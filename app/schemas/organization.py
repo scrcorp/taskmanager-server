@@ -50,6 +50,7 @@ class OrganizationResponse(BaseModel):
 
     id: str  # 조직 UUID 문자열 (Organization UUID as string)
     name: str  # 조직 이름 (Organization name)
+    code: str  # 회사 코드 (Company code for staff app login)
     is_active: bool  # 활성 상태 (Active flag)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 

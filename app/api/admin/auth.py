@@ -35,8 +35,10 @@ async def admin_login(
     """관리자 로그인 — 스태프 계정 접근 불가.
 
     Admin login endpoint. Rejects staff-level accounts (level >= 4).
+    Optionally accepts company_code in body to scope login to a specific org.
     """
-    result: TokenResponse = await auth_service.admin_login(db, data)
+    organization_id = await auth_service.resolve_company_code(db, data.company_code)
+    result: TokenResponse = await auth_service.admin_login(db, data, organization_id)
     await db.commit()
     return result
 
@@ -115,7 +117,8 @@ async def admin_setup(
     await db.commit()
 
     return _render(
-        f'<div class="msg ok">Done! Organization "{organization_name}" and admin "{username}" created.</div>'
+        f'<div class="msg ok">Done! Organization "{organization_name}" and admin "{username}" created.<br>'
+        f'Company Code: <strong>{org.code}</strong></div>'
     )
 
 

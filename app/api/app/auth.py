@@ -2,12 +2,12 @@
 
 App Auth Router — App registration, login, token refresh, and logout endpoints.
 Allows staff (level 4) and supervisor (level 3) accounts.
+Uses company_code in request body to identify organization.
 """
 
 from typing import Annotated
-from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -29,15 +29,15 @@ router: APIRouter = APIRouter()
 async def app_register(
     data: RegisterRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    x_organization_id: Annotated[UUID, Header(description="조직 ID 헤더")],
 ) -> TokenResponse:
     """앱 사용자 회원가입 — 스태프(level 4) 계정 생성.
 
     App user registration. Creates a staff-level account.
-    Organization ID is provided via X-Organization-Id header.
+    Organization is identified via company_code in request body.
     """
+    organization_id = await auth_service.resolve_company_code(db, data.company_code)
     result: TokenResponse = await auth_service.app_register(
-        db, data, x_organization_id
+        db, data, organization_id
     )
     await db.commit()
     return result
@@ -47,14 +47,15 @@ async def app_register(
 async def app_login(
     data: LoginRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    x_organization_id: Annotated[UUID | None, Header(description="조직 ID 헤더")] = None,
 ) -> TokenResponse:
     """앱 로그인 — 스태프 및 슈퍼바이저 허용.
 
     App login endpoint. Allows staff and supervisor accounts.
+    Optionally accepts company_code in body to scope login to a specific org.
     """
+    organization_id = await auth_service.resolve_company_code(db, data.company_code)
     result: TokenResponse = await auth_service.app_login(
-        db, data, x_organization_id
+        db, data, organization_id
     )
     await db.commit()
     return result

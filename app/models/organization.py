@@ -9,10 +9,21 @@ Tables:
     - brands: 조직 하위 브랜드/매장 (Sub-business/store under organization)
 """
 
+import random
+import string
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import String, Boolean, DateTime, Text, ForeignKey, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+
+def generate_company_code() -> str:
+    """6자리 랜덤 회사 코드 생성 (대문자 + 숫자).
+
+    Generate a random 6-character company code (uppercase letters + digits).
+    """
+    chars = string.ascii_uppercase + string.digits
+    return "".join(random.choices(chars, k=6))
 
 from app.database import Base
 
@@ -42,6 +53,8 @@ class Organization(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 조직 이름 — Organization display name (max 255 chars, required)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 회사 코드 — Short unique company code for staff app login (6 chars, uppercase + digits)
+    code: Mapped[str] = mapped_column(String(6), unique=True, nullable=False, default=generate_company_code)
     # 활성 상태 — Whether the organization is active (soft-delete pattern)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # 생성 일시 — Record creation timestamp (UTC)

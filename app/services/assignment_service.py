@@ -169,6 +169,14 @@ class AssignmentService:
             db, brand_id, shift_id, position_id
         )
 
+        # 체크리스트 템플릿 필수 검증 — Require checklist template
+        if snapshot is None:
+            raise BadRequestError(
+                "해당 조합에 체크리스트 템플릿이 없습니다. 먼저 체크리스트를 생성해 주세요. "
+                "(No checklist template exists for this combination. "
+                "Please create a checklist template first.)"
+            )
+
         assignment: WorkAssignment = await assignment_repository.create(
             db,
             {

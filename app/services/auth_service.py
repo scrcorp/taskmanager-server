@@ -42,6 +42,38 @@ class AuthService:
     Manages admin/app login flows, registration, token refresh, and logout.
     """
 
+    async def resolve_company_code(
+        self,
+        db: AsyncSession,
+        company_code: str | None,
+    ) -> UUID | None:
+        """회사 코드를 조직 UUID로 변환합니다.
+
+        Resolve a company code to an organization UUID.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            company_code: 회사 코드 (Company code, may be None)
+
+        Returns:
+            UUID | None: 조직 UUID 또는 None (Organization UUID or None)
+
+        Raises:
+            NotFoundError: 유효하지 않은 회사 코드일 때 (Invalid company code)
+        """
+        if company_code is None:
+            return None
+        result = await db.execute(
+            select(Organization).where(
+                Organization.code == company_code.upper(),
+                Organization.is_active == True,
+            )
+        )
+        org: Organization | None = result.scalar_one_or_none()
+        if org is None:
+            raise NotFoundError("Invalid company code")
+        return org.id
+
     def _build_jwt_payload(self, user: User, role: Role) -> dict[str, str | int]:
         """JWT 토큰 페이로드를 생성합니다.
 
@@ -347,6 +379,7 @@ class AuthService:
             role_level=role.level,
             organization_id=str(loaded_user.organization_id),
             organization_name=org.name,
+            company_code=org.code,
             is_active=loaded_user.is_active,
         )
 

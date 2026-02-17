@@ -16,10 +16,12 @@ class LoginRequest(BaseModel):
     Attributes:
         username: 사용자 로그인 아이디 (User login identifier)
         password: 비밀번호 (Plain text password, verified against bcrypt hash)
+        company_code: 회사 코드 (Company code to identify organization, optional)
     """
 
     username: str  # 사용자 로그인 아이디 (User login identifier)
     password: str  # 비밀번호 — 평문, 서버에서 bcrypt 해시와 비교 (Plain text, compared to bcrypt hash)
+    company_code: str | None = None  # 회사 코드 — 조직 식별용 (Company code for org identification)
 
 
 class RegisterRequest(BaseModel):
@@ -33,12 +35,14 @@ class RegisterRequest(BaseModel):
         password: 비밀번호 (Plain text, will be bcrypt-hashed on server)
         full_name: 실명 (Full display name)
         email: 이메일 (Email address, optional)
+        company_code: 회사 코드 (Company code to identify organization)
     """
 
     username: str  # 사용자 아이디 — 조직 내 고유 (Login ID, unique within org)
     password: str  # 비밀번호 — 평문, 서버에서 bcrypt 해싱 (Plain text, server hashes with bcrypt)
     full_name: str  # 실명 (Full display name)
     email: str | None = None  # 이메일 (Optional email address)
+    company_code: str  # 회사 코드 — 필수 (Company code, required for registration)
 
 
 class TokenResponse(BaseModel):
@@ -97,4 +101,5 @@ class UserMeResponse(BaseModel):
     role_level: int  # 역할 레벨 — 1=admin, 4=staff (Permission level)
     organization_id: str  # 소속 조직 UUID 문자열 (Organization UUID as string)
     organization_name: str  # 소속 조직 이름 (Organization display name)
+    company_code: str  # 회사 코드 (Organization company code)
     is_active: bool  # 계정 활성 상태 (Whether the account is active)
