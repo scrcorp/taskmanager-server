@@ -14,7 +14,7 @@ from typing import Any
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
-from axiom import Client as AxiomClient
+from axiom_py import Client as AxiomClient
 
 from app.config import settings
 
