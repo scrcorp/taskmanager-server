@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     APP_NAME: str = "TaskManager API"
     DEBUG: bool = True  # True이면 SQLAlchemy SQL 로그 출력 (Enables SQL echo when True)
 
+    # Axiom 로깅 설정 — Axiom observability platform settings
+    AXIOM_API_TOKEN: str = ""  # Axiom API 토큰 (API token from Axiom dashboard)
+    AXIOM_DATASET: str = ""  # Axiom 데이터셋 이름 (Dataset name for API logs)
+
     model_config = {"env_file": _ENV_FILE, "env_file_encoding": "utf-8"}
 
 

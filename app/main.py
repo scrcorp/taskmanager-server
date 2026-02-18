@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.middleware.axiom_logging import AxiomLoggingMiddleware
 
 app: FastAPI = FastAPI(
     title=settings.APP_NAME,
@@ -15,6 +16,10 @@ app: FastAPI = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Axiom API 로깅 미들웨어 — Axiom API request/response logging
+# CORS보다 먼저 등록하여 모든 요청을 캡처 (Registered before CORS to capture all requests)
+app.add_middleware(AxiomLoggingMiddleware)
 
 # CORS 미들웨어 — Cross-Origin Resource Sharing middleware
 app.add_middleware(
