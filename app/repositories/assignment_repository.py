@@ -132,6 +132,60 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
         result = await db.execute(query)
         return result.scalars().all()
 
+    async def get_recent_user_ids(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        brand_id: UUID,
+        exclude_date: date | None = None,
+        days: int = 30,
+    ) -> Sequence[tuple]:
+        """브랜드 내 최근 배정된 사용자 ID를 shift×position 조합별로 조회합니다.
+
+        Retrieve recently assigned user IDs grouped by shift×position combo.
+        Returns (shift_id, position_id, user_id, last_work_date) tuples
+        ordered by most recent first.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            organization_id: 조직 UUID (Organization UUID)
+            brand_id: 브랜드 UUID (Brand UUID)
+            exclude_date: 제외할 날짜, 보통 오늘 (Date to exclude, usually today)
+            days: 조회 기간 일수, 기본 30일 (Lookback period in days, default 30)
+
+        Returns:
+            Sequence[tuple]: (shift_id, position_id, user_id, last_work_date) 목록
+        """
+        from datetime import timedelta
+
+        cutoff: date = date.today() - timedelta(days=days)
+
+        query = (
+            select(
+                WorkAssignment.shift_id,
+                WorkAssignment.position_id,
+                WorkAssignment.user_id,
+                func.max(WorkAssignment.work_date).label("last_work_date"),
+            )
+            .where(
+                WorkAssignment.organization_id == organization_id,
+                WorkAssignment.brand_id == brand_id,
+                WorkAssignment.work_date >= cutoff,
+            )
+            .group_by(
+                WorkAssignment.shift_id,
+                WorkAssignment.position_id,
+                WorkAssignment.user_id,
+            )
+            .order_by(func.max(WorkAssignment.work_date).desc())
+        )
+
+        if exclude_date is not None:
+            query = query.having(func.max(WorkAssignment.work_date) != exclude_date)
+
+        result = await db.execute(query)
+        return result.all()
+
     async def check_duplicate(
         self,
         db: AsyncSession,

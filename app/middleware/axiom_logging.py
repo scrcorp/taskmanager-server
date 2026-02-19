@@ -61,7 +61,7 @@ class AxiomLoggingMiddleware(BaseHTTPMiddleware):
         self._client: AxiomClient | None = None
         self._dataset: str = settings.AXIOM_DATASET
 
-        if settings.AXIOM_API_TOKEN and settings.AXIOM_DATASET:
+        if not settings.DEBUG and settings.AXIOM_API_TOKEN and settings.AXIOM_DATASET:
             self._client = AxiomClient(token=settings.AXIOM_API_TOKEN)
 
     async def dispatch(

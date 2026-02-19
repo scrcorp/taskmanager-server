@@ -73,6 +73,7 @@ class UserService:
             username=user.username,
             full_name=user.full_name,
             role_name=role.name,
+            role_level=role.level,
             is_active=user.is_active,
         )
 

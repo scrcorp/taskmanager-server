@@ -81,6 +81,42 @@ async def list_assignments(
     }
 
 
+@router.get("/recent-users")
+async def list_recent_users(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_supervisor)],
+    brand_id: Annotated[str, Query()],
+    exclude_date: Annotated[date | None, Query()] = None,
+    days: Annotated[int, Query(ge=1, le=90)] = 30,
+) -> dict:
+    """브랜드 내 최근 배정된 사용자 목록을 조회합니다.
+
+    Get recently assigned user IDs per shift×position combo.
+    Used by the admin schedule page to prioritize recent workers.
+
+    Args:
+        db: 비동기 데이터베이스 세션 (Async database session)
+        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
+        brand_id: 브랜드 UUID (Brand UUID, required)
+        exclude_date: 제외할 날짜 (Date to exclude, e.g. today)
+        days: 조회 기간, 기본 30일, 최대 90일 (Lookback period, default 30, max 90)
+
+    Returns:
+        dict: { items: [{ shift_id, position_id, user_id, last_work_date }] }
+    """
+    brand_uuid: UUID = UUID(brand_id)
+
+    items: list[dict] = await assignment_service.get_recent_users(
+        db,
+        organization_id=current_user.organization_id,
+        brand_id=brand_uuid,
+        exclude_date=exclude_date,
+        days=days,
+    )
+
+    return {"items": items}
+
+
 @router.get("/{assignment_id}", response_model=AssignmentDetailResponse)
 async def get_assignment(
     assignment_id: UUID,

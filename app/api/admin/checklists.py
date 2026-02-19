@@ -14,6 +14,7 @@ from app.api.deps import get_current_user, require_supervisor
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
+    ChecklistBulkItemCreate,
     ChecklistItemCreate,
     ChecklistItemResponse,
     ChecklistItemUpdate,
@@ -29,6 +30,58 @@ router: APIRouter = APIRouter()
 
 
 # === 템플릿 엔드포인트 (Template Endpoints) ===
+
+
+@router.get(
+    "/checklist-templates",
+    response_model=list[ChecklistTemplateResponse],
+)
+async def list_all_templates(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_supervisor)],
+    brand_id: Annotated[str | None, Query()] = None,
+    shift_id: Annotated[str | None, Query()] = None,
+    position_id: Annotated[str | None, Query()] = None,
+) -> list[dict]:
+    """조직 전체의 체크리스트 템플릿 목록을 조회합니다.
+
+    List all checklist templates for the organization with optional filters.
+
+    Args:
+        db: 비동기 데이터베이스 세션 (Async database session)
+        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
+        brand_id: 브랜드 UUID 필터, 선택 (Optional brand UUID filter)
+        shift_id: 근무조 UUID 필터, 선택 (Optional shift UUID filter)
+        position_id: 포지션 UUID 필터, 선택 (Optional position UUID filter)
+
+    Returns:
+        list[dict]: 템플릿 목록 (List of templates)
+    """
+    brand_uuid: UUID | None = UUID(brand_id) if brand_id else None
+    shift_uuid: UUID | None = UUID(shift_id) if shift_id else None
+    position_uuid: UUID | None = UUID(position_id) if position_id else None
+
+    templates = await checklist_service.list_all_templates(
+        db,
+        organization_id=current_user.organization_id,
+        brand_id=brand_uuid,
+        shift_id=shift_uuid,
+        position_id=position_uuid,
+    )
+
+    return [
+        {
+            "id": str(t.id),
+            "brand_id": str(t.brand_id),
+            "shift_id": str(t.shift_id),
+            "position_id": str(t.position_id),
+            "shift_name": t.shift.name if t.shift else "",
+            "position_name": t.position.name if t.position else "",
+            "title": t.title,
+            "item_count": len(t.items) if t.items else 0,
+        }
+        for t in templates
+    ]
 
 
 @router.get(
@@ -73,6 +126,8 @@ async def list_templates(
             "brand_id": str(t.brand_id),
             "shift_id": str(t.shift_id),
             "position_id": str(t.position_id),
+            "shift_name": t.shift.name if t.shift else "",
+            "position_name": t.position.name if t.position else "",
             "title": t.title,
             "item_count": len(t.items) if t.items else 0,
         }
@@ -186,17 +241,26 @@ async def update_template(
         db,
         template_id=template_id,
         organization_id=current_user.organization_id,
-        title=data.title,
+        data=data,
     )
     await db.commit()
 
+    # 업데이트 후 항목 포함 상세 조회 — Re-fetch with items for accurate item_count
+    refreshed = await checklist_service.get_template_detail(
+        db,
+        template_id=template_id,
+        organization_id=current_user.organization_id,
+    )
+
     return {
-        "id": str(template.id),
-        "brand_id": str(template.brand_id),
-        "shift_id": str(template.shift_id),
-        "position_id": str(template.position_id),
-        "title": template.title,
-        "item_count": 0,
+        "id": str(refreshed.id),
+        "brand_id": str(refreshed.brand_id),
+        "shift_id": str(refreshed.shift_id),
+        "position_id": str(refreshed.position_id),
+        "shift_name": refreshed.shift.name if refreshed.shift else "",
+        "position_name": refreshed.position.name if refreshed.position else "",
+        "title": refreshed.title,
+        "item_count": len(refreshed.items) if refreshed.items else 0,
     }
 
 
@@ -312,6 +376,50 @@ async def create_item(
         "verification_type": item.verification_type,
         "sort_order": item.sort_order,
     }
+
+
+@router.post(
+    "/checklist-templates/{template_id}/items/bulk",
+    response_model=list[ChecklistItemResponse],
+    status_code=201,
+)
+async def create_items_bulk(
+    template_id: UUID,
+    data: ChecklistBulkItemCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_supervisor)],
+) -> list[dict]:
+    """템플릿에 여러 항목을 일괄 추가합니다.
+
+    Bulk-add multiple items to a checklist template in a single transaction.
+
+    Args:
+        template_id: 템플릿 UUID 문자열 (Template UUID string)
+        data: 일괄 생성 데이터 (Bulk creation data with items list)
+        db: 비동기 데이터베이스 세션 (Async database session)
+        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
+
+    Returns:
+        list[dict]: 생성된 항목 목록 (List of created items)
+    """
+    items = await checklist_service.add_items_bulk(
+        db,
+        template_id=template_id,
+        organization_id=current_user.organization_id,
+        data=data,
+    )
+    await db.commit()
+
+    return [
+        {
+            "id": str(item.id),
+            "title": item.title,
+            "description": item.description,
+            "verification_type": item.verification_type,
+            "sort_order": item.sort_order,
+        }
+        for item in items
+    ]
 
 
 @router.put(

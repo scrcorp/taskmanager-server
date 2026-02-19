@@ -14,9 +14,11 @@ from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem
 from app.models.organization import Brand
 from app.repositories.checklist_repository import checklist_repository
 from app.schemas.common import (
+    ChecklistBulkItemCreate,
     ChecklistItemCreate,
     ChecklistItemUpdate,
     ChecklistTemplateCreate,
+    ChecklistTemplateUpdate,
 )
 from app.utils.exceptions import DuplicateError, ForbiddenError, NotFoundError
 
@@ -63,6 +65,32 @@ class ChecklistService:
         return brand
 
     # --- 템플릿 CRUD (Template CRUD) ---
+
+    async def list_all_templates(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        brand_id: UUID | None = None,
+        shift_id: UUID | None = None,
+        position_id: UUID | None = None,
+    ) -> Sequence[ChecklistTemplate]:
+        """조직 전체의 체크리스트 템플릿 목록을 조회합니다.
+
+        List all checklist templates for an organization with optional filters.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            organization_id: 조직 UUID (Organization UUID)
+            brand_id: 브랜드 UUID 필터, 선택 (Optional brand UUID filter)
+            shift_id: 근무조 UUID 필터, 선택 (Optional shift UUID filter)
+            position_id: 포지션 UUID 필터, 선택 (Optional position UUID filter)
+
+        Returns:
+            Sequence[ChecklistTemplate]: 템플릿 목록 (List of templates)
+        """
+        return await checklist_repository.get_all_by_org(
+            db, organization_id, brand_id, shift_id, position_id
+        )
 
     async def list_templates(
         self,
@@ -181,17 +209,17 @@ class ChecklistService:
         db: AsyncSession,
         template_id: UUID,
         organization_id: UUID,
-        title: str,
+        data: ChecklistTemplateUpdate,
     ) -> ChecklistTemplate:
         """체크리스트 템플릿을 업데이트합니다.
 
-        Update a checklist template's title.
+        Update a checklist template (title, shift_id, position_id).
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             template_id: 템플릿 UUID (Template UUID)
             organization_id: 조직 UUID (Organization UUID)
-            title: 새 제목 (New title)
+            data: 업데이트 데이터 (Update data with optional title/shift_id/position_id)
 
         Returns:
             ChecklistTemplate: 업데이트된 템플릿 (Updated template)
@@ -199,6 +227,7 @@ class ChecklistService:
         Raises:
             NotFoundError: 템플릿이 없을 때 (When template not found)
             ForbiddenError: 다른 조직 브랜드일 때 (When brand belongs to another org)
+            DuplicateError: 동일 조합 존재 시 (When same combination already exists)
         """
         template: ChecklistTemplate | None = await checklist_repository.get_with_items(
             db, template_id
@@ -208,8 +237,33 @@ class ChecklistService:
 
         await self._validate_brand_ownership(db, template.brand_id, organization_id)
 
+        update_fields: dict = {}
+        if data.title is not None:
+            update_fields["title"] = data.title
+
+        new_shift_id: UUID = UUID(data.shift_id) if data.shift_id else template.shift_id
+        new_position_id: UUID = UUID(data.position_id) if data.position_id else template.position_id
+
+        # shift_id 또는 position_id가 변경되었으면 중복 검사 — Check duplicate if shift/position changed
+        if new_shift_id != template.shift_id or new_position_id != template.position_id:
+            is_duplicate: bool = await checklist_repository.check_duplicate(
+                db, template.brand_id, new_shift_id, new_position_id
+            )
+            if is_duplicate:
+                raise DuplicateError(
+                    "해당 브랜드+근무조+포지션 조합의 템플릿이 이미 존재합니다 "
+                    "(Template for this brand+shift+position combination already exists)"
+                )
+            if data.shift_id is not None:
+                update_fields["shift_id"] = new_shift_id
+            if data.position_id is not None:
+                update_fields["position_id"] = new_position_id
+
+        if not update_fields:
+            return template
+
         updated: ChecklistTemplate | None = await checklist_repository.update(
-            db, template_id, {"title": title}
+            db, template_id, update_fields
         )
         if updated is None:
             raise NotFoundError("체크리스트 템플릿을 찾을 수 없습니다 (Checklist template not found)")
@@ -309,6 +363,44 @@ class ChecklistService:
             },
         )
         return item
+
+    async def add_items_bulk(
+        self,
+        db: AsyncSession,
+        template_id: UUID,
+        organization_id: UUID,
+        data: ChecklistBulkItemCreate,
+    ) -> list[ChecklistTemplateItem]:
+        """템플릿에 여러 항목을 일괄 추가합니다.
+
+        Bulk-add multiple items to a checklist template in a single transaction.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            template_id: 템플릿 UUID (Template UUID)
+            organization_id: 조직 UUID (Organization UUID)
+            data: 일괄 생성 데이터 (Bulk creation data)
+
+        Returns:
+            list[ChecklistTemplateItem]: 생성된 항목 목록 (List of created items)
+
+        Raises:
+            NotFoundError: 템플릿이 없을 때 (When template not found)
+        """
+        await self.get_template_detail(db, template_id, organization_id)
+
+        items_data: list[dict] = [
+            {
+                "template_id": template_id,
+                "title": item.title,
+                "description": item.description,
+                "verification_type": item.verification_type,
+                "sort_order": item.sort_order,
+            }
+            for item in data.items
+        ]
+
+        return await checklist_repository.create_items_bulk(db, items_data)
 
     async def update_item(
         self,

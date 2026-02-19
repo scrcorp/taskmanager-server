@@ -145,6 +145,7 @@ class UserListResponse(BaseModel):
     username: str  # 로그인 아이디 (Login username)
     full_name: str  # 실명 (Full display name)
     role_name: str  # 역할 이름 — 조인된 값 (Role name, resolved from Role table)
+    role_level: int  # 역할 레벨 — 조인된 값 (Role level, resolved from Role table)
     is_active: bool  # 계정 활성 상태 (Account active flag)
 
 

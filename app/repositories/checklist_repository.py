@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem
+from app.models.organization import Brand
+from app.models.work import Position, Shift
 from app.repositories.base import BaseRepository
 
 
@@ -30,6 +32,50 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
         Initialize the checklist repository with ChecklistTemplate model.
         """
         super().__init__(ChecklistTemplate)
+
+    async def get_all_by_org(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        brand_id: UUID | None = None,
+        shift_id: UUID | None = None,
+        position_id: UUID | None = None,
+    ) -> Sequence[ChecklistTemplate]:
+        """조직 전체의 체크리스트 템플릿 목록을 조회합니다.
+
+        Retrieve all checklist templates for an organization with optional filters.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            organization_id: 조직 UUID (Organization UUID)
+            brand_id: 브랜드 UUID 필터, 선택 (Optional brand UUID filter)
+            shift_id: 근무조 UUID 필터, 선택 (Optional shift UUID filter)
+            position_id: 포지션 UUID 필터, 선택 (Optional position UUID filter)
+
+        Returns:
+            Sequence[ChecklistTemplate]: 템플릿 목록 (List of templates)
+        """
+        query: Select = (
+            select(ChecklistTemplate)
+            .join(Brand, ChecklistTemplate.brand_id == Brand.id)
+            .where(Brand.organization_id == organization_id)
+            .options(
+                selectinload(ChecklistTemplate.items),
+                selectinload(ChecklistTemplate.shift),
+                selectinload(ChecklistTemplate.position),
+            )
+        )
+
+        if brand_id is not None:
+            query = query.where(ChecklistTemplate.brand_id == brand_id)
+        if shift_id is not None:
+            query = query.where(ChecklistTemplate.shift_id == shift_id)
+        if position_id is not None:
+            query = query.where(ChecklistTemplate.position_id == position_id)
+
+        query = query.order_by(ChecklistTemplate.created_at.desc())
+        result = await db.execute(query)
+        return result.scalars().all()
 
     async def get_by_brand(
         self,
@@ -54,7 +100,11 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
         query: Select = (
             select(ChecklistTemplate)
             .where(ChecklistTemplate.brand_id == brand_id)
-            .options(selectinload(ChecklistTemplate.items))
+            .options(
+                selectinload(ChecklistTemplate.items),
+                selectinload(ChecklistTemplate.shift),
+                selectinload(ChecklistTemplate.position),
+            )
         )
 
         if shift_id is not None:
@@ -175,6 +225,31 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
         await db.flush()
         await db.refresh(item)
         return item
+
+    async def create_items_bulk(
+        self,
+        db: AsyncSession,
+        items_data: list[dict],
+    ) -> list[ChecklistTemplateItem]:
+        """여러 체크리스트 항목을 일괄 생성합니다.
+
+        Bulk-create multiple checklist template items in a single transaction.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            items_data: 항목 데이터 딕셔너리 목록 (List of item data dictionaries)
+
+        Returns:
+            list[ChecklistTemplateItem]: 생성된 항목 목록 (List of created items)
+        """
+        items: list[ChecklistTemplateItem] = [
+            ChecklistTemplateItem(**data) for data in items_data
+        ]
+        db.add_all(items)
+        await db.flush()
+        for item in items:
+            await db.refresh(item)
+        return items
 
     async def get_item_by_id(
         self,

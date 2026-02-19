@@ -66,6 +66,9 @@ class ChecklistTemplate(Base):
 
     # 관계 — Items sorted by sort_order for consistent display ordering
     items = relationship("ChecklistTemplateItem", back_populates="template", cascade="all, delete-orphan", order_by="ChecklistTemplateItem.sort_order")
+    # 관계 — Shift and Position for name lookups
+    shift = relationship("Shift", foreign_keys=[shift_id], lazy="noload")
+    position = relationship("Position", foreign_keys=[position_id], lazy="noload")
 
 
 class ChecklistTemplateItem(Base):

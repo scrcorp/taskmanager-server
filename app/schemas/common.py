@@ -8,7 +8,7 @@ This module consolidates schemas used across multiple API domains.
 
 from datetime import date, datetime
 from typing import Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # === 체크리스트 (Checklist) 스키마 ===
@@ -49,6 +49,8 @@ class ChecklistTemplateResponse(BaseModel):
     brand_id: str  # 브랜드 UUID 문자열 (Brand UUID as string)
     shift_id: str  # 시간대 UUID 문자열 (Shift UUID as string)
     position_id: str  # 포지션 UUID 문자열 (Position UUID as string)
+    shift_name: str = ""  # 시간대 이름 (Shift display name)
+    position_name: str = ""  # 포지션 이름 (Position display name)
     title: str  # 템플릿 제목 (Template title)
     item_count: int = 0  # 항목 수 — 서비스에서 계산 (Item count, computed by service)
 
@@ -60,9 +62,13 @@ class ChecklistTemplateUpdate(BaseModel):
 
     Attributes:
         title: 변경할 템플릿 제목 (New template title, optional)
+        shift_id: 변경할 시간대 UUID (New shift identifier, optional)
+        position_id: 변경할 포지션 UUID (New position identifier, optional)
     """
 
     title: str | None = None  # 변경할 템플릿 제목 (New title, optional)
+    shift_id: str | None = None  # 변경할 시간대 UUID (New shift identifier, optional)
+    position_id: str | None = None  # 변경할 포지션 UUID (New position identifier, optional)
 
 
 class ChecklistItemCreate(BaseModel):
@@ -120,6 +126,19 @@ class ChecklistItemResponse(BaseModel):
     description: str | None  # 상세 설명 (Description, may be null)
     verification_type: str  # 확인 유형 — "none"|"photo"|"text" (Verification method)
     sort_order: int  # 정렬 순서 (Display order)
+
+
+class ChecklistBulkItemCreate(BaseModel):
+    """체크리스트 항목 일괄 생성 요청 스키마.
+
+    Bulk checklist item creation request schema.
+    Creates multiple items in a single atomic transaction.
+
+    Attributes:
+        items: 생성할 항목 목록 (List of items to create)
+    """
+
+    items: list[ChecklistItemCreate] = Field(..., min_length=1)  # 일괄 생성할 항목 목록 (Items to bulk-create, at least 1)
 
 
 class ReorderRequest(BaseModel):

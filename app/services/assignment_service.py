@@ -389,6 +389,41 @@ class AssignmentService:
             raise NotFoundError("업무 배정을 찾을 수 없습니다 (Work assignment not found)")
         return deleted
 
+    async def get_recent_users(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        brand_id: UUID,
+        exclude_date: date | None = None,
+        days: int = 30,
+    ) -> list[dict]:
+        """브랜드 내 최근 배정된 사용자 목록을 조회합니다.
+
+        Get recently assigned users per shift×position combo for a brand.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            organization_id: 조직 UUID (Organization UUID)
+            brand_id: 브랜드 UUID (Brand UUID)
+            exclude_date: 제외할 날짜 (Date to exclude, usually today)
+            days: 조회 기간 일수 (Lookback period in days)
+
+        Returns:
+            list[dict]: 최근 배정 사용자 목록 (Recent assignment user list)
+        """
+        rows = await assignment_repository.get_recent_user_ids(
+            db, organization_id, brand_id, exclude_date, days
+        )
+        return [
+            {
+                "shift_id": str(row.shift_id),
+                "position_id": str(row.position_id),
+                "user_id": str(row.user_id),
+                "last_work_date": row.last_work_date,
+            }
+            for row in rows
+        ]
+
     async def get_my_assignments(
         self,
         db: AsyncSession,
