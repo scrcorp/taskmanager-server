@@ -39,18 +39,11 @@ server/
 │   │   └── media.py         (media — Phase 4)
 │   ├── schemas/            ← Pydantic request/response
 │   │   ├── __init__.py
-│   │   ├── auth.py
-│   │   ├── organization.py
-│   │   ├── brand.py
-│   │   ├── role.py
-│   │   ├── user.py
-│   │   ├── shift.py
-│   │   ├── position.py
-│   │   ├── checklist.py
-│   │   ├── assignment.py
-│   │   ├── announcement.py
-│   │   ├── task.py
-│   │   └── notification.py
+│   │   ├── auth.py          (Login, Register, Token, UserMe)
+│   │   ├── organization.py  (Organization, Brand schemas)
+│   │   ├── user.py           (Role, User, Profile schemas)
+│   │   ├── work.py           (Shift, Position schemas)
+│   │   └── common.py         (Checklist, Assignment, Announcement, Task, Notification)
 │   ├── services/           ← Business logic
 │   │   ├── __init__.py
 │   │   ├── auth_service.py
@@ -63,7 +56,8 @@ server/
 │   │   ├── assignment_service.py
 │   │   ├── announcement_service.py
 │   │   ├── task_service.py
-│   │   └── notification_service.py
+│   │   ├── notification_service.py
+│   │   └── profile_service.py
 │   ├── repositories/       ← DB queries only
 │   │   └── (mirrors services/)
 │   ├── api/
@@ -92,7 +86,7 @@ server/
 │   │       └── notifications.py
 │   ├── middleware/
 │   │   ├── __init__.py
-│   │   └── auth.py          ← JWT decode, role check
+│   │   └── axiom_logging.py  ← Axiom 로그 미들웨어
 │   └── utils/
 │       ├── __init__.py
 │       ├── jwt.py
