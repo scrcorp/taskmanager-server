@@ -38,10 +38,15 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
+    # Use session pooler (port 5432) instead of transaction pooler (port 6543)
+    # to avoid pgbouncer prepared statement conflicts during migrations
+    migration_url = settings.DATABASE_URL.replace(":6543/", ":5432/")
     connectable = create_async_engine(
-        settings.DATABASE_URL,
+        migration_url,
         poolclass=pool.NullPool,
-        connect_args={"statement_cache_size": 0},
+        connect_args={
+            "statement_cache_size": 0,
+        },
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
