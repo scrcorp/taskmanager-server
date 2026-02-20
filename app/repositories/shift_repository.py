@@ -17,7 +17,7 @@ class ShiftRepository(BaseRepository[Shift]):
     """근무조 테이블에 대한 데이터베이스 쿼리를 담당하는 레포지토리.
 
     Repository handling database queries for the shifts table.
-    Provides brand-scoped shift retrieval.
+    Provides store-scoped shift retrieval.
     """
 
     def __init__(self) -> None:
@@ -27,25 +27,25 @@ class ShiftRepository(BaseRepository[Shift]):
         """
         super().__init__(Shift)
 
-    async def get_by_brand(
+    async def get_by_store(
         self,
         db: AsyncSession,
-        brand_id: UUID,
+        store_id: UUID,
     ) -> list[Shift]:
-        """브랜드에 속한 모든 근무조를 정렬 순서로 조회합니다.
+        """매장에 속한 모든 근무조를 정렬 순서로 조회합니다.
 
-        Retrieve all shifts belonging to a brand, ordered by sort_order.
+        Retrieve all shifts belonging to a store, ordered by sort_order.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            brand_id: 브랜드 ID (Brand UUID)
+            store_id: 매장 ID (Store UUID)
 
         Returns:
             list[Shift]: 근무조 목록 (List of shifts ordered by sort_order)
         """
         query: Select = (
             select(Shift)
-            .where(Shift.brand_id == brand_id)
+            .where(Shift.store_id == store_id)
             .order_by(Shift.sort_order)
         )
         result = await db.execute(query)

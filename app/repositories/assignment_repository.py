@@ -35,7 +35,7 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
         self,
         db: AsyncSession,
         organization_id: UUID,
-        brand_id: UUID | None = None,
+        store_id: UUID | None = None,
         user_id: UUID | None = None,
         work_date: date | None = None,
         status: str | None = None,
@@ -49,7 +49,7 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 UUID (Organization UUID)
-            brand_id: 브랜드 UUID 필터, 선택 (Optional brand UUID filter)
+            store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
             user_id: 사용자 UUID 필터, 선택 (Optional user UUID filter)
             work_date: 근무일 필터, 선택 (Optional work date filter)
             status: 상태 필터, 선택 (Optional status filter)
@@ -65,8 +65,8 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
             .where(WorkAssignment.organization_id == organization_id)
         )
 
-        if brand_id is not None:
-            query = query.where(WorkAssignment.brand_id == brand_id)
+        if store_id is not None:
+            query = query.where(WorkAssignment.store_id == store_id)
         if user_id is not None:
             query = query.where(WorkAssignment.user_id == user_id)
         if work_date is not None:
@@ -136,11 +136,11 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
         self,
         db: AsyncSession,
         organization_id: UUID,
-        brand_id: UUID,
+        store_id: UUID,
         exclude_date: date | None = None,
         days: int = 30,
     ) -> Sequence[tuple]:
-        """브랜드 내 최근 배정된 사용자 ID를 shift×position 조합별로 조회합니다.
+        """매장 내 최근 배정된 사용자 ID를 shift×position 조합별로 조회합니다.
 
         Retrieve recently assigned user IDs grouped by shift×position combo.
         Returns (shift_id, position_id, user_id, last_work_date) tuples
@@ -149,7 +149,7 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 UUID (Organization UUID)
-            brand_id: 브랜드 UUID (Brand UUID)
+            store_id: 매장 UUID (Store UUID)
             exclude_date: 제외할 날짜, 보통 오늘 (Date to exclude, usually today)
             days: 조회 기간 일수, 기본 30일 (Lookback period in days, default 30)
 
@@ -169,7 +169,7 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
             )
             .where(
                 WorkAssignment.organization_id == organization_id,
-                WorkAssignment.brand_id == brand_id,
+                WorkAssignment.store_id == store_id,
                 WorkAssignment.work_date >= cutoff,
             )
             .group_by(
@@ -189,7 +189,7 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
     async def check_duplicate(
         self,
         db: AsyncSession,
-        brand_id: UUID,
+        store_id: UUID,
         shift_id: UUID,
         position_id: UUID,
         user_id: UUID,
@@ -201,7 +201,7 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            brand_id: 브랜드 UUID (Brand UUID)
+            store_id: 매장 UUID (Store UUID)
             shift_id: 근무조 UUID (Shift UUID)
             position_id: 포지션 UUID (Position UUID)
             user_id: 사용자 UUID (User UUID)
@@ -215,7 +215,7 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
                 select(func.count())
                 .select_from(WorkAssignment)
                 .where(
-                    WorkAssignment.brand_id == brand_id,
+                    WorkAssignment.store_id == store_id,
                     WorkAssignment.shift_id == shift_id,
                     WorkAssignment.position_id == position_id,
                     WorkAssignment.user_id == user_id,

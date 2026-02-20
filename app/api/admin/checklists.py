@@ -7,7 +7,9 @@ Provides CRUD operations for templates and their items, including reordering.
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import StreamingResponse
+from io import BytesIO
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_supervisor
@@ -21,10 +23,12 @@ from app.schemas.common import (
     ChecklistTemplateCreate,
     ChecklistTemplateResponse,
     ChecklistTemplateUpdate,
+    ExcelImportResponse,
     MessageResponse,
     ReorderRequest,
 )
 from app.services.checklist_service import checklist_service
+from app.utils.exceptions import BadRequestError
 
 router: APIRouter = APIRouter()
 
@@ -39,7 +43,7 @@ router: APIRouter = APIRouter()
 async def list_all_templates(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
-    brand_id: Annotated[str | None, Query()] = None,
+    store_id: Annotated[str | None, Query()] = None,
     shift_id: Annotated[str | None, Query()] = None,
     position_id: Annotated[str | None, Query()] = None,
 ) -> list[dict]:
@@ -50,21 +54,21 @@ async def list_all_templates(
     Args:
         db: 비동기 데이터베이스 세션 (Async database session)
         current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-        brand_id: 브랜드 UUID 필터, 선택 (Optional brand UUID filter)
+        store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
         shift_id: 근무조 UUID 필터, 선택 (Optional shift UUID filter)
         position_id: 포지션 UUID 필터, 선택 (Optional position UUID filter)
 
     Returns:
         list[dict]: 템플릿 목록 (List of templates)
     """
-    brand_uuid: UUID | None = UUID(brand_id) if brand_id else None
+    store_uuid: UUID | None = UUID(store_id) if store_id else None
     shift_uuid: UUID | None = UUID(shift_id) if shift_id else None
     position_uuid: UUID | None = UUID(position_id) if position_id else None
 
     templates = await checklist_service.list_all_templates(
         db,
         organization_id=current_user.organization_id,
-        brand_id=brand_uuid,
+        store_id=store_uuid,
         shift_id=shift_uuid,
         position_id=position_uuid,
     )
@@ -72,7 +76,7 @@ async def list_all_templates(
     return [
         {
             "id": str(t.id),
-            "brand_id": str(t.brand_id),
+            "store_id": str(t.store_id),
             "shift_id": str(t.shift_id),
             "position_id": str(t.position_id),
             "shift_name": t.shift.name if t.shift else "",
@@ -85,22 +89,22 @@ async def list_all_templates(
 
 
 @router.get(
-    "/brands/{brand_id}/checklist-templates",
+    "/stores/{store_id}/checklist-templates",
     response_model=list[ChecklistTemplateResponse],
 )
 async def list_templates(
-    brand_id: UUID,
+    store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
     shift_id: Annotated[str | None, Query()] = None,
     position_id: Annotated[str | None, Query()] = None,
 ) -> list[dict]:
-    """브랜드별 체크리스트 템플릿 목록을 조회합니다.
+    """매장별 체크리스트 템플릿 목록을 조회합니다.
 
-    List checklist templates for a brand with optional shift/position filters.
+    List checklist templates for a store with optional shift/position filters.
 
     Args:
-        brand_id: 브랜드 UUID 문자열 (Brand UUID string)
+        store_id: 매장 UUID 문자열 (Store UUID string)
         db: 비동기 데이터베이스 세션 (Async database session)
         current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
         shift_id: 근무조 UUID 필터, 선택 (Optional shift UUID filter)
@@ -114,7 +118,7 @@ async def list_templates(
 
     templates = await checklist_service.list_templates(
         db,
-        brand_id=brand_id,
+        store_id=store_id,
         organization_id=current_user.organization_id,
         shift_id=shift_uuid,
         position_id=position_uuid,
@@ -123,7 +127,7 @@ async def list_templates(
     return [
         {
             "id": str(t.id),
-            "brand_id": str(t.brand_id),
+            "store_id": str(t.store_id),
             "shift_id": str(t.shift_id),
             "position_id": str(t.position_id),
             "shift_name": t.shift.name if t.shift else "",
@@ -133,6 +137,74 @@ async def list_templates(
         }
         for t in templates
     ]
+
+
+# === Excel Import/Export (must be registered BEFORE /{template_id}) ===
+
+
+@router.post(
+    "/checklist-templates/import",
+    response_model=ExcelImportResponse,
+)
+async def import_from_excel(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_supervisor)],
+    file: UploadFile = File(...),
+    duplicate_action: Annotated[str, Query()] = "skip",
+) -> dict:
+    """Excel 파일에서 체크리스트 템플릿을 일괄 생성합니다.
+
+    Import checklist templates from an Excel file.
+    Auto-creates store/shift/position if they don't exist.
+
+    Args:
+        db: 비동기 데이터베이스 세션 (Async database session)
+        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
+        file: Excel 파일 (.xlsx) (Excel file upload)
+        duplicate_action: 중복 처리 방식 — "skip" | "overwrite" | "append"
+
+    Returns:
+        dict: 임포트 결과 통계 (Import result statistics)
+    """
+    if not file.filename or not file.filename.endswith(".xlsx"):
+        raise BadRequestError("Only .xlsx files are supported")
+
+    content: bytes = await file.read()
+    try:
+        result = await checklist_service.import_from_excel(
+            db,
+            organization_id=current_user.organization_id,
+            file_content=content,
+            duplicate_action=duplicate_action,
+        )
+    except ValueError as e:
+        raise BadRequestError(str(e))
+    await db.commit()
+    return result
+
+
+@router.get(
+    "/checklist-templates/import/sample",
+)
+async def download_sample_excel(
+    current_user: Annotated[User, Depends(require_supervisor)],
+) -> StreamingResponse:
+    """샘플 Excel 템플릿을 다운로드합니다.
+
+    Download a sample Excel template for checklist import.
+
+    Args:
+        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
+
+    Returns:
+        StreamingResponse: Excel 파일 스트림 (Excel file stream)
+    """
+    excel_bytes: bytes = checklist_service.generate_sample_excel()
+    return StreamingResponse(
+        BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=checklist_template_sample.xlsx"},
+    )
 
 
 @router.get(
@@ -164,7 +236,7 @@ async def get_template(
 
     return {
         "id": str(template.id),
-        "brand_id": str(template.brand_id),
+        "store_id": str(template.store_id),
         "shift_id": str(template.shift_id),
         "position_id": str(template.position_id),
         "title": template.title,
@@ -173,22 +245,22 @@ async def get_template(
 
 
 @router.post(
-    "/brands/{brand_id}/checklist-templates",
+    "/stores/{store_id}/checklist-templates",
     response_model=ChecklistTemplateResponse,
     status_code=201,
 )
 async def create_template(
-    brand_id: UUID,
+    store_id: UUID,
     data: ChecklistTemplateCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
 ) -> dict:
     """새 체크리스트 템플릿을 생성합니다.
 
-    Create a new checklist template (unique brand+shift+position).
+    Create a new checklist template (unique store+shift+position).
 
     Args:
-        brand_id: 브랜드 UUID 문자열 (Brand UUID string)
+        store_id: 매장 UUID 문자열 (Store UUID string)
         data: 템플릿 생성 데이터 (Template creation data)
         db: 비동기 데이터베이스 세션 (Async database session)
         current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
@@ -198,7 +270,7 @@ async def create_template(
     """
     template = await checklist_service.create_template(
         db,
-        brand_id=brand_id,
+        store_id=store_id,
         organization_id=current_user.organization_id,
         data=data,
     )
@@ -206,7 +278,7 @@ async def create_template(
 
     return {
         "id": str(template.id),
-        "brand_id": str(template.brand_id),
+        "store_id": str(template.store_id),
         "shift_id": str(template.shift_id),
         "position_id": str(template.position_id),
         "title": template.title,
@@ -254,7 +326,7 @@ async def update_template(
 
     return {
         "id": str(refreshed.id),
-        "brand_id": str(refreshed.brand_id),
+        "store_id": str(refreshed.store_id),
         "shift_id": str(refreshed.shift_id),
         "position_id": str(refreshed.position_id),
         "shift_name": refreshed.shift.name if refreshed.shift else "",
@@ -331,6 +403,8 @@ async def list_items(
             "title": item.title,
             "description": item.description,
             "verification_type": item.verification_type,
+            "recurrence_type": item.recurrence_type,
+            "recurrence_days": item.recurrence_days,
             "sort_order": item.sort_order,
         }
         for item in items
@@ -374,6 +448,8 @@ async def create_item(
         "title": item.title,
         "description": item.description,
         "verification_type": item.verification_type,
+        "recurrence_type": item.recurrence_type,
+        "recurrence_days": item.recurrence_days,
         "sort_order": item.sort_order,
     }
 
@@ -416,6 +492,8 @@ async def create_items_bulk(
             "title": item.title,
             "description": item.description,
             "verification_type": item.verification_type,
+            "recurrence_type": item.recurrence_type,
+            "recurrence_days": item.recurrence_days,
             "sort_order": item.sort_order,
         }
         for item in items
@@ -458,6 +536,8 @@ async def update_item(
         "title": item.title,
         "description": item.description,
         "verification_type": item.verification_type,
+        "recurrence_type": item.recurrence_type,
+        "recurrence_days": item.recurrence_days,
         "sort_order": item.sort_order,
     }
 

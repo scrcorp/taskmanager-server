@@ -9,6 +9,7 @@ import copy
 from datetime import date, datetime, timezone
 from typing import Sequence
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.assignment import WorkAssignment
 from app.models.checklist import ChecklistTemplate
-from app.models.organization import Brand
+from app.models.organization import Store
 from app.models.user import User
 from app.models.work import Position, Shift
 from app.repositories.assignment_repository import assignment_repository
@@ -32,61 +33,65 @@ class AssignmentService:
     completion tracking, and notification dispatch.
     """
 
-    async def _validate_brand_ownership(
+    async def _validate_store_ownership(
         self,
         db: AsyncSession,
-        brand_id: UUID,
+        store_id: UUID,
         organization_id: UUID,
-    ) -> Brand:
-        """브랜드가 해당 조직에 속하는지 검증합니다.
+    ) -> Store:
+        """매장이 해당 조직에 속하는지 검증합니다.
 
-        Verify that a brand belongs to the specified organization.
+        Verify that a store belongs to the specified organization.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            brand_id: 브랜드 UUID (Brand UUID)
+            store_id: 매장 UUID (Store UUID)
             organization_id: 조직 UUID (Organization UUID)
 
         Returns:
-            Brand: 검증된 브랜드 (Verified brand)
+            Store: 검증된 매장 (Verified store)
 
         Raises:
-            NotFoundError: 브랜드가 없을 때 (When brand not found)
-            ForbiddenError: 다른 조직 브랜드일 때 (When brand belongs to another org)
+            NotFoundError: 매장이 없을 때 (When store not found)
+            ForbiddenError: 다른 조직 매장일 때 (When store belongs to another org)
         """
-        result = await db.execute(select(Brand).where(Brand.id == brand_id))
-        brand: Brand | None = result.scalar_one_or_none()
+        result = await db.execute(select(Store).where(Store.id == store_id))
+        store: Store | None = result.scalar_one_or_none()
 
-        if brand is None:
-            raise NotFoundError("브랜드를 찾을 수 없습니다 (Brand not found)")
-        if brand.organization_id != organization_id:
-            raise ForbiddenError("해당 브랜드에 대한 권한이 없습니다 (No permission for this brand)")
-        return brand
+        if store is None:
+            raise NotFoundError("매장을 찾을 수 없습니다 (Store not found)")
+        if store.organization_id != organization_id:
+            raise ForbiddenError("해당 매장에 대한 권한이 없습니다 (No permission for this store)")
+        return store
 
     async def _build_checklist_snapshot(
         self,
         db: AsyncSession,
-        brand_id: UUID,
+        store_id: UUID,
         shift_id: UUID,
         position_id: UUID,
+        work_date: date | None = None,
     ) -> tuple[dict | None, int]:
         """체크리스트 템플릿으로부터 JSONB 스냅샷을 생성합니다.
 
         Build a JSONB checklist snapshot from the matching template.
+        Respects recurrence settings: daily templates always match,
+        weekly templates only match if work_date's weekday is in recurrence_days.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            brand_id: 브랜드 UUID (Brand UUID)
+            store_id: 매장 UUID (Store UUID)
             shift_id: 근무조 UUID (Shift UUID)
             position_id: 포지션 UUID (Position UUID)
+            work_date: 근무일 (Work date for recurrence filtering)
 
         Returns:
             tuple[dict | None, int]: (스냅샷 딕셔너리 또는 None, 총 항목 수)
                                       (Snapshot dict or None, total item count)
         """
         # 해당 조합의 템플릿 검색 — Find matching template
-        templates: Sequence[ChecklistTemplate] = await checklist_repository.get_by_brand(
-            db, brand_id, shift_id, position_id
+        templates: Sequence[ChecklistTemplate] = await checklist_repository.get_by_store(
+            db, store_id, shift_id, position_id
         )
 
         if not templates:
@@ -94,9 +99,18 @@ class AssignmentService:
 
         template: ChecklistTemplate = templates[0]
 
-        # 항목 스냅샷 생성 — Generate item snapshot
+        # 항목별 반복 주기 필터 — Per-item recurrence filter
+        weekday: int | None = work_date.weekday() if work_date else None  # Monday=0 ~ Sunday=6
+
+        # 항목 스냅샷 생성 — Generate item snapshot (item별 recurrence 필터링)
         items_snapshot: list[dict] = []
-        for idx, item in enumerate(template.items):
+        idx: int = 0
+        for item in template.items:
+            # item별 recurrence 체크 — skip if weekly and work_date not in item's recurrence_days
+            if weekday is not None and item.recurrence_type == "weekly":
+                if item.recurrence_days and weekday not in item.recurrence_days:
+                    continue
+
             items_snapshot.append(
                 {
                     "item_index": idx,
@@ -107,8 +121,14 @@ class AssignmentService:
                     "sort_order": item.sort_order,
                     "is_completed": False,
                     "completed_at": None,
+                    "completed_tz": None,
                 }
             )
+            idx += 1
+
+        # 해당 날짜에 매칭되는 item이 없으면 None 반환
+        if not items_snapshot:
+            return None, 0
 
         snapshot: dict = {
             "template_id": str(template.id),
@@ -140,21 +160,21 @@ class AssignmentService:
             WorkAssignment: 생성된 업무 배정 (Created work assignment)
 
         Raises:
-            NotFoundError: 브랜드가 없을 때 (When brand not found)
-            ForbiddenError: 다른 조직 브랜드일 때 (When brand belongs to another org)
+            NotFoundError: 매장이 없을 때 (When store not found)
+            ForbiddenError: 다른 조직 매장일 때 (When store belongs to another org)
             DuplicateError: 같은 날짜에 중복 배정 시 (When duplicate assignment exists)
         """
-        brand_id: UUID = UUID(data.brand_id)
+        store_id: UUID = UUID(data.store_id)
         shift_id: UUID = UUID(data.shift_id)
         position_id: UUID = UUID(data.position_id)
         user_id: UUID = UUID(data.user_id)
 
-        # 브랜드 소유권 검증 — Verify brand ownership
-        await self._validate_brand_ownership(db, brand_id, organization_id)
+        # 매장 소유권 검증 — Verify store ownership
+        await self._validate_store_ownership(db, store_id, organization_id)
 
         # 중복 배정 검사 — Check for duplicate assignment
         is_duplicate: bool = await assignment_repository.check_duplicate(
-            db, brand_id, shift_id, position_id, user_id, data.work_date
+            db, store_id, shift_id, position_id, user_id, data.work_date
         )
         if is_duplicate:
             raise DuplicateError(
@@ -162,11 +182,11 @@ class AssignmentService:
                 "(An assignment for this combination on this date already exists)"
             )
 
-        # 체크리스트 스냅샷 생성 — Build checklist snapshot
+        # 체크리스트 스냅샷 생성 (반복 주기 필터 포함) — Build checklist snapshot with recurrence filter
         snapshot: dict | None
         total_items: int
         snapshot, total_items = await self._build_checklist_snapshot(
-            db, brand_id, shift_id, position_id
+            db, store_id, shift_id, position_id, work_date=data.work_date
         )
 
         # 체크리스트 템플릿 필수 검증 — Require checklist template
@@ -181,7 +201,7 @@ class AssignmentService:
             db,
             {
                 "organization_id": organization_id,
-                "brand_id": brand_id,
+                "store_id": store_id,
                 "shift_id": shift_id,
                 "position_id": position_id,
                 "user_id": user_id,
@@ -243,12 +263,12 @@ class AssignmentService:
             assignment: 업무 배정 ORM 객체 (Work assignment ORM object)
 
         Returns:
-            dict: 브랜드/근무조/포지션/사용자 이름이 포함된 응답 딕셔너리
-                  (Response dict with brand/shift/position/user names)
+            dict: 매장/근무조/포지션/사용자 이름이 포함된 응답 딕셔너리
+                  (Response dict with store/shift/position/user names)
         """
         # 관련 엔티티 이름 조회 — Fetch related entity names
-        brand_result = await db.execute(select(Brand.name).where(Brand.id == assignment.brand_id))
-        brand_name: str = brand_result.scalar() or "Unknown"
+        store_result = await db.execute(select(Store.name).where(Store.id == assignment.store_id))
+        store_name: str = store_result.scalar() or "Unknown"
 
         shift_result = await db.execute(select(Shift.name).where(Shift.id == assignment.shift_id))
         shift_name: str = shift_result.scalar() or "Unknown"
@@ -265,8 +285,8 @@ class AssignmentService:
 
         return {
             "id": str(assignment.id),
-            "brand_id": str(assignment.brand_id),
-            "brand_name": brand_name,
+            "store_id": str(assignment.store_id),
+            "store_name": store_name,
             "shift_id": str(assignment.shift_id),
             "shift_name": shift_name,
             "position_id": str(assignment.position_id),
@@ -306,7 +326,7 @@ class AssignmentService:
         self,
         db: AsyncSession,
         organization_id: UUID,
-        brand_id: UUID | None = None,
+        store_id: UUID | None = None,
         user_id: UUID | None = None,
         work_date: date | None = None,
         status: str | None = None,
@@ -320,7 +340,7 @@ class AssignmentService:
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 UUID (Organization UUID)
-            brand_id: 브랜드 UUID 필터, 선택 (Optional brand UUID filter)
+            store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
             user_id: 사용자 UUID 필터, 선택 (Optional user UUID filter)
             work_date: 근무일 필터, 선택 (Optional work date filter)
             status: 상태 필터, 선택 (Optional status filter)
@@ -332,7 +352,7 @@ class AssignmentService:
                                                    (List of assignments, total count)
         """
         return await assignment_repository.get_by_filters(
-            db, organization_id, brand_id, user_id, work_date, status, page, per_page
+            db, organization_id, store_id, user_id, work_date, status, page, per_page
         )
 
     async def get_detail(
@@ -393,18 +413,18 @@ class AssignmentService:
         self,
         db: AsyncSession,
         organization_id: UUID,
-        brand_id: UUID,
+        store_id: UUID,
         exclude_date: date | None = None,
         days: int = 30,
     ) -> list[dict]:
-        """브랜드 내 최근 배정된 사용자 목록을 조회합니다.
+        """매장 내 최근 배정된 사용자 목록을 조회합니다.
 
-        Get recently assigned users per shift×position combo for a brand.
+        Get recently assigned users per shift x position combo for a store.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 UUID (Organization UUID)
-            brand_id: 브랜드 UUID (Brand UUID)
+            store_id: 매장 UUID (Store UUID)
             exclude_date: 제외할 날짜 (Date to exclude, usually today)
             days: 조회 기간 일수 (Lookback period in days)
 
@@ -412,7 +432,7 @@ class AssignmentService:
             list[dict]: 최근 배정 사용자 목록 (Recent assignment user list)
         """
         rows = await assignment_repository.get_recent_user_ids(
-            db, organization_id, brand_id, exclude_date, days
+            db, organization_id, store_id, exclude_date, days
         )
         return [
             {
@@ -453,6 +473,7 @@ class AssignmentService:
         user_id: UUID,
         item_index: int,
         is_completed: bool,
+        client_timezone: str = "America/Los_Angeles",
     ) -> WorkAssignment:
         """체크리스트 항목을 완료/미완료 처리합니다.
 
@@ -465,6 +486,7 @@ class AssignmentService:
             user_id: 사용자 UUID (User UUID)
             item_index: 체크리스트 항목 인덱스 (Checklist item index)
             is_completed: 완료 여부 (Whether item is completed)
+            client_timezone: 클라이언트 IANA 타임존 (Client IANA timezone for display)
 
         Returns:
             WorkAssignment: 업데이트된 배정 (Updated assignment)
@@ -500,9 +522,18 @@ class AssignmentService:
 
         # 항목 업데이트 — Update item
         items[item_index]["is_completed"] = is_completed
-        items[item_index]["completed_at"] = (
-            datetime.now(timezone.utc).isoformat() if is_completed else None
-        )
+        if is_completed:
+            # 클라이언트 타임존 기준 시각/타임존 분리 저장 — Store local time (HH:MM) + tz abbreviation separately
+            try:
+                tz = ZoneInfo(client_timezone)
+            except (KeyError, ValueError):
+                tz = ZoneInfo("America/Los_Angeles")
+            local_now = datetime.now(tz)
+            items[item_index]["completed_at"] = local_now.strftime("%Y-%m-%dT%H:%M")  # "2026-02-20T14:05"
+            items[item_index]["completed_tz"] = local_now.strftime("%Z")  # "PST", "KST"
+        else:
+            items[item_index]["completed_at"] = None
+            items[item_index]["completed_tz"] = None
 
         # 완료 항목 수 재계산 — Recalculate completed count
         completed_count: int = sum(1 for item in items if item["is_completed"])

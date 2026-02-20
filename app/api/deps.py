@@ -92,8 +92,8 @@ def require_level(max_level: int) -> Callable[..., Awaitable[User]]:
     a maximum role level. Lower level = higher authority.
 
     Level hierarchy:
-        1 = admin (최고 권한, highest authority)
-        2 = manager
+        1 = owner (최고 권한, highest authority)
+        2 = general_manager
         3 = supervisor
         4 = staff (최저 권한, lowest authority)
 
@@ -117,6 +117,28 @@ def require_level(max_level: int) -> Callable[..., Awaitable[User]]:
 
 
 # 편의 의존성 — Pre-configured level dependencies for common role requirements
-require_admin = require_level(1)        # admin만 허용 (Admin only, level 1)
-require_manager = require_level(2)      # admin + manager 허용 (Admin + manager, level <= 2)
-require_supervisor = require_level(3)   # admin + manager + supervisor 허용 (Level <= 3)
+require_owner = require_level(1)       # Owner만 허용 (Owner only, level 1)
+require_gm = require_level(2)          # Owner + GM 허용 (Owner + General Manager, level <= 2)
+require_supervisor = require_level(3)  # Owner + GM + Supervisor 허용 (Level <= 3)
+
+
+async def get_accessible_store_ids(
+    db: AsyncSession, user: User
+) -> list[UUID] | None:
+    """사용자가 접근 가능한 매장 ID 목록을 반환합니다.
+
+    Return the list of store IDs accessible to the user.
+    None means full access (Owner). Empty list means no stores assigned.
+
+    Args:
+        db: 비동기 데이터베이스 세션 (Async database session)
+        user: 현재 사용자 (Current user with role loaded)
+
+    Returns:
+        list[UUID] | None: 매장 ID 목록 또는 None (전체 접근)
+                           (Store ID list, or None for full access)
+    """
+    if user.role.level <= 1:
+        return None
+    from app.repositories.user_repository import user_repository
+    return await user_repository.get_user_store_ids(db, user.id)

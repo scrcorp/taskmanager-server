@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import Role
 from app.repositories.role_repository import role_repository
 from app.schemas.user import RoleCreate, RoleResponse, RoleUpdate
-from app.utils.exceptions import DuplicateError, NotFoundError
+from app.utils.exceptions import DuplicateError, ForbiddenError, NotFoundError
 
 
 class RoleService:
@@ -64,23 +64,31 @@ class RoleService:
         db: AsyncSession,
         organization_id: UUID,
         data: RoleCreate,
+        caller_level: int = 1,
     ) -> RoleResponse:
         """새 역할을 생성합니다.
 
         Create a new role within an organization.
+        Caller can only create roles with level strictly greater than their own.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 ID (Organization UUID)
             data: 역할 생성 데이터 (Role creation data)
+            caller_level: 요청자의 역할 레벨 (Caller's role level for access control)
 
         Returns:
             RoleResponse: 생성된 역할 응답 (Created role response)
 
         Raises:
+            ForbiddenError: 자기보다 높거나 같은 레벨의 역할 생성 시도
+                            (Attempting to create a role at or above caller's level)
             DuplicateError: 같은 이름 또는 레벨의 역할이 이미 존재할 때
                             (When a role with the same name or level already exists)
         """
+        if data.level <= caller_level:
+            raise ForbiddenError("Cannot create a role at or above your level")
+
         # 이름/레벨 중복 확인 — Check name/level uniqueness
         is_duplicate: bool = await role_repository.check_duplicate(
             db, organization_id, data.name, data.level
@@ -104,22 +112,27 @@ class RoleService:
         role_id: UUID,
         organization_id: UUID,
         data: RoleUpdate,
+        caller_level: int = 1,
     ) -> RoleResponse:
         """역할 정보를 수정합니다.
 
         Update an existing role.
+        Caller can only modify roles with level strictly greater than their own.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             role_id: 역할 ID (Role UUID)
             organization_id: 조직 ID (Organization UUID)
             data: 수정 데이터 (Update data)
+            caller_level: 요청자의 역할 레벨 (Caller's role level for access control)
 
         Returns:
             RoleResponse: 수정된 역할 응답 (Updated role response)
 
         Raises:
             NotFoundError: 역할을 찾을 수 없을 때 (Role not found)
+            ForbiddenError: 자기보다 높거나 같은 레벨의 역할 수정 시도
+                            (Attempting to modify a role at or above caller's level)
             DuplicateError: 같은 이름 또는 레벨의 역할이 이미 존재할 때
                             (When a role with the same name or level already exists)
         """
@@ -129,6 +142,14 @@ class RoleService:
         )
         if existing is None:
             raise NotFoundError("Role not found")
+
+        # 자기보다 높거나 같은 level의 역할은 수정 불가
+        if existing.level <= caller_level:
+            raise ForbiddenError("Cannot modify a role at or above your level")
+
+        # level 변경 시 caller_level 이하로 변경 불가
+        if data.level is not None and data.level <= caller_level:
+            raise ForbiddenError("Cannot set role level at or above your level")
 
         # 변경할 값으로 중복 확인 — Check duplicates with updated values
         check_name: str = data.name if data.name is not None else existing.name
@@ -154,19 +175,33 @@ class RoleService:
         db: AsyncSession,
         role_id: UUID,
         organization_id: UUID,
+        caller_level: int = 1,
     ) -> None:
         """역할을 삭제합니다.
 
         Delete a role by its ID.
+        Caller can only delete roles with level strictly greater than their own.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             role_id: 역할 ID (Role UUID)
             organization_id: 조직 ID (Organization UUID)
+            caller_level: 요청자의 역할 레벨 (Caller's role level for access control)
 
         Raises:
             NotFoundError: 역할을 찾을 수 없을 때 (Role not found)
+            ForbiddenError: 자기보다 높거나 같은 레벨의 역할 삭제 시도
+                            (Attempting to delete a role at or above caller's level)
         """
+        existing: Role | None = await role_repository.get_by_id(
+            db, role_id, organization_id
+        )
+        if existing is None:
+            raise NotFoundError("Role not found")
+
+        if existing.level <= caller_level:
+            raise ForbiddenError("Cannot delete a role at or above your level")
+
         deleted: bool = await role_repository.delete(db, role_id, organization_id)
         if not deleted:
             raise NotFoundError("Role not found")

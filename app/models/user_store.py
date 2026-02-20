@@ -1,7 +1,7 @@
-"""사용자-브랜드 연결 모델 — 다대다 매핑 테이블.
+"""사용자-매장 연결 모델 — 다대다 매핑 테이블.
 
-User-Brand association model — Many-to-many mapping table.
-Links users to the brands they are assigned to within an organization.
+User-Store association model — Many-to-many mapping table.
+Links users to the stores they are assigned to within an organization.
 """
 
 import uuid
@@ -13,19 +13,19 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 
-class UserBrand(Base):
-    """사용자-브랜드 연결 테이블.
+class UserStore(Base):
+    """사용자-매장 연결 테이블.
 
-    User-Brand association table for many-to-many relationships.
+    User-Store association table for many-to-many relationships.
 
     Attributes:
         id: 고유 식별자 (Primary key UUID)
         user_id: 사용자 ID (User UUID)
-        brand_id: 브랜드 ID (Brand UUID)
+        store_id: 매장 ID (Store UUID)
         created_at: 생성 일시 (Creation timestamp)
     """
 
-    __tablename__ = "user_brands"
+    __tablename__ = "user_stores"
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid, primary_key=True, default=uuid.uuid4
@@ -35,9 +35,9 @@ class UserBrand(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    brand_id: Mapped[uuid.UUID] = mapped_column(
+    store_id: Mapped[uuid.UUID] = mapped_column(
         Uuid,
-        ForeignKey("brands.id", ondelete="CASCADE"),
+        ForeignKey("stores.id", ondelete="CASCADE"),
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -45,9 +45,9 @@ class UserBrand(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("user_id", "brand_id", name="uq_user_brand"),
+        UniqueConstraint("user_id", "store_id", name="uq_user_store"),
     )
 
     # Relationships
-    user = relationship("User", back_populates="user_brands")
-    brand = relationship("Brand", back_populates="user_brands")
+    user = relationship("User", back_populates="user_stores")
+    store = relationship("Store", back_populates="user_stores")

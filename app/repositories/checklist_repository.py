@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem
-from app.models.organization import Brand
+from app.models.organization import Store
 from app.models.work import Position, Shift
 from app.repositories.base import BaseRepository
 
@@ -37,7 +37,7 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
         self,
         db: AsyncSession,
         organization_id: UUID,
-        brand_id: UUID | None = None,
+        store_id: UUID | None = None,
         shift_id: UUID | None = None,
         position_id: UUID | None = None,
     ) -> Sequence[ChecklistTemplate]:
@@ -48,7 +48,7 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 UUID (Organization UUID)
-            brand_id: 브랜드 UUID 필터, 선택 (Optional brand UUID filter)
+            store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
             shift_id: 근무조 UUID 필터, 선택 (Optional shift UUID filter)
             position_id: 포지션 UUID 필터, 선택 (Optional position UUID filter)
 
@@ -57,8 +57,8 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
         """
         query: Select = (
             select(ChecklistTemplate)
-            .join(Brand, ChecklistTemplate.brand_id == Brand.id)
-            .where(Brand.organization_id == organization_id)
+            .join(Store, ChecklistTemplate.store_id == Store.id)
+            .where(Store.organization_id == organization_id)
             .options(
                 selectinload(ChecklistTemplate.items),
                 selectinload(ChecklistTemplate.shift),
@@ -66,8 +66,8 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
             )
         )
 
-        if brand_id is not None:
-            query = query.where(ChecklistTemplate.brand_id == brand_id)
+        if store_id is not None:
+            query = query.where(ChecklistTemplate.store_id == store_id)
         if shift_id is not None:
             query = query.where(ChecklistTemplate.shift_id == shift_id)
         if position_id is not None:
@@ -77,20 +77,20 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
         result = await db.execute(query)
         return result.scalars().all()
 
-    async def get_by_brand(
+    async def get_by_store(
         self,
         db: AsyncSession,
-        brand_id: UUID,
+        store_id: UUID,
         shift_id: UUID | None = None,
         position_id: UUID | None = None,
     ) -> Sequence[ChecklistTemplate]:
-        """브랜드별 체크리스트 템플릿 목록을 조회합니다.
+        """매장별 체크리스트 템플릿 목록을 조회합니다.
 
-        Retrieve checklist templates filtered by brand and optional shift/position.
+        Retrieve checklist templates filtered by store and optional shift/position.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            brand_id: 브랜드 UUID (Brand UUID)
+            store_id: 매장 UUID (Store UUID)
             shift_id: 근무조 UUID 필터, 선택 (Optional shift UUID filter)
             position_id: 포지션 UUID 필터, 선택 (Optional position UUID filter)
 
@@ -99,7 +99,7 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
         """
         query: Select = (
             select(ChecklistTemplate)
-            .where(ChecklistTemplate.brand_id == brand_id)
+            .where(ChecklistTemplate.store_id == store_id)
             .options(
                 selectinload(ChecklistTemplate.items),
                 selectinload(ChecklistTemplate.shift),
@@ -144,18 +144,18 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
     async def check_duplicate(
         self,
         db: AsyncSession,
-        brand_id: UUID,
+        store_id: UUID,
         shift_id: UUID,
         position_id: UUID,
         exclude_id: UUID | None = None,
     ) -> bool:
-        """동일 브랜드+근무조+포지션 조합의 중복 여부를 확인합니다.
+        """동일 매장+근무조+포지션 조합의 중복 여부를 확인합니다.
 
-        Check if a duplicate template exists for the brand+shift+position combination.
+        Check if a duplicate template exists for the store+shift+position combination.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            brand_id: 브랜드 UUID (Brand UUID)
+            store_id: 매장 UUID (Store UUID)
             shift_id: 근무조 UUID (Shift UUID)
             position_id: 포지션 UUID (Position UUID)
             exclude_id: 제외할 템플릿 UUID, 수정 시 사용 (Template UUID to exclude on update)
@@ -167,7 +167,7 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
             select(func.count())
             .select_from(ChecklistTemplate)
             .where(
-                ChecklistTemplate.brand_id == brand_id,
+                ChecklistTemplate.store_id == store_id,
                 ChecklistTemplate.shift_id == shift_id,
                 ChecklistTemplate.position_id == position_id,
             )

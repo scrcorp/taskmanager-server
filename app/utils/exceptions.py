@@ -18,7 +18,7 @@ class NotFoundError(HTTPException):
     """404 Not Found 예외 — 요청한 리소스를 찾을 수 없을 때 사용.
 
     404 Not Found exception.
-    Raised when a requested resource (user, brand, assignment, etc.) does not exist.
+    Raised when a requested resource (user, store, assignment, etc.) does not exist.
 
     Args:
         detail: 오류 메시지 (Error message, default: "Resource not found")
@@ -33,7 +33,7 @@ class DuplicateError(HTTPException):
 
     409 Conflict exception.
     Raised when attempting to create a resource that violates a uniqueness constraint
-    (e.g. duplicate username, duplicate shift name within a brand).
+    (e.g. duplicate username, duplicate shift name within a store).
 
     Args:
         detail: 오류 메시지 (Error message, default: "Resource already exists")

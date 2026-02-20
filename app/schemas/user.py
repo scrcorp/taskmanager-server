@@ -18,12 +18,12 @@ class RoleCreate(BaseModel):
     Creates a new role with a unique name and permission level within the org.
 
     Attributes:
-        name: 역할 이름 (Role name, e.g. "manager", unique per org)
+        name: 역할 이름 (Role name, e.g. "general_manager", unique per org)
         level: 권한 레벨 (Permission level, 1=highest, unique per org)
     """
 
     name: str  # 역할 이름 — 조직 내 고유 (Role name, unique within org)
-    level: int  # 권한 레벨 — 1=admin 최고, 4=staff 최저 (Permission level)
+    level: int  # 권한 레벨 — 1=owner 최고, 4=staff 최저 (Permission level)
 
 
 class RoleUpdate(BaseModel):

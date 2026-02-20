@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Multi-brand employee management system. FastAPI + PostgreSQL (Supabase) backend serving two frontends: Admin (Next.js) and App (Flutter Web).
+Multi-store employee management system. FastAPI + PostgreSQL (Supabase) backend serving two frontends: Admin (Next.js) and App (Flutter Web).
 
 ## Tech Stack
 
@@ -29,8 +29,9 @@ server/
 │   ├── database.py         ← Async engine + session
 │   ├── models/             ← SQLAlchemy models
 │   │   ├── __init__.py
-│   │   ├── organization.py  (organizations, brands)
-│   │   ├── user.py          (roles, users, user_brands)
+│   │   ├── organization.py  (organizations, stores)
+│   │   ├── user.py          (roles, users)
+│   │   ├── user_store.py    (user_stores)
 │   │   ├── work.py          (shifts, positions)
 │   │   ├── checklist.py     (checklist_templates, checklist_template_items)
 │   │   ├── assignment.py    (work_assignments)
@@ -40,7 +41,7 @@ server/
 │   ├── schemas/            ← Pydantic request/response
 │   │   ├── __init__.py
 │   │   ├── auth.py          (Login, Register, Token, UserMe)
-│   │   ├── organization.py  (Organization, Brand schemas)
+│   │   ├── organization.py  (Organization, Store schemas)
 │   │   ├── user.py           (Role, User, Profile schemas)
 │   │   ├── work.py           (Shift, Position schemas)
 │   │   └── common.py         (Checklist, Assignment, Announcement, Task, Notification)
@@ -48,7 +49,7 @@ server/
 │   │   ├── __init__.py
 │   │   ├── auth_service.py
 │   │   ├── organization_service.py
-│   │   ├── brand_service.py
+│   │   ├── store_service.py
 │   │   ├── user_service.py
 │   │   ├── shift_service.py
 │   │   ├── position_service.py
@@ -67,7 +68,7 @@ server/
 │   │   │   ├── __init__.py
 │   │   │   ├── auth.py
 │   │   │   ├── organizations.py
-│   │   │   ├── brands.py
+│   │   │   ├── stores.py
 │   │   │   ├── shifts.py
 │   │   │   ├── positions.py
 │   │   │   ├── roles.py
@@ -113,23 +114,23 @@ Build in this order. Each phase should be fully working before moving to next.
 1. Project setup: FastAPI app, config, database connection
 2. Auth: JWT encode/decode, bcrypt, login/register endpoints
 3. Organization CRUD (admin only)
-4. Brand CRUD (admin: full, scoped to org)
+4. Store CRUD (admin: full, scoped to org)
 5. Role CRUD (admin only, level-based hierarchy)
 6. User CRUD (admin: manage all users, app: self-register)
-7. Shift CRUD (under brands)
-8. Position CRUD (under brands)
+7. Shift CRUD (under stores)
+8. Position CRUD (under stores)
 
 ### Phase 2 — Core Workflow (18 endpoints)
 
-9. Checklist Template CRUD (brand × shift × position unique)
+9. Checklist Template CRUD (store x shift x position unique)
 10. Template Item CRUD (sort_order, drag reorder)
 11. Work Assignment creation + JSONB snapshot generation
-12. Assignment list/filter (by date, brand, user, status)
+12. Assignment list/filter (by date, store, user, status)
 13. Checklist completion (JSONB item update, auto status change)
 
 ### Phase 3 — Communication (25 endpoints)
 
-14. Announcement CRUD (org-wide or brand-specific)
+14. Announcement CRUD (org-wide or store-specific)
 15. Additional Task CRUD + assignee management
 16. Notification auto-creation (on assignment, task, announcement)
 17. Notification read/mark-all-read

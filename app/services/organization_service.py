@@ -49,6 +49,7 @@ class OrganizationService:
         return OrganizationResponse(
             id=str(org.id),
             name=org.name,
+            code=org.code,
             is_active=org.is_active,
             created_at=org.created_at,
         )
@@ -84,6 +85,7 @@ class OrganizationService:
         return OrganizationResponse(
             id=str(org.id),
             name=org.name,
+            code=org.code,
             is_active=org.is_active,
             created_at=org.created_at,
         )

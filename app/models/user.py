@@ -22,12 +22,12 @@ class Role(Base):
 
     Role model — Defines permission levels within an organization.
     Lower level numbers indicate higher authority:
-        1 = admin, 2 = manager, 3 = supervisor, 4 = staff
+        1 = owner, 2 = general_manager, 3 = supervisor, 4 = staff
 
     Attributes:
         id: 고유 식별자 UUID (Unique identifier)
         organization_id: 소속 조직 FK (Parent organization foreign key)
-        name: 역할 이름 (Role name, e.g. "admin", "staff")
+        name: 역할 이름 (Role name, e.g. "owner", "staff")
         level: 권한 레벨 (Permission level, 1=highest)
         created_at: 생성 일시 UTC (Creation timestamp)
         updated_at: 수정 일시 UTC (Last update timestamp)
@@ -47,9 +47,9 @@ class Role(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 소속 조직 FK — Parent organization (CASCADE: 조직 삭제 시 역할도 삭제)
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    # 역할 이름 — Role display name (e.g. "admin", "manager", "supervisor", "staff")
+    # 역할 이름 — Role display name (e.g. "owner", "general_manager", "supervisor", "staff")
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    # 권한 레벨 — Permission level (1=admin 최고 권한, 4=staff 최저 권한)
+    # 권한 레벨 — Permission level (1=owner 최고 권한, 4=staff 최저 권한)
     level: Mapped[int] = mapped_column(Integer, nullable=False)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -90,7 +90,7 @@ class User(Base):
         organization: 소속 조직 (Parent organization)
         role: 사용자 역할 (Assigned role)
         refresh_tokens: 리프레시 토큰 목록 (Active refresh tokens, cascade delete)
-        user_brands: 소속 브랜드 연결 (Brand associations, cascade delete)
+        user_stores: 소속 매장 연결 (Store associations, cascade delete)
 
     Constraints:
         uq_user_org_username: 조직 내 사용자명 고유 (Unique username per org)
@@ -129,4 +129,4 @@ class User(Base):
     organization = relationship("Organization", back_populates="users")
     role = relationship("Role", back_populates="users")
     refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
-    user_brands = relationship("UserBrand", back_populates="user", cascade="all, delete-orphan")
+    user_stores = relationship("UserStore", back_populates="user", cascade="all, delete-orphan")

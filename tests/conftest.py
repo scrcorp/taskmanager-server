@@ -207,14 +207,14 @@ async def staff_user(db: AsyncSession, org, roles):
 
 
 @pytest_asyncio.fixture
-async def brand(db: AsyncSession, org):
-    """테스트 브랜드를 생성합니다."""
-    from app.models.organization import Brand
-    b = Brand(organization_id=org.id, name="Test Brand", address="123 Test St")
-    db.add(b)
+async def store(db: AsyncSession, org):
+    """테스트 매장을 생성합니다."""
+    from app.models.organization import Store
+    s = Store(organization_id=org.id, name="Test Store", address="123 Test St")
+    db.add(s)
     await db.flush()
-    await db.refresh(b)
-    return b
+    await db.refresh(s)
+    return s
 
 
 def make_token(user, role_name: str, role_level: int) -> str:

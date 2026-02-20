@@ -11,9 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.communication import Announcement
-from app.models.organization import Brand
+from app.models.organization import Store
 from app.models.user import User
-from app.models.user_brand import UserBrand
+from app.models.user_store import UserStore
 from app.repositories.announcement_repository import announcement_repository
 from app.schemas.common import AnnouncementCreate, AnnouncementUpdate
 from app.utils.exceptions import ForbiddenError, NotFoundError
@@ -25,36 +25,36 @@ class AnnouncementService:
     Announcement service providing admin CRUD and app-facing read operations.
     """
 
-    async def _validate_brand_ownership(
+    async def _validate_store_ownership(
         self,
         db: AsyncSession,
-        brand_id: UUID,
+        store_id: UUID,
         organization_id: UUID,
-    ) -> Brand:
-        """브랜드가 해당 조직에 속하는지 검증합니다.
+    ) -> Store:
+        """매장이 해당 조직에 속하는지 검증합니다.
 
-        Verify that a brand belongs to the specified organization.
+        Verify that a store belongs to the specified organization.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            brand_id: 브랜드 UUID (Brand UUID)
+            store_id: 매장 UUID (Store UUID)
             organization_id: 조직 UUID (Organization UUID)
 
         Returns:
-            Brand: 검증된 브랜드 (Verified brand)
+            Store: 검증된 매장 (Verified store)
 
         Raises:
-            NotFoundError: 브랜드가 없을 때 (When brand not found)
-            ForbiddenError: 다른 조직 브랜드일 때 (When brand belongs to another org)
+            NotFoundError: 매장이 없을 때 (When store not found)
+            ForbiddenError: 다른 조직 매장일 때 (When store belongs to another org)
         """
-        result = await db.execute(select(Brand).where(Brand.id == brand_id))
-        brand: Brand | None = result.scalar_one_or_none()
+        result = await db.execute(select(Store).where(Store.id == store_id))
+        store: Store | None = result.scalar_one_or_none()
 
-        if brand is None:
-            raise NotFoundError("브랜드를 찾을 수 없습니다 (Brand not found)")
-        if brand.organization_id != organization_id:
-            raise ForbiddenError("해당 브랜드에 대한 권한이 없습니다 (No permission for this brand)")
-        return brand
+        if store is None:
+            raise NotFoundError("매장을 찾을 수 없습니다 (Store not found)")
+        if store.organization_id != organization_id:
+            raise ForbiddenError("해당 매장에 대한 권한이 없습니다 (No permission for this store)")
+        return store
 
     async def build_response(
         self,
@@ -70,16 +70,16 @@ class AnnouncementService:
             announcement: 공지사항 ORM 객체 (Announcement ORM object)
 
         Returns:
-            dict: 브랜드명/작성자명이 포함된 응답 딕셔너리
-                  (Response dict with brand name and creator name)
+            dict: 매장명/작성자명이 포함된 응답 딕셔너리
+                  (Response dict with store name and creator name)
         """
-        # 브랜드 이름 조회 — Fetch brand name
-        brand_name: str | None = None
-        if announcement.brand_id is not None:
+        # 매장 이름 조회 — Fetch store name
+        store_name: str | None = None
+        if announcement.store_id is not None:
             result = await db.execute(
-                select(Brand.name).where(Brand.id == announcement.brand_id)
+                select(Store.name).where(Store.id == announcement.store_id)
             )
-            brand_name = result.scalar()
+            store_name = result.scalar()
 
         # 작성자 이름 조회 — Fetch creator name
         creator_result = await db.execute(
@@ -91,8 +91,8 @@ class AnnouncementService:
             "id": str(announcement.id),
             "title": announcement.title,
             "content": announcement.content,
-            "brand_id": str(announcement.brand_id) if announcement.brand_id else None,
-            "brand_name": brand_name,
+            "store_id": str(announcement.store_id) if announcement.store_id else None,
+            "store_name": store_name,
             "created_by_name": created_by_name,
             "created_at": announcement.created_at,
         }
@@ -171,19 +171,19 @@ class AnnouncementService:
             Announcement: 생성된 공지 (Created announcement)
 
         Raises:
-            NotFoundError: 브랜드가 없을 때 (When brand not found)
-            ForbiddenError: 다른 조직 브랜드일 때 (When brand belongs to another org)
+            NotFoundError: 매장이 없을 때 (When store not found)
+            ForbiddenError: 다른 조직 매장일 때 (When store belongs to another org)
         """
-        brand_id: UUID | None = UUID(data.brand_id) if data.brand_id else None
+        store_id: UUID | None = UUID(data.store_id) if data.store_id else None
 
-        if brand_id is not None:
-            await self._validate_brand_ownership(db, brand_id, organization_id)
+        if store_id is not None:
+            await self._validate_store_ownership(db, store_id, organization_id)
 
         announcement: Announcement = await announcement_repository.create(
             db,
             {
                 "organization_id": organization_id,
-                "brand_id": brand_id,
+                "store_id": store_id,
                 "title": data.title,
                 "content": data.content,
                 "created_by": created_by,
@@ -195,7 +195,7 @@ class AnnouncementService:
 
         # 대상 사용자 조회 — Find target users
         user_ids: list[UUID] = await self._get_target_user_ids(
-            db, organization_id, brand_id
+            db, organization_id, store_id
         )
         await notification_service.create_for_announcement(db, announcement, user_ids)
 
@@ -272,7 +272,7 @@ class AnnouncementService:
     ) -> tuple[Sequence[Announcement], int]:
         """사용자가 볼 수 있는 공지사항 목록을 조회합니다.
 
-        List announcements visible to the user (org-wide + user's brands).
+        List announcements visible to the user (org-wide + user's stores).
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -285,30 +285,30 @@ class AnnouncementService:
             tuple[Sequence[Announcement], int]: (공지 목록, 전체 개수)
                                                  (List of announcements, total count)
         """
-        # 사용자의 브랜드 ID 목록 조회 — Get user's brand IDs
-        brand_ids: list[UUID] = await self._get_user_brand_ids(db, user_id)
-        return await announcement_repository.get_for_user_brands(
-            db, organization_id, brand_ids, page, per_page
+        # 사용자의 매장 ID 목록 조회 — Get user's store IDs
+        store_ids: list[UUID] = await self._get_user_store_ids(db, user_id)
+        return await announcement_repository.get_for_user_stores(
+            db, organization_id, store_ids, page, per_page
         )
 
-    async def _get_user_brand_ids(
+    async def _get_user_store_ids(
         self,
         db: AsyncSession,
         user_id: UUID,
     ) -> list[UUID]:
-        """사용자가 속한 브랜드 ID 목록을 조회합니다.
+        """사용자가 속한 매장 ID 목록을 조회합니다.
 
-        Get list of brand UUIDs the user belongs to.
+        Get list of store UUIDs the user belongs to.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             user_id: 사용자 UUID (User UUID)
 
         Returns:
-            list[UUID]: 브랜드 UUID 목록 (List of brand UUIDs)
+            list[UUID]: 매장 UUID 목록 (List of store UUIDs)
         """
         result = await db.execute(
-            select(UserBrand.brand_id).where(UserBrand.user_id == user_id)
+            select(UserStore.store_id).where(UserStore.user_id == user_id)
         )
         return list(result.scalars().all())
 
@@ -316,7 +316,7 @@ class AnnouncementService:
         self,
         db: AsyncSession,
         organization_id: UUID,
-        brand_id: UUID | None,
+        store_id: UUID | None,
     ) -> list[UUID]:
         """알림 대상 사용자 ID 목록을 조회합니다.
 
@@ -325,13 +325,13 @@ class AnnouncementService:
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 UUID (Organization UUID)
-            brand_id: 브랜드 UUID (None이면 조직 전체)
-                      (Brand UUID, None means org-wide)
+            store_id: 매장 UUID (None이면 조직 전체)
+                      (Store UUID, None means org-wide)
 
         Returns:
             list[UUID]: 대상 사용자 UUID 목록 (Target user UUID list)
         """
-        if brand_id is None:
+        if store_id is None:
             # 조직 전체 사용자 — All users in the organization
             result = await db.execute(
                 select(User.id).where(
@@ -340,9 +340,9 @@ class AnnouncementService:
                 )
             )
         else:
-            # 해당 브랜드 소속 사용자 — Users belonging to the specific brand
+            # 해당 매장 소속 사용자 — Users belonging to the specific store
             result = await db.execute(
-                select(UserBrand.user_id).where(UserBrand.brand_id == brand_id)
+                select(UserStore.user_id).where(UserStore.store_id == store_id)
             )
         return list(result.scalars().all())
 

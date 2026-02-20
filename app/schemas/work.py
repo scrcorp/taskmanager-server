@@ -1,7 +1,7 @@
 """근무 구성(시간대/포지션) 관련 Pydantic 요청/응답 스키마 정의.
 
 Work configuration (Shift/Position) Pydantic request/response schema definitions.
-Covers CRUD operations for shifts and positions scoped under a brand.
+Covers CRUD operations for shifts and positions scoped under a store.
 """
 
 from pydantic import BaseModel
@@ -13,7 +13,7 @@ class ShiftCreate(BaseModel):
     """시간대 생성 요청 스키마.
 
     Shift creation request schema.
-    Shift is created under a specific brand (brand_id from URL path).
+    Shift is created under a specific store (store_id from URL path).
 
     Attributes:
         name: 시간대 이름 (Shift name, e.g. "오전", "오후")
@@ -45,13 +45,13 @@ class ShiftResponse(BaseModel):
 
     Attributes:
         id: 시간대 UUID (Shift unique identifier)
-        brand_id: 소속 브랜드 UUID (Parent brand)
+        store_id: 소속 매장 UUID (Parent store)
         name: 시간대 이름 (Shift name)
         sort_order: 정렬 순서 (Display order)
     """
 
     id: str  # 시간대 UUID 문자열 (Shift UUID as string)
-    brand_id: str  # 소속 브랜드 UUID 문자열 (Brand UUID as string)
+    store_id: str  # 소속 매장 UUID 문자열 (Store UUID as string)
     name: str  # 시간대 이름 (Shift name)
     sort_order: int  # 정렬 순서 (Display order)
 
@@ -62,7 +62,7 @@ class PositionCreate(BaseModel):
     """포지션 생성 요청 스키마.
 
     Position creation request schema.
-    Position is created under a specific brand (brand_id from URL path).
+    Position is created under a specific store (store_id from URL path).
 
     Attributes:
         name: 포지션 이름 (Position name, e.g. "그릴", "카운터")
@@ -94,12 +94,12 @@ class PositionResponse(BaseModel):
 
     Attributes:
         id: 포지션 UUID (Position unique identifier)
-        brand_id: 소속 브랜드 UUID (Parent brand)
+        store_id: 소속 매장 UUID (Parent store)
         name: 포지션 이름 (Position name)
         sort_order: 정렬 순서 (Display order)
     """
 
     id: str  # 포지션 UUID 문자열 (Position UUID as string)
-    brand_id: str  # 소속 브랜드 UUID 문자열 (Brand UUID as string)
+    store_id: str  # 소속 매장 UUID 문자열 (Store UUID as string)
     name: str  # 포지션 이름 (Position name)
     sort_order: int  # 정렬 순서 (Display order)

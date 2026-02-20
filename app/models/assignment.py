@@ -2,7 +2,7 @@
 
 Work assignment SQLAlchemy ORM model definitions.
 Represents daily work assignments linking a user to a specific
-brand + shift + position for a given date, with a JSONB snapshot
+store + shift + position for a given date, with a JSONB snapshot
 of the checklist at the time of assignment.
 
 Tables:
@@ -47,7 +47,7 @@ class WorkAssignment(Base):
     Attributes:
         id: 고유 식별자 UUID (Unique identifier)
         organization_id: 소속 조직 FK (Organization scope for multi-tenant isolation)
-        brand_id: 브랜드 FK (Brand where the work is performed)
+        store_id: 매장 FK (Store where the work is performed)
         shift_id: 시간대 FK (Shift period for the assignment)
         position_id: 포지션 FK (Position/station for the assignment)
         user_id: 배정 대상 사용자 FK (Assigned worker)
@@ -62,7 +62,7 @@ class WorkAssignment(Base):
 
     Constraints:
         uq_assignment_combo_date: 동일 날짜에 동일 조합 배정 불가
-            (One assignment per brand+shift+position+user+date)
+            (One assignment per store+shift+position+user+date)
     """
 
     __tablename__ = "work_assignments"
@@ -71,8 +71,8 @@ class WorkAssignment(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 소속 조직 FK — Organization scope for multi-tenant data isolation
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    # 브랜드 FK — Brand/store where the work takes place
-    brand_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("brands.id", ondelete="CASCADE"), nullable=False)
+    # 매장 FK — Store where the work takes place
+    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
     # 시간대 FK — Shift period (e.g. morning, afternoon)
     shift_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("shifts.id", ondelete="CASCADE"), nullable=False)
     # 포지션 FK — Work position/station (e.g. grill, counter)
@@ -97,5 +97,5 @@ class WorkAssignment(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
-        UniqueConstraint("brand_id", "shift_id", "position_id", "user_id", "work_date", name="uq_assignment_combo_date"),
+        UniqueConstraint("store_id", "shift_id", "position_id", "user_id", "work_date", name="uq_assignment_combo_date"),
     )

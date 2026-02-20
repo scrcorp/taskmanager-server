@@ -17,18 +17,21 @@ class ChecklistTemplateCreate(BaseModel):
     """체크리스트 템플릿 생성 요청 스키마.
 
     Checklist template creation request schema.
-    Creates a template for a unique brand + shift + position combination.
-    brand_id is provided via URL path parameter, not in the request body.
+    Creates a template for a unique store + shift + position combination.
+    store_id is provided via URL path parameter, not in the request body.
+
+    Title is auto-generated as '{store} - {shift} - {position}'.
+    If title is provided, format becomes '{store} - {shift} - {position} ({title})'.
 
     Attributes:
         shift_id: 대상 시간대 UUID (Target shift identifier)
         position_id: 대상 포지션 UUID (Target position identifier)
-        title: 템플릿 제목 (Template title)
+        title: 추가 제목 (Optional additional title, appended in parentheses)
     """
 
     shift_id: str  # 대상 시간대 UUID (Shift identifier)
     position_id: str  # 대상 포지션 UUID (Position identifier)
-    title: str  # 템플릿 제목 (Template display title)
+    title: str = ""  # 추가 제목 — 비어있으면 자동 생성 (Optional additional title)
 
 
 class ChecklistTemplateResponse(BaseModel):
@@ -38,7 +41,7 @@ class ChecklistTemplateResponse(BaseModel):
 
     Attributes:
         id: 템플릿 UUID (Template unique identifier)
-        brand_id: 브랜드 UUID (Brand identifier)
+        store_id: 매장 UUID (Store identifier)
         shift_id: 시간대 UUID (Shift identifier)
         position_id: 포지션 UUID (Position identifier)
         title: 템플릿 제목 (Template title)
@@ -46,7 +49,7 @@ class ChecklistTemplateResponse(BaseModel):
     """
 
     id: str  # 템플릿 UUID 문자열 (Template UUID as string)
-    brand_id: str  # 브랜드 UUID 문자열 (Brand UUID as string)
+    store_id: str  # 매장 UUID 문자열 (Store UUID as string)
     shift_id: str  # 시간대 UUID 문자열 (Shift UUID as string)
     position_id: str  # 포지션 UUID 문자열 (Position UUID as string)
     shift_name: str = ""  # 시간대 이름 (Shift display name)
@@ -80,13 +83,15 @@ class ChecklistItemCreate(BaseModel):
     Attributes:
         title: 항목 제목 (Item title/task description)
         description: 상세 설명 (Detailed description, optional)
-        verification_type: 확인 유형 (Verification: "none", "photo", "text")
+        verification_type: 확인 유형 (Verification: "none", "photo", "text", or combo "photo,text")
         sort_order: 정렬 순서 (Display order, default 0)
     """
 
     title: str  # 항목 제목 (Task title)
     description: str | None = None  # 상세 설명 (Detailed instructions, optional)
-    verification_type: str = "none"  # 확인 유형 — "none"|"photo"|"text" (Verification method)
+    verification_type: str = "none"  # 확인 유형 — "none"|"photo"|"text"|"photo,text"
+    recurrence_type: str = "daily"  # 반복 주기 — "daily"|"weekly"
+    recurrence_days: list[int] | None = None  # weekly일 때 요일 목록 [0=Mon..6=Sun]
     sort_order: int = 0  # 정렬 순서 (Display order)
 
 
@@ -105,6 +110,8 @@ class ChecklistItemUpdate(BaseModel):
     title: str | None = None  # 변경할 항목 제목 (New title, optional)
     description: str | None = None  # 변경할 설명 (New description, optional)
     verification_type: str | None = None  # 변경할 확인 유형 (New verification type, optional)
+    recurrence_type: str | None = None  # 변경할 반복 주기 (New recurrence type, optional)
+    recurrence_days: list[int] | None = None  # 변경할 반복 요일 (New recurrence days, optional)
     sort_order: int | None = None  # 변경할 정렬 순서 (New sort order, optional)
 
 
@@ -124,7 +131,9 @@ class ChecklistItemResponse(BaseModel):
     id: str  # 항목 UUID 문자열 (Item UUID as string)
     title: str  # 항목 제목 (Item title)
     description: str | None  # 상세 설명 (Description, may be null)
-    verification_type: str  # 확인 유형 — "none"|"photo"|"text" (Verification method)
+    verification_type: str  # 확인 유형 — "none"|"photo"|"text"|"photo,text"
+    recurrence_type: str = "daily"  # 반복 주기 — "daily"|"weekly"
+    recurrence_days: list[int] | None = None  # weekly일 때 요일 목록 [0=Mon..6=Sun]
     sort_order: int  # 정렬 순서 (Display order)
 
 
@@ -154,24 +163,41 @@ class ReorderRequest(BaseModel):
     item_ids: list[str]  # 새 순서대로 나열된 항목 UUID 목록 (Item UUIDs in desired order)
 
 
+class ExcelImportResponse(BaseModel):
+    """Excel import 결과 응답 스키마.
+
+    Excel import result response schema.
+    Reports the number of created/skipped entities and any row-level errors.
+    """
+
+    created_templates: int = 0
+    created_items: int = 0
+    created_stores: int = 0
+    created_shifts: int = 0
+    created_positions: int = 0
+    skipped_templates: int = 0
+    updated_templates: int = 0
+    errors: list[str] = []
+
+
 # === 근무 배정 (Assignment) 스키마 ===
 
 class AssignmentCreate(BaseModel):
     """근무 배정 생성 요청 스키마.
 
     Work assignment creation request schema.
-    Creates a daily assignment for a user at a specific brand/shift/position.
+    Creates a daily assignment for a user at a specific store/shift/position.
     The server automatically snapshots the matching checklist template.
 
     Attributes:
-        brand_id: 대상 브랜드 UUID (Target brand)
+        store_id: 대상 매장 UUID (Target store)
         shift_id: 대상 시간대 UUID (Target shift)
         position_id: 대상 포지션 UUID (Target position)
         user_id: 배정 대상 사용자 UUID (Worker to assign)
         work_date: 근무 날짜 (Work date)
     """
 
-    brand_id: str  # 대상 브랜드 UUID (Brand identifier)
+    store_id: str  # 대상 매장 UUID (Store identifier)
     shift_id: str  # 대상 시간대 UUID (Shift identifier)
     position_id: str  # 대상 포지션 UUID (Position identifier)
     user_id: str  # 배정 대상 사용자 UUID (Worker identifier)
@@ -182,13 +208,13 @@ class AssignmentResponse(BaseModel):
     """근무 배정 응답 스키마 (목록용).
 
     Work assignment response schema for list views.
-    Includes resolved names for brand, shift, position, and user
+    Includes resolved names for store, shift, position, and user
     to avoid additional API calls on the client.
 
     Attributes:
         id: 배정 UUID (Assignment unique identifier)
-        brand_id: 브랜드 UUID (Brand identifier)
-        brand_name: 브랜드 이름 (Resolved brand name)
+        store_id: 매장 UUID (Store identifier)
+        store_name: 매장 이름 (Resolved store name)
         shift_id: 시간대 UUID (Shift identifier)
         shift_name: 시간대 이름 (Resolved shift name)
         position_id: 포지션 UUID (Position identifier)
@@ -203,8 +229,8 @@ class AssignmentResponse(BaseModel):
     """
 
     id: str  # 배정 UUID 문자열 (Assignment UUID as string)
-    brand_id: str  # 브랜드 UUID 문자열 (Brand UUID as string)
-    brand_name: str  # 브랜드 이름 — 조인된 값 (Brand name, resolved)
+    store_id: str  # 매장 UUID 문자열 (Store UUID as string)
+    store_name: str  # 매장 이름 — 조인된 값 (Store name, resolved)
     shift_id: str  # 시간대 UUID 문자열 (Shift UUID as string)
     shift_name: str  # 시간대 이름 — 조인된 값 (Shift name, resolved)
     position_id: str  # 포지션 UUID 문자열 (Position UUID as string)
@@ -228,7 +254,7 @@ class AssignmentDetailResponse(AssignmentResponse):
         checklist_snapshot: JSONB 체크리스트 스냅샷 (Snapshot of checklist items at assignment time)
     """
 
-    # JSONB 스냅샷 — 각 항목: {item_index, title, description, verification_type, is_completed, completed_at}
+    # JSONB 스냅샷 — 각 항목: {item_index, title, description, verification_type, is_completed, completed_at, completed_tz}
     checklist_snapshot: list[dict[str, Any]] | None = None
 
 
@@ -240,9 +266,11 @@ class ChecklistItemComplete(BaseModel):
 
     Attributes:
         is_completed: 완료 여부 (True=완료, False=미완료)
+        timezone: 클라이언트 IANA 타임존 (Client IANA timezone, e.g. "America/Los_Angeles")
     """
 
     is_completed: bool  # 완료 여부 — True이면 completed_at 자동 설정 (Completion flag)
+    timezone: str = "America/Los_Angeles"  # 클라이언트 타임존 — 완료 시각 표시용 (Client timezone for display)
 
 
 # === 공지사항 (Announcement) 스키마 ===
@@ -251,17 +279,17 @@ class AnnouncementCreate(BaseModel):
     """공지사항 생성 요청 스키마.
 
     Announcement creation request schema.
-    If brand_id is null, the announcement targets the entire organization.
+    If store_id is null, the announcement targets the entire organization.
 
     Attributes:
         title: 공지 제목 (Announcement title)
         content: 공지 내용 (Announcement body text)
-        brand_id: 대상 브랜드 UUID (Target brand, null = org-wide)
+        store_id: 대상 매장 UUID (Target store, null = org-wide)
     """
 
     title: str  # 공지 제목 (Announcement title)
     content: str  # 공지 내용 (Announcement body)
-    brand_id: str | None = None  # 대상 브랜드 — None이면 조직 전체 (Brand scope, null = org-wide)
+    store_id: str | None = None  # 대상 매장 — None이면 조직 전체 (Store scope, null = org-wide)
 
 
 class AnnouncementUpdate(BaseModel):
@@ -287,8 +315,8 @@ class AnnouncementResponse(BaseModel):
         id: 공지 UUID (Announcement unique identifier)
         title: 공지 제목 (Announcement title)
         content: 공지 내용 (Announcement body)
-        brand_id: 대상 브랜드 UUID (Target brand, nullable)
-        brand_name: 대상 브랜드 이름 (Resolved brand name, nullable)
+        store_id: 대상 매장 UUID (Target store, nullable)
+        store_name: 대상 매장 이름 (Resolved store name, nullable)
         created_by_name: 작성자 이름 (Resolved author name)
         created_at: 생성 일시 (Creation timestamp)
     """
@@ -296,8 +324,8 @@ class AnnouncementResponse(BaseModel):
     id: str  # 공지 UUID 문자열 (Announcement UUID as string)
     title: str  # 공지 제목 (Title)
     content: str  # 공지 내용 (Body text)
-    brand_id: str | None  # 대상 브랜드 UUID — None이면 조직 전체 (Brand scope, null = org-wide)
-    brand_name: str | None  # 대상 브랜드 이름 — 조인된 값 (Brand name, resolved)
+    store_id: str | None  # 대상 매장 UUID — None이면 조직 전체 (Store scope, null = org-wide)
+    store_name: str | None  # 대상 매장 이름 — 조인된 값 (Store name, resolved)
     created_by_name: str  # 작성자 이름 — 조인된 값 (Author name, resolved)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
@@ -313,7 +341,7 @@ class TaskCreate(BaseModel):
     Attributes:
         title: 업무 제목 (Task title)
         description: 업무 설명 (Task description, optional)
-        brand_id: 대상 브랜드 UUID (Brand scope, optional)
+        store_id: 대상 매장 UUID (Store scope, optional)
         priority: 우선순위 (Priority: "normal" or "urgent")
         due_date: 마감일시 (Due date with timezone, optional)
         assignee_ids: 담당자 UUID 목록 (List of assignee user UUIDs)
@@ -321,7 +349,7 @@ class TaskCreate(BaseModel):
 
     title: str  # 업무 제목 (Task title)
     description: str | None = None  # 업무 설명 (Description, optional)
-    brand_id: str | None = None  # 대상 브랜드 — None이면 조직 전체 (Brand scope, optional)
+    store_id: str | None = None  # 대상 매장 — None이면 조직 전체 (Store scope, optional)
     priority: str = "normal"  # 우선순위 — "normal"|"urgent" (Priority level)
     due_date: datetime | None = None  # 마감일시 (Deadline, optional)
     assignee_ids: list[str] = []  # 담당자 UUID 목록 (Worker UUIDs to assign)
@@ -356,8 +384,8 @@ class TaskResponse(BaseModel):
         id: 업무 UUID (Task unique identifier)
         title: 업무 제목 (Task title)
         description: 업무 설명 (Description, nullable)
-        brand_id: 브랜드 UUID (Brand scope, nullable)
-        brand_name: 브랜드 이름 (Resolved brand name, nullable)
+        store_id: 매장 UUID (Store scope, nullable)
+        store_name: 매장 이름 (Resolved store name, nullable)
         priority: 우선순위 (Priority: "normal" or "urgent")
         status: 진행 상태 (Status: pending/in_progress/completed)
         due_date: 마감일시 (Due date, nullable)
@@ -369,8 +397,8 @@ class TaskResponse(BaseModel):
     id: str  # 업무 UUID 문자열 (Task UUID as string)
     title: str  # 업무 제목 (Task title)
     description: str | None  # 업무 설명 (Description, may be null)
-    brand_id: str | None  # 브랜드 UUID — None이면 조직 전체 (Brand scope, null = org-wide)
-    brand_name: str | None  # 브랜드 이름 — 조인된 값 (Brand name, resolved)
+    store_id: str | None  # 매장 UUID — None이면 조직 전체 (Store scope, null = org-wide)
+    store_name: str | None  # 매장 이름 — 조인된 값 (Store name, resolved)
     priority: str  # 우선순위 — "normal"|"urgent" (Priority level)
     status: str  # 진행 상태 — "pending"|"in_progress"|"completed" (Workflow status)
     due_date: datetime | None  # 마감일시 (Deadline, may be null)

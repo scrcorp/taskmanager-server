@@ -1,7 +1,7 @@
-"""조직 및 브랜드 관련 Pydantic 요청/응답 스키마 정의.
+"""조직 및 매장 관련 Pydantic 요청/응답 스키마 정의.
 
-Organization and Brand Pydantic request/response schema definitions.
-Covers CRUD operations for organizations (tenants) and brands (stores/locations).
+Organization and Store Pydantic request/response schema definitions.
+Covers CRUD operations for organizations (tenants) and stores (locations).
 """
 
 from datetime import datetime
@@ -55,70 +55,70 @@ class OrganizationResponse(BaseModel):
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 
-# === 브랜드 (Brand) 스키마 ===
+# === 매장 (Store) 스키마 ===
 
-class BrandCreate(BaseModel):
-    """브랜드 생성 요청 스키마.
+class StoreCreate(BaseModel):
+    """매장 생성 요청 스키마.
 
-    Brand creation request schema.
-    Brand is created under the authenticated user's organization.
+    Store creation request schema.
+    Store is created under the authenticated user's organization.
 
     Attributes:
-        name: 브랜드/매장 이름 (Brand/store name)
+        name: 매장 이름 (Store name)
         address: 매장 주소 (Store address, optional)
     """
 
-    name: str  # 브랜드 이름 (Brand/store name)
+    name: str  # 매장 이름 (Store name)
     address: str | None = None  # 매장 주소 (Physical address, optional)
 
 
-class BrandUpdate(BaseModel):
-    """브랜드 수정 요청 스키마 (부분 업데이트).
+class StoreUpdate(BaseModel):
+    """매장 수정 요청 스키마 (부분 업데이트).
 
-    Brand update request schema (partial update).
+    Store update request schema (partial update).
 
     Attributes:
-        name: 브랜드 이름 (New name, optional)
+        name: 매장 이름 (New name, optional)
         address: 매장 주소 (New address, optional)
         is_active: 활성 상태 (Active status toggle, optional)
     """
 
-    name: str | None = None  # 변경할 브랜드 이름 (New name, optional)
+    name: str | None = None  # 변경할 매장 이름 (New name, optional)
     address: str | None = None  # 변경할 주소 (New address, optional)
     is_active: bool | None = None  # 활성 상태 변경 (Activate/deactivate, optional)
 
 
-class BrandResponse(BaseModel):
-    """브랜드 응답 스키마.
+class StoreResponse(BaseModel):
+    """매장 응답 스키마.
 
-    Brand response schema returned from API.
+    Store response schema returned from API.
 
     Attributes:
-        id: 브랜드 UUID (Brand unique identifier)
+        id: 매장 UUID (Store unique identifier)
         organization_id: 소속 조직 UUID (Parent organization)
-        name: 브랜드 이름 (Brand name)
+        name: 매장 이름 (Store name)
         address: 매장 주소 (Store address, nullable)
         is_active: 활성 상태 (Active status flag)
         created_at: 생성 일시 (Creation timestamp)
     """
 
-    id: str  # 브랜드 UUID 문자열 (Brand UUID as string)
+    id: str  # 매장 UUID 문자열 (Store UUID as string)
     organization_id: str  # 소속 조직 UUID 문자열 (Organization UUID as string)
-    name: str  # 브랜드 이름 (Brand name)
+    name: str  # 매장 이름 (Store name)
     address: str | None  # 매장 주소 (Address, may be null)
     is_active: bool  # 활성 상태 (Active flag)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 
-class BrandDetailResponse(BrandResponse):
-    """브랜드 상세 응답 스키마 — 시간대/포지션 포함.
+class StoreDetailResponse(StoreResponse):
+    """매장 상세 응답 스키마 — 시간대/포지션 포함.
 
-    Brand detail response schema including nested shifts and positions.
-    Used when full brand context is needed (e.g. brand detail page).
+    Store detail response schema including nested shifts and positions.
+    Used when full store context is needed (e.g. store detail page).
 
     Attributes:
-        shifts: 소속 시간대 목록 (List of shifts under this brand)
-        positions: 소속 포지션 목록 (List of positions under this brand)
+        shifts: 소속 시간대 목록 (List of shifts under this store)
+        positions: 소속 포지션 목록 (List of positions under this store)
     """
 
     shifts: list["ShiftResponse"] = []  # 소속 시간대 목록 (Shifts, default empty)
@@ -128,9 +128,9 @@ class BrandDetailResponse(BrandResponse):
 # === 전방 참조용 내부 스키마 (Forward reference schemas) ===
 
 class ShiftResponse(BaseModel):
-    """브랜드 상세용 시간대 간략 응답 스키마.
+    """매장 상세용 시간대 간략 응답 스키마.
 
-    Abbreviated shift response for BrandDetailResponse nesting.
+    Abbreviated shift response for StoreDetailResponse nesting.
 
     Attributes:
         id: 시간대 UUID (Shift identifier)
@@ -144,9 +144,9 @@ class ShiftResponse(BaseModel):
 
 
 class PositionResponse(BaseModel):
-    """브랜드 상세용 포지션 간략 응답 스키마.
+    """매장 상세용 포지션 간략 응답 스키마.
 
-    Abbreviated position response for BrandDetailResponse nesting.
+    Abbreviated position response for StoreDetailResponse nesting.
 
     Attributes:
         id: 포지션 UUID (Position identifier)
@@ -159,5 +159,5 @@ class PositionResponse(BaseModel):
     sort_order: int  # 정렬 순서 (Display order)
 
 
-# 전방 참조 해결 — Resolve forward references for BrandDetailResponse
-BrandDetailResponse.model_rebuild()
+# 전방 참조 해결 — Resolve forward references for StoreDetailResponse
+StoreDetailResponse.model_rebuild()

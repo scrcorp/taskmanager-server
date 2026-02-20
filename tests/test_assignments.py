@@ -17,14 +17,14 @@ URL = "/api/v1/admin/work-assignments/"
 
 
 @pytest_asyncio.fixture
-async def work_setup(client: AsyncClient, admin_token, brand, staff_user):
+async def work_setup(client: AsyncClient, admin_token, store, staff_user):
     """근무 배정에 필요한 shift/position/checklist 데이터를 생성합니다."""
-    brand_id = str(brand.id)
+    store_id = str(store.id)
     admin_url = "/api/v1/admin"
 
     # 시간대 생성
     shift_res = await client.post(
-        f"{admin_url}/brands/{brand_id}/shifts",
+        f"{admin_url}/stores/{store_id}/shifts",
         json={"name": "오전", "sort_order": 1},
         headers=auth_header(admin_token),
     )
@@ -32,7 +32,7 @@ async def work_setup(client: AsyncClient, admin_token, brand, staff_user):
 
     # 포지션 생성
     pos_res = await client.post(
-        f"{admin_url}/brands/{brand_id}/positions",
+        f"{admin_url}/stores/{store_id}/positions",
         json={"name": "그릴", "sort_order": 1},
         headers=auth_header(admin_token),
     )
@@ -40,7 +40,7 @@ async def work_setup(client: AsyncClient, admin_token, brand, staff_user):
 
     # 체크리스트 템플릿 + 항목 생성
     tmpl_res = await client.post(
-        f"{admin_url}/brands/{brand_id}/checklist-templates",
+        f"{admin_url}/stores/{store_id}/checklist-templates",
         json={
             "shift_id": shift["id"],
             "position_id": position["id"],
@@ -58,7 +58,7 @@ async def work_setup(client: AsyncClient, admin_token, brand, staff_user):
         )
 
     return {
-        "brand_id": brand_id,
+        "store_id": store_id,
         "shift_id": shift["id"],
         "position_id": position["id"],
         "template_id": template["id"],
@@ -72,7 +72,7 @@ class TestAssignmentCreate:
     async def test_create_assignment(self, client: AsyncClient, admin_token, work_setup):
         """근무 배정 생성 성공 — 체크리스트 스냅샷 포함."""
         res = await client.post(URL, json={
-            "brand_id": work_setup["brand_id"],
+            "store_id": work_setup["store_id"],
             "shift_id": work_setup["shift_id"],
             "position_id": work_setup["position_id"],
             "user_id": work_setup["user_id"],
@@ -87,7 +87,7 @@ class TestAssignmentCreate:
     async def test_create_duplicate_assignment(self, client: AsyncClient, admin_token, work_setup):
         """동일 조합+날짜 중복 배정 실패."""
         payload = {
-            "brand_id": work_setup["brand_id"],
+            "store_id": work_setup["store_id"],
             "shift_id": work_setup["shift_id"],
             "position_id": work_setup["position_id"],
             "user_id": work_setup["user_id"],
@@ -104,7 +104,7 @@ class TestAssignmentRead:
     async def test_list_assignments(self, client: AsyncClient, admin_token, work_setup):
         """근무 배정 목록 조회."""
         await client.post(URL, json={
-            "brand_id": work_setup["brand_id"],
+            "store_id": work_setup["store_id"],
             "shift_id": work_setup["shift_id"],
             "position_id": work_setup["position_id"],
             "user_id": work_setup["user_id"],
@@ -120,7 +120,7 @@ class TestAssignmentRead:
     async def test_get_assignment_detail_with_snapshot(self, client: AsyncClient, admin_token, work_setup):
         """근무 배정 상세 조회 — 체크리스트 스냅샷 확인."""
         create_res = await client.post(URL, json={
-            "brand_id": work_setup["brand_id"],
+            "store_id": work_setup["store_id"],
             "shift_id": work_setup["shift_id"],
             "position_id": work_setup["position_id"],
             "user_id": work_setup["user_id"],
@@ -143,7 +143,7 @@ class TestAssignmentDelete:
     async def test_delete_assignment(self, client: AsyncClient, admin_token, work_setup):
         """근무 배정 삭제."""
         create_res = await client.post(URL, json={
-            "brand_id": work_setup["brand_id"],
+            "store_id": work_setup["store_id"],
             "shift_id": work_setup["shift_id"],
             "position_id": work_setup["position_id"],
             "user_id": work_setup["user_id"],

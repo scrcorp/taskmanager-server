@@ -1,27 +1,27 @@
-"""사용자 서비스 — 사용자 CRUD 및 브랜드 배정 비즈니스 로직.
+"""사용자 서비스 — 사용자 CRUD 및 매장 배정 비즈니스 로직.
 
-User Service — Business logic for user CRUD and brand assignment operations.
+User Service — Business logic for user CRUD and store assignment operations.
 Handles user management including creation, update, activation toggle,
-and user-brand association management.
+and user-store association management.
 """
 
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.organization import Brand
+from app.models.organization import Store
 from app.models.user import Role, User
-from app.repositories.brand_repository import brand_repository
+from app.repositories.store_repository import store_repository
 from app.repositories.role_repository import role_repository
 from app.repositories.user_repository import user_repository
-from app.schemas.organization import BrandResponse
+from app.schemas.organization import StoreResponse
 from app.schemas.user import (
     UserCreate,
     UserListResponse,
     UserResponse,
     UserUpdate,
 )
-from app.utils.exceptions import DuplicateError, NotFoundError
+from app.utils.exceptions import BadRequestError, DuplicateError, ForbiddenError, NotFoundError
 from app.utils.password import hash_password
 
 
@@ -29,7 +29,7 @@ class UserService:
     """사용자 관련 비즈니스 로직을 처리하는 서비스.
 
     Service handling user business logic.
-    Provides CRUD operations and brand assignment management.
+    Provides CRUD operations and store assignment management.
     """
 
     def _to_response(self, user: User) -> UserResponse:
@@ -90,8 +90,8 @@ class UserService:
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 ID (Organization UUID)
-            filters: 필터 딕셔너리 (brand_id, role_id, is_active)
-                     (Filter dict with optional brand_id, role_id, is_active)
+            filters: 필터 딕셔너리 (store_id, role_id, is_active)
+                     (Filter dict with optional store_id, role_id, is_active)
 
         Returns:
             list[UserListResponse]: 사용자 목록 (List of user list responses)
@@ -135,15 +135,18 @@ class UserService:
         db: AsyncSession,
         organization_id: UUID,
         data: UserCreate,
+        caller: User | None = None,
     ) -> UserResponse:
         """새 사용자를 생성합니다.
 
         Create a new user within an organization.
+        Caller can only create users with role level strictly greater than their own.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 ID (Organization UUID)
             data: 사용자 생성 데이터 (User creation data)
+            caller: 요청자 (Caller user for level-based access control)
 
         Returns:
             UserResponse: 생성된 사용자 응답 (Created user response)
@@ -152,6 +155,8 @@ class UserService:
             DuplicateError: 같은 사용자명이 이미 존재할 때
                             (When the username already exists)
             NotFoundError: 지정한 역할을 찾을 수 없을 때 (Role not found)
+            ForbiddenError: 자기보다 높거나 같은 레벨의 역할 지정 시도
+                            (Attempting to assign a role at or above caller's level)
         """
         # 사용자명 중복 확인 — Check username uniqueness within org
         exists: bool = await user_repository.exists(
@@ -166,6 +171,10 @@ class UserService:
         )
         if role is None:
             raise NotFoundError("Role not found")
+
+        # 하위 직급만 생성 가능 — Can only create users with lower authority
+        if caller is not None and role.level <= caller.role.level:
+            raise ForbiddenError("Cannot create a user with a role at or above your level")
 
         password_hash: str = hash_password(data.password)
         user: User = await user_repository.create(
@@ -195,22 +204,27 @@ class UserService:
         user_id: UUID,
         organization_id: UUID,
         data: UserUpdate,
+        caller: User | None = None,
     ) -> UserResponse:
         """사용자 정보를 수정합니다.
 
         Update an existing user's information.
+        When changing role_id, caller can only assign roles below their own level.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             user_id: 사용자 ID (User UUID)
             organization_id: 조직 ID (Organization UUID)
             data: 수정 데이터 (Update data)
+            caller: 요청자 (Caller user for level-based access control)
 
         Returns:
             UserResponse: 수정된 사용자 응답 (Updated user response)
 
         Raises:
             NotFoundError: 사용자를 찾을 수 없을 때 (User not found)
+            ForbiddenError: 자기보다 높거나 같은 레벨의 역할 지정 시도
+                            (Attempting to assign a role at or above caller's level)
         """
         update_data: dict = data.model_dump(exclude_unset=True)
 
@@ -221,6 +235,9 @@ class UserService:
             )
             if role is None:
                 raise NotFoundError("Role not found")
+            # 하위 직급만 지정 가능 — Can only assign lower authority roles
+            if caller is not None and role.level <= caller.role.level:
+                raise ForbiddenError("Cannot assign a role at or above your level")
             update_data["role_id"] = UUID(update_data["role_id"])
 
         user: User | None = await user_repository.update(
@@ -310,15 +327,15 @@ class UserService:
             db, user_id, {"is_active": False}, organization_id
         )
 
-    async def get_user_brands(
+    async def get_user_stores(
         self,
         db: AsyncSession,
         user_id: UUID,
         organization_id: UUID,
-    ) -> list[BrandResponse]:
-        """사용자에게 배정된 브랜드 목록을 조회합니다.
+    ) -> list[StoreResponse]:
+        """사용자에게 배정된 매장 목록을 조회합니다.
 
-        Retrieve all brands assigned to a user.
+        Retrieve all stores assigned to a user.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -326,7 +343,7 @@ class UserService:
             organization_id: 조직 ID (Organization UUID)
 
         Returns:
-            list[BrandResponse]: 배정된 브랜드 목록 (List of assigned brand responses)
+            list[StoreResponse]: 배정된 매장 목록 (List of assigned store responses)
 
         Raises:
             NotFoundError: 사용자를 찾을 수 없을 때 (User not found)
@@ -338,87 +355,103 @@ class UserService:
         if user is None:
             raise NotFoundError("User not found")
 
-        brands: list[Brand] = await user_repository.get_user_brands(db, user_id)
+        stores: list[Store] = await user_repository.get_user_stores(db, user_id)
         return [
-            BrandResponse(
-                id=str(b.id),
-                organization_id=str(b.organization_id),
-                name=b.name,
-                address=b.address,
-                is_active=b.is_active,
-                created_at=b.created_at,
+            StoreResponse(
+                id=str(s.id),
+                organization_id=str(s.organization_id),
+                name=s.name,
+                address=s.address,
+                is_active=s.is_active,
+                created_at=s.created_at,
             )
-            for b in brands
+            for s in stores
         ]
 
-    async def add_user_brand(
+    async def add_user_store(
         self,
         db: AsyncSession,
         user_id: UUID,
-        brand_id: UUID,
+        store_id: UUID,
         organization_id: UUID,
+        caller: User | None = None,
     ) -> None:
-        """사용자에게 브랜드를 배정합니다.
+        """사용자에게 매장을 배정합니다.
 
-        Assign a brand to a user.
+        Assign a store to a user.
+        Staff (level >= 4) cannot be assigned to stores.
+        Supervisor (level == 3) can only be assigned to one store.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             user_id: 사용자 ID (User UUID)
-            brand_id: 브랜드 ID (Brand UUID)
+            store_id: 매장 ID (Store UUID)
             organization_id: 조직 ID (Organization UUID)
+            caller: 요청자 (Caller user, unused currently but passed for consistency)
 
         Raises:
-            NotFoundError: 사용자 또는 브랜드를 찾을 수 없을 때
-                           (User or brand not found)
+            NotFoundError: 사용자 또는 매장을 찾을 수 없을 때
+                           (User or store not found)
+            BadRequestError: Staff에게 매장 배정 시도 또는 Supervisor 1매장 초과
+                             (Staff store assignment or Supervisor exceeding 1 store)
             DuplicateError: 이미 배정되어 있을 때 (Already assigned)
         """
-        # 사용자 존재 확인 — Verify user exists in org
-        user: User | None = await user_repository.get_by_id(
+        # 사용자 상세 조회 (역할 포함) — Fetch user with role loaded
+        user_with_role: User | None = await user_repository.get_detail(
             db, user_id, organization_id
         )
-        if user is None:
+        if user_with_role is None:
             raise NotFoundError("User not found")
 
-        # 브랜드 존재 확인 — Verify brand exists in org
-        brand: Brand | None = await brand_repository.get_by_id(
-            db, brand_id, organization_id
+        # Staff는 매장 배정 불가 — Staff cannot be assigned to stores
+        if user_with_role.role.level >= 4:
+            raise BadRequestError("Staff cannot be assigned to stores")
+
+        # Supervisor는 1개 매장만 — Supervisor can only have one store
+        if user_with_role.role.level == 3:
+            existing_stores: list[Store] = await user_repository.get_user_stores(db, user_id)
+            if len(existing_stores) >= 1:
+                raise BadRequestError("Supervisor can only be assigned to one store")
+
+        # 매장 존재 확인 — Verify store exists in org
+        store: Store | None = await store_repository.get_by_id(
+            db, store_id, organization_id
         )
-        if brand is None:
-            raise NotFoundError("Brand not found")
+        if store is None:
+            raise NotFoundError("Store not found")
 
         # 중복 배정 확인 — Check for duplicate assignment
-        already_exists: bool = await user_repository.user_brand_exists(
-            db, user_id, brand_id
+        already_exists: bool = await user_repository.user_store_exists(
+            db, user_id, store_id
         )
         if already_exists:
-            raise DuplicateError("User is already assigned to this brand")
+            raise DuplicateError("User is already assigned to this store")
 
-        await user_repository.add_user_brand(db, user_id, brand_id)
+        await user_repository.add_user_store(db, user_id, store_id)
 
-    async def remove_user_brand(
+    async def remove_user_store(
         self,
         db: AsyncSession,
         user_id: UUID,
-        brand_id: UUID,
+        store_id: UUID,
         organization_id: UUID,
     ) -> None:
-        """사용자에게서 브랜드 배정을 해제합니다.
+        """사용자에게서 매장 배정을 해제합니다.
 
-        Remove a brand assignment from a user.
+        Remove a store assignment from a user.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             user_id: 사용자 ID (User UUID)
-            brand_id: 브랜드 ID (Brand UUID)
+            store_id: 매장 ID (Store UUID)
             organization_id: 조직 ID (Organization UUID)
 
         Raises:
             NotFoundError: 배정 관계를 찾을 수 없을 때 (Assignment not found)
         """
-        removed: bool = await user_repository.remove_user_brand(db, user_id, brand_id)
+        removed: bool = await user_repository.remove_user_store(db, user_id, store_id)
         if not removed:
-            raise NotFoundError("User-brand assignment not found")
+            raise NotFoundError("User-store assignment not found")
 
 
 # 싱글턴 인스턴스 — Singleton instance

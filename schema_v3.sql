@@ -19,7 +19,7 @@ CREATE TABLE organizations (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE brands (
+CREATE TABLE stores (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
@@ -67,34 +67,34 @@ CREATE TABLE refresh_tokens (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE user_brands (
+CREATE TABLE user_stores (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(user_id, brand_id)
+    UNIQUE(user_id, store_id)
 );
 
 -- ============================================
--- 3. WORK STRUCTURE (브랜드 종속)
+-- 3. WORK STRUCTURE (매장 종속)
 -- ============================================
 
 CREATE TABLE shifts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     name VARCHAR(100) NOT NULL,
     sort_order INT DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(brand_id, name)
+    UNIQUE(store_id, name)
 );
 
 CREATE TABLE positions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     name VARCHAR(100) NOT NULL,
     sort_order INT DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(brand_id, name)
+    UNIQUE(store_id, name)
 );
 
 -- ============================================
@@ -103,27 +103,30 @@ CREATE TABLE positions (
 
 CREATE TABLE checklist_templates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     shift_id UUID NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
     position_id UUID NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(brand_id, shift_id, position_id)
+    UNIQUE(store_id, shift_id, position_id)
 );
 
--- verification_type: 'none' (MVP) | 'photo' | 'text' (Phase 4)
+-- verification_type: 'none' | 'photo' | 'text' | 'photo,text'
+-- recurrence_type: 'daily' (매일) | 'weekly' (특정 요일)
+-- recurrence_days: JSONB array [0..6] (mon=0 ~ sun=6), NULL when daily
 CREATE TABLE checklist_template_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     checklist_template_id UUID NOT NULL REFERENCES checklist_templates(id) ON DELETE CASCADE,
     title VARCHAR(255) NOT NULL,
     description TEXT,
     verification_type VARCHAR(20) NOT NULL DEFAULT 'none',
+    recurrence_type VARCHAR(10) NOT NULL DEFAULT 'daily',
+    recurrence_days JSONB,
     sort_order INT DEFAULT 0,
     is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    CONSTRAINT chk_verification_type CHECK (verification_type IN ('none', 'photo', 'text'))
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ============================================
@@ -133,7 +136,7 @@ CREATE TABLE checklist_template_items (
 -- checklist_snapshot JSONB 구조:
 -- {
 --   "template_id": "uuid",
---   "template_name": "A브랜드-오픈-주방",
+--   "template_name": "A매장-오픈-주방",
 --   "snapshot_at": "2025-02-15T00:00:00Z",
 --   "items": [
 --     {
@@ -151,7 +154,7 @@ CREATE TABLE checklist_template_items (
 
 CREATE TABLE work_assignments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     shift_id UUID NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
     position_id UUID NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -170,7 +173,7 @@ CREATE TABLE work_assignments (
 CREATE TABLE additional_tasks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    brand_id UUID REFERENCES brands(id) ON DELETE SET NULL,
+    store_id UUID REFERENCES stores(id) ON DELETE SET NULL,
     created_by UUID NOT NULL REFERENCES users(id),
     title VARCHAR(255) NOT NULL,
     description TEXT,
@@ -197,7 +200,7 @@ CREATE TABLE additional_task_assignees (
 CREATE TABLE announcements (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    brand_id UUID REFERENCES brands(id) ON DELETE SET NULL,
+    store_id UUID REFERENCES stores(id) ON DELETE SET NULL,
     created_by UUID NOT NULL REFERENCES users(id),
     title VARCHAR(255) NOT NULL,
     content TEXT NOT NULL,
@@ -277,20 +280,20 @@ CREATE TABLE email_verifications (
 CREATE INDEX idx_users_org ON users(organization_id);
 CREATE INDEX idx_users_role ON users(role_id);
 
--- Brands
-CREATE INDEX idx_brands_org ON brands(organization_id);
+-- Stores
+CREATE INDEX idx_stores_org ON stores(organization_id);
 
--- User-Brand
-CREATE INDEX idx_user_brands_user ON user_brands(user_id);
-CREATE INDEX idx_user_brands_brand ON user_brands(brand_id);
+-- User-Store
+CREATE INDEX idx_user_stores_user ON user_stores(user_id);
+CREATE INDEX idx_user_stores_store ON user_stores(store_id);
 
 -- Shifts & Positions
-CREATE INDEX idx_shifts_brand ON shifts(brand_id);
-CREATE INDEX idx_positions_brand ON positions(brand_id);
+CREATE INDEX idx_shifts_store ON shifts(store_id);
+CREATE INDEX idx_positions_store ON positions(store_id);
 
 -- Work Assignments
 CREATE INDEX idx_work_assignments_user_date ON work_assignments(user_id, work_date);
-CREATE INDEX idx_work_assignments_brand_date ON work_assignments(brand_id, work_date);
+CREATE INDEX idx_work_assignments_store_date ON work_assignments(store_id, work_date);
 CREATE INDEX idx_work_assignments_date ON work_assignments(work_date);
 
 -- Additional Tasks
@@ -299,7 +302,7 @@ CREATE INDEX idx_additional_task_assignees_user ON additional_task_assignees(use
 
 -- Announcements
 CREATE INDEX idx_announcements_org ON announcements(organization_id);
-CREATE INDEX idx_announcements_brand ON announcements(brand_id);
+CREATE INDEX idx_announcements_store ON announcements(store_id);
 
 -- Notifications
 CREATE INDEX idx_notifications_user ON notifications(user_id);

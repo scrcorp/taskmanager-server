@@ -1,7 +1,7 @@
-"""관리자 직책 라우터 — 브랜드 하위 직책 CRUD 엔드포인트.
+"""관리자 직책 라우터 — 매장 하위 직책 CRUD 엔드포인트.
 
-Admin Position Router — CRUD endpoints for positions under a brand.
-All endpoints are nested under /brands/{brand_id}/positions.
+Admin Position Router — CRUD endpoints for positions under a store.
+All endpoints are nested under /stores/{store_id}/positions.
 """
 
 from typing import Annotated
@@ -20,51 +20,51 @@ router: APIRouter = APIRouter()
 
 
 @router.get(
-    "/brands/{brand_id}/positions",
+    "/stores/{store_id}/positions",
     response_model=list[PositionResponse],
 )
 async def list_positions(
-    brand_id: UUID,
+    store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
 ) -> list[PositionResponse]:
-    """브랜드에 속한 직책 목록을 조회합니다.
+    """매장에 속한 직책 목록을 조회합니다.
 
-    List all positions belonging to a brand.
+    List all positions belonging to a store.
     """
     org_id: UUID = current_user.organization_id
-    return await position_service.list_positions(db, brand_id, org_id)
+    return await position_service.list_positions(db, store_id, org_id)
 
 
 @router.post(
-    "/brands/{brand_id}/positions",
+    "/stores/{store_id}/positions",
     response_model=PositionResponse,
     status_code=201,
 )
 async def create_position(
-    brand_id: UUID,
+    store_id: UUID,
     data: PositionCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
 ) -> PositionResponse:
     """새 직책을 생성합니다.
 
-    Create a new position under a brand.
+    Create a new position under a store.
     """
     org_id: UUID = current_user.organization_id
     result: PositionResponse = await position_service.create_position(
-        db, brand_id, org_id, data
+        db, store_id, org_id, data
     )
     await db.commit()
     return result
 
 
 @router.put(
-    "/brands/{brand_id}/positions/{position_id}",
+    "/stores/{store_id}/positions/{position_id}",
     response_model=PositionResponse,
 )
 async def update_position(
-    brand_id: UUID,
+    store_id: UUID,
     position_id: UUID,
     data: PositionUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -76,18 +76,18 @@ async def update_position(
     """
     org_id: UUID = current_user.organization_id
     result: PositionResponse = await position_service.update_position(
-        db, position_id, brand_id, org_id, data
+        db, position_id, store_id, org_id, data
     )
     await db.commit()
     return result
 
 
 @router.delete(
-    "/brands/{brand_id}/positions/{position_id}",
+    "/stores/{store_id}/positions/{position_id}",
     status_code=204,
 )
 async def delete_position(
-    brand_id: UUID,
+    store_id: UUID,
     position_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
@@ -97,5 +97,5 @@ async def delete_position(
     Delete a position by its ID.
     """
     org_id: UUID = current_user.organization_id
-    await position_service.delete_position(db, position_id, brand_id, org_id)
+    await position_service.delete_position(db, position_id, store_id, org_id)
     await db.commit()

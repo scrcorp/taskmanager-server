@@ -18,11 +18,12 @@ engine: AsyncEngine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
     pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
+    pool_size=3,
+    max_overflow=5,
+    pool_recycle=300,
     # Supavisor(트랜잭션 모드 풀러)에서 prepared statement 비활성화
     # Disable prepared statement caches for Supavisor transaction-mode pooling
-    connect_args={"statement_cache_size": 0},
+    connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},
 )
 
 # 비동기 세션 팩토리 — Async session factory

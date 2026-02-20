@@ -2,7 +2,7 @@
 
 Checklist template SQLAlchemy ORM model definitions.
 Defines reusable checklist templates scoped to a specific
-brand + shift + position combination, along with their items.
+store + shift + position combination, along with their items.
 
 Tables:
     - checklist_templates: 체크리스트 템플릿 (Reusable checklist templates)
@@ -12,16 +12,17 @@ Tables:
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import String, DateTime, Integer, Text, ForeignKey, UniqueConstraint, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
 
 class ChecklistTemplate(Base):
-    """체크리스트 템플릿 모델 — 브랜드/시간대/포지션 조합별 업무 체크리스트.
+    """체크리스트 템플릿 모델 — 매장/시간대/포지션 조합별 업무 체크리스트.
 
     Checklist template model — Reusable task checklist for a specific
-    brand + shift + position combination. Only one template can exist
+    store + shift + position combination. Only one template can exist
     per combination (enforced by unique constraint).
 
     When a WorkAssignment is created, the template's items are
@@ -29,7 +30,7 @@ class ChecklistTemplate(Base):
 
     Attributes:
         id: 고유 식별자 UUID (Unique identifier)
-        brand_id: 소속 브랜드 FK (Brand foreign key)
+        store_id: 소속 매장 FK (Store foreign key)
         shift_id: 시간대 FK (Shift foreign key)
         position_id: 포지션 FK (Position foreign key)
         title: 템플릿 제목 (Template title)
@@ -40,15 +41,18 @@ class ChecklistTemplate(Base):
         items: 체크리스트 항목 목록 (Template items, ordered by sort_order)
 
     Constraints:
-        uq_template_brand_shift_position: 브랜드+시간대+포지션 조합 고유 (One template per combination)
+        uq_template_store_shift_position: 매장+시간대+포지션 조합 고유 (One template per combination)
+
+    Note:
+        recurrence는 item 레벨로 이동됨 (recurrence moved to item level)
     """
 
     __tablename__ = "checklist_templates"
 
     # 템플릿 고유 식별자 — Template unique identifier (UUID v4, auto-generated)
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    # 소속 브랜드 FK — Brand scope (CASCADE: 브랜드 삭제 시 템플릿도 삭제)
-    brand_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("brands.id", ondelete="CASCADE"), nullable=False)
+    # 소속 매장 FK — Store scope (CASCADE: 매장 삭제 시 템플릿도 삭제)
+    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
     # 시간대 FK — Shift scope (CASCADE: 시간대 삭제 시 템플릿도 삭제)
     shift_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("shifts.id", ondelete="CASCADE"), nullable=False)
     # 포지션 FK — Position scope (CASCADE: 포지션 삭제 시 템플릿도 삭제)
@@ -61,7 +65,7 @@ class ChecklistTemplate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
-        UniqueConstraint("brand_id", "shift_id", "position_id", name="uq_template_brand_shift_position"),
+        UniqueConstraint("store_id", "shift_id", "position_id", name="uq_template_store_shift_position"),
     )
 
     # 관계 — Items sorted by sort_order for consistent display ordering
@@ -83,6 +87,8 @@ class ChecklistTemplateItem(Base):
         title: 항목 제목 (Item title/task description)
         description: 상세 설명 (Detailed description, optional)
         verification_type: 확인 유형 (Verification method: "none", "photo", "text")
+        recurrence_type: 반복 주기 유형 ("daily"=매일, "weekly"=특정 요일만)
+        recurrence_days: 반복 요일 목록 (weekly일 때 [0=Mon..6=Sun])
         sort_order: 정렬 순서 (Display order, lower = first)
         created_at: 생성 일시 UTC (Creation timestamp)
         updated_at: 수정 일시 UTC (Last update timestamp)
@@ -103,6 +109,10 @@ class ChecklistTemplateItem(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 확인 유형 — Verification method: "none"=체크만, "photo"=사진첨부, "text"=텍스트입력
     verification_type: Mapped[str] = mapped_column(String(20), default="none")  # none, photo, text
+    # 반복 주기 유형 — "daily"=매일, "weekly"=특정 요일만
+    recurrence_type: Mapped[str] = mapped_column(String(10), default="daily", nullable=False)
+    # 반복 요일 목록 — weekly일 때 요일 숫자 배열 [0=Mon..6=Sun]. daily이면 null
+    recurrence_days: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True, default=None)
     # 정렬 순서 — Display sort order (0-based, supports drag-and-drop reordering)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     # 생성 일시 — Record creation timestamp (UTC)

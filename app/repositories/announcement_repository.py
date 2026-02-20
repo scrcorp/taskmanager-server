@@ -1,7 +1,7 @@
 """공지사항 레포지토리 — 공지사항 관련 DB 쿼리 담당.
 
 Announcement Repository — Handles all announcement-related database queries.
-Extends BaseRepository with organization-scoped and brand-filtered queries.
+Extends BaseRepository with organization-scoped and store-filtered queries.
 """
 
 from typing import Sequence
@@ -17,7 +17,7 @@ from app.repositories.base import BaseRepository
 class AnnouncementRepository(BaseRepository[Announcement]):
     """공지사항 레포지토리.
 
-    Announcement repository with org-scoped and brand-filtered queries.
+    Announcement repository with org-scoped and store-filtered queries.
 
     Extends:
         BaseRepository[Announcement]
@@ -58,22 +58,22 @@ class AnnouncementRepository(BaseRepository[Announcement]):
         )
         return await self.get_paginated(db, query, page, per_page)
 
-    async def get_for_user_brands(
+    async def get_for_user_stores(
         self,
         db: AsyncSession,
         organization_id: UUID,
-        brand_ids: list[UUID],
+        store_ids: list[UUID],
         page: int = 1,
         per_page: int = 20,
     ) -> tuple[Sequence[Announcement], int]:
-        """사용자가 속한 브랜드의 공지사항 + 조직 전체 공지를 조회합니다.
+        """사용자가 속한 매장의 공지사항 + 조직 전체 공지를 조회합니다.
 
-        Retrieve announcements for user's brands (org-wide + brand-specific).
+        Retrieve announcements for user's stores (org-wide + store-specific).
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 UUID (Organization UUID)
-            brand_ids: 사용자가 속한 브랜드 UUID 목록 (User's brand UUID list)
+            store_ids: 사용자가 속한 매장 UUID 목록 (User's store UUID list)
             page: 페이지 번호, 1부터 시작 (Page number, 1-based)
             per_page: 페이지당 항목 수 (Items per page)
 
@@ -81,15 +81,15 @@ class AnnouncementRepository(BaseRepository[Announcement]):
             tuple[Sequence[Announcement], int]: (공지 목록, 전체 개수)
                                                  (List of announcements, total count)
         """
-        # 조직 전체(brand_id=NULL) 또는 사용자 브랜드 소속 공지
-        # Org-wide (brand_id is NULL) or user's brand announcements
+        # 조직 전체(store_id=NULL) 또는 사용자 매장 소속 공지
+        # Org-wide (store_id is NULL) or user's store announcements
         query: Select = (
             select(Announcement)
             .where(
                 Announcement.organization_id == organization_id,
                 or_(
-                    Announcement.brand_id.is_(None),
-                    Announcement.brand_id.in_(brand_ids),
+                    Announcement.store_id.is_(None),
+                    Announcement.store_id.in_(store_ids),
                 ),
             )
             .order_by(Announcement.created_at.desc())

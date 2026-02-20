@@ -1,7 +1,7 @@
 """관리자 공지사항 라우터 — 공지사항 관리 API.
 
 Admin Announcement Router — API endpoints for announcement management.
-Provides CRUD operations for organization-wide and brand-specific announcements.
+Provides CRUD operations for organization-wide and store-specific announcements.
 """
 
 from typing import Annotated
@@ -25,7 +25,7 @@ from app.services.announcement_service import announcement_service
 router: APIRouter = APIRouter()
 
 
-@router.get("/", response_model=PaginatedResponse)
+@router.get("", response_model=PaginatedResponse)
 async def list_announcements(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
@@ -91,7 +91,7 @@ async def get_announcement(
     return await announcement_service.build_response(db, announcement)
 
 
-@router.post("/", response_model=AnnouncementResponse, status_code=201)
+@router.post("", response_model=AnnouncementResponse, status_code=201)
 async def create_announcement(
     data: AnnouncementCreate,
     db: Annotated[AsyncSession, Depends(get_db)],

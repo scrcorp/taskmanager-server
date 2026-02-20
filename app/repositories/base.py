@@ -4,9 +4,9 @@ Base CRUD Repository — Parent class for all domain repositories.
 Provides generic Create, Read, Update, Delete operations with organization scoping.
 
 Usage:
-    class BrandRepository(BaseRepository[Brand]):
+    class StoreRepository(BaseRepository[Store]):
         def __init__(self) -> None:
-            super().__init__(Brand)
+            super().__init__(Store)
 """
 
 from typing import Any, Generic, Sequence, TypeVar

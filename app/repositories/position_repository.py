@@ -17,7 +17,7 @@ class PositionRepository(BaseRepository[Position]):
     """직책 테이블에 대한 데이터베이스 쿼리를 담당하는 레포지토리.
 
     Repository handling database queries for the positions table.
-    Provides brand-scoped position retrieval.
+    Provides store-scoped position retrieval.
     """
 
     def __init__(self) -> None:
@@ -27,25 +27,25 @@ class PositionRepository(BaseRepository[Position]):
         """
         super().__init__(Position)
 
-    async def get_by_brand(
+    async def get_by_store(
         self,
         db: AsyncSession,
-        brand_id: UUID,
+        store_id: UUID,
     ) -> list[Position]:
-        """브랜드에 속한 모든 직책을 정렬 순서로 조회합니다.
+        """매장에 속한 모든 직책을 정렬 순서로 조회합니다.
 
-        Retrieve all positions belonging to a brand, ordered by sort_order.
+        Retrieve all positions belonging to a store, ordered by sort_order.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            brand_id: 브랜드 ID (Brand UUID)
+            store_id: 매장 ID (Store UUID)
 
         Returns:
             list[Position]: 직책 목록 (List of positions ordered by sort_order)
         """
         query: Select = (
             select(Position)
-            .where(Position.brand_id == brand_id)
+            .where(Position.store_id == store_id)
             .order_by(Position.sort_order)
         )
         result = await db.execute(query)

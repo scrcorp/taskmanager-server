@@ -9,7 +9,7 @@ JWT Payload Structure:
     {
         "sub": "user_uuid",         # 사용자 ID (User identifier)
         "org": "organization_uuid", # 조직 ID (Organization identifier)
-        "role": "admin",            # 역할 이름 (Role name)
+        "role": "owner",            # 역할 이름 (Role name)
         "level": 1,                 # 역할 레벨 (Role permission level)
         "exp": 1234567890,          # 만료 시간 UNIX timestamp (Expiration)
         "type": "access"|"refresh"  # 토큰 유형 (Token type discriminator)

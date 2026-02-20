@@ -1,6 +1,6 @@
 """사용자 CRUD API 테스트.
 
-User CRUD API tests — Create, List, Update, Toggle active, brand assignment.
+User CRUD API tests — Create, List, Update, Toggle active, store assignment.
 Tests authorization, unique username constraint, and role-level restrictions.
 """
 
@@ -110,26 +110,26 @@ class TestUserUpdate:
         assert res.json()["is_active"] is False
 
 
-class TestUserBrandAssignment:
-    """사용자 브랜드 배정 테스트."""
+class TestUserStoreAssignment:
+    """사용자 매장 배정 테스트."""
 
-    async def test_assign_brand(self, client: AsyncClient, admin_token, staff_user, brand):
-        """사용자에게 브랜드 배정."""
+    async def test_assign_store(self, client: AsyncClient, admin_token, staff_user, store):
+        """사용자에게 매장 배정."""
         res = await client.post(
-            f"{URL}{staff_user.id}/brands/{brand.id}",
+            f"{URL}{staff_user.id}/stores/{store.id}",
             headers=auth_header(admin_token),
         )
         assert res.status_code == 201
 
-    async def test_list_user_brands(self, client: AsyncClient, admin_token, staff_user, brand):
-        """사용자 배정 브랜드 목록 조회."""
+    async def test_list_user_stores(self, client: AsyncClient, admin_token, staff_user, store):
+        """사용자 배정 매장 목록 조회."""
         # 먼저 배정
         await client.post(
-            f"{URL}{staff_user.id}/brands/{brand.id}",
+            f"{URL}{staff_user.id}/stores/{store.id}",
             headers=auth_header(admin_token),
         )
         res = await client.get(
-            f"{URL}{staff_user.id}/brands",
+            f"{URL}{staff_user.id}/stores",
             headers=auth_header(admin_token),
         )
         assert res.status_code == 200

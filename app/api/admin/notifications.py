@@ -19,7 +19,7 @@ from app.services.notification_service import notification_service
 router: APIRouter = APIRouter()
 
 
-@router.get("/", response_model=PaginatedResponse)
+@router.get("", response_model=PaginatedResponse)
 async def list_notifications(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],

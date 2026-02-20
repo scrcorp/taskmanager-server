@@ -46,8 +46,8 @@ class TaskRepository(BaseRepository[AdditionalTask]):
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 UUID (Organization UUID)
-            filters: 추가 필터 (brand_id, status, priority)
-                     (Additional filters: brand_id, status, priority)
+            filters: 추가 필터 (store_id, status, priority)
+                     (Additional filters: store_id, status, priority)
             page: 페이지 번호, 1부터 시작 (Page number, 1-based)
             per_page: 페이지당 항목 수 (Items per page)
 
@@ -62,8 +62,8 @@ class TaskRepository(BaseRepository[AdditionalTask]):
         )
 
         if filters:
-            if filters.get("brand_id") is not None:
-                query = query.where(AdditionalTask.brand_id == filters["brand_id"])
+            if filters.get("store_id") is not None:
+                query = query.where(AdditionalTask.store_id == filters["store_id"])
             if filters.get("status") is not None:
                 query = query.where(AdditionalTask.status == filters["status"])
             if filters.get("priority") is not None:

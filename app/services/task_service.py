@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.communication import AdditionalTask, AdditionalTaskAssignee
-from app.models.organization import Brand
+from app.models.organization import Store
 from app.models.user import User
 from app.repositories.task_repository import task_repository
 from app.schemas.common import TaskCreate, TaskUpdate
@@ -25,36 +25,36 @@ class TaskService:
     and app-facing completion tracking.
     """
 
-    async def _validate_brand_ownership(
+    async def _validate_store_ownership(
         self,
         db: AsyncSession,
-        brand_id: UUID,
+        store_id: UUID,
         organization_id: UUID,
-    ) -> Brand:
-        """브랜드가 해당 조직에 속하는지 검증합니다.
+    ) -> Store:
+        """매장이 해당 조직에 속하는지 검증합니다.
 
-        Verify that a brand belongs to the specified organization.
+        Verify that a store belongs to the specified organization.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            brand_id: 브랜드 UUID (Brand UUID)
+            store_id: 매장 UUID (Store UUID)
             organization_id: 조직 UUID (Organization UUID)
 
         Returns:
-            Brand: 검증된 브랜드 (Verified brand)
+            Store: 검증된 매장 (Verified store)
 
         Raises:
-            NotFoundError: 브랜드가 없을 때 (When brand not found)
-            ForbiddenError: 다른 조직 브랜드일 때 (When brand belongs to another org)
+            NotFoundError: 매장이 없을 때 (When store not found)
+            ForbiddenError: 다른 조직 매장일 때 (When store belongs to another org)
         """
-        result = await db.execute(select(Brand).where(Brand.id == brand_id))
-        brand: Brand | None = result.scalar_one_or_none()
+        result = await db.execute(select(Store).where(Store.id == store_id))
+        store: Store | None = result.scalar_one_or_none()
 
-        if brand is None:
-            raise NotFoundError("브랜드를 찾을 수 없습니다 (Brand not found)")
-        if brand.organization_id != organization_id:
-            raise ForbiddenError("해당 브랜드에 대한 권한이 없습니다 (No permission for this brand)")
-        return brand
+        if store is None:
+            raise NotFoundError("매장을 찾을 수 없습니다 (Store not found)")
+        if store.organization_id != organization_id:
+            raise ForbiddenError("해당 매장에 대한 권한이 없습니다 (No permission for this store)")
+        return store
 
     async def build_response(
         self,
@@ -70,14 +70,14 @@ class TaskService:
             task: 추가 업무 ORM 객체 (Additional task ORM object)
 
         Returns:
-            dict: 브랜드명/작성자명/담당자명이 포함된 응답 딕셔너리
-                  (Response dict with brand, creator, and assignee names)
+            dict: 매장명/작성자명/담당자명이 포함된 응답 딕셔너리
+                  (Response dict with store, creator, and assignee names)
         """
-        # 브랜드 이름 조회 — Fetch brand name
-        brand_name: str | None = None
-        if task.brand_id is not None:
-            result = await db.execute(select(Brand.name).where(Brand.id == task.brand_id))
-            brand_name = result.scalar()
+        # 매장 이름 조회 — Fetch store name
+        store_name: str | None = None
+        if task.store_id is not None:
+            result = await db.execute(select(Store.name).where(Store.id == task.store_id))
+            store_name = result.scalar()
 
         # 작성자 이름 조회 — Fetch creator name
         creator_result = await db.execute(
@@ -100,8 +100,8 @@ class TaskService:
             "id": str(task.id),
             "title": task.title,
             "description": task.description,
-            "brand_id": str(task.brand_id) if task.brand_id else None,
-            "brand_name": brand_name,
+            "store_id": str(task.store_id) if task.store_id else None,
+            "store_name": store_name,
             "priority": task.priority,
             "status": task.status,
             "due_date": task.due_date,
@@ -116,7 +116,7 @@ class TaskService:
         self,
         db: AsyncSession,
         organization_id: UUID,
-        brand_id: UUID | None = None,
+        store_id: UUID | None = None,
         status: str | None = None,
         priority: str | None = None,
         page: int = 1,
@@ -129,7 +129,7 @@ class TaskService:
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 UUID (Organization UUID)
-            brand_id: 브랜드 UUID 필터, 선택 (Optional brand UUID filter)
+            store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
             status: 상태 필터, 선택 (Optional status filter)
             priority: 우선순위 필터, 선택 (Optional priority filter)
             page: 페이지 번호 (Page number)
@@ -140,8 +140,8 @@ class TaskService:
                                                    (List of tasks, total count)
         """
         filters: dict = {}
-        if brand_id is not None:
-            filters["brand_id"] = brand_id
+        if store_id is not None:
+            filters["store_id"] = store_id
         if status is not None:
             filters["status"] = status
         if priority is not None:
@@ -200,19 +200,19 @@ class TaskService:
             AdditionalTask: 생성된 업무 (Created task)
 
         Raises:
-            NotFoundError: 브랜드가 없을 때 (When brand not found)
-            ForbiddenError: 다른 조직 브랜드일 때 (When brand belongs to another org)
+            NotFoundError: 매장이 없을 때 (When store not found)
+            ForbiddenError: 다른 조직 매장일 때 (When store belongs to another org)
         """
-        brand_id: UUID | None = UUID(data.brand_id) if data.brand_id else None
+        store_id: UUID | None = UUID(data.store_id) if data.store_id else None
 
-        if brand_id is not None:
-            await self._validate_brand_ownership(db, brand_id, organization_id)
+        if store_id is not None:
+            await self._validate_store_ownership(db, store_id, organization_id)
 
         task: AdditionalTask = await task_repository.create(
             db,
             {
                 "organization_id": organization_id,
-                "brand_id": brand_id,
+                "store_id": store_id,
                 "title": data.title,
                 "description": data.description,
                 "priority": data.priority,

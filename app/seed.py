@@ -8,8 +8,8 @@ Usage:
 
 Creates:
     - 1개 조직: "Withers Corporation" (1 organization)
-    - 4개 역할: admin(1), manager(2), supervisor(3), staff(4) (4 roles)
-    - 1개 관리자 계정: admin / admin123 (1 admin user)
+    - 4개 역할: owner(1), general_manager(2), supervisor(3), staff(4) (4 roles)
+    - 1개 관리자 계정: admin / admin123 (1 owner user)
 """
 
 import asyncio
@@ -45,10 +45,10 @@ async def seed() -> None:
         db.add(org)
         await db.flush()  # flush로 org.id 생성 (Flush to generate org.id)
 
-        # 역할 계층 생성 — Create role hierarchy (level 1=admin ~ 4=staff)
+        # 역할 계층 생성 — Create role hierarchy (level 1=owner ~ 4=staff)
         roles_data: list[tuple[str, int]] = [
-            ("admin", 1),
-            ("manager", 2),
+            ("owner", 1),
+            ("general_manager", 2),
             ("supervisor", 3),
             ("staff", 4),
         ]
@@ -59,10 +59,10 @@ async def seed() -> None:
             await db.flush()  # flush로 role.id 생성 (Flush to generate role.id)
             roles[name] = role
 
-        # 관리자 계정 생성 — Create initial admin user (admin/admin123)
+        # 관리자 계정 생성 — Create initial owner user (admin/admin123)
         admin: User = User(
             organization_id=org.id,
-            role_id=roles["admin"].id,
+            role_id=roles["owner"].id,
             username="admin",
             full_name="System Admin",
             email="admin@withers.com",

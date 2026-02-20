@@ -1,7 +1,7 @@
 """공지사항/추가업무 API 테스트.
 
 Announcement and Additional Task API tests.
-Tests CRUD, brand scoping, assignee management, and authorization.
+Tests CRUD, store scoping, assignee management, and authorization.
 """
 
 import pytest
@@ -28,17 +28,17 @@ class TestAnnouncementCRUD:
         assert res.status_code == 201
         data = res.json()
         assert data["title"] == "전체 공지"
-        assert data["brand_id"] is None
+        assert data["store_id"] is None
 
-    async def test_create_brand_announcement(self, client: AsyncClient, admin_token, brand):
-        """특정 브랜드 공지 생성."""
+    async def test_create_store_announcement(self, client: AsyncClient, admin_token, store):
+        """특정 매장 공지 생성."""
         res = await client.post(ANNOUNCE_URL, json={
-            "title": "브랜드 공지",
-            "content": "브랜드 전용 안내.",
-            "brand_id": str(brand.id),
+            "title": "매장 공지",
+            "content": "매장 전용 안내.",
+            "store_id": str(store.id),
         }, headers=auth_header(admin_token))
         assert res.status_code == 201
-        assert res.json()["brand_id"] == str(brand.id)
+        assert res.json()["store_id"] == str(store.id)
 
     async def test_list_announcements(self, client: AsyncClient, admin_token):
         """공지사항 목록 조회."""
@@ -104,15 +104,15 @@ class TestAdditionalTaskCRUD:
         assert data["priority"] == "urgent"
         assert data["status"] == "pending"
 
-    async def test_create_task_with_brand(self, client: AsyncClient, admin_token, brand, staff_user):
-        """브랜드 지정 추가 업무 생성."""
+    async def test_create_task_with_store(self, client: AsyncClient, admin_token, store, staff_user):
+        """매장 지정 추가 업무 생성."""
         res = await client.post(TASK_URL, json={
             "title": "매장 점검",
-            "brand_id": str(brand.id),
+            "store_id": str(store.id),
             "assignee_ids": [str(staff_user.id)],
         }, headers=auth_header(admin_token))
         assert res.status_code == 201
-        assert res.json()["brand_id"] == str(brand.id)
+        assert res.json()["store_id"] == str(store.id)
 
     async def test_create_task_no_assignees(self, client: AsyncClient, admin_token):
         """담당자 없이 업무 생성."""

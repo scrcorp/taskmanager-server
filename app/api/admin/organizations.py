@@ -1,7 +1,7 @@
 """관리자 조직 라우터 — 현재 조직 조회 및 수정.
 
 Admin Organization Router — Retrieve and update the current organization.
-Only accessible by admin-level users.
+Only accessible by owner-level users.
 """
 
 from typing import Annotated
@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import require_owner
 from app.database import get_db
 from app.models.user import User
 from app.schemas.organization import OrganizationResponse, OrganizationUpdate
@@ -22,7 +22,7 @@ router: APIRouter = APIRouter()
 @router.get("/me", response_model=OrganizationResponse)
 async def get_current_organization(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_owner)],
 ) -> OrganizationResponse:
     """현재 조직 정보를 조회합니다.
 
@@ -36,7 +36,7 @@ async def get_current_organization(
 async def update_current_organization(
     data: OrganizationUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_owner)],
 ) -> OrganizationResponse:
     """현재 조직 정보를 수정합니다.
 

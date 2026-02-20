@@ -25,11 +25,11 @@ from app.services.task_service import task_service
 router: APIRouter = APIRouter()
 
 
-@router.get("/", response_model=PaginatedResponse)
+@router.get("", response_model=PaginatedResponse)
 async def list_tasks(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
-    brand_id: Annotated[str | None, Query()] = None,
+    store_id: Annotated[str | None, Query()] = None,
     status: Annotated[str | None, Query()] = None,
     priority: Annotated[str | None, Query()] = None,
     page: int = 1,
@@ -42,7 +42,7 @@ async def list_tasks(
     Args:
         db: 비동기 데이터베이스 세션 (Async database session)
         current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-        brand_id: 브랜드 UUID 필터, 선택 (Optional brand UUID filter)
+        store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
         status: 상태 필터, 선택 (Optional status filter)
         priority: 우선순위 필터, 선택 (Optional priority filter)
         page: 페이지 번호 (Page number)
@@ -51,12 +51,12 @@ async def list_tasks(
     Returns:
         dict: 페이지네이션된 업무 목록 (Paginated task list)
     """
-    brand_uuid: UUID | None = UUID(brand_id) if brand_id else None
+    store_uuid: UUID | None = UUID(store_id) if store_id else None
 
     tasks, total = await task_service.list_tasks(
         db,
         organization_id=current_user.organization_id,
-        brand_id=brand_uuid,
+        store_id=store_uuid,
         status=status,
         priority=priority,
         page=page,
@@ -102,7 +102,7 @@ async def get_task(
     return await task_service.build_response(db, task)
 
 
-@router.post("/", response_model=TaskResponse, status_code=201)
+@router.post("", response_model=TaskResponse, status_code=201)
 async def create_task(
     data: TaskCreate,
     db: Annotated[AsyncSession, Depends(get_db)],

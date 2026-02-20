@@ -1,8 +1,8 @@
-"""관리자 사용자 라우터 — 사용자 CRUD 및 브랜드 배정 엔드포인트.
+"""관리자 사용자 라우터 — 사용자 CRUD 및 매장 배정 엔드포인트.
 
-Admin User Router — CRUD and brand assignment endpoints for user management.
+Admin User Router — CRUD and store assignment endpoints for user management.
 Provides user listing with filters, detail retrieval, creation, update,
-activation toggle, and user-brand association management.
+activation toggle, and user-store association management.
 """
 
 from typing import Annotated
@@ -11,11 +11,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_manager, require_supervisor
+from app.api.deps import require_gm, require_supervisor
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse
-from app.schemas.organization import BrandResponse
+from app.schemas.organization import StoreResponse
 from app.schemas.user import (
     UserCreate,
     UserListResponse,
@@ -27,21 +27,21 @@ from app.services.user_service import user_service
 router: APIRouter = APIRouter()
 
 
-@router.get("/", response_model=list[UserListResponse])
+@router.get("", response_model=list[UserListResponse])
 async def list_users(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
-    brand_id: Annotated[UUID | None, Query(description="브랜드 ID 필터")] = None,
+    store_id: Annotated[UUID | None, Query(description="매장 ID 필터")] = None,
     role_id: Annotated[UUID | None, Query(description="역할 ID 필터")] = None,
     is_active: Annotated[bool | None, Query(description="활성 상태 필터")] = None,
 ) -> list[UserListResponse]:
     """사용자 목록을 필터 조건으로 조회합니다.
 
-    List users with optional filters (brand_id, role_id, is_active).
+    List users with optional filters (store_id, role_id, is_active).
     """
     org_id: UUID = current_user.organization_id
     filters: dict[str, UUID | bool | None] = {
-        "brand_id": brand_id,
+        "store_id": store_id,
         "role_id": role_id,
         "is_active": is_active,
     }
@@ -62,18 +62,21 @@ async def get_user(
     return await user_service.get_user(db, user_id, org_id)
 
 
-@router.post("/", response_model=UserResponse, status_code=201)
+@router.post("", response_model=UserResponse, status_code=201)
 async def create_user(
     data: UserCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_manager)],
+    current_user: Annotated[User, Depends(require_supervisor)],
 ) -> UserResponse:
     """새 사용자를 생성합니다.
 
     Create a new user in the current organization.
+    Supervisor can create Staff; GM can create Supervisor+Staff; Owner can create all.
     """
     org_id: UUID = current_user.organization_id
-    result: UserResponse = await user_service.create_user(db, org_id, data)
+    result: UserResponse = await user_service.create_user(
+        db, org_id, data, caller=current_user
+    )
     await db.commit()
     return result
 
@@ -83,14 +86,16 @@ async def update_user(
     user_id: UUID,
     data: UserUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_manager)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> UserResponse:
     """사용자 정보를 수정합니다.
 
     Update an existing user's information.
     """
     org_id: UUID = current_user.organization_id
-    result: UserResponse = await user_service.update_user(db, user_id, org_id, data)
+    result: UserResponse = await user_service.update_user(
+        db, user_id, org_id, data, caller=current_user
+    )
     await db.commit()
     return result
 
@@ -99,7 +104,7 @@ async def update_user(
 async def toggle_user_active(
     user_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_manager)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> UserResponse:
     """사용자 활성/비활성 상태를 토글합니다.
 
@@ -115,11 +120,11 @@ async def toggle_user_active(
 async def delete_user(
     user_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_manager)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict[str, str]:
     """사용자를 삭제합니다 (소프트 삭제: is_active=False 처리).
 
-    Delete a user (soft-delete: sets is_active=False and clears brand assignments).
+    Delete a user (soft-delete: sets is_active=False and clears store assignments).
     Only managers and above can delete users.
 
     Args:
@@ -136,48 +141,50 @@ async def delete_user(
     return {"message": "사용자가 삭제되었습니다 (User deleted successfully)"}
 
 
-@router.get("/{user_id}/brands", response_model=list[BrandResponse])
-async def get_user_brands(
+@router.get("/{user_id}/stores", response_model=list[StoreResponse])
+async def get_user_stores(
     user_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
-) -> list[BrandResponse]:
-    """사용자에게 배정된 브랜드 목록을 조회합니다.
+) -> list[StoreResponse]:
+    """사용자에게 배정된 매장 목록을 조회합니다.
 
-    Retrieve all brands assigned to a user.
+    Retrieve all stores assigned to a user.
     """
     org_id: UUID = current_user.organization_id
-    return await user_service.get_user_brands(db, user_id, org_id)
+    return await user_service.get_user_stores(db, user_id, org_id)
 
 
-@router.post("/{user_id}/brands/{brand_id}", status_code=201)
-async def add_user_brand(
+@router.post("/{user_id}/stores/{store_id}", status_code=201)
+async def add_user_store(
     user_id: UUID,
-    brand_id: UUID,
+    store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_manager)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict[str, str]:
-    """사용자에게 브랜드를 배정합니다.
+    """사용자에게 매장을 배정합니다.
 
-    Assign a brand to a user.
+    Assign a store to a user.
     """
     org_id: UUID = current_user.organization_id
-    await user_service.add_user_brand(db, user_id, brand_id, org_id)
+    await user_service.add_user_store(
+        db, user_id, store_id, org_id, caller=current_user
+    )
     await db.commit()
-    return {"message": "Brand assigned successfully"}
+    return {"message": "Store assigned successfully"}
 
 
-@router.delete("/{user_id}/brands/{brand_id}", status_code=204)
-async def remove_user_brand(
+@router.delete("/{user_id}/stores/{store_id}", status_code=204)
+async def remove_user_store(
     user_id: UUID,
-    brand_id: UUID,
+    store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_manager)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> None:
-    """사용자에게서 브랜드 배정을 해제합니다.
+    """사용자에게서 매장 배정을 해제합니다.
 
-    Remove a brand assignment from a user.
+    Remove a store assignment from a user.
     """
     org_id: UUID = current_user.organization_id
-    await user_service.remove_user_brand(db, user_id, brand_id, org_id)
+    await user_service.remove_user_store(db, user_id, store_id, org_id)
     await db.commit()

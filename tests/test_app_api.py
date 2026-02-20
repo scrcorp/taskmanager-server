@@ -47,20 +47,20 @@ class TestAppAssignments:
     """직원 근무 배정 조회 테스트."""
 
     @pytest_asyncio.fixture
-    async def staff_assignment(self, db: AsyncSession, org, brand, staff_user):
+    async def staff_assignment(self, db: AsyncSession, org, store, staff_user):
         """스태프에게 배정된 근무를 DB에 직접 생성."""
         from app.models.work import Shift, Position
         from app.models.assignment import WorkAssignment
 
-        shift = Shift(brand_id=brand.id, name="오전", sort_order=1)
+        shift = Shift(store_id=store.id, name="오전", sort_order=1)
         db.add(shift)
-        position = Position(brand_id=brand.id, name="그릴", sort_order=1)
+        position = Position(store_id=store.id, name="그릴", sort_order=1)
         db.add(position)
         await db.flush()
 
         assignment = WorkAssignment(
             organization_id=org.id,
-            brand_id=brand.id,
+            store_id=store.id,
             shift_id=shift.id,
             position_id=position.id,
             user_id=staff_user.id,

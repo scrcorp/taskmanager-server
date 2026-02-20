@@ -1,11 +1,11 @@
 """커뮤니케이션 관련 SQLAlchemy ORM 모델 정의.
 
 Communication-related SQLAlchemy ORM model definitions.
-Includes announcements (org-wide or brand-specific notices) and
+Includes announcements (org-wide or store-specific notices) and
 additional tasks (ad-hoc tasks assigned to specific users).
 
 Tables:
-    - announcements: 공지사항 (Organization or brand-level announcements)
+    - announcements: 공지사항 (Organization or store-level announcements)
     - additional_tasks: 추가 업무 (Ad-hoc tasks with priority and assignees)
     - additional_task_assignees: 추가 업무 담당자 (Task-user assignment junction)
 """
@@ -19,16 +19,16 @@ from app.database import Base
 
 
 class Announcement(Base):
-    """공지사항 모델 — 조직 전체 또는 특정 브랜드 대상 공지.
+    """공지사항 모델 — 조직 전체 또는 특정 매장 대상 공지.
 
-    Announcement model — Organization-wide or brand-specific notices.
-    When brand_id is NULL, the announcement targets the entire organization.
-    When brand_id is set, it targets only users of that brand.
+    Announcement model — Organization-wide or store-specific notices.
+    When store_id is NULL, the announcement targets the entire organization.
+    When store_id is set, it targets only users of that store.
 
     Attributes:
         id: 고유 식별자 UUID (Unique identifier)
         organization_id: 소속 조직 FK (Organization scope)
-        brand_id: 대상 브랜드 FK (Target brand, NULL = org-wide announcement)
+        store_id: 대상 매장 FK (Target store, NULL = org-wide announcement)
         title: 공지 제목 (Announcement title, max 500 chars)
         content: 공지 내용 (Announcement body text)
         created_by: 작성자 FK (Author user foreign key)
@@ -42,8 +42,8 @@ class Announcement(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 소속 조직 FK — Organization scope for multi-tenant isolation
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    # 대상 브랜드 FK — NULL이면 조직 전체 공지 (NULL = org-wide, SET NULL on brand delete)
-    brand_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("brands.id", ondelete="SET NULL"), nullable=True)  # NULL = org-wide
+    # 대상 매장 FK — NULL이면 조직 전체 공지 (NULL = org-wide, SET NULL on store delete)
+    store_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)  # NULL = org-wide
     # 공지 제목 — Announcement title
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     # 공지 내용 — Announcement body (full text)
@@ -66,7 +66,7 @@ class AdditionalTask(Base):
     Attributes:
         id: 고유 식별자 UUID (Unique identifier)
         organization_id: 소속 조직 FK (Organization scope)
-        brand_id: 대상 브랜드 FK (Target brand, optional)
+        store_id: 대상 매장 FK (Target store, optional)
         title: 업무 제목 (Task title)
         description: 업무 상세 설명 (Task description, optional)
         priority: 우선순위 (Priority: "normal" or "urgent")
@@ -86,8 +86,8 @@ class AdditionalTask(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 소속 조직 FK — Organization scope for multi-tenant isolation
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    # 대상 브랜드 FK — Optional brand scope (SET NULL on brand delete)
-    brand_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("brands.id", ondelete="SET NULL"), nullable=True)
+    # 대상 매장 FK — Optional store scope (SET NULL on store delete)
+    store_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
     # 업무 제목 — Task title
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     # 업무 설명 — Detailed task description (optional)
