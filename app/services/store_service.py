@@ -46,6 +46,10 @@ class StoreService:
             name=store.name,
             address=store.address,
             is_active=store.is_active,
+            require_approval=store.require_approval,
+            operating_hours=store.operating_hours,
+            max_work_hours_weekly=store.max_work_hours_weekly,
+            state_code=store.state_code,
             created_at=store.created_at,
         )
 
@@ -106,6 +110,10 @@ class StoreService:
             name=store.name,
             address=store.address,
             is_active=store.is_active,
+            require_approval=store.require_approval,
+            operating_hours=store.operating_hours,
+            max_work_hours_weekly=store.max_work_hours_weekly,
+            state_code=store.state_code,
             created_at=store.created_at,
             shifts=[
                 ShiftResponse(id=str(s.id), name=s.name, sort_order=s.sort_order)

@@ -5,6 +5,7 @@ Covers CRUD operations for organizations (tenants) and stores (locations).
 """
 
 from datetime import datetime
+from typing import Any
 from pydantic import BaseModel
 
 
@@ -86,6 +87,9 @@ class StoreUpdate(BaseModel):
     name: str | None = None  # 변경할 매장 이름 (New name, optional)
     address: str | None = None  # 변경할 주소 (New address, optional)
     is_active: bool | None = None  # 활성 상태 변경 (Activate/deactivate, optional)
+    operating_hours: dict[str, Any] | None = None  # 운영시간 JSONB (Operating hours, optional)
+    max_work_hours_weekly: int | None = None  # 주간 최대 근무시간 (Max weekly hours, optional)
+    state_code: str | None = None  # 주(State) 코드 (US state code, optional)
 
 
 class StoreResponse(BaseModel):
@@ -107,6 +111,10 @@ class StoreResponse(BaseModel):
     name: str  # 매장 이름 (Store name)
     address: str | None  # 매장 주소 (Address, may be null)
     is_active: bool  # 활성 상태 (Active flag)
+    require_approval: bool = True  # 승인 필요 여부 (Schedule approval required)
+    operating_hours: dict[str, Any] | None = None  # 운영시간 (Operating hours JSONB)
+    max_work_hours_weekly: int | None = None  # 주간 최대 근무시간 (Max weekly hours)
+    state_code: str | None = None  # 주(State) 코드 (US state code)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 
