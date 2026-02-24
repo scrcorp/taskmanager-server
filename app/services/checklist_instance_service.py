@@ -11,6 +11,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.assignment import WorkAssignment
 from app.models.checklist import ChecklistCompletion, ChecklistInstance, ChecklistTemplate
@@ -267,6 +268,109 @@ class ChecklistInstanceService:
 
         # completions 재로드 — Reload with completions
         return await self.get_instance(db, instance_id)
+
+    async def get_audit_log(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID | None = None,
+        user_id: UUID | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> tuple[list[dict], int]:
+        """체크리스트 완료 감사 로그를 조회합니다.
+
+        Get checklist completion audit log with user and instance info.
+        Queries cl_completions joined with cl_instances and users.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            organization_id: 조직 UUID (Organization UUID)
+            store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
+            user_id: 사용자 UUID 필터, 선택 (Optional user UUID filter)
+            date_from: 시작일 필터, 선택 (Optional start date filter)
+            date_to: 종료일 필터, 선택 (Optional end date filter)
+            page: 페이지 번호 (Page number)
+            per_page: 페이지당 항목 수 (Items per page)
+
+        Returns:
+            tuple[list[dict], int]: (감사 로그 목록, 전체 개수)
+                                     (Audit log list, total count)
+        """
+        from sqlalchemy import func as sa_func
+        from app.models.organization import Store
+
+        # Base query: completions joined with instances
+        base_filter = select(ChecklistCompletion).join(
+            ChecklistInstance,
+            ChecklistCompletion.instance_id == ChecklistInstance.id,
+        ).where(ChecklistInstance.organization_id == organization_id)
+
+        if store_id is not None:
+            base_filter = base_filter.where(ChecklistInstance.store_id == store_id)
+        if user_id is not None:
+            base_filter = base_filter.where(ChecklistCompletion.user_id == user_id)
+        if date_from is not None:
+            base_filter = base_filter.where(ChecklistInstance.work_date >= date_from)
+        if date_to is not None:
+            base_filter = base_filter.where(ChecklistInstance.work_date <= date_to)
+
+        # Count total
+        count_query = select(sa_func.count()).select_from(base_filter.subquery())
+        total_result = await db.execute(count_query)
+        total: int = total_result.scalar() or 0
+
+        # Fetch paginated completions with instance eager-loaded
+        data_query = (
+            base_filter
+            .options(selectinload(ChecklistCompletion.instance))
+            .order_by(ChecklistCompletion.completed_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+        result = await db.execute(data_query)
+        completions: list[ChecklistCompletion] = list(result.scalars().all())
+
+        # Build response with user/store names
+        items: list[dict] = []
+        for comp in completions:
+            inst: ChecklistInstance = comp.instance
+
+            # Fetch user name
+            user_result = await db.execute(select(User.full_name).where(User.id == comp.user_id))
+            user_name: str = user_result.scalar() or "Unknown"
+
+            # Fetch store name
+            store_result = await db.execute(select(Store.name).where(Store.id == inst.store_id))
+            store_name: str = store_result.scalar() or "Unknown"
+
+            # Get item title from snapshot
+            snapshot_items: list[dict] = inst.snapshot.get("items", []) if inst.snapshot else []
+            item_title: str = "Unknown"
+            for s_item in snapshot_items:
+                if s_item.get("item_index") == comp.item_index:
+                    item_title = s_item.get("title", "Unknown")
+                    break
+
+            items.append({
+                "id": str(comp.id),
+                "instance_id": str(comp.instance_id),
+                "item_index": comp.item_index,
+                "item_title": item_title,
+                "user_id": str(comp.user_id),
+                "user_name": user_name,
+                "store_id": str(inst.store_id),
+                "store_name": store_name,
+                "work_date": inst.work_date.isoformat(),
+                "completed_at": comp.completed_at.isoformat() if comp.completed_at else None,
+                "completed_timezone": comp.completed_timezone,
+                "photo_url": comp.photo_url,
+                "note": comp.note,
+            })
+
+        return items, total
 
     async def build_response(
         self,

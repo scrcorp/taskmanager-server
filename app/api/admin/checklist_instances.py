@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
-from app.api.deps import require_supervisor
+from app.api.deps import require_gm, require_supervisor
 from app.database import get_db
 from app.models.checklist import ChecklistComment
 from app.models.user import User
@@ -74,6 +74,57 @@ async def list_checklist_instances(
     for inst in instances:
         response: dict = await checklist_instance_service.build_response(db, inst)
         items.append(response)
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }
+
+
+@router.get("/checklist-audit")
+async def get_checklist_audit(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_gm)],
+    store_id: Annotated[str | None, Query()] = None,
+    user_id: Annotated[str | None, Query()] = None,
+    date_from: Annotated[date | None, Query()] = None,
+    date_to: Annotated[date | None, Query()] = None,
+    page: int = 1,
+    per_page: int = 20,
+) -> dict:
+    """체크리스트 완료 감사 로그를 조회합니다.
+
+    Get checklist completion audit log showing who completed what items, when.
+    Requires GM or higher permission.
+
+    Args:
+        db: 비동기 데이터베이스 세션 (Async database session)
+        current_user: 인증된 GM 이상 사용자 (Authenticated GM+ user)
+        store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
+        user_id: 사용자 UUID 필터, 선택 (Optional user UUID filter)
+        date_from: 시작일 필터, 선택 (Optional start date filter)
+        date_to: 종료일 필터, 선택 (Optional end date filter)
+        page: 페이지 번호 (Page number)
+        per_page: 페이지당 항목 수 (Items per page)
+
+    Returns:
+        dict: 페이지네이션된 감사 로그 (Paginated audit log)
+    """
+    store_uuid: UUID | None = UUID(store_id) if store_id else None
+    user_uuid: UUID | None = UUID(user_id) if user_id else None
+
+    items, total = await checklist_instance_service.get_audit_log(
+        db,
+        organization_id=current_user.organization_id,
+        store_id=store_uuid,
+        user_id=user_uuid,
+        date_from=date_from,
+        date_to=date_to,
+        page=page,
+        per_page=per_page,
+    )
 
     return {
         "items": items,
