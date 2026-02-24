@@ -61,6 +61,9 @@ from app.api.admin.qr_codes import router as qr_codes_router
 from app.api.admin.shift_presets import router as shift_presets_router
 from app.api.admin.labor_law import router as labor_law_router
 
+# Phase 7 — Evaluation 라우터 임포트
+from app.api.admin.evaluations import router as evaluations_router
+
 admin_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -112,3 +115,9 @@ admin_router.include_router(qr_codes_router, tags=["QR Codes"])
 admin_router.include_router(shift_presets_router, tags=["Shift Presets"])
 # 노동법 설정: /stores/{store_id}/labor-law (nested under stores)
 admin_router.include_router(labor_law_router, tags=["Labor Law"])
+
+# ---------------------------------------------------------------------------
+# Phase 7 라우터 등록 — Register Phase 7 (Evaluation) routers
+# ---------------------------------------------------------------------------
+# 평가: /evaluations 하위 (Evaluation templates & evaluations)
+admin_router.include_router(evaluations_router, prefix="/evaluations", tags=["Evaluations"])
