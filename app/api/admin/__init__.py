@@ -57,6 +57,10 @@ from app.api.admin.schedules import router as schedules_router
 from app.api.admin.attendances import router as attendances_router
 from app.api.admin.qr_codes import router as qr_codes_router
 
+# Phase 6 — Store Extensions 라우터 임포트
+from app.api.admin.shift_presets import router as shift_presets_router
+from app.api.admin.labor_law import router as labor_law_router
+
 admin_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -100,3 +104,11 @@ admin_router.include_router(schedules_router, prefix="/schedules", tags=["Schedu
 admin_router.include_router(attendances_router, prefix="/attendances", tags=["Attendances"])
 # QR 코드: /stores/{store_id}/qr-codes 및 /qr-codes 하위 (QR code management)
 admin_router.include_router(qr_codes_router, tags=["QR Codes"])
+
+# ---------------------------------------------------------------------------
+# Phase 6 라우터 등록 — Register Phase 6 (Store Extensions) routers
+# ---------------------------------------------------------------------------
+# 시프트 프리셋: /stores/{store_id}/shift-presets (nested under stores)
+admin_router.include_router(shift_presets_router, tags=["Shift Presets"])
+# 노동법 설정: /stores/{store_id}/labor-law (nested under stores)
+admin_router.include_router(labor_law_router, tags=["Labor Law"])
