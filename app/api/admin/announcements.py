@@ -2,6 +2,10 @@
 
 Admin Announcement Router — API endpoints for announcement management.
 Provides CRUD operations for organization-wide and store-specific announcements.
+
+Permission Matrix (역할별 권한 설계):
+    - 공지사항 작성/수정/삭제: Owner + GM
+    - 공지사항 조회: Owner + GM + SV (전 관리 역할)
 """
 
 from typing import Annotated
@@ -10,7 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_supervisor
+from app.api.deps import require_gm, require_supervisor
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
@@ -32,18 +36,9 @@ async def list_announcements(
     page: int = 1,
     per_page: int = 20,
 ) -> dict:
-    """공지사항 목록을 조회합니다.
+    """공지사항 목록을 조회합니다. 전 관리 역할 조회 가능.
 
-    List announcements for the organization.
-
-    Args:
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-        page: 페이지 번호 (Page number)
-        per_page: 페이지당 항목 수 (Items per page)
-
-    Returns:
-        dict: 페이지네이션된 공지 목록 (Paginated announcement list)
+    List announcements for the organization. All admin roles can read.
     """
     announcements, total = await announcement_service.list_announcements(
         db,
@@ -74,14 +69,6 @@ async def get_announcement(
     """공지사항 상세를 조회합니다.
 
     Get announcement detail.
-
-    Args:
-        announcement_id: 공지 UUID 문자열 (Announcement UUID string)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 공지 상세 (Announcement detail)
     """
     announcement = await announcement_service.get_detail(
         db,
@@ -95,19 +82,11 @@ async def get_announcement(
 async def create_announcement(
     data: AnnouncementCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """새 공지사항을 생성합니다.
+    """새 공지사항을 생성합니다. Owner + GM만 가능.
 
-    Create a new announcement.
-
-    Args:
-        data: 공지 생성 데이터 (Announcement creation data)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 생성된 공지 (Created announcement)
+    Create a new announcement. Owner + GM only.
     """
     announcement = await announcement_service.create_announcement(
         db,
@@ -125,20 +104,11 @@ async def update_announcement(
     announcement_id: UUID,
     data: AnnouncementUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """공지사항을 업데이트합니다.
+    """공지사항을 업데이트합니다. Owner + GM만 가능.
 
-    Update an announcement.
-
-    Args:
-        announcement_id: 공지 UUID 문자열 (Announcement UUID string)
-        data: 업데이트 데이터 (Update data)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 업데이트된 공지 (Updated announcement)
+    Update an announcement. Owner + GM only.
     """
     announcement = await announcement_service.update_announcement(
         db,
@@ -155,19 +125,11 @@ async def update_announcement(
 async def delete_announcement(
     announcement_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """공지사항을 삭제합니다.
+    """공지사항을 삭제합니다. Owner + GM만 가능.
 
-    Delete an announcement.
-
-    Args:
-        announcement_id: 공지 UUID 문자열 (Announcement UUID string)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 삭제 결과 메시지 (Deletion result message)
+    Delete an announcement. Owner + GM only.
     """
     await announcement_service.delete_announcement(
         db,

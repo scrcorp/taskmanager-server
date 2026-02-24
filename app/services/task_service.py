@@ -121,10 +121,12 @@ class TaskService:
         priority: str | None = None,
         page: int = 1,
         per_page: int = 20,
+        accessible_store_ids: list[UUID] | None = None,
     ) -> tuple[Sequence[AdditionalTask], int]:
-        """조직의 추가 업무 목록을 필터링하여 조회합니다.
+        """조직의 추가 업무 목록을 필터링하여 조회합니다. 접근 가능한 매장만 필터링.
 
         List additional tasks for an org with optional filters.
+        Results are scoped to accessible stores when accessible_store_ids is provided.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -134,6 +136,8 @@ class TaskService:
             priority: 우선순위 필터, 선택 (Optional priority filter)
             page: 페이지 번호 (Page number)
             per_page: 페이지당 항목 수 (Items per page)
+            accessible_store_ids: 접근 가능한 매장 ID 목록, None=전체
+                                   (Accessible store IDs, None=full access)
 
         Returns:
             tuple[Sequence[AdditionalTask], int]: (업무 목록, 전체 개수)
@@ -142,6 +146,8 @@ class TaskService:
         filters: dict = {}
         if store_id is not None:
             filters["store_id"] = store_id
+        elif accessible_store_ids is not None:
+            filters["store_ids"] = accessible_store_ids
         if status is not None:
             filters["status"] = status
         if priority is not None:

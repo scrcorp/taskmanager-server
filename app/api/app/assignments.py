@@ -124,6 +124,8 @@ async def complete_checklist_item(
         item_index=item_index,
         is_completed=data.is_completed,
         client_timezone=data.timezone,
+        photo_url=data.photo_url,
+        note=data.note,
     )
     await db.commit()
 

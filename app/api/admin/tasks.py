@@ -2,6 +2,10 @@
 
 Admin Task Router — API endpoints for additional task management.
 Provides CRUD operations with assignee management and filtering.
+
+Permission Matrix (역할별 권한 설계):
+    - Task 생성/수정/삭제: Owner + GM (담당 매장)
+    - Task 조회: Owner + GM + SV (소속 매장)
 """
 
 from typing import Annotated
@@ -10,17 +14,19 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_supervisor
+from app.api.deps import get_accessible_store_ids, require_gm, require_supervisor
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
     MessageResponse,
     PaginatedResponse,
     TaskCreate,
+    TaskEvidenceResponse,
     TaskResponse,
     TaskUpdate,
 )
 from app.services.task_service import task_service
+from app.services.task_evidence_service import task_evidence_service
 
 router: APIRouter = APIRouter()
 
@@ -35,23 +41,16 @@ async def list_tasks(
     page: int = 1,
     per_page: int = 20,
 ) -> dict:
-    """추가 업무 목록을 필터링하여 조회합니다.
+    """추가 업무 목록을 필터링하여 조회합니다. 접근 가능한 매장만 표시.
 
-    List additional tasks with optional filters.
-
-    Args:
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-        store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
-        status: 상태 필터, 선택 (Optional status filter)
-        priority: 우선순위 필터, 선택 (Optional priority filter)
-        page: 페이지 번호 (Page number)
-        per_page: 페이지당 항목 수 (Items per page)
-
-    Returns:
-        dict: 페이지네이션된 업무 목록 (Paginated task list)
+    List additional tasks with optional filters. Scoped to accessible stores.
     """
     store_uuid: UUID | None = UUID(store_id) if store_id else None
+    accessible = await get_accessible_store_ids(db, current_user)
+
+    # 특정 매장 필터가 있으면 접근 권한 확인 — Validate store filter against access scope
+    if store_uuid is not None and accessible is not None and store_uuid not in accessible:
+        return {"items": [], "total": 0, "page": page, "per_page": per_page}
 
     tasks, total = await task_service.list_tasks(
         db,
@@ -61,6 +60,7 @@ async def list_tasks(
         priority=priority,
         page=page,
         per_page=per_page,
+        accessible_store_ids=accessible,
     )
 
     items: list[dict] = []
@@ -85,14 +85,6 @@ async def get_task(
     """추가 업무 상세를 조회합니다.
 
     Get additional task detail with assignees.
-
-    Args:
-        task_id: 업무 UUID 문자열 (Task UUID string)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 업무 상세 (Task detail)
     """
     task = await task_service.get_detail(
         db,
@@ -106,19 +98,11 @@ async def get_task(
 async def create_task(
     data: TaskCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """새 추가 업무를 생성합니다.
+    """새 추가 업무를 생성합니다. Owner + GM만 가능.
 
-    Create a new additional task with assignees.
-
-    Args:
-        data: 업무 생성 데이터 (Task creation data)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 생성된 업무 (Created task)
+    Create a new additional task with assignees. Owner + GM only.
     """
     task = await task_service.create_task(
         db,
@@ -142,20 +126,11 @@ async def update_task(
     task_id: UUID,
     data: TaskUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """추가 업무를 업데이트합니다.
+    """추가 업무를 업데이트합니다. Owner + GM만 가능.
 
-    Update an additional task.
-
-    Args:
-        task_id: 업무 UUID 문자열 (Task UUID string)
-        data: 업데이트 데이터 (Update data)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 업데이트된 업무 (Updated task)
+    Update an additional task. Owner + GM only.
     """
     task = await task_service.update_task(
         db,
@@ -178,19 +153,11 @@ async def update_task(
 async def delete_task(
     task_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """추가 업무를 삭제합니다.
+    """추가 업무를 삭제합니다. Owner + GM만 가능.
 
-    Delete an additional task.
-
-    Args:
-        task_id: 업무 UUID 문자열 (Task UUID string)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 삭제 결과 메시지 (Deletion result message)
+    Delete an additional task. Owner + GM only.
     """
     await task_service.delete_task(
         db,
@@ -200,3 +167,22 @@ async def delete_task(
     await db.commit()
 
     return {"message": "추가 업무가 삭제되었습니다 (Additional task deleted)"}
+
+
+@router.get("/{task_id}/evidences", response_model=list[TaskEvidenceResponse])
+async def list_task_evidences(
+    task_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_supervisor)],
+) -> list[dict]:
+    """특정 업무의 증빙 목록을 조회합니다. SV 이상만 가능.
+
+    List all evidences for a specific task. Supervisor+ only.
+    """
+    # 업무 존재 및 조직 확인 — Verify task exists within the organization
+    await task_service.get_detail(
+        db,
+        task_id=task_id,
+        organization_id=current_user.organization_id,
+    )
+    return await task_evidence_service.get_evidences(db, task_id)

@@ -20,6 +20,13 @@ Included routers (Phase 3 — Communication):
     - announcements: 공지사항 관리 (Announcement management)
     - tasks: 추가 업무 관리 (Additional task management)
     - notifications: 관리자 알림 관리 (Admin notification management)
+
+Included routers (Phase 4 — Schedule):
+    - schedules: 스케줄 관리 (Schedule draft & approval management)
+
+Included routers (Phase 5 — Attendance):
+    - attendances: 근태 기록 관리 (Attendance record management)
+    - qr_codes: QR 코드 관리 (QR code management for attendance scanning)
 """
 
 from fastapi import APIRouter
@@ -36,11 +43,19 @@ from app.api.admin.positions import router as positions_router
 # Phase 2 — Core Workflow 라우터 임포트
 from app.api.admin.checklists import router as checklists_router
 from app.api.admin.assignments import router as assignments_router
+from app.api.admin.checklist_instances import router as checklist_instances_router
 
 # Phase 3 — Communication 라우터 임포트
 from app.api.admin.announcements import router as announcements_router
 from app.api.admin.tasks import router as tasks_router
 from app.api.admin.notifications import router as notifications_router
+
+# Phase 4 — Schedule 라우터 임포트
+from app.api.admin.schedules import router as schedules_router
+
+# Phase 5 — Attendance 라우터 임포트
+from app.api.admin.attendances import router as attendances_router
+from app.api.admin.qr_codes import router as qr_codes_router
 
 admin_router: APIRouter = APIRouter()
 
@@ -62,6 +77,8 @@ admin_router.include_router(positions_router, tags=["Positions"])
 admin_router.include_router(checklists_router, tags=["Checklists"])
 # 업무 배정: /work-assignments 하위 (Work assignments)
 admin_router.include_router(assignments_router, prefix="/work-assignments", tags=["Assignments"])
+# 체크리스트 인스턴스: /checklist-instances 하위 (Checklist instances)
+admin_router.include_router(checklist_instances_router, prefix="/checklist-instances", tags=["Checklist Instances"])
 
 # ---------------------------------------------------------------------------
 # Phase 3 라우터 등록 — Register Phase 3 (Communication) routers
@@ -69,3 +86,17 @@ admin_router.include_router(assignments_router, prefix="/work-assignments", tags
 admin_router.include_router(announcements_router, prefix="/announcements", tags=["Announcements"])
 admin_router.include_router(tasks_router, prefix="/additional-tasks", tags=["Additional Tasks"])
 admin_router.include_router(notifications_router, prefix="/notifications", tags=["Admin Notifications"])
+
+# ---------------------------------------------------------------------------
+# Phase 4 라우터 등록 — Register Phase 4 (Schedule) routers
+# ---------------------------------------------------------------------------
+# 스케줄: /schedules 하위 (Schedule drafts & approvals)
+admin_router.include_router(schedules_router, prefix="/schedules", tags=["Schedules"])
+
+# ---------------------------------------------------------------------------
+# Phase 5 라우터 등록 — Register Phase 5 (Attendance) routers
+# ---------------------------------------------------------------------------
+# 근태: /attendances 하위 (Attendance records)
+admin_router.include_router(attendances_router, prefix="/attendances", tags=["Attendances"])
+# QR 코드: /stores/{store_id}/qr-codes 및 /qr-codes 하위 (QR code management)
+admin_router.include_router(qr_codes_router, tags=["QR Codes"])

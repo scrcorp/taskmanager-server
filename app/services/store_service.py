@@ -53,19 +53,24 @@ class StoreService:
         self,
         db: AsyncSession,
         organization_id: UUID,
+        accessible_store_ids: list[UUID] | None = None,
     ) -> list[StoreResponse]:
-        """조직에 속한 매장 목록을 조회합니다.
+        """조직에 속한 매장 목록을 조회합니다. 접근 가능한 매장만 필터링.
 
-        List all stores belonging to the organization.
+        List stores belonging to the organization, filtered by accessible stores.
+        accessible_store_ids=None means full access (Owner).
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 ID (Organization UUID)
+            accessible_store_ids: 접근 가능한 매장 ID 목록, None=전체 (Accessible store IDs, None=all)
 
         Returns:
             list[StoreResponse]: 매장 목록 (List of store responses)
         """
         stores: list[Store] = await store_repository.get_by_org(db, organization_id)
+        if accessible_store_ids is not None:
+            stores = [s for s in stores if s.id in accessible_store_ids]
         return [self._to_response(s) for s in stores]
 
     async def get_store(

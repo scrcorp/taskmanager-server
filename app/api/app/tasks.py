@@ -13,8 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.database import get_db
 from app.models.user import User
-from app.schemas.common import MessageResponse, PaginatedResponse, TaskResponse
+from app.schemas.common import (
+    MessageResponse,
+    PaginatedResponse,
+    TaskEvidenceCreate,
+    TaskEvidenceResponse,
+    TaskResponse,
+)
 from app.services.task_service import task_service
+from app.services.task_evidence_service import task_evidence_service
 
 router: APIRouter = APIRouter()
 
@@ -118,3 +125,66 @@ async def complete_my_task(
         organization_id=current_user.organization_id,
     )
     return await task_service.build_response(db, task)
+
+
+@router.post("/{task_id}/evidences", response_model=TaskEvidenceResponse, status_code=201)
+async def add_task_evidence(
+    task_id: UUID,
+    data: TaskEvidenceCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """업무 증빙을 추가합니다. 담당자만 가능.
+
+    Add evidence (photo/document) to an additional task. Assignee only.
+
+    Args:
+        task_id: 업무 UUID (Task UUID)
+        data: 증빙 생성 데이터 (Evidence creation data)
+        db: 비동기 데이터베이스 세션 (Async database session)
+        current_user: 인증된 사용자 (Authenticated user)
+
+    Returns:
+        dict: 생성된 증빙 상세 (Created evidence detail)
+    """
+    evidence = await task_evidence_service.add_evidence(
+        db,
+        task_id=task_id,
+        user_id=current_user.id,
+        file_url=data.file_url,
+        file_type=data.file_type,
+        note=data.note,
+    )
+    await db.commit()
+
+    return await task_evidence_service.build_response(db, evidence)
+
+
+@router.delete("/{task_id}/evidences/{evidence_id}", response_model=MessageResponse)
+async def delete_task_evidence(
+    task_id: UUID,
+    evidence_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """본인의 업무 증빙을 삭제합니다.
+
+    Delete own evidence from an additional task.
+
+    Args:
+        task_id: 업무 UUID (Task UUID, for URL consistency)
+        evidence_id: 증빙 UUID (Evidence UUID)
+        db: 비동기 데이터베이스 세션 (Async database session)
+        current_user: 인증된 사용자 (Authenticated user)
+
+    Returns:
+        dict: 삭제 확인 메시지 (Deletion confirmation message)
+    """
+    await task_evidence_service.delete_evidence(
+        db,
+        evidence_id=evidence_id,
+        user_id=current_user.id,
+    )
+    await db.commit()
+
+    return {"message": "증빙이 삭제되었습니다 (Evidence deleted)"}

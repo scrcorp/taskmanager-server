@@ -71,7 +71,7 @@ class AssignmentService:
         shift_id: UUID,
         position_id: UUID,
         work_date: date | None = None,
-    ) -> tuple[dict | None, int]:
+    ) -> tuple[dict | None, int, ChecklistTemplate | None]:
         """체크리스트 템플릿으로부터 JSONB 스냅샷을 생성합니다.
 
         Build a JSONB checklist snapshot from the matching template.
@@ -86,8 +86,9 @@ class AssignmentService:
             work_date: 근무일 (Work date for recurrence filtering)
 
         Returns:
-            tuple[dict | None, int]: (스냅샷 딕셔너리 또는 None, 총 항목 수)
-                                      (Snapshot dict or None, total item count)
+            tuple[dict | None, int, ChecklistTemplate | None]:
+                (스냅샷 딕셔너리 또는 None, 총 항목 수, 원본 템플릿 또는 None)
+                (Snapshot dict or None, total item count, source template or None)
         """
         # 해당 조합의 템플릿 검색 — Find matching template
         templates: Sequence[ChecklistTemplate] = await checklist_repository.get_by_store(
@@ -95,7 +96,7 @@ class AssignmentService:
         )
 
         if not templates:
-            return None, 0
+            return None, 0, None
 
         template: ChecklistTemplate = templates[0]
 
@@ -128,7 +129,7 @@ class AssignmentService:
 
         # 해당 날짜에 매칭되는 item이 없으면 None 반환
         if not items_snapshot:
-            return None, 0
+            return None, 0, None
 
         snapshot: dict = {
             "template_id": str(template.id),
@@ -137,7 +138,7 @@ class AssignmentService:
             "items": items_snapshot,
         }
 
-        return snapshot, len(items_snapshot)
+        return snapshot, len(items_snapshot), template
 
     async def create_assignment(
         self,
@@ -185,7 +186,8 @@ class AssignmentService:
         # 체크리스트 스냅샷 생성 (반복 주기 필터 포함) — Build checklist snapshot with recurrence filter
         snapshot: dict | None
         total_items: int
-        snapshot, total_items = await self._build_checklist_snapshot(
+        template: ChecklistTemplate | None
+        snapshot, total_items, template = await self._build_checklist_snapshot(
             db, store_id, shift_id, position_id, work_date=data.work_date
         )
 
@@ -212,6 +214,13 @@ class AssignmentService:
                 "completed_items": 0,
                 "assigned_by": assigned_by,
             },
+        )
+
+        # cl_instances 동시 생성 — Also create cl_instances row for gradual migration
+        from app.services.checklist_instance_service import checklist_instance_service
+
+        await checklist_instance_service.create_instance(
+            db, assignment, template, snapshot, total_items
         )
 
         # 알림 자동 생성 — Auto-create notification
@@ -270,8 +279,12 @@ class AssignmentService:
         store_result = await db.execute(select(Store.name).where(Store.id == assignment.store_id))
         store_name: str = store_result.scalar() or "Unknown"
 
-        shift_result = await db.execute(select(Shift.name).where(Shift.id == assignment.shift_id))
-        shift_name: str = shift_result.scalar() or "Unknown"
+        shift_result = await db.execute(
+            select(Shift.name, Shift.sort_order).where(Shift.id == assignment.shift_id)
+        )
+        shift_row = shift_result.one_or_none()
+        shift_name: str = shift_row[0] if shift_row else "Unknown"
+        shift_sort_order: int = shift_row[1] if shift_row else 0
 
         position_result = await db.execute(
             select(Position.name).where(Position.id == assignment.position_id)
@@ -289,6 +302,7 @@ class AssignmentService:
             "store_name": store_name,
             "shift_id": str(assignment.shift_id),
             "shift_name": shift_name,
+            "shift_sort_order": shift_sort_order,
             "position_id": str(assignment.position_id),
             "position_name": position_name,
             "user_id": str(assignment.user_id),
@@ -329,6 +343,8 @@ class AssignmentService:
         store_id: UUID | None = None,
         user_id: UUID | None = None,
         work_date: date | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
         status: str | None = None,
         page: int = 1,
         per_page: int = 20,
@@ -342,7 +358,9 @@ class AssignmentService:
             organization_id: 조직 UUID (Organization UUID)
             store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
             user_id: 사용자 UUID 필터, 선택 (Optional user UUID filter)
-            work_date: 근무일 필터, 선택 (Optional work date filter)
+            work_date: 근무일 필터, 선택 (Optional single work date filter)
+            date_from: 시작일 범위 필터, 선택 (Optional range start date)
+            date_to: 종료일 범위 필터, 선택 (Optional range end date)
             status: 상태 필터, 선택 (Optional status filter)
             page: 페이지 번호 (Page number)
             per_page: 페이지당 항목 수 (Items per page)
@@ -352,7 +370,16 @@ class AssignmentService:
                                                    (List of assignments, total count)
         """
         return await assignment_repository.get_by_filters(
-            db, organization_id, store_id, user_id, work_date, status, page, per_page
+            db,
+            organization_id,
+            store_id=store_id,
+            user_id=user_id,
+            work_date=work_date,
+            date_from=date_from,
+            date_to=date_to,
+            status=status,
+            page=page,
+            per_page=per_page,
         )
 
     async def get_detail(
@@ -474,6 +501,8 @@ class AssignmentService:
         item_index: int,
         is_completed: bool,
         client_timezone: str = "America/Los_Angeles",
+        photo_url: str | None = None,
+        note: str | None = None,
     ) -> WorkAssignment:
         """체크리스트 항목을 완료/미완료 처리합니다.
 
@@ -520,6 +549,18 @@ class AssignmentService:
                 f"항목 인덱스가 범위를 벗어났습니다 (Item index out of range: {item_index})"
             )
 
+        # 항목 타입별 검증 — Validate required evidence based on verification_type
+        if is_completed:
+            v_type: str = items[item_index].get("verification_type", "none")
+            if "photo" in v_type and not photo_url:
+                raise BadRequestError(
+                    "이 항목은 사진이 필요합니다 (Photo is required for this item)"
+                )
+            if "text" in v_type and not note:
+                raise BadRequestError(
+                    "이 항목은 메모가 필요합니다 (Note is required for this item)"
+                )
+
         # 항목 업데이트 — Update item
         items[item_index]["is_completed"] = is_completed
         if is_completed:
@@ -547,10 +588,50 @@ class AssignmentService:
         else:
             new_status = "assigned"
 
-        # JSONB 필드 업데이트를 위해 직접 할당 — Direct assign for JSONB update
+        # JSONB 필드 업데이트 (하위호환) — Update JSONB for backward compatibility
         assignment.checklist_snapshot = snapshot
         assignment.completed_items = completed_count
         assignment.status = new_status
+
+        # cl_completions 동기화 — Sync cl_completions table (new source of truth)
+        from app.repositories.checklist_instance_repository import checklist_instance_repository
+
+        cl_instance = await checklist_instance_repository.get_by_assignment_id(
+            db, assignment_id
+        )
+        if cl_instance is not None:
+            if is_completed:
+                existing = await checklist_instance_repository.get_completion(
+                    db, cl_instance.id, item_index
+                )
+                if existing is None:
+                    await checklist_instance_repository.create_completion(
+                        db,
+                        {
+                            "instance_id": cl_instance.id,
+                            "item_index": item_index,
+                            "user_id": user_id,
+                            "completed_at": datetime.now(timezone.utc),
+                            "completed_timezone": client_timezone,
+                        },
+                    )
+            else:
+                existing = await checklist_instance_repository.get_completion(
+                    db, cl_instance.id, item_index
+                )
+                if existing is not None:
+                    await checklist_instance_repository.delete_completion(db, existing)
+
+            # cl_instance 카운트/상태 동기화 — Sync counts and status
+            cl_instance.completed_items = completed_count
+            cl_status: str
+            if completed_count == cl_instance.total_items:
+                cl_status = "completed"
+            elif completed_count > 0:
+                cl_status = "in_progress"
+            else:
+                cl_status = "pending"
+            cl_instance.status = cl_status
 
         await db.flush()
         await db.refresh(assignment)

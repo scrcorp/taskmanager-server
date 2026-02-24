@@ -2,6 +2,10 @@
 
 Admin Shift Router — CRUD endpoints for shifts under a store.
 All endpoints are nested under /stores/{store_id}/shifts.
+
+Permission Matrix (역할별 권한 설계):
+    - Shift 생성/수정/삭제: Owner + GM (담당 매장)
+    - Shift 목록 조회: Owner + GM + SV (소속 매장)
 """
 
 from typing import Annotated
@@ -10,7 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_supervisor
+from app.api.deps import check_store_access, require_gm, require_supervisor
 from app.database import get_db
 from app.models.user import User
 from app.schemas.work import ShiftCreate, ShiftResponse, ShiftUpdate
@@ -28,10 +32,11 @@ async def list_shifts(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_supervisor)],
 ) -> list[ShiftResponse]:
-    """매장에 속한 근무조 목록을 조회합니다.
+    """매장에 속한 근무조 목록을 조회합니다. 담당/소속 매장만 접근 가능.
 
-    List all shifts belonging to a store.
+    List all shifts belonging to a store. Scoped to accessible stores.
     """
+    await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
     return await shift_service.list_shifts(db, store_id, org_id)
 
@@ -45,12 +50,13 @@ async def create_shift(
     store_id: UUID,
     data: ShiftCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> ShiftResponse:
-    """새 근무조를 생성합니다.
+    """새 근무조를 생성합니다. Owner + GM (담당 매장).
 
-    Create a new shift under a store.
+    Create a new shift under a store. Owner + GM (assigned stores only).
     """
+    await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
     result: ShiftResponse = await shift_service.create_shift(
         db, store_id, org_id, data
@@ -68,12 +74,13 @@ async def update_shift(
     shift_id: UUID,
     data: ShiftUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> ShiftResponse:
-    """근무조 정보를 수정합니다.
+    """근무조 정보를 수정합니다. Owner + GM (담당 매장).
 
-    Update an existing shift.
+    Update an existing shift. Owner + GM (assigned stores only).
     """
+    await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
     result: ShiftResponse = await shift_service.update_shift(
         db, shift_id, store_id, org_id, data
@@ -90,12 +97,13 @@ async def delete_shift(
     store_id: UUID,
     shift_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> None:
-    """근무조를 삭제합니다.
+    """근무조를 삭제합니다. Owner + GM (담당 매장).
 
-    Delete a shift by its ID.
+    Delete a shift by its ID. Owner + GM (assigned stores only).
     """
+    await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
     await shift_service.delete_shift(db, shift_id, store_id, org_id)
     await db.commit()

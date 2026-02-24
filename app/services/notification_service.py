@@ -10,9 +10,13 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
 from app.models.assignment import WorkAssignment
 from app.models.communication import AdditionalTask, Announcement
 from app.models.notification import Notification
+from app.models.schedule import Schedule
+from app.models.user import Role, User
 from app.repositories.notification_repository import notification_repository
 
 
@@ -169,6 +173,82 @@ class NotificationService:
             notifications.append(notification)
 
         return notifications
+
+    async def create_for_schedule_submit(
+        self,
+        db: AsyncSession,
+        schedule: Schedule,
+    ) -> list[Notification]:
+        """스케줄 승인 요청 시 GM 이상 사용자에게 알림을 자동 생성합니다.
+
+        Auto-create notifications for GM+ users when a schedule is submitted for approval.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            schedule: 스케줄 객체 (Schedule object)
+
+        Returns:
+            list[Notification]: 생성된 알림 목록 (List of created notifications)
+        """
+        message: str = (
+            f"스케줄 승인 요청: {schedule.work_date} "
+            f"(Schedule pending approval for {schedule.work_date})"
+        )
+
+        # GM 이상 사용자 조회 (level <= 20) — Find GM+ users in organization
+        gm_result = await db.execute(
+            select(User.id)
+            .join(Role, User.role_id == Role.id)
+            .where(User.organization_id == schedule.organization_id)
+            .where(User.is_active.is_(True))
+            .where(Role.level <= 20)
+        )
+        gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
+
+        notifications: list[Notification] = []
+        for uid in gm_ids:
+            notification: Notification = await notification_repository.create_notification(
+                db,
+                organization_id=schedule.organization_id,
+                user_id=uid,
+                notification_type="schedule_pending",
+                message=message,
+                reference_type="schedule",
+                reference_id=schedule.id,
+            )
+            notifications.append(notification)
+
+        return notifications
+
+    async def create_for_schedule_approve(
+        self,
+        db: AsyncSession,
+        schedule: Schedule,
+    ) -> Notification:
+        """스케줄 승인 시 배정된 직원에게 알림을 자동 생성합니다.
+
+        Auto-create a notification for the assigned staff when a schedule is approved.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            schedule: 스케줄 객체 (Schedule object)
+
+        Returns:
+            Notification: 생성된 알림 (Created notification)
+        """
+        message: str = (
+            f"스케줄이 승인되었습니다: {schedule.work_date} "
+            f"(Your schedule for {schedule.work_date} has been approved)"
+        )
+        return await notification_repository.create_notification(
+            db,
+            organization_id=schedule.organization_id,
+            user_id=schedule.user_id,
+            notification_type="schedule_approved",
+            message=message,
+            reference_type="schedule",
+            reference_id=schedule.id,
+        )
 
     async def create_for_announcement(
         self,

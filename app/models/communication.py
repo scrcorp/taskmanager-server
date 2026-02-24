@@ -1,13 +1,15 @@
 """커뮤니케이션 관련 SQLAlchemy ORM 모델 정의.
 
 Communication-related SQLAlchemy ORM model definitions.
-Includes announcements (org-wide or store-specific notices) and
-additional tasks (ad-hoc tasks assigned to specific users).
+Includes announcements (org-wide or store-specific notices),
+additional tasks (ad-hoc tasks assigned to specific users),
+and task evidences (photo/document attachments for task completion).
 
 Tables:
     - announcements: 공지사항 (Organization or store-level announcements)
     - additional_tasks: 추가 업무 (Ad-hoc tasks with priority and assignees)
     - additional_task_assignees: 추가 업무 담당자 (Task-user assignment junction)
+    - task_evidences: 업무 증빙 (Photo/document evidence for task completion)
 """
 
 import uuid
@@ -107,6 +109,8 @@ class AdditionalTask(Base):
 
     # 관계 — Assignees (cascade: 업무 삭제 시 담당자 매핑도 삭제)
     assignees = relationship("AdditionalTaskAssignee", back_populates="task", cascade="all, delete-orphan")
+    # 관계 — Evidences (cascade: 업무 삭제 시 증빙도 삭제)
+    evidences = relationship("TaskEvidence", back_populates="task", cascade="all, delete-orphan")
 
 
 class AdditionalTaskAssignee(Base):
@@ -139,3 +143,43 @@ class AdditionalTaskAssignee(Base):
 
     # 관계 — Relationships
     task = relationship("AdditionalTask", back_populates="assignees")
+
+
+class TaskEvidence(Base):
+    """업무 증빙 모델 — 추가 업무 완료 시 첨부하는 사진/문서 증빙.
+
+    Task evidence model — Photo/document attachments submitted
+    by assignees when completing an additional task.
+
+    Attributes:
+        id: 고유 식별자 UUID (Unique identifier)
+        task_id: 추가 업무 FK (Parent additional task foreign key)
+        user_id: 제출자 FK (Submitter user foreign key)
+        file_url: 파일 URL (File URL in storage, max 500 chars)
+        file_type: 파일 유형 (File type: "photo" or "document")
+        note: 메모 (Optional note/description for the evidence)
+        created_at: 생성 일시 UTC (Creation timestamp)
+
+    Relationships:
+        task: 소속 업무 (Parent additional task)
+    """
+
+    __tablename__ = "task_evidences"
+
+    # 증빙 고유 식별자 — Evidence unique identifier (UUID v4, auto-generated)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 업무 FK — Parent task (CASCADE: 업무 삭제 시 증빙도 삭제)
+    task_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("additional_tasks.id", ondelete="CASCADE"), nullable=False)
+    # 제출자 FK — User who submitted the evidence (CASCADE: 사용자 삭제 시 증빙도 삭제)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # 파일 URL — File URL in Supabase Storage (or S3)
+    file_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    # 파일 유형 — "photo" 또는 "document" (File type: photo or document)
+    file_type: Mapped[str] = mapped_column(String(20), default="photo")
+    # 메모 — Optional note describing the evidence
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 생성 일시 — Record creation timestamp (UTC)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    # 관계 — Relationships
+    task = relationship("AdditionalTask", back_populates="evidences")

@@ -64,6 +64,8 @@ class TaskRepository(BaseRepository[AdditionalTask]):
         if filters:
             if filters.get("store_id") is not None:
                 query = query.where(AdditionalTask.store_id == filters["store_id"])
+            elif filters.get("store_ids") is not None:
+                query = query.where(AdditionalTask.store_id.in_(filters["store_ids"]))
             if filters.get("status") is not None:
                 query = query.where(AdditionalTask.status == filters["status"])
             if filters.get("priority") is not None:

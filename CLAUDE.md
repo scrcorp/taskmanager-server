@@ -1,5 +1,8 @@
 # Employee Management Service — Backend
 
+> **IMPORTANT**: Before implementing any feature, read the parent `../CLAUDE.md` and relevant task docs in `../docs/tasks/`.
+> Task documents are the Source of Truth for API paths, table names, permissions, and status values.
+
 ## Project Overview
 
 Multi-store employee management system. FastAPI + PostgreSQL (Supabase) backend serving two frontends: Admin (Next.js) and App (Flutter Web).

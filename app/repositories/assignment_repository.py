@@ -38,6 +38,8 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
         store_id: UUID | None = None,
         user_id: UUID | None = None,
         work_date: date | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
         status: str | None = None,
         page: int = 1,
         per_page: int = 20,
@@ -51,7 +53,9 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
             organization_id: 조직 UUID (Organization UUID)
             store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
             user_id: 사용자 UUID 필터, 선택 (Optional user UUID filter)
-            work_date: 근무일 필터, 선택 (Optional work date filter)
+            work_date: 근무일 필터, 선택 (Optional single work date filter)
+            date_from: 시작일 범위 필터, 선택 (Optional range start date filter)
+            date_to: 종료일 범위 필터, 선택 (Optional range end date filter)
             status: 상태 필터, 선택 (Optional status filter)
             page: 페이지 번호, 1부터 시작 (Page number, 1-based)
             per_page: 페이지당 항목 수 (Items per page)
@@ -69,7 +73,13 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
             query = query.where(WorkAssignment.store_id == store_id)
         if user_id is not None:
             query = query.where(WorkAssignment.user_id == user_id)
-        if work_date is not None:
+        # 날짜 범위 필터 우선, 없으면 단일 날짜 필터
+        # Date range filter takes precedence; falls back to single date
+        if date_from is not None:
+            query = query.where(WorkAssignment.work_date >= date_from)
+        if date_to is not None:
+            query = query.where(WorkAssignment.work_date <= date_to)
+        if date_from is None and date_to is None and work_date is not None:
             query = query.where(WorkAssignment.work_date == work_date)
         if status is not None:
             query = query.where(WorkAssignment.status == status)

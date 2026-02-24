@@ -103,6 +103,10 @@ class Store(Base):
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 활성 상태 — Whether the store is active (soft-delete pattern)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 승인 필요 여부 — Whether schedule approval is required (default True)
+    # True: SV가 생성한 스케줄은 GM 승인 후 배정 생성
+    # False: SV가 생성하면 즉시 배정 생성
+    require_approval: Mapped[bool] = mapped_column(Boolean, default=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)

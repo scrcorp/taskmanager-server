@@ -1,17 +1,20 @@
-"""체크리스트 템플릿 관련 SQLAlchemy ORM 모델 정의.
+"""체크리스트 관련 SQLAlchemy ORM 모델 정의.
 
-Checklist template SQLAlchemy ORM model definitions.
+Checklist SQLAlchemy ORM model definitions.
 Defines reusable checklist templates scoped to a specific
-store + shift + position combination, along with their items.
+store + shift + position combination, along with their items,
+and checklist instances/completions for actual work tracking.
 
 Tables:
     - checklist_templates: 체크리스트 템플릿 (Reusable checklist templates)
     - checklist_template_items: 체크리스트 항목 (Individual items within a template)
+    - cl_instances: 체크리스트 인스턴스 (One per work assignment, snapshot of template)
+    - cl_completions: 체크리스트 완료 기록 (One per completed item in an instance)
 """
 
 import uuid
-from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, Integer, Text, ForeignKey, UniqueConstraint, Uuid
+from datetime import date, datetime, timezone
+from sqlalchemy import String, DateTime, Date, Integer, Text, ForeignKey, UniqueConstraint, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -122,3 +125,117 @@ class ChecklistTemplateItem(Base):
 
     # 관계 — Relationships
     template = relationship("ChecklistTemplate", back_populates="items")
+
+
+class ChecklistInstance(Base):
+    """체크리스트 인스턴스 모델 — 배정 1건당 1개의 체크리스트 스냅샷.
+
+    Checklist instance model — One instance per work assignment.
+    Stores a frozen snapshot of template items at assignment creation time,
+    allowing templates to change without affecting existing assignments.
+
+    Attributes:
+        id: 고유 식별자 UUID (Unique identifier)
+        organization_id: 소속 조직 FK (Organization scope for multi-tenant isolation)
+        template_id: 원본 템플릿 FK (Source template, nullable — template may be deleted)
+        work_assignment_id: 근무 배정 FK (Work assignment, UNIQUE — one instance per assignment)
+        store_id: 매장 FK (Store where the work is performed)
+        user_id: 배정 대상 사용자 FK (Assigned worker)
+        work_date: 근무 날짜 (Date of the work assignment)
+        snapshot: JSONB 스냅샷 (Frozen copy of template items at creation time)
+        total_items: 총 항목 수 (Total checklist items count)
+        completed_items: 완료 항목 수 (Completed items count)
+        status: 진행 상태 (Status: "pending" -> "in_progress" -> "completed")
+        created_at: 생성 일시 UTC (Creation timestamp)
+        updated_at: 수정 일시 UTC (Last update timestamp)
+
+    Relationships:
+        completions: 완료 기록 목록 (Completion records for this instance)
+
+    Constraints:
+        work_assignment_id UNIQUE — one checklist instance per assignment
+    """
+
+    __tablename__ = "cl_instances"
+
+    # 인스턴스 고유 식별자 — Instance unique identifier (UUID v4, auto-generated)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 소속 조직 FK — Organization scope for multi-tenant data isolation
+    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    # 원본 템플릿 FK — Source template (SET NULL: 템플릿 삭제 시 null, 스냅샷은 유지)
+    template_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("checklist_templates.id", ondelete="SET NULL"), nullable=True)
+    # 근무 배정 FK — Work assignment (CASCADE: 배정 삭제 시 인스턴스도 삭제, UNIQUE)
+    work_assignment_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("work_assignments.id", ondelete="CASCADE"), nullable=False, unique=True)
+    # 매장 FK — Store where the work takes place
+    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
+    # 배정 대상 사용자 FK — Worker assigned to this checklist
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # 근무 날짜 — Date of the work assignment (date only, no time)
+    work_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # JSONB 스냅샷 — Frozen copy of template items at instance creation time
+    snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # 총 항목 수 — Total number of checklist items (denormalized for quick progress display)
+    total_items: Mapped[int] = mapped_column(Integer, default=0)
+    # 완료 항목 수 — Number of completed items (denormalized, updated on item completion)
+    completed_items: Mapped[int] = mapped_column(Integer, default=0)
+    # 진행 상태 — Workflow status: "pending" → "in_progress" → "completed"
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    # 생성 일시 — Record creation timestamp (UTC)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # 수정 일시 — Last modification timestamp (UTC, auto-updated)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # 관계 — Completion records ordered by item_index
+    completions = relationship("ChecklistCompletion", back_populates="instance", cascade="all, delete-orphan", order_by="ChecklistCompletion.item_index")
+
+
+class ChecklistCompletion(Base):
+    """체크리스트 완료 기록 모델 — 인스턴스 내 개별 항목 완료 기록.
+
+    Checklist completion model — One row per completed item in an instance.
+    Records who completed an item, when, and optional evidence (photo, note, GPS).
+
+    Attributes:
+        id: 고유 식별자 UUID (Unique identifier)
+        instance_id: 소속 인스턴스 FK (Parent checklist instance)
+        item_index: 항목 인덱스 (Matches snapshot item_index)
+        user_id: 완료한 사용자 FK (User who completed the item)
+        completed_at: 완료 일시 (Completion timestamp)
+        photo_url: 사진 URL (Photo evidence URL, optional)
+        note: 메모 (Text note, optional)
+        location: GPS 위치 JSONB (lat/lng, optional)
+        created_at: 생성 일시 UTC (Creation timestamp)
+
+    Constraints:
+        uq_cl_completion_instance_item: (instance_id, item_index) — one completion per item
+    """
+
+    __tablename__ = "cl_completions"
+
+    # 완료 기록 고유 식별자 — Completion record unique identifier (UUID v4, auto-generated)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 소속 인스턴스 FK — Parent instance (CASCADE: 인스턴스 삭제 시 완료 기록도 삭제)
+    instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instances.id", ondelete="CASCADE"), nullable=False)
+    # 항목 인덱스 — Matches snapshot item_index (0-based)
+    item_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 완료한 사용자 FK — User who completed this item
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # 완료 일시 — When the item was completed (UTC with timezone)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # IANA 타임존 — Timezone at completion (e.g. "America/Los_Angeles") for local time display
+    completed_timezone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # 사진 URL — Optional photo evidence URL (Supabase Storage)
+    photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 메모 — Optional text note for the completion
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # GPS 위치 — Optional location data as JSONB {lat, lng}
+    location: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 생성 일시 — Record creation timestamp (UTC)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("instance_id", "item_index", name="uq_cl_completion_instance_item"),
+    )
+
+    # 관계 — Parent instance
+    instance = relationship("ChecklistInstance", back_populates="completions")

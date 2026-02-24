@@ -2,6 +2,10 @@
 
 Admin Checklist Router — API endpoints for checklist template and item management.
 Provides CRUD operations for templates and their items, including reordering.
+
+Permission Matrix (역할별 권한 설계):
+    - 체크리스트 생성/수정/삭제: Owner + GM (담당 매장)
+    - 체크리스트 조회: Owner + GM + SV (소속 매장)
 """
 
 from typing import Annotated
@@ -12,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from io import BytesIO
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_supervisor
+from app.api.deps import check_store_access, get_accessible_store_ids, require_gm, require_supervisor
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
@@ -47,23 +51,20 @@ async def list_all_templates(
     shift_id: Annotated[str | None, Query()] = None,
     position_id: Annotated[str | None, Query()] = None,
 ) -> list[dict]:
-    """조직 전체의 체크리스트 템플릿 목록을 조회합니다.
+    """조직 전체의 체크리스트 템플릿 목록을 조회합니다. 접근 가능한 매장만 필터링.
 
     List all checklist templates for the organization with optional filters.
-
-    Args:
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-        store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
-        shift_id: 근무조 UUID 필터, 선택 (Optional shift UUID filter)
-        position_id: 포지션 UUID 필터, 선택 (Optional position UUID filter)
-
-    Returns:
-        list[dict]: 템플릿 목록 (List of templates)
+    Results are filtered to only include templates from accessible stores.
     """
     store_uuid: UUID | None = UUID(store_id) if store_id else None
     shift_uuid: UUID | None = UUID(shift_id) if shift_id else None
     position_uuid: UUID | None = UUID(position_id) if position_id else None
+
+    accessible = await get_accessible_store_ids(db, current_user)
+
+    # 특정 매장 필터가 있으면 접근 권한 확인 — Validate store filter against access scope
+    if store_uuid is not None and accessible is not None and store_uuid not in accessible:
+        return []
 
     templates = await checklist_service.list_all_templates(
         db,
@@ -72,6 +73,11 @@ async def list_all_templates(
         shift_id=shift_uuid,
         position_id=position_uuid,
     )
+
+    # 접근 가능한 매장 템플릿만 필터링 — Filter to accessible stores
+    if accessible is not None:
+        accessible_set = set(accessible)
+        templates = [t for t in templates if t.store_id in accessible_set]
 
     return [
         {
@@ -99,20 +105,12 @@ async def list_templates(
     shift_id: Annotated[str | None, Query()] = None,
     position_id: Annotated[str | None, Query()] = None,
 ) -> list[dict]:
-    """매장별 체크리스트 템플릿 목록을 조회합니다.
+    """매장별 체크리스트 템플릿 목록을 조회합니다. 담당/소속 매장만 접근 가능.
 
-    List checklist templates for a store with optional shift/position filters.
-
-    Args:
-        store_id: 매장 UUID 문자열 (Store UUID string)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-        shift_id: 근무조 UUID 필터, 선택 (Optional shift UUID filter)
-        position_id: 포지션 UUID 필터, 선택 (Optional position UUID filter)
-
-    Returns:
-        list[dict]: 템플릿 목록 (List of templates)
+    List checklist templates for a store. Scoped to accessible stores.
     """
+    await check_store_access(db, current_user, store_id)
+
     shift_uuid: UUID | None = UUID(shift_id) if shift_id else None
     position_uuid: UUID | None = UUID(position_id) if position_id else None
 
@@ -148,23 +146,13 @@ async def list_templates(
 )
 async def import_from_excel(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
     file: UploadFile = File(...),
     duplicate_action: Annotated[str, Query()] = "skip",
 ) -> dict:
-    """Excel 파일에서 체크리스트 템플릿을 일괄 생성합니다.
+    """Excel 파일에서 체크리스트 템플릿을 일괄 생성합니다. Owner + GM만 가능.
 
-    Import checklist templates from an Excel file.
-    Auto-creates store/shift/position if they don't exist.
-
-    Args:
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-        file: Excel 파일 (.xlsx) (Excel file upload)
-        duplicate_action: 중복 처리 방식 — "skip" | "overwrite" | "append"
-
-    Returns:
-        dict: 임포트 결과 통계 (Import result statistics)
+    Import checklist templates from an Excel file. Owner + GM only.
     """
     if not file.filename or not file.filename.endswith(".xlsx"):
         raise BadRequestError("Only .xlsx files are supported")
@@ -192,12 +180,6 @@ async def download_sample_excel(
     """샘플 Excel 템플릿을 다운로드합니다.
 
     Download a sample Excel template for checklist import.
-
-    Args:
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        StreamingResponse: Excel 파일 스트림 (Excel file stream)
     """
     excel_bytes: bytes = checklist_service.generate_sample_excel()
     return StreamingResponse(
@@ -219,14 +201,6 @@ async def get_template(
     """체크리스트 템플릿 상세를 조회합니다.
 
     Get checklist template detail.
-
-    Args:
-        template_id: 템플릿 UUID 문자열 (Template UUID string)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 템플릿 상세 (Template detail)
     """
     template = await checklist_service.get_template_detail(
         db,
@@ -253,21 +227,14 @@ async def create_template(
     store_id: UUID,
     data: ChecklistTemplateCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """새 체크리스트 템플릿을 생성합니다.
+    """새 체크리스트 템플릿을 생성합니다. Owner + GM (담당 매장).
 
-    Create a new checklist template (unique store+shift+position).
-
-    Args:
-        store_id: 매장 UUID 문자열 (Store UUID string)
-        data: 템플릿 생성 데이터 (Template creation data)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 생성된 템플릿 (Created template)
+    Create a new checklist template. Owner + GM (assigned stores only).
     """
+    await check_store_access(db, current_user, store_id)
+
     template = await checklist_service.create_template(
         db,
         store_id=store_id,
@@ -294,20 +261,11 @@ async def update_template(
     template_id: UUID,
     data: ChecklistTemplateUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """체크리스트 템플릿을 업데이트합니다.
+    """체크리스트 템플릿을 업데이트합니다. Owner + GM.
 
-    Update a checklist template.
-
-    Args:
-        template_id: 템플릿 UUID 문자열 (Template UUID string)
-        data: 업데이트 데이터 (Update data)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 업데이트된 템플릿 (Updated template)
+    Update a checklist template. Owner + GM only.
     """
     template = await checklist_service.update_template(
         db,
@@ -343,19 +301,11 @@ async def update_template(
 async def delete_template(
     template_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """체크리스트 템플릿을 삭제합니다.
+    """체크리스트 템플릿을 삭제합니다. Owner + GM.
 
-    Delete a checklist template.
-
-    Args:
-        template_id: 템플릿 UUID 문자열 (Template UUID string)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 삭제 결과 메시지 (Deletion result message)
+    Delete a checklist template. Owner + GM only.
     """
     await checklist_service.delete_template(
         db,
@@ -382,14 +332,6 @@ async def list_items(
     """템플릿의 체크리스트 항목 목록을 조회합니다.
 
     List items for a checklist template.
-
-    Args:
-        template_id: 템플릿 UUID 문자열 (Template UUID string)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        list[dict]: 항목 목록 (List of items)
     """
     items = await checklist_service.list_items(
         db,
@@ -420,20 +362,11 @@ async def create_item(
     template_id: UUID,
     data: ChecklistItemCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """템플릿에 새 항목을 추가합니다.
+    """템플릿에 새 항목을 추가합니다. Owner + GM.
 
-    Add a new item to a checklist template.
-
-    Args:
-        template_id: 템플릿 UUID 문자열 (Template UUID string)
-        data: 항목 생성 데이터 (Item creation data)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 생성된 항목 (Created item)
+    Add a new item to a checklist template. Owner + GM only.
     """
     item = await checklist_service.add_item(
         db,
@@ -463,20 +396,11 @@ async def create_items_bulk(
     template_id: UUID,
     data: ChecklistBulkItemCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> list[dict]:
-    """템플릿에 여러 항목을 일괄 추가합니다.
+    """템플릿에 여러 항목을 일괄 추가합니다. Owner + GM.
 
-    Bulk-add multiple items to a checklist template in a single transaction.
-
-    Args:
-        template_id: 템플릿 UUID 문자열 (Template UUID string)
-        data: 일괄 생성 데이터 (Bulk creation data with items list)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        list[dict]: 생성된 항목 목록 (List of created items)
+    Bulk-add multiple items to a checklist template. Owner + GM only.
     """
     items = await checklist_service.add_items_bulk(
         db,
@@ -508,20 +432,11 @@ async def update_item(
     item_id: UUID,
     data: ChecklistItemUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """체크리스트 항목을 업데이트합니다.
+    """체크리스트 항목을 업데이트합니다. Owner + GM.
 
-    Update a checklist template item.
-
-    Args:
-        item_id: 항목 UUID 문자열 (Item UUID string)
-        data: 업데이트 데이터 (Update data)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 업데이트된 항목 (Updated item)
+    Update a checklist template item. Owner + GM only.
     """
     item = await checklist_service.update_item(
         db,
@@ -550,26 +465,12 @@ async def reorder_items(
     item_id: UUID,
     data: ReorderRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """체크리스트 항목의 정렬 순서를 재배치합니다.
+    """체크리스트 항목의 정렬 순서를 재배치합니다. Owner + GM.
 
-    Reorder checklist template items.
-
-    Note:
-        item_id in the path refers to the template item used to identify
-        the template. The actual reordering uses the item_ids in the body.
-
-    Args:
-        item_id: 항목 UUID (기준 항목) (Item UUID as reference)
-        data: 정렬 순서 요청 (Reorder request with item_ids)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 정렬 결과 메시지 (Reorder result message)
+    Reorder checklist template items. Owner + GM only.
     """
-    # 항목 ID에서 template_id를 추출하여 재배치 — Resolve template from item and reorder
     await checklist_service.reorder_items_by_item_id(
         db,
         item_id=item_id,
@@ -588,19 +489,11 @@ async def reorder_items(
 async def delete_item(
     item_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_gm)],
 ) -> dict:
-    """체크리스트 항목을 삭제합니다.
+    """체크리스트 항목을 삭제합니다. Owner + GM.
 
-    Delete a checklist template item.
-
-    Args:
-        item_id: 항목 UUID 문자열 (Item UUID string)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 감독자 이상 사용자 (Authenticated supervisor+ user)
-
-    Returns:
-        dict: 삭제 결과 메시지 (Deletion result message)
+    Delete a checklist template item. Owner + GM only.
     """
     await checklist_service.delete_item(
         db,

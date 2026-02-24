@@ -142,3 +142,27 @@ async def get_accessible_store_ids(
         return None
     from app.repositories.user_repository import user_repository
     return await user_repository.get_user_store_ids(db, user.id)
+
+
+async def check_store_access(
+    db: AsyncSession, user: User, store_id: UUID
+) -> None:
+    """사용자가 특정 매장에 접근 가능한지 확인합니다. 불가 시 403 발생.
+
+    Verify the user has access to a specific store. Raises 403 if not.
+    Owner has full access. GM/Supervisor must have the store in their user_stores.
+
+    Args:
+        db: 비동기 데이터베이스 세션 (Async database session)
+        user: 현재 사용자 (Current user with role loaded)
+        store_id: 확인할 매장 ID (Store UUID to check access for)
+
+    Raises:
+        HTTPException(403): 매장 접근 권한 없음 (No access to this store)
+    """
+    accessible = await get_accessible_store_ids(db, user)
+    if accessible is not None and store_id not in accessible:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No access to this store",
+        )
