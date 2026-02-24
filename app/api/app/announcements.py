@@ -13,9 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.database import get_db
+from app.models.communication import AnnouncementRead
 from app.models.user import User
 from app.models.user_store import UserStore
-from app.schemas.common import AnnouncementResponse, PaginatedResponse
+from app.schemas.common import AnnouncementResponse, MessageResponse, PaginatedResponse
 from app.services.announcement_service import announcement_service
 from app.utils.exceptions import ForbiddenError
 
@@ -99,3 +100,31 @@ async def get_my_announcement(
             raise ForbiddenError("이 공지사항에 대한 접근 권한이 없습니다 (No access to this announcement)")
 
     return await announcement_service.build_response(db, announcement)
+
+
+@router.post("/{announcement_id}/read", response_model=MessageResponse)
+async def mark_announcement_read(
+    announcement_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """공지사항을 읽음 처리합니다.
+
+    Mark an announcement as read by the current user.
+    Idempotent — re-reading does not create duplicate records.
+    """
+    existing = await db.execute(
+        select(AnnouncementRead).where(
+            AnnouncementRead.announcement_id == announcement_id,
+            AnnouncementRead.user_id == current_user.id,
+        )
+    )
+    if existing.scalar_one_or_none() is None:
+        read_record = AnnouncementRead(
+            announcement_id=announcement_id,
+            user_id=current_user.id,
+        )
+        db.add(read_record)
+        await db.commit()
+
+    return {"message": "읽음 처리 완료 (Marked as read)"}

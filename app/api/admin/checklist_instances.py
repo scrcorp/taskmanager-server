@@ -11,14 +11,18 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
 from app.api.deps import require_supervisor
 from app.database import get_db
+from app.models.checklist import ChecklistComment
 from app.models.user import User
 from app.schemas.common import (
     ChecklistInstanceDetailResponse,
     ChecklistInstanceResponse,
     PaginatedResponse,
 )
+from app.schemas.checklist_comment import ChecklistCommentCreate, ChecklistCommentResponse
 from app.services.checklist_instance_service import checklist_instance_service
 
 router: APIRouter = APIRouter()
@@ -104,3 +108,61 @@ async def get_checklist_instance(
     )
 
     return await checklist_instance_service.build_detail_response(db, instance)
+
+
+@router.get("/{instance_id}/comments", response_model=list[ChecklistCommentResponse])
+async def list_comments(
+    instance_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_supervisor)],
+) -> list[ChecklistCommentResponse]:
+    """체크리스트 인스턴스의 코멘트 목록을 조회합니다."""
+    query = (
+        select(ChecklistComment)
+        .where(ChecklistComment.instance_id == instance_id)
+        .order_by(ChecklistComment.created_at)
+    )
+    result = await db.execute(query)
+    comments = list(result.scalars().all())
+
+    responses: list[ChecklistCommentResponse] = []
+    for c in comments:
+        user_result = await db.execute(select(User).where(User.id == c.user_id))
+        user = user_result.scalar_one_or_none()
+        responses.append(ChecklistCommentResponse(
+            id=str(c.id),
+            instance_id=str(c.instance_id),
+            user_id=str(c.user_id),
+            user_name=user.full_name if user else None,
+            text=c.text,
+            created_at=c.created_at,
+        ))
+    return responses
+
+
+@router.post("/{instance_id}/comments", response_model=ChecklistCommentResponse, status_code=201)
+async def create_comment(
+    instance_id: UUID,
+    data: ChecklistCommentCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_supervisor)],
+) -> ChecklistCommentResponse:
+    """체크리스트 인스턴스에 코멘트를 추가합니다."""
+    comment = ChecklistComment(
+        instance_id=instance_id,
+        user_id=current_user.id,
+        text=data.text,
+    )
+    db.add(comment)
+    await db.flush()
+    await db.refresh(comment)
+    await db.commit()
+
+    return ChecklistCommentResponse(
+        id=str(comment.id),
+        instance_id=str(comment.instance_id),
+        user_id=str(comment.user_id),
+        user_name=current_user.full_name,
+        text=comment.text,
+        created_at=comment.created_at,
+    )

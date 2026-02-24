@@ -12,10 +12,12 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_gm, require_supervisor
 from app.database import get_db
+from app.models.communication import AnnouncementRead
 from app.models.user import User
 from app.schemas.common import (
     AnnouncementCreate,
@@ -24,6 +26,7 @@ from app.schemas.common import (
     MessageResponse,
     PaginatedResponse,
 )
+from app.schemas.announcement_read import AnnouncementReadResponse
 from app.services.announcement_service import announcement_service
 
 router: APIRouter = APIRouter()
@@ -139,3 +142,30 @@ async def delete_announcement(
     await db.commit()
 
     return {"message": "공지사항이 삭제되었습니다 (Announcement deleted)"}
+
+
+@router.get("/{announcement_id}/reads", response_model=list[AnnouncementReadResponse])
+async def get_announcement_reads(
+    announcement_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_gm)],
+) -> list[AnnouncementReadResponse]:
+    """공지사항 읽음 현황을 조회합니다. Owner + GM만 가능."""
+    query = (
+        select(AnnouncementRead)
+        .where(AnnouncementRead.announcement_id == announcement_id)
+        .order_by(AnnouncementRead.read_at)
+    )
+    result = await db.execute(query)
+    reads = list(result.scalars().all())
+
+    responses: list[AnnouncementReadResponse] = []
+    for r in reads:
+        user_result = await db.execute(select(User).where(User.id == r.user_id))
+        user = user_result.scalar_one_or_none()
+        responses.append(AnnouncementReadResponse(
+            user_id=str(r.user_id),
+            user_name=user.full_name if user else None,
+            read_at=r.read_at,
+        ))
+    return responses
