@@ -239,3 +239,28 @@ class ChecklistCompletion(Base):
 
     # 관계 — Parent instance
     instance = relationship("ChecklistInstance", back_populates="completions")
+
+
+class ChecklistComment(Base):
+    """체크리스트 코멘트 모델 — 인스턴스에 대한 코멘트/메모.
+
+    Checklist comment model — Comments on a checklist instance.
+    Allows managers and staff to leave notes on checklist progress.
+
+    Attributes:
+        id: 고유 식별자 UUID
+        instance_id: 소속 인스턴스 FK
+        user_id: 작성자 FK
+        text: 코멘트 내용
+        created_at: 생성 일시 UTC
+    """
+
+    __tablename__ = "cl_comments"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instances.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    instance = relationship("ChecklistInstance", foreign_keys=[instance_id])

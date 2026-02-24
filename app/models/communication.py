@@ -183,3 +183,24 @@ class TaskEvidence(Base):
 
     # 관계 — Relationships
     task = relationship("AdditionalTask", back_populates="evidences")
+
+
+class AnnouncementRead(Base):
+    """공지사항 읽음 추적 모델 — 사용자별 공지 읽음 기록.
+
+    Announcement read tracking model — Records when a user reads an announcement.
+    Used to track read rates and identify unread users.
+
+    Attributes:
+        id: 고유 식별자 UUID
+        announcement_id: 공지사항 FK
+        user_id: 읽은 사용자 FK
+        read_at: 읽은 일시 UTC
+    """
+
+    __tablename__ = "announcement_reads"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    announcement_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("announcements.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

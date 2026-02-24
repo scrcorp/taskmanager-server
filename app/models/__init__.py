@@ -6,40 +6,43 @@ SQLAlchemy metadata, which is required for Alembic migrations and
 relationship resolution.
 
 Modules:
-    organization: 조직 및 매장 (Organization and Store)
+    organization: 조직, 매장, 시프트프리셋, 노동법설정 (Organization, Store, ShiftPreset, LaborLawSetting)
     user: 역할 및 사용자 (Role and User)
     work: 근무 시간대 및 포지션 (Shift and Position)
     token: 리프레시 토큰 (Refresh tokens)
     user_store: 사용자-매장 매핑 (User-Store association)
-    checklist: 체크리스트 템플릿 (Checklist templates and items)
+    checklist: 체크리스트 템플릿, 인스턴스, 완료, 코멘트 (Checklist templates, instances, completions, comments)
     assignment: 근무 배정 (Work assignments with JSONB snapshots)
-    communication: 공지사항, 추가 업무, 업무 증빙 (Announcements, additional tasks, and task evidences)
+    communication: 공지사항, 추가 업무, 증빙, 읽음추적 (Announcements, tasks, evidences, read tracking)
     notification: 알림 (User notifications)
     schedule: 스케줄 및 승인 (Schedules and approvals)
-    attendance: 근태 관리 — QR 코드, 근태 기록, 수정 이력 (Attendance: QR codes, records, corrections)
+    attendance: 근태 관리 (Attendance: QR codes, records, corrections)
+    evaluation: 평가 템플릿, 평가, 응답 (Evaluation templates, evaluations, responses)
 """
 
-from app.models.organization import Organization, Store
+from app.models.organization import Organization, Store, ShiftPreset, LaborLawSetting
 from app.models.user import Role, User
 from app.models.work import Shift, Position
 from app.models.token import RefreshToken
 from app.models.user_store import UserStore
-from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistInstance, ChecklistCompletion
+from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistInstance, ChecklistCompletion, ChecklistComment
 from app.models.assignment import WorkAssignment
-from app.models.communication import Announcement, AdditionalTask, AdditionalTaskAssignee, TaskEvidence
+from app.models.communication import Announcement, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, AnnouncementRead
 from app.models.notification import Notification
 from app.models.schedule import Schedule, ScheduleApproval
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
+from app.models.evaluation import EvalTemplate, EvalTemplateItem, Evaluation, EvalResponse
 
 __all__ = [
-    "Organization", "Store",
+    "Organization", "Store", "ShiftPreset", "LaborLawSetting",
     "Role", "User",
     "Shift", "Position",
     "RefreshToken", "UserStore",
-    "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistInstance", "ChecklistCompletion",
+    "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistInstance", "ChecklistCompletion", "ChecklistComment",
     "WorkAssignment",
-    "Announcement", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence",
+    "Announcement", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "AnnouncementRead",
     "Notification",
     "Schedule", "ScheduleApproval",
     "QRCode", "Attendance", "AttendanceCorrection",
+    "EvalTemplate", "EvalTemplateItem", "Evaluation", "EvalResponse",
 ]
