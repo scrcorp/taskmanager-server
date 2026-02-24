@@ -17,9 +17,11 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
     MessageResponse,
+    OvertimeValidateRequest,
     PaginatedResponse,
     ScheduleCreate,
     ScheduleResponse,
+    ScheduleSubstituteRequest,
     ScheduleUpdate,
 )
 from app.services.schedule_service import schedule_service
@@ -271,3 +273,47 @@ async def cancel_schedule(
     await db.commit()
 
     return {"message": "스케줄이 취소되었습니다 (Schedule cancelled)"}
+
+
+@router.patch("/{schedule_id}/substitute", response_model=ScheduleResponse)
+async def substitute_schedule(
+    schedule_id: UUID,
+    data: ScheduleSubstituteRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_gm)],
+) -> dict:
+    """대타 처리 — 승인된 스케줄의 담당자를 변경합니다. Owner + GM만 가능.
+
+    Substitute schedule — Change the assigned user of an approved schedule.
+    Owner + GM only.
+    """
+    schedule = await schedule_service.substitute_schedule(
+        db,
+        schedule_id=schedule_id,
+        organization_id=current_user.organization_id,
+        new_user_id=UUID(data.new_user_id),
+        requested_by=current_user.id,
+    )
+    await db.commit()
+
+    return await schedule_service.build_response(db, schedule)
+
+
+@router.post("/validate-overtime")
+async def validate_overtime(
+    data: OvertimeValidateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_supervisor)],
+) -> dict:
+    """초과근무 사전 검증 — 스케줄 생성 전 주간 근무시간 초과 여부를 확인합니다.
+
+    Pre-validate weekly overtime before creating a schedule.
+    Returns warning info if adding these hours would exceed thresholds.
+    """
+    return await schedule_service.validate_overtime(
+        db,
+        organization_id=current_user.organization_id,
+        user_id=UUID(data.user_id),
+        work_date=data.work_date,
+        hours=data.hours,
+    )

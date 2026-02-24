@@ -516,5 +516,76 @@ class AttendanceService:
         }
 
 
+    async def get_overtime_alerts(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID | None = None,
+        week_date: date | None = None,
+    ) -> list[dict]:
+        """주간 초과근무 경고 목록 조회.
+
+        Get overtime alerts — users whose weekly total exceeds threshold.
+        """
+        import datetime as dt
+        from sqlalchemy import func
+        from app.models.organization import LaborLawSetting
+
+        target_date = week_date or date.today()
+        weekday = target_date.weekday()
+        week_start = target_date - dt.timedelta(days=weekday)
+        week_end = week_start + dt.timedelta(days=6)
+
+        # 노동법 기준 조회
+        max_weekly = 40
+        law_result = await db.execute(
+            select(LaborLawSetting)
+            .where(LaborLawSetting.organization_id == organization_id)
+            .limit(1)
+        )
+        law = law_result.scalar_one_or_none()
+        if law:
+            max_weekly = law.store_max_weekly or law.state_max_weekly or law.federal_max_weekly
+
+        # 주간 근무시간 합산 (사용자별)
+        query = (
+            select(
+                Attendance.user_id,
+                func.sum(Attendance.total_work_minutes).label("total_minutes"),
+            )
+            .where(
+                Attendance.organization_id == organization_id,
+                Attendance.work_date >= week_start,
+                Attendance.work_date <= week_end,
+            )
+            .group_by(Attendance.user_id)
+        )
+        if store_id:
+            query = query.where(Attendance.store_id == store_id)
+
+        result = await db.execute(query)
+        rows = result.all()
+
+        alerts: list[dict] = []
+        for row in rows:
+            total_minutes = row.total_minutes or 0
+            total_hours = total_minutes / 60
+            if total_hours > max_weekly:
+                user_result = await db.execute(
+                    select(User.full_name).where(User.id == row.user_id)
+                )
+                user_name = user_result.scalar() or "Unknown"
+                alerts.append({
+                    "user_id": str(row.user_id),
+                    "user_name": user_name,
+                    "week_start": str(week_start),
+                    "week_end": str(week_end),
+                    "total_hours": round(total_hours, 1),
+                    "max_weekly_hours": max_weekly,
+                    "overtime_hours": round(total_hours - max_weekly, 1),
+                })
+        return alerts
+
+
 # 싱글턴 인스턴스 — Singleton instance
 attendance_service: AttendanceService = AttendanceService()

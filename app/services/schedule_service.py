@@ -550,5 +550,107 @@ class ScheduleService:
         }
 
 
+    async def substitute_schedule(
+        self,
+        db: AsyncSession,
+        schedule_id: UUID,
+        organization_id: UUID,
+        new_user_id: UUID,
+        requested_by: UUID,
+    ) -> Schedule:
+        """대타 처리 — 승인된 스케줄의 담당자를 변경합니다.
+
+        Substitute schedule — Change the assigned user of an approved schedule.
+        Records substitution in schedule_approvals for audit trail.
+
+        Args:
+            db: Async database session
+            schedule_id: Schedule UUID
+            organization_id: Organization UUID
+            new_user_id: New user UUID (substitute)
+            requested_by: User who requested the substitution
+        """
+        schedule = await schedule_repository.get_by_id_with_org(db, schedule_id, organization_id)
+        if schedule is None:
+            raise NotFoundError("스케줄을 찾을 수 없습니다 (Schedule not found)")
+
+        if schedule.status != "approved":
+            raise BadRequestError("승인된 스케줄만 대타 처리할 수 있습니다 (Only approved schedules can be substituted)")
+
+        old_user_id = schedule.user_id
+        schedule.user_id = new_user_id
+
+        # 대타 이력 기록 — Record substitution in approvals
+        await schedule_repository.create_approval(db, {
+            "schedule_id": schedule.id,
+            "action": "substitute",
+            "user_id": requested_by,
+            "note": f"대타: {old_user_id} → {new_user_id}",
+        })
+
+        await db.flush()
+        await db.refresh(schedule)
+        return schedule
+
+    async def validate_overtime(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        user_id: UUID,
+        work_date: date,
+        hours: float,
+    ) -> dict:
+        """주간 초과근무 사전 검증.
+
+        Pre-validate weekly overtime before creating a schedule.
+        Returns warning info if adding these hours exceeds thresholds.
+        """
+        from app.models.attendance import Attendance
+        from app.models.organization import LaborLawSetting
+        import datetime as dt
+
+        # 해당 주의 월~일 계산
+        weekday = work_date.weekday()
+        week_start = work_date - dt.timedelta(days=weekday)
+        week_end = week_start + dt.timedelta(days=6)
+
+        # 해당 주 기존 근무시간 합산
+        result = await db.execute(
+            select(Attendance.total_work_minutes)
+            .where(
+                Attendance.user_id == user_id,
+                Attendance.organization_id == organization_id,
+                Attendance.work_date >= week_start,
+                Attendance.work_date <= week_end,
+            )
+        )
+        existing_minutes = sum(r or 0 for r in result.scalars().all())
+        existing_hours = existing_minutes / 60
+        total_hours = existing_hours + hours
+
+        # 노동법 설정 조회 (매장 기준)
+        max_weekly = 40  # 기본값
+        law_result = await db.execute(
+            select(LaborLawSetting)
+            .where(LaborLawSetting.organization_id == organization_id)
+            .limit(1)
+        )
+        law = law_result.scalar_one_or_none()
+        if law:
+            max_weekly = law.store_max_weekly or law.state_max_weekly or law.federal_max_weekly
+
+        return {
+            "user_id": str(user_id),
+            "week_start": str(week_start),
+            "week_end": str(week_end),
+            "existing_hours": round(existing_hours, 1),
+            "adding_hours": hours,
+            "total_hours": round(total_hours, 1),
+            "max_weekly_hours": max_weekly,
+            "overtime": total_hours > max_weekly,
+            "overtime_hours": round(max(0, total_hours - max_weekly), 1),
+        }
+
+
 # 싱글턴 인스턴스 — Singleton instance
 schedule_service: ScheduleService = ScheduleService()

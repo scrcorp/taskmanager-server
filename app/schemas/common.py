@@ -661,6 +661,34 @@ class ScheduleUpdate(BaseModel):
     note: str | None = None  # 변경할 메모 (New note, optional)
 
 
+class ScheduleSubstituteRequest(BaseModel):
+    """대타 요청 스키마.
+
+    Schedule substitution request schema.
+
+    Attributes:
+        new_user_id: 대타 사용자 UUID (Substitute user)
+    """
+
+    new_user_id: str  # 대타 사용자 UUID (Substitute user identifier)
+
+
+class OvertimeValidateRequest(BaseModel):
+    """초과근무 사전 검증 요청 스키마.
+
+    Overtime pre-validation request schema.
+
+    Attributes:
+        user_id: 사용자 UUID
+        work_date: 근무 날짜
+        hours: 추가 근무 시간
+    """
+
+    user_id: str
+    work_date: date
+    hours: float
+
+
 # === 근태 관리 (Attendance) 스키마 ===
 
 class QRCodeResponse(BaseModel):

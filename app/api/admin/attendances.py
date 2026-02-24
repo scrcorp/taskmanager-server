@@ -148,3 +148,23 @@ async def correct_attendance(
     await db.commit()
 
     return await attendance_service.build_correction_response(db, correction)
+
+
+@router.get("/overtime-alerts")
+async def get_overtime_alerts(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_supervisor)],
+    store_id: Annotated[str | None, Query()] = None,
+    week_date: Annotated[date | None, Query()] = None,
+) -> list[dict]:
+    """초과근무 경고 목록 조회 — 주간 근무시간 초과 직원 목록.
+
+    Get overtime alerts — List employees exceeding weekly work hour limits.
+    Returns users whose total weekly hours exceed the configured threshold.
+    """
+    return await attendance_service.get_overtime_alerts(
+        db,
+        organization_id=current_user.organization_id,
+        store_id=UUID(store_id) if store_id else None,
+        week_date=week_date,
+    )
