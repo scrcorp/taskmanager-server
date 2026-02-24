@@ -285,6 +285,81 @@ class NotificationService:
 
         return notifications
 
+    async def create_for_attendance_correction(
+        self,
+        db: AsyncSession,
+        attendance_id: UUID,
+        organization_id: UUID,
+        corrected_by: UUID,
+        field_name: str,
+    ) -> list[Notification]:
+        """근태 수정 시 GM 이상 사용자에게 알림을 자동 생성합니다.
+
+        Auto-create notifications for GM+ users when an attendance record is corrected.
+        """
+        message: str = f"근태 기록이 수정되었습니다: {field_name} (Attendance corrected: {field_name})"
+
+        gm_result = await db.execute(
+            select(User.id)
+            .join(Role, User.role_id == Role.id)
+            .where(User.organization_id == organization_id)
+            .where(User.is_active.is_(True))
+            .where(Role.level <= 20)
+            .where(User.id != corrected_by)
+        )
+        gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
+
+        notifications: list[Notification] = []
+        for uid in gm_ids:
+            notification: Notification = await notification_repository.create_notification(
+                db,
+                organization_id=organization_id,
+                user_id=uid,
+                notification_type="attendance_corrected",
+                message=message,
+                reference_type="attendance",
+                reference_id=attendance_id,
+            )
+            notifications.append(notification)
+        return notifications
+
+    async def create_for_substitute(
+        self,
+        db: AsyncSession,
+        schedule: Schedule,
+        old_user_id: UUID,
+        new_user_id: UUID,
+    ) -> list[Notification]:
+        """대타 처리 시 기존 담당자와 새 담당자에게 알림을 자동 생성합니다.
+
+        Auto-create notifications for old and new users on schedule substitution.
+        """
+        notifications: list[Notification] = []
+
+        old_msg = f"대타 처리됨: {schedule.work_date} 스케줄 변경 (Substituted out: {schedule.work_date})"
+        notifications.append(await notification_repository.create_notification(
+            db,
+            organization_id=schedule.organization_id,
+            user_id=old_user_id,
+            notification_type="schedule_substitute",
+            message=old_msg,
+            reference_type="schedule",
+            reference_id=schedule.id,
+        ))
+
+        new_msg = f"대타 배정됨: {schedule.work_date} 스케줄 배정 (Substituted in: {schedule.work_date})"
+        notifications.append(await notification_repository.create_notification(
+            db,
+            organization_id=schedule.organization_id,
+            user_id=new_user_id,
+            notification_type="schedule_substitute",
+            message=new_msg,
+            reference_type="schedule",
+            reference_id=schedule.id,
+        ))
+
+        return notifications
+
 
 # 싱글턴 인스턴스 — Singleton instance
 notification_service: NotificationService = NotificationService()

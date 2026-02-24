@@ -590,6 +590,11 @@ class ScheduleService:
 
         await db.flush()
         await db.refresh(schedule)
+
+        # 대타 알림 — Notify old and new users about substitution
+        from app.services.notification_service import notification_service
+        await notification_service.create_for_substitute(db, schedule, old_user_id, new_user_id)
+
         return schedule
 
     async def validate_overtime(
