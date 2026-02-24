@@ -64,6 +64,9 @@ from app.api.admin.labor_law import router as labor_law_router
 # Phase 7 — Evaluation 라우터 임포트
 from app.api.admin.evaluations import router as evaluations_router
 
+# Phase 8 — Dashboard 라우터 임포트
+from app.api.admin.dashboard import router as dashboard_router
+
 admin_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -121,3 +124,9 @@ admin_router.include_router(labor_law_router, tags=["Labor Law"])
 # ---------------------------------------------------------------------------
 # 평가: /evaluations 하위 (Evaluation templates & evaluations)
 admin_router.include_router(evaluations_router, prefix="/evaluations", tags=["Evaluations"])
+
+# ---------------------------------------------------------------------------
+# Phase 8 라우터 등록 — Register Phase 8 (Dashboard) routers
+# ---------------------------------------------------------------------------
+# 대시보드: /dashboard 하위 (Dashboard aggregation APIs)
+admin_router.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
