@@ -96,10 +96,10 @@ async def admin_setup(
 
     # 기본 역할 4개 생성 — Create 4 default roles
     admin_role: Role | None = None
-    for name, level in [("owner", 1), ("general_manager", 2), ("supervisor", 3), ("staff", 4)]:
+    for name, level in [("owner", 10), ("general_manager", 20), ("supervisor", 30), ("staff", 40)]:
         role = Role(organization_id=org.id, name=name, level=level)
         db.add(role)
-        if level == 1:
+        if level == 10:
             admin_role = role
     await db.flush()
 

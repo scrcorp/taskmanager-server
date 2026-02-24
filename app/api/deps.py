@@ -117,9 +117,9 @@ def require_level(max_level: int) -> Callable[..., Awaitable[User]]:
 
 
 # 편의 의존성 — Pre-configured level dependencies for common role requirements
-require_owner = require_level(1)       # Owner만 허용 (Owner only, level 1)
-require_gm = require_level(2)          # Owner + GM 허용 (Owner + General Manager, level <= 2)
-require_supervisor = require_level(3)  # Owner + GM + Supervisor 허용 (Level <= 3)
+require_owner = require_level(10)       # Owner만 허용 (Owner only, level 10)
+require_gm = require_level(20)          # Owner + GM 허용 (Owner + General Manager, level <= 20)
+require_supervisor = require_level(30)  # Owner + GM + Supervisor 허용 (Level <= 30)
 
 
 async def get_accessible_store_ids(
@@ -138,7 +138,7 @@ async def get_accessible_store_ids(
         list[UUID] | None: 매장 ID 목록 또는 None (전체 접근)
                            (Store ID list, or None for full access)
     """
-    if user.role.level <= 1:
+    if user.role.level <= 10:
         return None
     from app.repositories.user_repository import user_repository
     return await user_repository.get_user_store_ids(db, user.id)

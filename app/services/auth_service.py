@@ -166,7 +166,7 @@ class AuthService:
         role: Role = user.role
 
         # 스태프 계정은 관리자 로그인 불가 — Staff accounts cannot use admin login
-        if role.level >= 4:
+        if role.level >= 40:
             raise ForbiddenError("Staff accounts cannot access admin endpoints")
 
         return await self._generate_tokens(db, user, role)
@@ -245,11 +245,11 @@ class AuthService:
         if existing is not None:
             raise DuplicateError("Username already exists")
 
-        # 스태프 역할 조회 (level = 4) — Find staff role (level 4)
+        # 스태프 역할 조회 (level = 40) — Find staff role (level 40)
         roles: list[Role] = await role_repository.get_by_org(db, organization_id)
         staff_role: Role | None = None
         for r in roles:
-            if r.level == 4:
+            if r.level == 40:
                 staff_role = r
                 break
 
