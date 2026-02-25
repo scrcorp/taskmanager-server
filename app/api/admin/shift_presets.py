@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import check_store_access, require_gm, require_supervisor
+from app.api.deps import check_store_access, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.shift_preset import ShiftPresetCreate, ShiftPresetResponse, ShiftPresetUpdate
@@ -23,7 +23,7 @@ router: APIRouter = APIRouter()
 async def list_shift_presets(
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("stores:read"))],
 ) -> list[ShiftPresetResponse]:
     await check_store_access(db, current_user, store_id)
     return await shift_preset_service.list_presets(db, store_id)
@@ -34,7 +34,7 @@ async def create_shift_preset(
     store_id: UUID,
     data: ShiftPresetCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("stores:create"))],
 ) -> ShiftPresetResponse:
     await check_store_access(db, current_user, store_id)
     result = await shift_preset_service.create_preset(db, current_user.organization_id, store_id, data)
@@ -47,7 +47,7 @@ async def update_shift_preset(
     preset_id: UUID,
     data: ShiftPresetUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> ShiftPresetResponse:
     result = await shift_preset_service.update_preset(db, preset_id, current_user.organization_id, data)
     await db.commit()
@@ -58,7 +58,7 @@ async def update_shift_preset(
 async def delete_shift_preset(
     preset_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("stores:delete"))],
 ) -> None:
     await shift_preset_service.delete_preset(db, preset_id, current_user.organization_id)
     await db.commit()

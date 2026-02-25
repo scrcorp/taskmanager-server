@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_owner
+from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.organization import OrganizationResponse, OrganizationUpdate
@@ -22,7 +22,7 @@ router: APIRouter = APIRouter()
 @router.get("/me", response_model=OrganizationResponse)
 async def get_current_organization(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_owner)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> OrganizationResponse:
     """현재 조직 정보를 조회합니다.
 
@@ -36,7 +36,7 @@ async def get_current_organization(
 async def update_current_organization(
     data: OrganizationUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_owner)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> OrganizationResponse:
     """현재 조직 정보를 수정합니다.
 

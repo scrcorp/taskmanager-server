@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_supervisor
+from app.api.deps import get_current_user, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse, NotificationResponse, PaginatedResponse
@@ -22,7 +22,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=PaginatedResponse)
 async def list_notifications(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("dashboard:read"))],
     page: int = 1,
     per_page: int = 20,
 ) -> dict:
@@ -70,7 +70,7 @@ async def list_notifications(
 @router.get("/unread-count")
 async def get_unread_count(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("dashboard:read"))],
 ) -> dict:
     """관리자의 읽지 않은 알림 수를 조회합니다.
 
@@ -91,7 +91,7 @@ async def get_unread_count(
 async def mark_read(
     notification_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("dashboard:read"))],
 ) -> dict:
     """단일 알림을 읽음 처리합니다.
 
@@ -123,7 +123,7 @@ async def mark_read(
 @router.patch("/read-all", response_model=MessageResponse)
 async def mark_all_read(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("dashboard:read"))],
 ) -> dict:
     """모든 읽지 않은 알림을 읽음 처리합니다.
 

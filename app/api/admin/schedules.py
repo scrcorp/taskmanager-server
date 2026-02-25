@@ -12,7 +12,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_gm, require_supervisor
+from app.api.deps import get_current_user, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
@@ -32,7 +32,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=PaginatedResponse)
 async def list_schedules(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
     store_id: Annotated[str | None, Query()] = None,
     user_id: Annotated[str | None, Query()] = None,
     work_date: Annotated[date | None, Query()] = None,
@@ -97,7 +97,7 @@ async def list_schedules(
 async def get_schedule(
     schedule_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """스케줄 상세를 조회합니다.
 
@@ -125,7 +125,7 @@ async def get_schedule(
 async def create_schedule(
     data: ScheduleCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """새 스케줄 초안을 생성합니다.
 
@@ -156,7 +156,7 @@ async def update_schedule(
     schedule_id: UUID,
     data: ScheduleUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """스케줄을 수정합니다.
 
@@ -189,7 +189,7 @@ async def update_schedule(
 async def submit_schedule(
     schedule_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """스케줄을 승인 요청합니다 (draft → pending).
 
@@ -218,7 +218,7 @@ async def submit_schedule(
 async def approve_schedule(
     schedule_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("schedules:create"))],
 ) -> dict:
     """스케줄을 승인하고 work_assignment를 자동 생성합니다.
 
@@ -248,7 +248,7 @@ async def approve_schedule(
 async def cancel_schedule(
     schedule_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """스케줄을 취소합니다.
 
@@ -280,7 +280,7 @@ async def substitute_schedule(
     schedule_id: UUID,
     data: ScheduleSubstituteRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> dict:
     """대타 처리 — 승인된 스케줄의 담당자를 변경합니다. Owner + GM만 가능.
 
@@ -303,7 +303,7 @@ async def substitute_schedule(
 async def validate_overtime(
     data: OvertimeValidateRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """초과근무 사전 검증 — 스케줄 생성 전 주간 근무시간 초과 여부를 확인합니다.
 

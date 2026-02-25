@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_gm, require_supervisor
+from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
@@ -28,7 +28,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=PaginatedResponse)
 async def list_attendances(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
     store_id: Annotated[str | None, Query()] = None,
     user_id: Annotated[str | None, Query()] = None,
     work_date: Annotated[date | None, Query()] = None,
@@ -84,7 +84,7 @@ async def list_attendances(
 async def get_attendance(
     attendance_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """근태 기록 상세를 조회합니다 (수정 이력 포함).
 
@@ -121,7 +121,7 @@ async def correct_attendance(
     attendance_id: UUID,
     data: AttendanceCorrectionRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> dict:
     """근태 기록을 수정합니다 (GM+ 전용).
 
@@ -153,7 +153,7 @@ async def correct_attendance(
 @router.get("/weekly-summary")
 async def get_weekly_summary(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
     user_id: Annotated[str | None, Query()] = None,
     store_id: Annotated[str | None, Query()] = None,
     week_date: Annotated[date | None, Query()] = None,
@@ -174,7 +174,7 @@ async def get_weekly_summary(
 @router.get("/overtime-alerts")
 async def get_overtime_alerts(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
     store_id: Annotated[str | None, Query()] = None,
     week_date: Annotated[date | None, Query()] = None,
 ) -> list[dict]:

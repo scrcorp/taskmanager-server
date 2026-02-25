@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_gm, require_supervisor
+from app.api.deps import require_permission
 from app.database import get_db
 from app.models.communication import AnnouncementRead
 from app.models.user import User
@@ -35,7 +35,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=PaginatedResponse)
 async def list_announcements(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("announcements:read"))],
     page: int = 1,
     per_page: int = 20,
 ) -> dict:
@@ -67,7 +67,7 @@ async def list_announcements(
 async def get_announcement(
     announcement_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("announcements:read"))],
 ) -> dict:
     """공지사항 상세를 조회합니다.
 
@@ -85,7 +85,7 @@ async def get_announcement(
 async def create_announcement(
     data: AnnouncementCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("announcements:create"))],
 ) -> dict:
     """새 공지사항을 생성합니다. Owner + GM만 가능.
 
@@ -107,7 +107,7 @@ async def update_announcement(
     announcement_id: UUID,
     data: AnnouncementUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("announcements:update"))],
 ) -> dict:
     """공지사항을 업데이트합니다. Owner + GM만 가능.
 
@@ -128,7 +128,7 @@ async def update_announcement(
 async def delete_announcement(
     announcement_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("announcements:delete"))],
 ) -> dict:
     """공지사항을 삭제합니다. Owner + GM만 가능.
 
@@ -148,7 +148,7 @@ async def delete_announcement(
 async def get_announcement_reads(
     announcement_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("announcements:read"))],
 ) -> list[AnnouncementReadResponse]:
     """공지사항 읽음 현황을 조회합니다. Owner + GM만 가능."""
     query = (

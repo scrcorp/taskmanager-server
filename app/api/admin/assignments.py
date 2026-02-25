@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_supervisor
+from app.api.deps import get_current_user, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
@@ -29,7 +29,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=PaginatedResponse)
 async def list_assignments(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
     store_id: Annotated[str | None, Query()] = None,
     user_id: Annotated[str | None, Query()] = None,
     work_date: Annotated[date | None, Query()] = None,
@@ -92,7 +92,7 @@ async def list_assignments(
 @router.get("/recent-users")
 async def list_recent_users(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
     store_id: Annotated[str, Query()],
     exclude_date: Annotated[date | None, Query()] = None,
     days: Annotated[int, Query(ge=1, le=90)] = 30,
@@ -129,7 +129,7 @@ async def list_recent_users(
 async def get_assignment(
     assignment_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """업무 배정 상세를 조회합니다.
 
@@ -156,7 +156,7 @@ async def get_assignment(
 async def create_assignment(
     data: AssignmentCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """새 업무 배정을 생성합니다.
 
@@ -185,7 +185,7 @@ async def create_assignment(
 async def bulk_create_assignments(
     data: list[AssignmentCreate],
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> list[dict]:
     """여러 업무 배정을 일괄 생성합니다.
 
@@ -219,7 +219,7 @@ async def bulk_create_assignments(
 async def delete_assignment(
     assignment_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """업무 배정을 삭제합니다.
 

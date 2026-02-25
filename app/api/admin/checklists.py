@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from io import BytesIO
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import check_store_access, get_accessible_store_ids, require_gm, require_supervisor
+from app.api.deps import check_store_access, get_accessible_store_ids, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
@@ -46,7 +46,7 @@ router: APIRouter = APIRouter()
 )
 async def list_all_templates(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
     store_id: Annotated[str | None, Query()] = None,
     shift_id: Annotated[str | None, Query()] = None,
     position_id: Annotated[str | None, Query()] = None,
@@ -101,7 +101,7 @@ async def list_all_templates(
 async def list_templates(
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
     shift_id: Annotated[str | None, Query()] = None,
     position_id: Annotated[str | None, Query()] = None,
 ) -> list[dict]:
@@ -146,7 +146,7 @@ async def list_templates(
 )
 async def import_from_excel(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:create"))],
     file: UploadFile = File(...),
     duplicate_action: Annotated[str, Query()] = "skip",
 ) -> dict:
@@ -175,7 +175,7 @@ async def import_from_excel(
     "/checklist-templates/import/sample",
 )
 async def download_sample_excel(
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
 ) -> StreamingResponse:
     """샘플 Excel 템플릿을 다운로드합니다.
 
@@ -196,7 +196,7 @@ async def download_sample_excel(
 async def get_template(
     template_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
 ) -> dict:
     """체크리스트 템플릿 상세를 조회합니다.
 
@@ -227,7 +227,7 @@ async def create_template(
     store_id: UUID,
     data: ChecklistTemplateCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:create"))],
 ) -> dict:
     """새 체크리스트 템플릿을 생성합니다. Owner + GM (담당 매장).
 
@@ -261,7 +261,7 @@ async def update_template(
     template_id: UUID,
     data: ChecklistTemplateUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:update"))],
 ) -> dict:
     """체크리스트 템플릿을 업데이트합니다. Owner + GM.
 
@@ -301,7 +301,7 @@ async def update_template(
 async def delete_template(
     template_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:delete"))],
 ) -> dict:
     """체크리스트 템플릿을 삭제합니다. Owner + GM.
 
@@ -327,7 +327,7 @@ async def delete_template(
 async def list_items(
     template_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
 ) -> list[dict]:
     """템플릿의 체크리스트 항목 목록을 조회합니다.
 
@@ -362,7 +362,7 @@ async def create_item(
     template_id: UUID,
     data: ChecklistItemCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:create"))],
 ) -> dict:
     """템플릿에 새 항목을 추가합니다. Owner + GM.
 
@@ -396,7 +396,7 @@ async def create_items_bulk(
     template_id: UUID,
     data: ChecklistBulkItemCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:create"))],
 ) -> list[dict]:
     """템플릿에 여러 항목을 일괄 추가합니다. Owner + GM.
 
@@ -432,7 +432,7 @@ async def update_item(
     item_id: UUID,
     data: ChecklistItemUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:update"))],
 ) -> dict:
     """체크리스트 항목을 업데이트합니다. Owner + GM.
 
@@ -465,7 +465,7 @@ async def reorder_items(
     item_id: UUID,
     data: ReorderRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:update"))],
 ) -> dict:
     """체크리스트 항목의 정렬 순서를 재배치합니다. Owner + GM.
 
@@ -489,7 +489,7 @@ async def reorder_items(
 async def delete_item(
     item_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:delete"))],
 ) -> dict:
     """체크리스트 항목을 삭제합니다. Owner + GM.
 

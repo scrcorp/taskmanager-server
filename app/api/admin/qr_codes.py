@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_gm
+from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import QRCodeResponse
@@ -24,7 +24,7 @@ router: APIRouter = APIRouter()
 async def create_qr_code(
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("schedules:create"))],
 ) -> dict:
     """매장의 QR 코드를 생성합니다 (GM+ 전용). 기존 활성 QR은 비활성화됩니다.
 
@@ -53,7 +53,7 @@ async def create_qr_code(
 async def get_store_qr_code(
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> dict:
     """매장의 활성 QR 코드를 조회합니다 (GM+ 전용).
 
@@ -81,7 +81,7 @@ async def get_store_qr_code(
 async def regenerate_qr_code(
     qr_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("schedules:create"))],
 ) -> dict:
     """QR 코드를 재생성합니다 (GM+ 전용). 기존 QR은 비활성화되고 새 QR이 생성됩니다.
 

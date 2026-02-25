@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_gm
+from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.user import RoleCreate, RoleResponse, RoleUpdate
@@ -22,7 +22,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=list[RoleResponse])
 async def list_roles(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("roles:read"))],
 ) -> list[RoleResponse]:
     """역할 목록을 조회합니다.
 
@@ -36,7 +36,7 @@ async def list_roles(
 async def create_role(
     data: RoleCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("roles:create"))],
 ) -> RoleResponse:
     """새 역할을 생성합니다.
 
@@ -44,7 +44,7 @@ async def create_role(
     """
     org_id: UUID = current_user.organization_id
     result: RoleResponse = await role_service.create_role(
-        db, org_id, data, caller_level=current_user.role.level
+        db, org_id, data, caller_priority=current_user.role.priority
     )
     await db.commit()
     return result
@@ -55,7 +55,7 @@ async def update_role(
     role_id: UUID,
     data: RoleUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("roles:update"))],
 ) -> RoleResponse:
     """역할 정보를 수정합니다.
 
@@ -63,7 +63,7 @@ async def update_role(
     """
     org_id: UUID = current_user.organization_id
     result: RoleResponse = await role_service.update_role(
-        db, role_id, org_id, data, caller_level=current_user.role.level
+        db, role_id, org_id, data, caller_priority=current_user.role.priority
     )
     await db.commit()
     return result
@@ -73,12 +73,12 @@ async def update_role(
 async def delete_role(
     role_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("roles:delete"))],
 ) -> None:
     """역할을 삭제합니다.
 
     Delete a role by its ID.
     """
     org_id: UUID = current_user.organization_id
-    await role_service.delete_role(db, role_id, org_id, caller_level=current_user.role.level)
+    await role_service.delete_role(db, role_id, org_id, caller_priority=current_user.role.priority)
     await db.commit()

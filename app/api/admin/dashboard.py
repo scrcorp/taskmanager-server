@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_gm, require_supervisor
+from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.services.dashboard_service import dashboard_service
@@ -27,7 +27,7 @@ router: APIRouter = APIRouter()
 @router.get("/checklist-completion")
 async def get_checklist_completion(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("dashboard:read"))],
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
     store_id: Annotated[str | None, Query()] = None,
@@ -45,7 +45,7 @@ async def get_checklist_completion(
 @router.get("/attendance-summary")
 async def get_attendance_summary(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("dashboard:read"))],
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
     store_id: Annotated[str | None, Query()] = None,
@@ -63,7 +63,7 @@ async def get_attendance_summary(
 @router.get("/overtime-summary")
 async def get_overtime_summary(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("dashboard:read"))],
     week_date: Annotated[date | None, Query()] = None,
     store_id: Annotated[str | None, Query()] = None,
 ) -> dict:
@@ -79,7 +79,7 @@ async def get_overtime_summary(
 @router.get("/export")
 async def export_dashboard(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("dashboard:read"))],
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
     store_id: Annotated[str | None, Query()] = None,
@@ -102,7 +102,7 @@ async def export_dashboard(
 @router.get("/evaluation-summary")
 async def get_evaluation_summary(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("dashboard:read"))],
 ) -> dict:
     """평가 요약 조회 — 전체 평가 통계."""
     return await dashboard_service.get_evaluation_summary(

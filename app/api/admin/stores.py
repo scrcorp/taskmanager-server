@@ -17,8 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import (
     check_store_access,
     get_accessible_store_ids,
-    require_owner,
-    require_supervisor,
+    require_permission,
 )
 from app.database import get_db
 from app.models.user import User
@@ -36,7 +35,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=list[StoreResponse])
 async def list_stores(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("stores:read"))],
 ) -> list[StoreResponse]:
     """매장 목록을 조회합니다. Owner=전체, GM=담당 매장, SV=소속 매장.
 
@@ -51,7 +50,7 @@ async def list_stores(
 async def get_store(
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("stores:read"))],
 ) -> StoreDetailResponse:
     """매장 상세 정보를 조회합니다 (근무조/직책 포함). 담당 매장만 접근 가능.
 
@@ -66,7 +65,7 @@ async def get_store(
 async def create_store(
     data: StoreCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_owner)],
+    current_user: Annotated[User, Depends(require_permission("stores:create"))],
 ) -> StoreResponse:
     """새 매장을 생성합니다. Owner만 가능.
 
@@ -83,7 +82,7 @@ async def update_store(
     store_id: UUID,
     data: StoreUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_owner)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> StoreResponse:
     """매장 정보를 수정합니다. Owner만 가능.
 
@@ -99,7 +98,7 @@ async def update_store(
 async def delete_store(
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_owner)],
+    current_user: Annotated[User, Depends(require_permission("stores:delete"))],
 ) -> None:
     """매장을 삭제합니다. Owner만 가능.
 

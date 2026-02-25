@@ -14,7 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import check_store_access, require_gm, require_supervisor
+from app.api.deps import check_store_access, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.work import ShiftCreate, ShiftResponse, ShiftUpdate
@@ -30,7 +30,7 @@ router: APIRouter = APIRouter()
 async def list_shifts(
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("stores:read"))],
 ) -> list[ShiftResponse]:
     """매장에 속한 근무조 목록을 조회합니다. 담당/소속 매장만 접근 가능.
 
@@ -50,7 +50,7 @@ async def create_shift(
     store_id: UUID,
     data: ShiftCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("stores:create"))],
 ) -> ShiftResponse:
     """새 근무조를 생성합니다. Owner + GM (담당 매장).
 
@@ -74,7 +74,7 @@ async def update_shift(
     shift_id: UUID,
     data: ShiftUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> ShiftResponse:
     """근무조 정보를 수정합니다. Owner + GM (담당 매장).
 
@@ -97,7 +97,7 @@ async def delete_shift(
     store_id: UUID,
     shift_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("stores:delete"))],
 ) -> None:
     """근무조를 삭제합니다. Owner + GM (담당 매장).
 

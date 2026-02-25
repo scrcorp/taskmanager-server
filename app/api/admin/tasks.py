@@ -14,7 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_accessible_store_ids, require_gm, require_supervisor
+from app.api.deps import get_accessible_store_ids, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
@@ -34,7 +34,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=PaginatedResponse)
 async def list_tasks(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("tasks:read"))],
     store_id: Annotated[str | None, Query()] = None,
     status: Annotated[str | None, Query()] = None,
     priority: Annotated[str | None, Query()] = None,
@@ -80,7 +80,7 @@ async def list_tasks(
 async def get_task(
     task_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("tasks:read"))],
 ) -> dict:
     """추가 업무 상세를 조회합니다.
 
@@ -98,7 +98,7 @@ async def get_task(
 async def create_task(
     data: TaskCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("tasks:create"))],
 ) -> dict:
     """새 추가 업무를 생성합니다. Owner + GM만 가능.
 
@@ -126,7 +126,7 @@ async def update_task(
     task_id: UUID,
     data: TaskUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("tasks:update"))],
 ) -> dict:
     """추가 업무를 업데이트합니다. Owner + GM만 가능.
 
@@ -153,7 +153,7 @@ async def update_task(
 async def delete_task(
     task_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("tasks:delete"))],
 ) -> dict:
     """추가 업무를 삭제합니다. Owner + GM만 가능.
 
@@ -173,7 +173,7 @@ async def delete_task(
 async def list_task_evidences(
     task_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("tasks:read"))],
 ) -> list[dict]:
     """특정 업무의 증빙 목록을 조회합니다. SV 이상만 가능.
 

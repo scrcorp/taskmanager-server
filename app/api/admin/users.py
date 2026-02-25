@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_gm, require_supervisor
+from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse
@@ -30,7 +30,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=list[UserListResponse])
 async def list_users(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("users:read"))],
     store_id: Annotated[UUID | None, Query(description="매장 ID 필터")] = None,
     role_id: Annotated[UUID | None, Query(description="역할 ID 필터")] = None,
     is_active: Annotated[bool | None, Query(description="활성 상태 필터")] = None,
@@ -52,7 +52,7 @@ async def list_users(
 async def get_user(
     user_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("users:read"))],
 ) -> UserResponse:
     """사용자 상세 정보를 조회합니다.
 
@@ -66,7 +66,7 @@ async def get_user(
 async def create_user(
     data: UserCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("users:read"))],
 ) -> UserResponse:
     """새 사용자를 생성합니다.
 
@@ -86,7 +86,7 @@ async def update_user(
     user_id: UUID,
     data: UserUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
 ) -> UserResponse:
     """사용자 정보를 수정합니다.
 
@@ -104,7 +104,7 @@ async def update_user(
 async def toggle_user_active(
     user_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
 ) -> UserResponse:
     """사용자 활성/비활성 상태를 토글합니다.
 
@@ -120,7 +120,7 @@ async def toggle_user_active(
 async def delete_user(
     user_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("users:delete"))],
 ) -> dict[str, str]:
     """사용자를 삭제합니다 (소프트 삭제: is_active=False 처리).
 
@@ -145,7 +145,7 @@ async def delete_user(
 async def get_user_stores(
     user_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("users:read"))],
 ) -> list[StoreResponse]:
     """사용자에게 배정된 매장 목록을 조회합니다.
 
@@ -160,7 +160,7 @@ async def add_user_store(
     user_id: UUID,
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("users:create"))],
 ) -> dict[str, str]:
     """사용자에게 매장을 배정합니다.
 
@@ -179,7 +179,7 @@ async def remove_user_store(
     user_id: UUID,
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("users:delete"))],
 ) -> None:
     """사용자에게서 매장 배정을 해제합니다.
 

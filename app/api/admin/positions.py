@@ -14,7 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import check_store_access, require_gm, require_supervisor
+from app.api.deps import check_store_access, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.work import PositionCreate, PositionResponse, PositionUpdate
@@ -30,7 +30,7 @@ router: APIRouter = APIRouter()
 async def list_positions(
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("stores:read"))],
 ) -> list[PositionResponse]:
     """매장에 속한 직책 목록을 조회합니다. 담당/소속 매장만 접근 가능.
 
@@ -50,7 +50,7 @@ async def create_position(
     store_id: UUID,
     data: PositionCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("stores:create"))],
 ) -> PositionResponse:
     """새 직책을 생성합니다. Owner + GM (담당 매장).
 
@@ -74,7 +74,7 @@ async def update_position(
     position_id: UUID,
     data: PositionUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> PositionResponse:
     """직책 정보를 수정합니다. Owner + GM (담당 매장).
 
@@ -97,7 +97,7 @@ async def delete_position(
     store_id: UUID,
     position_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("stores:delete"))],
 ) -> None:
     """직책을 삭제합니다. Owner + GM (담당 매장).
 

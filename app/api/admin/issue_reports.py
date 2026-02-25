@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_gm, require_supervisor
+from app.api.deps import get_current_user, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse, PaginatedResponse
@@ -23,7 +23,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=PaginatedResponse)
 async def list_issue_reports(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("tasks:read"))],
     status: str | None = Query(None),
     page: int = 1,
     per_page: int = 20,
@@ -40,7 +40,7 @@ async def list_issue_reports(
 async def get_issue_report(
     report_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("tasks:read"))],
 ) -> dict:
     """이슈 리포트 상세 조회."""
     report = await issue_report_service.get_detail(db, report_id, current_user.organization_id)
@@ -66,7 +66,7 @@ async def update_issue_report(
     report_id: UUID,
     data: IssueReportUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("tasks:update"))],
 ) -> dict:
     """이슈 리포트 수정. GM+ 가능."""
     report = await issue_report_service.update_report(
@@ -80,7 +80,7 @@ async def update_issue_report(
 async def delete_issue_report(
     report_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("tasks:delete"))],
 ) -> dict:
     """이슈 리포트 삭제. GM+ 가능."""
     await issue_report_service.delete_report(db, report_id, current_user.organization_id)

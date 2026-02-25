@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
-from app.api.deps import require_gm, require_supervisor
+from app.api.deps import require_permission
 from app.database import get_db
 from app.models.checklist import ChecklistComment
 from app.models.user import User
@@ -31,7 +31,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=PaginatedResponse)
 async def list_checklist_instances(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
     store_id: Annotated[str | None, Query()] = None,
     user_id: Annotated[str | None, Query()] = None,
     work_date: Annotated[date | None, Query()] = None,
@@ -86,7 +86,7 @@ async def list_checklist_instances(
 @router.get("/checklist-audit")
 async def get_checklist_audit(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
     store_id: Annotated[str | None, Query()] = None,
     user_id: Annotated[str | None, Query()] = None,
     date_from: Annotated[date | None, Query()] = None,
@@ -138,7 +138,7 @@ async def get_checklist_audit(
 async def get_checklist_instance(
     instance_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
 ) -> dict:
     """체크리스트 인스턴스 상세를 조회합니다 (스냅샷 + 완료 기록 병합).
 
@@ -165,7 +165,7 @@ async def get_checklist_instance(
 async def list_comments(
     instance_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
 ) -> list[ChecklistCommentResponse]:
     """체크리스트 인스턴스의 코멘트 목록을 조회합니다."""
     query = (
@@ -196,7 +196,7 @@ async def create_comment(
     instance_id: UUID,
     data: ChecklistCommentCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
 ) -> ChecklistCommentResponse:
     """체크리스트 인스턴스에 코멘트를 추가합니다."""
     comment = ChecklistComment(

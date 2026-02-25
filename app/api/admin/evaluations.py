@@ -14,7 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_gm, require_supervisor
+from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse, PaginatedResponse
@@ -35,7 +35,7 @@ router: APIRouter = APIRouter()
 @router.get("/templates", response_model=PaginatedResponse)
 async def list_templates(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("evaluations:read"))],
     page: int = 1,
     per_page: int = 20,
 ) -> dict:
@@ -51,7 +51,7 @@ async def list_templates(
 async def get_template(
     template_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("evaluations:read"))],
 ) -> dict:
     """평가 템플릿 상세를 조회합니다."""
     template = await evaluation_service.get_template(
@@ -64,7 +64,7 @@ async def get_template(
 async def create_template(
     data: EvalTemplateCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("evaluations:create"))],
 ) -> dict:
     """새 평가 템플릿을 생성합니다. Owner + GM만 가능."""
     template = await evaluation_service.create_template(
@@ -79,7 +79,7 @@ async def update_template(
     template_id: UUID,
     data: EvalTemplateUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("evaluations:update"))],
 ) -> dict:
     """평가 템플릿을 수정합니다. Owner + GM만 가능."""
     template = await evaluation_service.update_template(
@@ -93,7 +93,7 @@ async def update_template(
 async def delete_template(
     template_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("evaluations:delete"))],
 ) -> dict:
     """평가 템플릿을 삭제합니다. Owner + GM만 가능."""
     await evaluation_service.delete_template(
@@ -108,7 +108,7 @@ async def delete_template(
 @router.get("", response_model=PaginatedResponse)
 async def list_evaluations(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("evaluations:read"))],
     evaluator_id: Annotated[str | None, Query()] = None,
     evaluatee_id: Annotated[str | None, Query()] = None,
     status: Annotated[str | None, Query()] = None,
@@ -135,7 +135,7 @@ async def list_evaluations(
 async def get_evaluation(
     evaluation_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("evaluations:read"))],
 ) -> dict:
     """평가 상세를 조회합니다."""
     evaluation = await evaluation_service.get_evaluation(
@@ -148,7 +148,7 @@ async def get_evaluation(
 async def create_evaluation(
     data: EvaluationCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("evaluations:read"))],
 ) -> dict:
     """새 평가를 생성합니다. 방향 검증: 상위→하위."""
     evaluation = await evaluation_service.create_evaluation(
@@ -165,7 +165,7 @@ async def create_evaluation(
 async def submit_evaluation(
     evaluation_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("evaluations:read"))],
 ) -> dict:
     """평가를 제출합니다 (draft → submitted)."""
     evaluation = await evaluation_service.submit_evaluation(

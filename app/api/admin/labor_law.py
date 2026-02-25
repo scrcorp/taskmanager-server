@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import check_store_access, require_gm, require_supervisor
+from app.api.deps import check_store_access, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.labor_law import LaborLawSettingResponse, LaborLawSettingUpdate
@@ -23,7 +23,7 @@ router: APIRouter = APIRouter()
 async def get_labor_law(
     store_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
+    current_user: Annotated[User, Depends(require_permission("stores:read"))],
 ) -> LaborLawSettingResponse | None:
     await check_store_access(db, current_user, store_id)
     return await labor_law_service.get_setting(db, store_id, current_user.organization_id)
@@ -34,7 +34,7 @@ async def upsert_labor_law(
     store_id: UUID,
     data: LaborLawSettingUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> LaborLawSettingResponse:
     await check_store_access(db, current_user, store_id)
     result = await labor_law_service.upsert_setting(db, store_id, current_user.organization_id, data)

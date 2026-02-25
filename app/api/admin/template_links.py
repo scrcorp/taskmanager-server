@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_gm
+from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse, TemplateLinkCreate, TemplateLinkResponse
@@ -27,7 +27,7 @@ router: APIRouter = APIRouter()
 async def create_template_link(
     data: TemplateLinkCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:create"))],
 ) -> dict:
     """체크리스트 템플릿 연결을 생성합니다. Owner + GM."""
     link = await template_link_service.create_link(
@@ -45,7 +45,7 @@ async def create_template_link(
 )
 async def list_template_links(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
     store_id: Annotated[str | None, Query()] = None,
     template_id: Annotated[str | None, Query()] = None,
 ) -> list[dict]:
@@ -66,7 +66,7 @@ async def list_template_links(
 async def delete_template_link(
     link_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_gm)],
+    current_user: Annotated[User, Depends(require_permission("checklists:delete"))],
 ) -> dict:
     """체크리스트 템플릿 연결을 삭제합니다. Owner + GM."""
     await template_link_service.delete_link(
