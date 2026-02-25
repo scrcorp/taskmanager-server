@@ -30,7 +30,7 @@ def create_access_token(data: dict[str, Any]) -> str:
     Token expires after JWT_ACCESS_TOKEN_EXPIRE_MINUTES (default: 30 min).
 
     Args:
-        data: JWT 페이로드 데이터. 일반적으로 {"sub": user_id, "org": org_id, "role": role_name, "level": role_level}
+        data: JWT 페이로드 데이터. 일반적으로 {"sub": user_id, "org": org_id, "role": role_name, "priority": role_priority}
               (JWT payload data, typically contains user/org/role info)
 
     Returns:
