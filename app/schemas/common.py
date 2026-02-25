@@ -649,12 +649,14 @@ class ScheduleCreate(BaseModel):
     Schedule creation request schema.
     Creates a draft schedule for a user at a specific store on a given date.
     Shift and position are optional; start/end times can be provided directly.
+    If preset_id is provided, start_time/end_time are auto-filled from the preset.
 
     Attributes:
         store_id: 대상 매장 UUID (Target store)
         user_id: 배정 대상 사용자 UUID (Worker to schedule)
         shift_id: 시간대 UUID, 선택 (Optional shift)
         position_id: 포지션 UUID, 선택 (Optional position)
+        preset_id: 시프트 프리셋 UUID, 선택 (Optional preset — auto-fills times)
         work_date: 근무 날짜 (Work date)
         start_time: 시작 시각 문자열 "HH:MM", 선택 (Optional start time)
         end_time: 종료 시각 문자열 "HH:MM", 선택 (Optional end time)
@@ -665,6 +667,7 @@ class ScheduleCreate(BaseModel):
     user_id: str  # 배정 대상 사용자 UUID (Worker identifier)
     shift_id: str | None = None  # 시간대 UUID, 선택 (Optional shift identifier)
     position_id: str | None = None  # 포지션 UUID, 선택 (Optional position identifier)
+    preset_id: str | None = None  # 시프트 프리셋 UUID, 선택 (Preset for auto-fill times)
     work_date: date  # 근무 날짜 — 시간 없이 날짜만 (Date only)
     start_time: str | None = None  # 시작 시각 — "09:00" 형식 (Start time, "HH:MM" format)
     end_time: str | None = None  # 종료 시각 — "17:00" 형식 (End time, "HH:MM" format)

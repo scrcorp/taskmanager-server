@@ -12,7 +12,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.organization import Store
+from app.models.organization import ShiftPreset, Store
 from app.models.schedule import Schedule
 from app.models.user import User
 from app.models.work import Position, Shift
@@ -121,9 +121,30 @@ class ScheduleService:
         user_id: UUID = UUID(data.user_id)
         shift_id: UUID | None = UUID(data.shift_id) if data.shift_id else None
         position_id: UUID | None = UUID(data.position_id) if data.position_id else None
+        preset_id: UUID | None = UUID(data.preset_id) if data.preset_id else None
 
         # 매장 소유권 검증 — Verify store ownership
         await self._validate_store_ownership(db, store_id, organization_id)
+
+        # 프리셋 연동 — If preset_id provided, auto-fill shift_id and start/end times
+        start_time: time | None = self._parse_time(data.start_time)
+        end_time: time | None = self._parse_time(data.end_time)
+
+        if preset_id is not None:
+            preset_result = await db.execute(
+                select(ShiftPreset).where(ShiftPreset.id == preset_id)
+            )
+            preset: ShiftPreset | None = preset_result.scalar_one_or_none()
+            if preset is None:
+                raise NotFoundError("Shift preset not found")
+            # Auto-fill shift_id from preset if not explicitly provided
+            if shift_id is None:
+                shift_id = preset.shift_id
+            # Auto-fill start/end times from preset if not explicitly provided
+            if start_time is None:
+                start_time = preset.start_time
+            if end_time is None:
+                end_time = preset.end_time
 
         # 중복 스케줄 검사 — Check for duplicate schedule
         is_duplicate: bool = await schedule_repository.check_duplicate(
@@ -134,10 +155,6 @@ class ScheduleService:
                 "해당 날짜에 동일한 스케줄이 이미 존재합니다 "
                 "(A schedule for this combination on this date already exists)"
             )
-
-        # 시간 파싱 — Parse time strings
-        start_time: time | None = self._parse_time(data.start_time)
-        end_time: time | None = self._parse_time(data.end_time)
 
         schedule: Schedule = await schedule_repository.create(
             db,
