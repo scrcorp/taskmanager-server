@@ -46,7 +46,7 @@ class RoleRepository(BaseRepository[Role]):
         query: Select = (
             select(Role)
             .where(Role.organization_id == organization_id)
-            .order_by(Role.level)
+            .order_by(Role.priority)
         )
         result = await db.execute(query)
         return list(result.scalars().all())
@@ -56,33 +56,17 @@ class RoleRepository(BaseRepository[Role]):
         db: AsyncSession,
         organization_id: UUID,
         name: str,
-        level: int,
+        priority: int,
         exclude_id: UUID | None = None,
     ) -> bool:
-        """같은 조직 내 역할 이름 또는 레벨 중복을 확인합니다.
-
-        Check if a role with the same name or level already exists in the organization.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            organization_id: 조직 ID (Organization UUID)
-            name: 확인할 역할 이름 (Role name to check)
-            level: 확인할 역할 레벨 (Role level to check)
-            exclude_id: 제외할 역할 ID (수정 시 자기 자신 제외)
-                        (Role ID to exclude, for update operations)
-
-        Returns:
-            bool: 중복 존재 여부 (Whether a duplicate exists)
-        """
-        # 같은 조직에서 이름 또는 레벨이 겹치는 역할 검색
-        # Search for roles in the same org with matching name or level
+        """같은 조직 내 역할 이름 또는 priority 중복을 확인합니다."""
         query: Select = (
             select(func.count())
             .select_from(Role)
             .where(
                 and_(
                     Role.organization_id == organization_id,
-                    or_(Role.name == name, Role.level == level),
+                    or_(Role.name == name, Role.priority == priority),
                 )
             )
         )

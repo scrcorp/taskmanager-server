@@ -62,18 +62,46 @@ async def admin_setup(
     db.add(org)
     await db.flush()
 
-    # 기본 역할 4개 생성 — Create 4 default roles
+    # 기본 역할 4개 생성
     admin_role: Role | None = None
-    for name, level in [("owner", 10), ("general_manager", 20), ("supervisor", 30), ("staff", 40)]:
-        role = Role(organization_id=org.id, name=name, level=level)
+    roles_created: list[Role] = []
+    for name, priority in [("owner", 10), ("general_manager", 20), ("supervisor", 30), ("staff", 40)]:
+        role = Role(organization_id=org.id, name=name, priority=priority)
         db.add(role)
-        if level == 10:
+        roles_created.append(role)
+        if priority == 10:
             admin_role = role
     await db.flush()
 
     assert admin_role is not None
 
-    # 관리자 계정 생성 — Create admin user
+    # Permission seed — 기본 permission 할당
+    from app.models.permission import Permission, RolePermission
+    perm_result = await db.execute(select(Permission))
+    all_perms = {p.code: p.id for p in perm_result.scalars().all()}
+
+    gm_excluded = {"stores:create", "stores:delete", "roles:create", "roles:delete"}
+    sv_allowed = {
+        "stores:read", "users:read", "roles:read",
+        "schedules:read", "schedules:create",
+        "announcements:read", "checklists:read", "tasks:read",
+        "evaluations:read", "dashboard:read",
+    }
+
+    for r in roles_created:
+        if r.priority <= 10:
+            codes = list(all_perms.keys())
+        elif r.priority <= 20:
+            codes = [c for c in all_perms if c not in gm_excluded]
+        elif r.priority <= 30:
+            codes = [c for c in all_perms if c in sv_allowed]
+        else:
+            codes = []
+        for code in codes:
+            db.add(RolePermission(role_id=r.id, permission_id=all_perms[code]))
+    await db.flush()
+
+    # 관리자 계정 생성
     user = User(
         organization_id=org.id,
         role_id=admin_role.id,

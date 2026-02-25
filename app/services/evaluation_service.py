@@ -161,21 +161,21 @@ class EvaluationService:
     ) -> None:
         """평가 방향 검증 — 상위 → 하위만 가능."""
         evaluator_result = await db.execute(
-            select(Role.level)
+            select(Role.priority)
             .join(User, User.role_id == Role.id)
             .where(User.id == evaluator_id)
         )
         evaluatee_result = await db.execute(
-            select(Role.level)
+            select(Role.priority)
             .join(User, User.role_id == Role.id)
             .where(User.id == evaluatee_id)
         )
-        evaluator_level = evaluator_result.scalar()
-        evaluatee_level = evaluatee_result.scalar()
+        evaluator_priority = evaluator_result.scalar()
+        evaluatee_priority = evaluatee_result.scalar()
 
-        if evaluator_level is None or evaluatee_level is None:
+        if evaluator_priority is None or evaluatee_priority is None:
             raise NotFoundError("평가자 또는 피평가자를 찾을 수 없습니다")
-        if evaluator_level >= evaluatee_level:
+        if evaluator_priority >= evaluatee_priority:
             raise ForbiddenError(
                 "상위 역할만 하위 역할을 평가할 수 있습니다 "
                 "(Only higher-role users can evaluate lower-role users)"

@@ -90,7 +90,7 @@ class AuthService:
             "sub": str(user.id),
             "org": str(user.organization_id),
             "role": role.name,
-            "level": role.level,
+            "priority": role.priority,
         }
 
     async def _generate_tokens(
@@ -165,9 +165,11 @@ class AuthService:
 
         role: Role = user.role
 
-        # 스태프 계정은 관리자 로그인 불가 — Staff accounts cannot use admin login
-        if role.level >= 40:
-            raise ForbiddenError("Staff accounts cannot access admin endpoints")
+        # permission이 없으면 관리자 로그인 불가
+        from app.repositories.permission_repository import permission_repository
+        user_permissions = await permission_repository.get_permissions_by_role_id(db, user.role_id)
+        if len(user_permissions) == 0:
+            raise ForbiddenError("No admin permissions assigned to this role")
 
         return await self._generate_tokens(db, user, role)
 
@@ -245,11 +247,11 @@ class AuthService:
         if existing is not None:
             raise DuplicateError("Username already exists")
 
-        # 스태프 역할 조회 (level = 40) — Find staff role (level 40)
+        # 스태프 역할 조회 (priority = 40)
         roles: list[Role] = await role_repository.get_by_org(db, organization_id)
         staff_role: Role | None = None
         for r in roles:
-            if r.level == 40:
+            if r.priority == 40:
                 staff_role = r
                 break
 
@@ -370,17 +372,22 @@ class AuthService:
         role: Role = loaded_user.role
         org: Organization = loaded_user.organization
 
+        # permission codes 조회
+        from app.repositories.permission_repository import permission_repository
+        permissions = await permission_repository.get_permissions_by_role_id(db, role.id)
+
         return UserMeResponse(
             id=str(loaded_user.id),
             username=loaded_user.username,
             full_name=loaded_user.full_name,
             email=loaded_user.email,
             role_name=role.name,
-            role_level=role.level,
+            role_priority=role.priority,
             organization_id=str(loaded_user.organization_id),
             organization_name=org.name,
             company_code=org.code,
             is_active=loaded_user.is_active,
+            permissions=sorted(permissions),
         )
 
 

@@ -87,19 +87,20 @@ class UserMeResponse(BaseModel):
         full_name: 실명 (Full display name)
         email: 이메일 (Email, nullable)
         role_name: 역할 이름 (Role name, e.g. "owner")
-        role_level: 역할 레벨 (Role level, 1=highest)
+        role_priority: 역할 우선순위 (10=owner, 40=staff)
         organization_id: 소속 조직 UUID (Organization identifier)
         organization_name: 소속 조직 이름 (Organization name)
         is_active: 활성 상태 (Account active status)
     """
 
-    id: str  # 사용자 UUID 문자열 (User UUID as string)
-    username: str  # 로그인 아이디 (Login username)
-    full_name: str  # 실명 (Full display name)
-    email: str | None  # 이메일 (Email, may be null)
-    role_name: str  # 역할 이름 (Role name, e.g. "owner", "staff")
-    role_level: int  # 역할 레벨 — 1=owner, 4=staff (Permission level)
-    organization_id: str  # 소속 조직 UUID 문자열 (Organization UUID as string)
-    organization_name: str  # 소속 조직 이름 (Organization display name)
-    company_code: str  # 회사 코드 (Organization company code)
-    is_active: bool  # 계정 활성 상태 (Whether the account is active)
+    id: str
+    username: str
+    full_name: str
+    email: str | None
+    role_name: str
+    role_priority: int  # 역할 우선순위 — 10=owner, 40=staff (낮을수록 높은 권한)
+    organization_id: str
+    organization_name: str
+    company_code: str
+    is_active: bool
+    permissions: list[str] = []  # 역할에 할당된 permission code 목록

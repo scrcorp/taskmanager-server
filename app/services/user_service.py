@@ -51,7 +51,7 @@ class UserService:
             full_name=user.full_name,
             email=user.email,
             role_name=role.name,
-            role_level=role.level,
+            role_priority=role.priority,
             is_active=user.is_active,
             created_at=user.created_at,
         )
@@ -73,7 +73,7 @@ class UserService:
             username=user.username,
             full_name=user.full_name,
             role_name=role.name,
-            role_level=role.level,
+            role_priority=role.priority,
             is_active=user.is_active,
         )
 
@@ -172,9 +172,9 @@ class UserService:
         if role is None:
             raise NotFoundError("Role not found")
 
-        # 하위 직급만 생성 가능 — Can only create users with lower authority
-        if caller is not None and role.level <= caller.role.level:
-            raise ForbiddenError("Cannot create a user with a role at or above your level")
+        # 하위 직급만 생성 가능
+        if caller is not None and role.priority <= caller.role.priority:
+            raise ForbiddenError("Cannot create a user with a role at or above your priority")
 
         password_hash: str = hash_password(data.password)
         user: User = await user_repository.create(
@@ -235,9 +235,9 @@ class UserService:
             )
             if role is None:
                 raise NotFoundError("Role not found")
-            # 하위 직급만 지정 가능 — Can only assign lower authority roles
-            if caller is not None and role.level <= caller.role.level:
-                raise ForbiddenError("Cannot assign a role at or above your level")
+            # 하위 직급만 지정 가능
+            if caller is not None and role.priority <= caller.role.priority:
+                raise ForbiddenError("Cannot assign a role at or above your priority")
             update_data["role_id"] = UUID(update_data["role_id"])
 
         user: User | None = await user_repository.update(
@@ -403,12 +403,12 @@ class UserService:
         if user_with_role is None:
             raise NotFoundError("User not found")
 
-        # Staff는 매장 배정 불가 — Staff cannot be assigned to stores
-        if user_with_role.role.level >= 4:
+        # Staff는 매장 배정 불가
+        if user_with_role.role.priority >= 40:
             raise BadRequestError("Staff cannot be assigned to stores")
 
-        # Supervisor는 1개 매장만 — Supervisor can only have one store
-        if user_with_role.role.level == 3:
+        # Supervisor는 1개 매장만
+        if user_with_role.role.priority == 30:
             existing_stores: list[Store] = await user_repository.get_user_stores(db, user_id)
             if len(existing_stores) >= 1:
                 raise BadRequestError("Supervisor can only be assigned to one store")

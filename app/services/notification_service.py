@@ -201,7 +201,7 @@ class NotificationService:
             .join(Role, User.role_id == Role.id)
             .where(User.organization_id == schedule.organization_id)
             .where(User.is_active.is_(True))
-            .where(Role.level <= 20)
+            .where(Role.priority <= 20)
         )
         gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
 
@@ -304,7 +304,7 @@ class NotificationService:
             .join(Role, User.role_id == Role.id)
             .where(User.organization_id == organization_id)
             .where(User.is_active.is_(True))
-            .where(Role.level <= 20)
+            .where(Role.priority <= 20)
             .where(User.id != corrected_by)
         )
         gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
