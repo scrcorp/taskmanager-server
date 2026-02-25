@@ -70,6 +70,9 @@ from app.api.admin.dashboard import router as dashboard_router
 # Phase 9 — Template Links 라우터 임포트
 from app.api.admin.template_links import router as template_links_router
 
+# Phase 10 — Issue Reports 라우터 임포트
+from app.api.admin.issue_reports import router as issue_reports_router
+
 admin_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -139,3 +142,8 @@ admin_router.include_router(dashboard_router, prefix="/dashboard", tags=["Dashbo
 # ---------------------------------------------------------------------------
 # 템플릿 연결: /checklist-template-links 하위
 admin_router.include_router(template_links_router, tags=["Checklist Template Links"])
+
+# ---------------------------------------------------------------------------
+# Phase 10 라우터 등록 — Register Phase 10 (Issue Reports) routers
+# ---------------------------------------------------------------------------
+admin_router.include_router(issue_reports_router, prefix="/issue-reports", tags=["Issue Reports"])

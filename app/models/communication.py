@@ -3,13 +3,15 @@
 Communication-related SQLAlchemy ORM model definitions.
 Includes announcements (org-wide or store-specific notices),
 additional tasks (ad-hoc tasks assigned to specific users),
-and task evidences (photo/document attachments for task completion).
+task evidences (photo/document attachments for task completion),
+and issue reports (employee-submitted issue tracking).
 
 Tables:
     - announcements: 공지사항 (Organization or store-level announcements)
     - additional_tasks: 추가 업무 (Ad-hoc tasks with priority and assignees)
     - additional_task_assignees: 추가 업무 담당자 (Task-user assignment junction)
     - task_evidences: 업무 증빙 (Photo/document evidence for task completion)
+    - issue_reports: 이슈 리포트 (Employee-submitted issue reports)
 """
 
 import uuid
@@ -204,3 +206,42 @@ class AnnouncementRead(Base):
     announcement_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("announcements.id", ondelete="CASCADE"), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class IssueReport(Base):
+    """이슈 리포트 모델 — 전 역할 작성 가능한 이슈 보고.
+
+    Issue report model — Issue reports that can be created by any role.
+    Tracks issues with status workflow: open → in_progress → resolved.
+
+    Attributes:
+        id: 고유 식별자 UUID
+        organization_id: 소속 조직 FK
+        store_id: 관련 매장 FK (optional)
+        title: 이슈 제목
+        description: 이슈 상세 설명
+        category: 이슈 유형 (facility, equipment, safety, hr, other)
+        status: 상태 (open, in_progress, resolved)
+        priority: 우선순위 (low, normal, high, urgent)
+        created_by: 작성자 FK
+        resolved_by: 처리자 FK (optional)
+        resolved_at: 처리 완료 일시 (optional)
+        created_at: 생성 일시
+        updated_at: 수정 일시
+    """
+
+    __tablename__ = "issue_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    store_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str] = mapped_column(String(30), default="other")  # facility, equipment, safety, hr, other
+    status: Mapped[str] = mapped_column(String(20), default="open")  # open, in_progress, resolved
+    priority: Mapped[str] = mapped_column(String(20), default="normal")  # low, normal, high, urgent
+    created_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id"), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
