@@ -150,6 +150,37 @@ class ChecklistBulkItemCreate(BaseModel):
     items: list[ChecklistItemCreate] = Field(..., min_length=1)  # 일괄 생성할 항목 목록 (Items to bulk-create, at least 1)
 
 
+# === 체크리스트 템플릿 연결 (Checklist Template Link) 스키마 ===
+
+class TemplateLinkCreate(BaseModel):
+    """체크리스트 템플릿 연결 생성 요청."""
+
+    template_id: str
+    store_id: str
+    shift_id: str
+    position_id: str
+    repeat_type: str = "daily"  # "daily" or "custom"
+    repeat_days: list[str] | None = None  # ["mon","wed","fri"]
+
+
+class TemplateLinkResponse(BaseModel):
+    """체크리스트 템플릿 연결 응답."""
+
+    id: str
+    template_id: str
+    template_title: str = ""
+    store_id: str
+    store_name: str = ""
+    shift_id: str
+    shift_name: str = ""
+    position_id: str
+    position_name: str = ""
+    repeat_type: str
+    repeat_days: list[str] | None = None
+    is_active: bool
+    created_at: datetime
+
+
 class ReorderRequest(BaseModel):
     """항목 재정렬 요청 스키마.
 

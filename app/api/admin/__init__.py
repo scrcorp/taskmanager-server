@@ -67,6 +67,9 @@ from app.api.admin.evaluations import router as evaluations_router
 # Phase 8 — Dashboard 라우터 임포트
 from app.api.admin.dashboard import router as dashboard_router
 
+# Phase 9 — Template Links 라우터 임포트
+from app.api.admin.template_links import router as template_links_router
+
 admin_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -130,3 +133,9 @@ admin_router.include_router(evaluations_router, prefix="/evaluations", tags=["Ev
 # ---------------------------------------------------------------------------
 # 대시보드: /dashboard 하위 (Dashboard aggregation APIs)
 admin_router.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
+
+# ---------------------------------------------------------------------------
+# Phase 9 라우터 등록 — Register Phase 9 (Template Links) routers
+# ---------------------------------------------------------------------------
+# 템플릿 연결: /checklist-template-links 하위
+admin_router.include_router(template_links_router, tags=["Checklist Template Links"])

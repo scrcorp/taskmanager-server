@@ -14,7 +14,7 @@ Tables:
 
 import uuid
 from datetime import date, datetime, timezone
-from sqlalchemy import String, DateTime, Date, Integer, Text, ForeignKey, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, String, DateTime, Date, Integer, Text, ForeignKey, UniqueConstraint, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -239,6 +239,49 @@ class ChecklistCompletion(Base):
 
     # 관계 — Parent instance
     instance = relationship("ChecklistInstance", back_populates="completions")
+
+
+class ChecklistTemplateLink(Base):
+    """체크리스트 템플릿 연결 모델 — 템플릿을 여러 매장/시프트/포지션 조합에 연결.
+
+    Checklist template link model — Links a template to a store+shift+position
+    combination with a repeat schedule. Enables reusing one template across
+    multiple combinations.
+
+    Attributes:
+        id: 고유 식별자 UUID
+        template_id: 연결 대상 템플릿 FK
+        store_id: 매장 FK
+        shift_id: 시프트 FK
+        position_id: 포지션 FK
+        repeat_type: 반복 유형 ("daily" or "custom")
+        repeat_days: 반복 요일 JSONB (custom일 때 ["mon","wed","fri"] 등)
+        is_active: 활성 상태
+        created_at: 생성 일시 UTC
+        updated_at: 수정 일시 UTC
+
+    Constraints:
+        uq_cl_template_link: (template_id, store_id, shift_id, position_id) — 동일 조합 중복 불가
+    """
+
+    __tablename__ = "cl_template_links"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    template_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("checklist_templates.id", ondelete="CASCADE"), nullable=False)
+    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
+    shift_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("shifts.id", ondelete="CASCADE"), nullable=False)
+    position_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("positions.id", ondelete="CASCADE"), nullable=False)
+    repeat_type: Mapped[str] = mapped_column(String(10), default="daily", nullable=False)
+    repeat_days: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("template_id", "store_id", "shift_id", "position_id", name="uq_cl_template_link"),
+    )
+
+    template = relationship("ChecklistTemplate", foreign_keys=[template_id])
 
 
 class ChecklistComment(Base):
