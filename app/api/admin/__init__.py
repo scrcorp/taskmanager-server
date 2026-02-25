@@ -73,6 +73,9 @@ from app.api.admin.template_links import router as template_links_router
 # Phase 10 — Issue Reports 라우터 임포트
 from app.api.admin.issue_reports import router as issue_reports_router
 
+# Permission 관리 라우터 임포트
+from app.api.admin.permissions import router as permissions_router
+
 admin_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -147,3 +150,8 @@ admin_router.include_router(template_links_router, tags=["Checklist Template Lin
 # Phase 10 라우터 등록 — Register Phase 10 (Issue Reports) routers
 # ---------------------------------------------------------------------------
 admin_router.include_router(issue_reports_router, prefix="/issue-reports", tags=["Issue Reports"])
+
+# ---------------------------------------------------------------------------
+# Permission 관리 라우터 등록
+# ---------------------------------------------------------------------------
+admin_router.include_router(permissions_router, prefix="/permissions", tags=["Permissions"])
