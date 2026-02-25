@@ -467,6 +467,11 @@ class AttendanceService:
         user_result = await db.execute(select(User.full_name).where(User.id == attendance.user_id))
         user_name: str = user_result.scalar() or "Unknown"
 
+        # 순 근무시간 계산 — Net work minutes = total - break
+        total_work = attendance.total_work_minutes or 0
+        total_break = attendance.total_break_minutes or 0
+        net_work_minutes = max(0, total_work - total_break) if attendance.total_work_minutes is not None else None
+
         return {
             "id": str(attendance.id),
             "store_id": str(attendance.store_id),
@@ -483,6 +488,7 @@ class AttendanceService:
             "status": attendance.status,
             "total_work_minutes": attendance.total_work_minutes,
             "total_break_minutes": attendance.total_break_minutes,
+            "net_work_minutes": net_work_minutes,
             "note": attendance.note,
             "created_at": attendance.created_at,
         }
@@ -521,6 +527,71 @@ class AttendanceService:
             "created_at": correction.created_at,
         }
 
+
+    async def get_weekly_summary(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        user_id: UUID | None = None,
+        store_id: UUID | None = None,
+        week_date: date | None = None,
+    ) -> list[dict]:
+        """주간 근무시간 요약 — 사용자별 일일/주간 근무시간.
+
+        Weekly work time summary — per-user daily and weekly totals.
+        Computes net_work_minutes (total - break) per day and aggregates weekly.
+        """
+        import datetime as dt
+        from sqlalchemy import func
+
+        target_date = week_date or date.today()
+        weekday = target_date.weekday()
+        week_start = target_date - dt.timedelta(days=weekday)
+        week_end = week_start + dt.timedelta(days=6)
+
+        query = (
+            select(
+                Attendance.user_id,
+                func.sum(Attendance.total_work_minutes).label("total_work"),
+                func.sum(Attendance.total_break_minutes).label("total_break"),
+                func.count(Attendance.id).label("days_worked"),
+            )
+            .where(
+                Attendance.organization_id == organization_id,
+                Attendance.work_date >= week_start,
+                Attendance.work_date <= week_end,
+            )
+            .group_by(Attendance.user_id)
+        )
+        if user_id:
+            query = query.where(Attendance.user_id == user_id)
+        if store_id:
+            query = query.where(Attendance.store_id == store_id)
+
+        result = await db.execute(query)
+        rows = result.all()
+
+        summaries: list[dict] = []
+        for row in rows:
+            user_result = await db.execute(
+                select(User.full_name).where(User.id == row.user_id)
+            )
+            user_name = user_result.scalar() or "Unknown"
+            total_work = row.total_work or 0
+            total_break = row.total_break or 0
+            net_minutes = max(0, total_work - total_break)
+            summaries.append({
+                "user_id": str(row.user_id),
+                "user_name": user_name,
+                "week_start": str(week_start),
+                "week_end": str(week_end),
+                "days_worked": row.days_worked,
+                "total_work_minutes": total_work,
+                "total_break_minutes": total_break,
+                "net_work_minutes": net_minutes,
+                "net_work_hours": round(net_minutes / 60, 1),
+            })
+        return summaries
 
     async def get_overtime_alerts(
         self,

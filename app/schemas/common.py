@@ -806,6 +806,7 @@ class AttendanceResponse(BaseModel):
     status: str  # 상태 — "clocked_in"|"on_break"|"clocked_out" (Attendance status)
     total_work_minutes: int | None  # 총 근무 시간(분) (Total work minutes)
     total_break_minutes: int | None  # 총 휴식 시간(분) (Total break minutes)
+    net_work_minutes: int | None = None  # 순 근무 시간(분) = total - break (Net work minutes)
     note: str | None  # 메모 (Note, may be null)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 

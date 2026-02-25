@@ -150,6 +150,27 @@ async def correct_attendance(
     return await attendance_service.build_correction_response(db, correction)
 
 
+@router.get("/weekly-summary")
+async def get_weekly_summary(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_supervisor)],
+    user_id: Annotated[str | None, Query()] = None,
+    store_id: Annotated[str | None, Query()] = None,
+    week_date: Annotated[date | None, Query()] = None,
+) -> list[dict]:
+    """주간 근무시간 요약 — 사용자별 주간 실 근무시간 (총시간 - 휴식).
+
+    Weekly work time summary — net work hours per user.
+    """
+    return await attendance_service.get_weekly_summary(
+        db,
+        organization_id=current_user.organization_id,
+        user_id=UUID(user_id) if user_id else None,
+        store_id=UUID(store_id) if store_id else None,
+        week_date=week_date,
+    )
+
+
 @router.get("/overtime-alerts")
 async def get_overtime_alerts(
     db: Annotated[AsyncSession, Depends(get_db)],
