@@ -49,8 +49,8 @@ class Role(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     # 역할 이름 — Role display name (e.g. "owner", "general_manager", "supervisor", "staff")
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    # 권한 레벨 — Permission level (1=owner 최고 권한, 4=staff 최저 권한)
-    level: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 우선순위 — Priority (10=owner 최고 권한, 40=staff 최저 권한). 낮을수록 높은 권한.
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
@@ -58,12 +58,13 @@ class Role(Base):
 
     __table_args__ = (
         UniqueConstraint("organization_id", "name", name="uq_role_org_name"),
-        UniqueConstraint("organization_id", "level", name="uq_role_org_level"),
+        UniqueConstraint("organization_id", "priority", name="uq_role_org_priority"),
     )
 
     # 관계 — Relationships
     organization = relationship("Organization", back_populates="roles")
     users = relationship("User", back_populates="role")
+    role_permissions = relationship("RolePermission", back_populates="role", cascade="all, delete-orphan")
 
 
 class User(Base):

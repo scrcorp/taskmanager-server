@@ -32,6 +32,7 @@ from app.models.notification import Notification
 from app.models.schedule import Schedule, ScheduleApproval
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
 from app.models.evaluation import EvalTemplate, EvalTemplateItem, Evaluation, EvalResponse
+from app.models.permission import Permission, RolePermission
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -45,4 +46,5 @@ __all__ = [
     "Schedule", "ScheduleApproval",
     "QRCode", "Attendance", "AttendanceCorrection",
     "EvalTemplate", "EvalTemplateItem", "Evaluation", "EvalResponse",
+    "Permission", "RolePermission",
 ]
