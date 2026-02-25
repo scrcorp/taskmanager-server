@@ -1,7 +1,8 @@
-"""관리자 인증 라우터 — 관리자 로그인, 토큰 갱신, 로그아웃.
+"""관리자 인증 라우터 — 관리자 로그인, 초기 설정.
 
-Admin Auth Router — Admin login, token refresh, and logout endpoints.
+Admin Auth Router — Admin login and initial setup endpoints.
 Staff-level accounts (role level >= 4) are rejected from admin login.
+Common endpoints (refresh, logout, me) are in app.api.auth.
 """
 
 from typing import Annotated
@@ -11,16 +12,10 @@ from fastapi import APIRouter, Depends, Form
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_supervisor
 from app.database import get_db
 from app.models.organization import Organization
 from app.models.user import Role, User
-from app.schemas.auth import (
-    LoginRequest,
-    RefreshRequest,
-    TokenResponse,
-    UserMeResponse,
-)
+from app.schemas.auth import LoginRequest, TokenResponse
 from app.services.auth_service import auth_service
 from app.utils.password import hash_password
 
@@ -41,33 +36,6 @@ async def admin_login(
     result: TokenResponse = await auth_service.admin_login(db, data, organization_id)
     await db.commit()
     return result
-
-
-@router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(
-    data: RefreshRequest,
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> TokenResponse:
-    """토큰 갱신 — 리프레시 토큰으로 새 토큰 쌍 발급.
-
-    Refresh token endpoint. Issues a new token pair using a refresh token.
-    """
-    result: TokenResponse = await auth_service.refresh_tokens(db, data)
-    await db.commit()
-    return result
-
-
-@router.post("/logout", status_code=204)
-async def logout(
-    data: RefreshRequest,
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> None:
-    """로그아웃 — 리프레시 토큰 폐기.
-
-    Logout endpoint. Revokes the given refresh token.
-    """
-    await auth_service.logout(db, data.refresh_token)
-    await db.commit()
 
 
 @router.post("/setup", response_class=HTMLResponse)
@@ -120,15 +88,3 @@ async def admin_setup(
         f'<div class="msg ok">Done! Organization "{organization_name}" and admin "{username}" created.<br>'
         f'Company Code: <strong>{org.code}</strong></div>'
     )
-
-
-@router.get("/me", response_model=UserMeResponse)
-async def get_me(
-    db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_supervisor)],
-) -> UserMeResponse:
-    """현재 사용자 프로필 조회.
-
-    Get the profile of the currently authenticated admin user.
-    """
-    return await auth_service.get_me(db, current_user)
