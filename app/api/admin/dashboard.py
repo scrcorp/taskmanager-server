@@ -8,13 +8,15 @@ Permission: SV+ (all admin roles)
 """
 
 from datetime import date
+from io import BytesIO
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_supervisor
+from app.api.deps import require_gm, require_supervisor
 from app.database import get_db
 from app.models.user import User
 from app.services.dashboard_service import dashboard_service
@@ -71,6 +73,29 @@ async def get_overtime_summary(
         organization_id=current_user.organization_id,
         week_date=week_date,
         store_id=UUID(store_id) if store_id else None,
+    )
+
+
+@router.get("/export")
+async def export_dashboard(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_gm)],
+    date_from: Annotated[date | None, Query()] = None,
+    date_to: Annotated[date | None, Query()] = None,
+    store_id: Annotated[str | None, Query()] = None,
+) -> StreamingResponse:
+    """대시보드 데이터를 Excel 파일로 내보냅니다. Owner + GM."""
+    excel_bytes: bytes = await dashboard_service.export_excel(
+        db,
+        organization_id=current_user.organization_id,
+        date_from=date_from,
+        date_to=date_to,
+        store_id=UUID(store_id) if store_id else None,
+    )
+    return StreamingResponse(
+        BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=dashboard_export.xlsx"},
     )
 
 
