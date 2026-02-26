@@ -27,3 +27,6 @@ openpyxl==3.1.5
 
 # Logging
 axiom-py==0.10.0
+
+# Email
+aiosmtplib==3.0.2

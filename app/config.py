@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     AXIOM_API_TOKEN: str = ""  # Axiom API 토큰 (API token from Axiom dashboard)
     AXIOM_DATASET: str = ""  # Axiom 데이터셋 이름 (Dataset name for API logs)
 
+    # SMTP 이메일 설정 — Brevo (smtp-relay.brevo.com)
+    SMTP_HOST: str = "smtp-relay.brevo.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""  # Brevo 계정 이메일
+    SMTP_PASSWORD: str = ""  # Brevo SMTP 키 (API 키 아님)
+    SMTP_FROM_EMAIL: str = ""  # 발신 이메일 주소
+    SMTP_FROM_NAME: str = "TaskManager"  # 발신자 표시 이름
+
     model_config = {"env_file": _ENV_FILE, "env_file_encoding": "utf-8"}
 
 
