@@ -132,6 +132,31 @@ class UserListResponse(BaseModel):
     is_active: bool  # 계정 활성 상태 (Account active flag)
 
 
+# === 매장 배정 (Store Assignment) 스키마 ===
+
+
+class UserStoreAssignment(BaseModel):
+    """매장 배정 항목."""
+    store_id: str
+    is_manager: bool = False
+
+
+class SyncUserStoresRequest(BaseModel):
+    """매장 배정 일괄 저장 요청."""
+    assignments: list[UserStoreAssignment]
+
+
+class UserStoreResponse(BaseModel):
+    """매장 배정 응답 (is_manager 포함)."""
+    id: str
+    organization_id: str
+    name: str
+    address: str | None
+    is_active: bool
+    is_manager: bool
+    created_at: datetime
+
+
 # === 프로필 (Profile) 스키마 ===
 
 

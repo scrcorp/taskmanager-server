@@ -19,6 +19,7 @@ from app.schemas.user import (
     UserCreate,
     UserListResponse,
     UserResponse,
+    UserStoreResponse,
     UserUpdate,
 )
 from app.utils.exceptions import BadRequestError, DuplicateError, ForbiddenError, NotFoundError
@@ -355,17 +356,24 @@ class UserService:
         if user is None:
             raise NotFoundError("User not found")
 
+        from app.models.user_store import UserStore
+
+        assignments: list[UserStore] = await user_repository.get_user_store_assignments(db, user_id)
+        # store 정보가 필요하므로 store 조회
         stores: list[Store] = await user_repository.get_user_stores(db, user_id)
+        store_map = {s.id: s for s in stores}
         return [
-            StoreResponse(
-                id=str(s.id),
-                organization_id=str(s.organization_id),
-                name=s.name,
-                address=s.address,
-                is_active=s.is_active,
-                created_at=s.created_at,
+            UserStoreResponse(
+                id=str(a.store_id),
+                organization_id=str(store_map[a.store_id].organization_id) if a.store_id in store_map else "",
+                name=store_map[a.store_id].name if a.store_id in store_map else "",
+                address=store_map[a.store_id].address if a.store_id in store_map else None,
+                is_active=store_map[a.store_id].is_active if a.store_id in store_map else False,
+                is_manager=a.is_manager,
+                created_at=store_map[a.store_id].created_at if a.store_id in store_map else a.created_at,
             )
-            for s in stores
+            for a in assignments
+            if a.store_id in store_map
         ]
 
     async def sync_user_stores(

@@ -15,11 +15,12 @@ from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse
-from app.schemas.organization import StoreResponse
 from app.schemas.user import (
+    SyncUserStoresRequest,
     UserCreate,
     UserListResponse,
     UserResponse,
+    UserStoreResponse,
     UserUpdate,
 )
 from app.services.user_service import user_service
@@ -141,17 +142,32 @@ async def delete_user(
     return {"message": "사용자가 삭제되었습니다 (User deleted successfully)"}
 
 
-@router.get("/{user_id}/stores", response_model=list[StoreResponse])
+@router.get("/{user_id}/stores", response_model=list[UserStoreResponse])
 async def get_user_stores(
     user_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("users:read"))],
-) -> list[StoreResponse]:
-    """사용자에게 배정된 매장 목록을 조회합니다.
-
-    Retrieve all stores assigned to a user.
-    """
+) -> list[UserStoreResponse]:
+    """사용자에게 배정된 매장 목록 (is_manager 포함)."""
     org_id: UUID = current_user.organization_id
+    return await user_service.get_user_stores(db, user_id, org_id)
+
+
+@router.put("/{user_id}/stores", response_model=list[UserStoreResponse])
+async def sync_user_stores(
+    user_id: UUID,
+    data: SyncUserStoresRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> list[UserStoreResponse]:
+    """매장 배정 일괄 저장 (diff 기반)."""
+    org_id: UUID = current_user.organization_id
+    assignments = [
+        {"store_id": UUID(a.store_id), "is_manager": a.is_manager}
+        for a in data.assignments
+    ]
+    await user_service.sync_user_stores(db, user_id, org_id, assignments)
+    await db.commit()
     return await user_service.get_user_stores(db, user_id, org_id)
 
 
@@ -162,10 +178,7 @@ async def add_user_store(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("users:create"))],
 ) -> dict[str, str]:
-    """사용자에게 매장을 배정합니다.
-
-    Assign a store to a user.
-    """
+    """사용자에게 매장을 배정합니다 (개별, 하위호환)."""
     org_id: UUID = current_user.organization_id
     await user_service.add_user_store(
         db, user_id, store_id, org_id, caller=current_user
@@ -181,10 +194,7 @@ async def remove_user_store(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("users:delete"))],
 ) -> None:
-    """사용자에게서 매장 배정을 해제합니다.
-
-    Remove a store assignment from a user.
-    """
+    """사용자에게서 매장 배정을 해제합니다 (개별, 하위호환)."""
     org_id: UUID = current_user.organization_id
     await user_service.remove_user_store(db, user_id, store_id, org_id)
     await db.commit()
