@@ -269,7 +269,7 @@ class ChecklistInstanceService:
         # completions 재로드 — Reload with completions
         return await self.get_instance(db, instance_id)
 
-    async def get_audit_log(
+    async def get_completion_log(
         self,
         db: AsyncSession,
         organization_id: UUID,
@@ -280,24 +280,9 @@ class ChecklistInstanceService:
         page: int = 1,
         per_page: int = 20,
     ) -> tuple[list[dict], int]:
-        """체크리스트 완료 감사 로그를 조회합니다.
+        """Get checklist completion log with user and instance info.
 
-        Get checklist completion audit log with user and instance info.
         Queries cl_completions joined with cl_instances and users.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            organization_id: 조직 UUID (Organization UUID)
-            store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
-            user_id: 사용자 UUID 필터, 선택 (Optional user UUID filter)
-            date_from: 시작일 필터, 선택 (Optional start date filter)
-            date_to: 종료일 필터, 선택 (Optional end date filter)
-            page: 페이지 번호 (Page number)
-            per_page: 페이지당 항목 수 (Items per page)
-
-        Returns:
-            tuple[list[dict], int]: (감사 로그 목록, 전체 개수)
-                                     (Audit log list, total count)
         """
         from sqlalchemy import func as sa_func
         from app.models.organization import Store

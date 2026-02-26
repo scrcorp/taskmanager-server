@@ -84,7 +84,8 @@ async def list_checklist_instances(
 
 
 @router.get("/checklist-audit")
-async def get_checklist_audit(
+@router.get("/completion-log")
+async def get_completion_log(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("checklists:read"))],
     store_id: Annotated[str | None, Query()] = None,
@@ -94,28 +95,14 @@ async def get_checklist_audit(
     page: int = 1,
     per_page: int = 20,
 ) -> dict:
-    """체크리스트 완료 감사 로그를 조회합니다.
+    """Get checklist completion log showing who completed what items, when.
 
-    Get checklist completion audit log showing who completed what items, when.
-    Requires GM or higher permission.
-
-    Args:
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 GM 이상 사용자 (Authenticated GM+ user)
-        store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
-        user_id: 사용자 UUID 필터, 선택 (Optional user UUID filter)
-        date_from: 시작일 필터, 선택 (Optional start date filter)
-        date_to: 종료일 필터, 선택 (Optional end date filter)
-        page: 페이지 번호 (Page number)
-        per_page: 페이지당 항목 수 (Items per page)
-
-    Returns:
-        dict: 페이지네이션된 감사 로그 (Paginated audit log)
+    Requires checklists:read permission (GM+).
     """
     store_uuid: UUID | None = UUID(store_id) if store_id else None
     user_uuid: UUID | None = UUID(user_id) if user_id else None
 
-    items, total = await checklist_instance_service.get_audit_log(
+    items, total = await checklist_instance_service.get_completion_log(
         db,
         organization_id=current_user.organization_id,
         store_id=store_uuid,
