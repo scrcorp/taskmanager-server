@@ -368,6 +368,48 @@ class UserService:
             for s in stores
         ]
 
+    async def sync_user_stores(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        organization_id: UUID,
+        assignments: list[dict],
+    ) -> None:
+        """매장 배정 일괄 저장 (diff 기반).
+
+        Args:
+            assignments: [{"store_id": UUID, "is_manager": bool}, ...]
+
+        Raises:
+            NotFoundError: 사용자 또는 매장을 찾을 수 없을 때
+            BadRequestError: Role별 규칙 위반 시
+        """
+        user_with_role: User | None = await user_repository.get_detail(
+            db, user_id, organization_id
+        )
+        if user_with_role is None:
+            raise NotFoundError("User not found")
+
+        priority = user_with_role.role.priority
+
+        # Role별 검증
+        manager_count = sum(1 for a in assignments if a["is_manager"])
+
+        if priority >= 40 and manager_count > 0:
+            raise BadRequestError("Staff cannot be assigned as manager")
+
+        if priority == 30 and manager_count > 1:
+            raise BadRequestError("Supervisor can only manage one store")
+
+        # 매장 존재 확인
+        org_stores = await store_repository.get_by_org(db, organization_id)
+        org_store_ids = {s.id for s in org_stores}
+        for a in assignments:
+            if a["store_id"] not in org_store_ids:
+                raise NotFoundError(f"Store not found: {a['store_id']}")
+
+        await user_repository.sync_user_stores(db, user_id, assignments)
+
     async def add_user_store(
         self,
         db: AsyncSession,
@@ -376,51 +418,23 @@ class UserService:
         organization_id: UUID,
         caller: User | None = None,
     ) -> None:
-        """사용자에게 매장을 배정합니다.
+        """사용자에게 매장을 배정합니다 (개별 API용, 하위호환).
 
-        Assign a store to a user.
-        Staff (level >= 4) cannot be assigned to stores.
-        Supervisor (level == 3) can only be assigned to one store.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            user_id: 사용자 ID (User UUID)
-            store_id: 매장 ID (Store UUID)
-            organization_id: 조직 ID (Organization UUID)
-            caller: 요청자 (Caller user, unused currently but passed for consistency)
-
-        Raises:
-            NotFoundError: 사용자 또는 매장을 찾을 수 없을 때
-                           (User or store not found)
-            BadRequestError: Staff에게 매장 배정 시도 또는 Supervisor 1매장 초과
-                             (Staff store assignment or Supervisor exceeding 1 store)
-            DuplicateError: 이미 배정되어 있을 때 (Already assigned)
+        Staff는 근무매장만 가능 (is_manager=false).
+        Supervisor는 관리매장 1개만.
         """
-        # 사용자 상세 조회 (역할 포함) — Fetch user with role loaded
         user_with_role: User | None = await user_repository.get_detail(
             db, user_id, organization_id
         )
         if user_with_role is None:
             raise NotFoundError("User not found")
 
-        # Staff는 매장 배정 불가
-        if user_with_role.role.priority >= 40:
-            raise BadRequestError("Staff cannot be assigned to stores")
-
-        # Supervisor는 1개 매장만
-        if user_with_role.role.priority == 30:
-            existing_stores: list[Store] = await user_repository.get_user_stores(db, user_id)
-            if len(existing_stores) >= 1:
-                raise BadRequestError("Supervisor can only be assigned to one store")
-
-        # 매장 존재 확인 — Verify store exists in org
         store: Store | None = await store_repository.get_by_id(
             db, store_id, organization_id
         )
         if store is None:
             raise NotFoundError("Store not found")
 
-        # 중복 배정 확인 — Check for duplicate assignment
         already_exists: bool = await user_repository.user_store_exists(
             db, user_id, store_id
         )

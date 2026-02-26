@@ -79,14 +79,27 @@ def require_permission(*permission_codes: str) -> Callable[..., Awaitable[User]]
 async def get_accessible_store_ids(
     db: AsyncSession, user: User
 ) -> list[UUID] | None:
-    """사용자가 접근 가능한 매장 ID 목록을 반환합니다.
+    """사용자가 관리 가능한 매장 ID 목록 (admin용).
 
-    None means full access (priority <= 10). Empty list means no stores assigned.
+    None = full access (Owner). List = 관리매장만 (is_manager=true).
     """
     if user.role.priority <= 10:
         return None
     from app.repositories.user_repository import user_repository
-    return await user_repository.get_user_store_ids(db, user.id)
+    return await user_repository.get_managed_store_ids(db, user.id)
+
+
+async def get_work_store_ids(
+    db: AsyncSession, user: User
+) -> list[UUID] | None:
+    """사용자의 근무매장 ID 목록 (staff app용).
+
+    None = full access (Owner). List = 모든 배정 매장.
+    """
+    if user.role.priority <= 10:
+        return None
+    from app.repositories.user_repository import user_repository
+    return await user_repository.get_work_store_ids(db, user.id)
 
 
 async def check_store_access(
