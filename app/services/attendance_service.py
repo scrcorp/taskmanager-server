@@ -546,7 +546,7 @@ class AttendanceService:
 
         target_date = week_date or date.today()
         weekday = target_date.weekday()
-        week_start = target_date - dt.timedelta(days=weekday)
+        week_start = target_date - dt.timedelta(days=(weekday + 1) % 7)
         week_end = week_start + dt.timedelta(days=6)
 
         query = (
@@ -610,7 +610,7 @@ class AttendanceService:
 
         target_date = week_date or date.today()
         weekday = target_date.weekday()
-        week_start = target_date - dt.timedelta(days=weekday)
+        week_start = target_date - dt.timedelta(days=(weekday + 1) % 7)
         week_end = week_start + dt.timedelta(days=6)
 
         # 노동법 기준 조회

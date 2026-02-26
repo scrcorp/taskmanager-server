@@ -130,7 +130,7 @@ class DashboardService:
         """초과근무 현황 요약."""
         target_date = week_date or date.today()
         weekday = target_date.weekday()
-        week_start = target_date - timedelta(days=weekday)
+        week_start = target_date - timedelta(days=(weekday + 1) % 7)
         week_end = week_start + timedelta(days=6)
 
         # 노동법 기준
@@ -314,8 +314,8 @@ class DashboardService:
         # Calculate weekly overtime for the date range
         # Use Monday of date_from week to Sunday of date_to week
         weekday = date_from.weekday()
-        week_start = date_from - timedelta(days=weekday)
-        week_end_of_range = date_to + timedelta(days=(6 - date_to.weekday()))
+        week_start = date_from - timedelta(days=(weekday + 1) % 7)
+        week_end_of_range = date_to + timedelta(days=6 - (date_to.weekday() + 1) % 7)
 
         max_weekly = 40
         law_result = await db.execute(

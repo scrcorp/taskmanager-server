@@ -631,9 +631,9 @@ class ScheduleService:
         from app.models.organization import LaborLawSetting
         import datetime as dt
 
-        # 해당 주의 월~일 계산
+        # 해당 주의 일~토 계산 (일요일 시작)
         weekday = work_date.weekday()
-        week_start = work_date - dt.timedelta(days=weekday)
+        week_start = work_date - dt.timedelta(days=(weekday + 1) % 7)
         week_end = week_start + dt.timedelta(days=6)
 
         # 해당 주 기존 근무시간 합산
