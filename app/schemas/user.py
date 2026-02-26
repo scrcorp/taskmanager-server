@@ -130,6 +130,7 @@ class UserListResponse(BaseModel):
     role_name: str  # 역할 이름 — 조인된 값 (Role name, resolved from Role table)
     role_priority: int  # 역할 우선순위 — 조인된 값
     is_active: bool  # 계정 활성 상태 (Account active flag)
+    created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
 
 # === 매장 배정 (Store Assignment) 스키마 ===

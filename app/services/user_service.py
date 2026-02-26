@@ -76,6 +76,7 @@ class UserService:
             role_name=role.name,
             role_priority=role.priority,
             is_active=user.is_active,
+            created_at=user.created_at,
         )
 
     async def list_users(
