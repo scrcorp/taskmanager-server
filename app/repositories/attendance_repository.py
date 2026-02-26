@@ -39,6 +39,8 @@ class AttendanceRepository(BaseRepository[Attendance]):
         store_id: UUID | None = None,
         user_id: UUID | None = None,
         work_date: date | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
         status: str | None = None,
         page: int = 1,
         per_page: int = 20,
@@ -53,6 +55,8 @@ class AttendanceRepository(BaseRepository[Attendance]):
             store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
             user_id: 사용자 UUID 필터, 선택 (Optional user UUID filter)
             work_date: 근무일 필터, 선택 (Optional work date filter)
+            date_from: 시작일 필터, 선택 (Optional date range start)
+            date_to: 종료일 필터, 선택 (Optional date range end)
             status: 상태 필터, 선택 (Optional status filter)
             page: 페이지 번호, 1부터 시작 (Page number, 1-based)
             per_page: 페이지당 항목 수 (Items per page)
@@ -72,6 +76,10 @@ class AttendanceRepository(BaseRepository[Attendance]):
             query = query.where(Attendance.user_id == user_id)
         if work_date is not None:
             query = query.where(Attendance.work_date == work_date)
+        if date_from is not None:
+            query = query.where(Attendance.work_date >= date_from)
+        if date_to is not None:
+            query = query.where(Attendance.work_date <= date_to)
         if status is not None:
             query = query.where(Attendance.status == status)
 

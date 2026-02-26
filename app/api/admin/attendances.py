@@ -32,6 +32,8 @@ async def list_attendances(
     store_id: Annotated[str | None, Query()] = None,
     user_id: Annotated[str | None, Query()] = None,
     work_date: Annotated[date | None, Query()] = None,
+    date_from: Annotated[date | None, Query()] = None,
+    date_to: Annotated[date | None, Query()] = None,
     status: Annotated[str | None, Query()] = None,
     page: int = 1,
     per_page: int = 20,
@@ -46,6 +48,8 @@ async def list_attendances(
         store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
         user_id: 사용자 UUID 필터, 선택 (Optional user UUID filter)
         work_date: 근무일 필터, 선택 (Optional work date filter)
+        date_from: 시작일 필터, 선택 (Optional date range start)
+        date_to: 종료일 필터, 선택 (Optional date range end)
         status: 상태 필터, 선택 (Optional status filter)
         page: 페이지 번호 (Page number)
         per_page: 페이지당 항목 수 (Items per page)
@@ -62,6 +66,8 @@ async def list_attendances(
         store_id=store_uuid,
         user_id=user_uuid,
         work_date=work_date,
+        date_from=date_from,
+        date_to=date_to,
         status=status,
         page=page,
         per_page=per_page,

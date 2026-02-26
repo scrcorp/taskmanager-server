@@ -288,6 +288,8 @@ class AttendanceService:
         store_id: UUID | None = None,
         user_id: UUID | None = None,
         work_date: date | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
         status: str | None = None,
         page: int = 1,
         per_page: int = 20,
@@ -302,6 +304,8 @@ class AttendanceService:
             store_id: 매장 UUID 필터, 선택 (Optional store filter)
             user_id: 사용자 UUID 필터, 선택 (Optional user filter)
             work_date: 근무일 필터, 선택 (Optional date filter)
+            date_from: 시작일 필터, 선택 (Optional date range start)
+            date_to: 종료일 필터, 선택 (Optional date range end)
             status: 상태 필터, 선택 (Optional status filter)
             page: 페이지 번호 (Page number)
             per_page: 페이지당 항목 수 (Items per page)
@@ -310,7 +314,7 @@ class AttendanceService:
             tuple[Sequence[Attendance], int]: (근태 목록, 전체 개수)
         """
         return await attendance_repository.get_by_filters(
-            db, organization_id, store_id, user_id, work_date, status, page, per_page
+            db, organization_id, store_id, user_id, work_date, date_from, date_to, status, page, per_page
         )
 
     async def get_attendance(
