@@ -7,7 +7,7 @@ including filtering, eager loading, and user-store associations.
 
 from uuid import UUID
 
-from sqlalchemy import Select, and_, select
+from sqlalchemy import Select, and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -203,6 +203,83 @@ class UserRepository(BaseRepository[User]):
             select(UserStore.store_id).where(UserStore.user_id == user_id)
         )
         return list(result.scalars().all())
+
+    async def get_managed_store_ids(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+    ) -> list[UUID]:
+        """관리매장 ID 목록 (is_manager=true)."""
+        result = await db.execute(
+            select(UserStore.store_id).where(
+                UserStore.user_id == user_id, UserStore.is_manager.is_(True)
+            )
+        )
+        return list(result.scalars().all())
+
+    async def get_work_store_ids(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+    ) -> list[UUID]:
+        """근무매장 ID 목록 (모든 user_stores)."""
+        result = await db.execute(
+            select(UserStore.store_id).where(UserStore.user_id == user_id)
+        )
+        return list(result.scalars().all())
+
+    async def get_user_store_assignments(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+    ) -> list[UserStore]:
+        """사용자의 전체 매장 배정 레코드 조회."""
+        result = await db.execute(
+            select(UserStore).where(UserStore.user_id == user_id)
+        )
+        return list(result.scalars().all())
+
+    async def sync_user_stores(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        assignments: list[dict],
+    ) -> None:
+        """일괄 저장: 현재 상태와 diff 계산 후 추가/수정/삭제.
+
+        Args:
+            assignments: [{"store_id": UUID, "is_manager": bool}, ...]
+        """
+        # 현재 상태 조회
+        current = await self.get_user_store_assignments(db, user_id)
+        current_map: dict[UUID, UserStore] = {us.store_id: us for us in current}
+
+        # 목표 상태
+        target_map: dict[UUID, bool] = {
+            a["store_id"]: a["is_manager"] for a in assignments
+        }
+
+        # 삭제: 현재에 있지만 목표에 없는 것
+        to_delete = set(current_map.keys()) - set(target_map.keys())
+        if to_delete:
+            await db.execute(
+                delete(UserStore).where(
+                    UserStore.user_id == user_id,
+                    UserStore.store_id.in_(to_delete),
+                )
+            )
+
+        # 추가/수정
+        for store_id, is_manager in target_map.items():
+            existing = current_map.get(store_id)
+            if existing is None:
+                db.add(UserStore(
+                    user_id=user_id, store_id=store_id, is_manager=is_manager
+                ))
+            elif existing.is_manager != is_manager:
+                existing.is_manager = is_manager
+
+        await db.flush()
 
     async def user_store_exists(
         self,
