@@ -5,12 +5,15 @@ Handles creation, retrieval, update, and deletion of shifts
 under a specific store with organization scope verification.
 """
 
+import re
 from uuid import UUID
 
+from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.checklist import ChecklistTemplate
 from app.models.organization import Store
-from app.models.work import Shift
+from app.models.work import Position, Shift
 from app.repositories.store_repository import store_repository
 from app.repositories.shift_repository import shift_repository
 from app.schemas.work import ShiftCreate, ShiftResponse, ShiftUpdate
@@ -167,15 +170,18 @@ class ShiftService:
             DuplicateError: 같은 이름의 근무조가 이미 존재할 때
                             (Shift with same name already exists)
         """
-        await self._verify_store_ownership(db, store_id, organization_id)
+        store: Store = await self._verify_store_ownership(db, store_id, organization_id)
 
         # 기존 근무조 확인 — Verify shift exists under this store
         existing: Shift | None = await shift_repository.get_by_id(db, shift_id)
         if existing is None or existing.store_id != store_id:
             raise NotFoundError("Shift not found in this store")
 
+        # 이름 변경 여부 확인 — Detect name change for cascade
+        name_changed: bool = data.name is not None and data.name != existing.name
+
         # 이름 변경 시 중복 확인 — Check name uniqueness if changing name
-        if data.name is not None and data.name != existing.name:
+        if name_changed:
             name_exists: bool = await shift_repository.exists(
                 db, {"store_id": store_id, "name": data.name}
             )
@@ -189,7 +195,49 @@ class ShiftService:
         if shift is None:
             raise NotFoundError("Shift not found")
 
+        # 이름 변경 시 체크리스트 템플릿 제목 자동 업데이트
+        # Cascade shift name change to checklist template titles
+        if name_changed:
+            await self._cascade_shift_name_to_templates(
+                db, shift_id, store.name, data.name  # type: ignore[arg-type]
+            )
+
         return self._to_response(shift)
+
+    async def _cascade_shift_name_to_templates(
+        self,
+        db: AsyncSession,
+        shift_id: UUID,
+        store_name: str,
+        new_shift_name: str,
+    ) -> None:
+        """시프트 이름 변경 시 관련 체크리스트 템플릿 제목을 자동 업데이트합니다.
+
+        Update checklist template titles when a shift is renamed.
+        Title format: '{store} - {shift} - {position}' or '{store} - {shift} - {position} (extra)'
+        """
+        result = await db.execute(
+            sa_select(ChecklistTemplate).where(ChecklistTemplate.shift_id == shift_id)
+        )
+        templates = result.scalars().all()
+        if not templates:
+            return
+
+        # 필요한 position 이름 일괄 조회 — Batch load position names
+        position_ids = {t.position_id for t in templates}
+        pos_result = await db.execute(
+            sa_select(Position).where(Position.id.in_(position_ids))
+        )
+        positions_map: dict[UUID, str] = {
+            p.id: p.name for p in pos_result.scalars().all()
+        }
+
+        for tmpl in templates:
+            pos_name: str = positions_map.get(tmpl.position_id, "")
+            new_base: str = f"{store_name} - {new_shift_name} - {pos_name}"
+            # 기존 제목 끝의 괄호 부분 보존 — Preserve optional (extra) suffix
+            match = re.search(r"\s*\(([^)]+)\)\s*$", tmpl.title)
+            tmpl.title = f"{new_base} ({match.group(1)})" if match else new_base
 
     async def delete_shift(
         self,
