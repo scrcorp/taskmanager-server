@@ -7,7 +7,7 @@ Links users to the stores they are assigned to within an organization.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, DateTime, ForeignKey, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -39,6 +39,9 @@ class UserStore(Base):
         Uuid,
         ForeignKey("stores.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    is_manager: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
