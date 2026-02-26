@@ -24,11 +24,12 @@ def make_excel(rows: list[list[str]], headers: list[str] | None = None) -> bytes
     ws = wb.active
     if headers is None:
         headers = [
-            "store_name", "shift_name", "position_name",
+            "store", "shift", "position",
             "recurrence", "item_title", "item_description",
             "verification_type",
         ]
     ws.append(headers)
+    ws.append([""] * len(headers))  # guide row at row 2 (skipped by importer)
     for row in rows:
         ws.append(row)
     buf = BytesIO()
@@ -76,7 +77,7 @@ class TestGenerateSampleExcel:
         wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
         ws = wb.active
         headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-        for col in ["store_name", "shift_name", "position_name", "recurrence", "item_title"]:
+        for col in ["store", "shift", "position", "recurrence", "item_title"]:
             assert col in headers, f"Missing header: {col}"
         wb.close()
 
@@ -85,7 +86,7 @@ class TestGenerateSampleExcel:
         wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
         ws = wb.active
         stores = set()
-        for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+        for row in ws.iter_rows(min_row=3, max_col=1, values_only=True):
             if row[0]:
                 stores.add(row[0])
         assert len(stores) >= 3, f"Expected ≥3 stores, got: {stores}"
@@ -96,7 +97,7 @@ class TestGenerateSampleExcel:
         wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
         ws = wb.active
         shifts = set()
-        for row in ws.iter_rows(min_row=2, min_col=2, max_col=2, values_only=True):
+        for row in ws.iter_rows(min_row=3, min_col=2, max_col=2, values_only=True):
             if row[0]:
                 shifts.add(row[0])
         assert len(shifts) >= 3, f"Expected ≥3 shifts, got: {shifts}"
@@ -107,7 +108,7 @@ class TestGenerateSampleExcel:
         wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
         ws = wb.active
         recurrences = set()
-        for row in ws.iter_rows(min_row=2, min_col=4, max_col=4, values_only=True):
+        for row in ws.iter_rows(min_row=3, min_col=4, max_col=4, values_only=True):
             if row[0]:
                 recurrences.add(row[0])
         assert "daily" in recurrences
@@ -119,7 +120,7 @@ class TestGenerateSampleExcel:
         wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
         ws = wb.active
         vtypes = set()
-        for row in ws.iter_rows(min_row=2, min_col=7, max_col=7, values_only=True):
+        for row in ws.iter_rows(min_row=3, min_col=7, max_col=7, values_only=True):
             if row[0]:
                 vtypes.add(row[0])
         assert "photo,text" in vtypes, f"Expected 'photo,text' in vtypes, got: {vtypes}"
@@ -131,7 +132,7 @@ class TestGenerateSampleExcel:
         ws = wb.active
         has_none = False
         has_empty = False
-        for row in ws.iter_rows(min_row=2, min_col=7, max_col=7, values_only=True):
+        for row in ws.iter_rows(min_row=3, min_col=7, max_col=7, values_only=True):
             val = row[0]
             if val == "none":
                 has_none = True
@@ -207,7 +208,7 @@ class TestVerificationTypeParsing:
         """import_from_excel 내부 v_type 파싱 로직을 재현."""
         v_type_raw = raw.lower().strip()
         if v_type_raw:
-            valid_types = {"none", "photo", "text"}
+            valid_types = {"none", "photo", "text", "video"}
             parts = [p.strip() for p in v_type_raw.split(",") if p.strip()]
             parts = [p for p in parts if p in valid_types]
             if len(parts) > 1:
@@ -247,10 +248,10 @@ class TestVerificationTypeParsing:
         assert self._parse_vtype("none,photo,text") == "photo,text"
 
     def test_invalid_type_ignored(self):
-        assert self._parse_vtype("video") == "none"
+        assert self._parse_vtype("picture") == "none"
 
     def test_mixed_valid_invalid(self):
-        assert self._parse_vtype("photo,video") == "photo"
+        assert self._parse_vtype("photo,video") == "photo,video"
 
     def test_case_insensitive(self):
         assert self._parse_vtype("Photo") == "photo"

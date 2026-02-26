@@ -35,7 +35,7 @@ DAY_MAP: dict[str, int] = {
 
 # Excel 필수 컬럼 목록
 REQUIRED_COLUMNS: list[str] = [
-    "store_name", "shift_name", "position_name", "recurrence", "item_title",
+    "store", "shift", "position", "recurrence", "item_title",
 ]
 
 
@@ -782,7 +782,7 @@ class ChecklistService:
         # 그룹핑: (store_name, shift_name, position_name) → items (각 item에 recurrence 포함)
         groups: dict[tuple[str, str, str], dict] = {}
 
-        for row_num, row in enumerate(ws.iter_rows(min_row=2), start=2):
+        for row_num, row in enumerate(ws.iter_rows(min_row=3), start=3):
             cells: list = list(row)
 
             def get_val(col_name: str) -> str:
@@ -792,9 +792,9 @@ class ChecklistService:
                 val = cells[idx].value
                 return str(val).strip() if val is not None else ""
 
-            store_name: str = get_val("store_name")
-            shift_name: str = get_val("shift_name")
-            position_name: str = get_val("position_name")
+            store_name: str = get_val("store")
+            shift_name: str = get_val("shift")
+            position_name: str = get_val("position")
             recurrence_raw: str = get_val("recurrence")
             item_title: str = get_val("item_title")
 
@@ -823,7 +823,7 @@ class ChecklistService:
             v_type_raw: str = get_val("verification_type").lower()
             # Support comma-separated multi-type (e.g. "photo,text")
             if v_type_raw:
-                valid_types = {"none", "photo", "text"}
+                valid_types = {"none", "photo", "text", "video"}
                 parts = [p.strip() for p in v_type_raw.split(",") if p.strip()]
                 parts = [p for p in parts if p in valid_types]
                 # Remove "none" if combined with others (e.g. "none,photo" → "photo")
@@ -987,9 +987,9 @@ class ChecklistService:
         ws.title = "Checklist Template"
 
         headers: list[str] = [
-            "store_name",
-            "shift_name",
-            "position_name",
+            "store",
+            "shift",
+            "position",
             "recurrence",
             "item_title",
             "item_description",
@@ -1006,6 +1006,24 @@ class ChecklistService:
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="center")
 
+        # Guide row (row 2): shows valid values — skipped during import
+        guide_row_values: list[str] = [
+            "LA Downtown / Santa Monica",
+            "Morning / Evening / Night",
+            "Grill / Counter / Kitchen",
+            "daily  OR  mon,wed,fri",
+            "Turn on all lights (example)",
+            "Heat to 400°F (optional)",
+            "none / photo / text / video",
+        ]
+        guide_fill = PatternFill(start_color="F0F0F0", end_color="F0F0F0", fill_type="solid")
+        guide_font = Font(italic=True, color="808080")
+        for col_idx, value in enumerate(guide_row_values, 1):
+            cell = ws.cell(row=2, column=col_idx, value=value)
+            cell.font = guide_font
+            cell.fill = guide_fill
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+
         # Sample data — diverse stores, shifts, positions, recurrence patterns
         sample_data: list[list[str]] = [
             # Store 1: LA Downtown — Morning / Grill (daily)
@@ -1021,7 +1039,7 @@ class ChecklistService:
             ["LA Downtown", "Evening", "Closing", "daily", "Sweep & mop floors", "", "photo"],
             ["LA Downtown", "Evening", "Closing", "daily", "Empty trash bins", "All bins including patio", "none"],
             ["LA Downtown", "Evening", "Closing", "daily", "Lock back door", "", "photo"],
-            ["LA Downtown", "Evening", "Closing", "daily", "Set alarm system", "Code on manager sheet", ""],
+            ["LA Downtown", "Evening", "Closing", "daily", "Set alarm system", "Code on manager sheet", "video"],
             # Store 2: Santa Monica — Morning / Drive-Thru (daily)
             ["Santa Monica", "Morning", "Drive-Thru", "daily", "Test headset", "Check volume & clarity", ""],
             ["Santa Monica", "Morning", "Drive-Thru", "daily", "Clean menu board", "", "photo"],
@@ -1036,11 +1054,7 @@ class ChecklistService:
             ["Hollywood", "Afternoon", "Front", "mon,tue,wed,thu,fri", "Restock restroom supplies", "Soap, paper towels, TP", "photo,text"],
             # Store 3: Hollywood — Morning / Manager (sat,sun)
             ["Hollywood", "Morning", "Manager", "sat,sun", "Weekend sales report", "Email to regional mgr", "text"],
-            ["Hollywood", "Morning", "Manager", "sat,sun", "Inventory count", "Walk-in + dry storage", "photo,text"],
-            # ⚠ Error examples — these rows contain intentional mistakes
-            ["Hollywood", "Morning", "Grill", "monday", "Bad recurrence (error)", "Full day name causes error", "photo"],
-            ["Hollywood", "Morning", "Grill", "mon,xyz,fri", "Partial bad recurrence (error)", "xyz is invalid — row skipped", "text"],
-            ["Hollywood", "Morning", "Grill", "daily", "Silent fallback verification", "picture → becomes none", "picture"],
+            ["Hollywood", "Morning", "Manager", "sat,sun", "Inventory count", "Walk-in + dry storage", "photo,video"],
         ]
         for row_data in sample_data:
             ws.append(row_data)
@@ -1063,19 +1077,19 @@ class ChecklistService:
 
         guide_rows: list[list[str]] = [
             [
-                "store_name",
+                "store",
                 "Yes",
                 "Store name. Auto-created if it does not exist.",
                 "LA Downtown",
             ],
             [
-                "shift_name",
+                "shift",
                 "Yes",
                 "Shift name. Auto-created if it does not exist.",
                 "Morning",
             ],
             [
-                "position_name",
+                "position",
                 "Yes",
                 "Position/role name. Auto-created if it does not exist.",
                 "Grill",
@@ -1102,10 +1116,10 @@ class ChecklistService:
             [
                 "verification_type",
                 "No",
-                "How to verify completion. Options: none, photo, text. "
+                "How to verify completion. Options: none, photo, text, video. "
                 "Combine with commas for multiple (e.g. photo,text). "
                 "Leave empty or write 'none' for no verification — both work the same.",
-                "photo  OR  text  OR  photo,text  OR  (empty)",
+                "photo  OR  text  OR  video  OR  photo,text  OR  (empty)",
             ],
         ]
         for row_data in guide_rows:
@@ -1128,7 +1142,7 @@ class ChecklistService:
         error_rows = [
             ["monday (recurrence)", "Full day name not recognized", "Error — row skipped. Use 3-letter: mon, tue, wed, thu, fri, sat, sun"],
             ["mon,xyz,fri (recurrence)", "xyz is not a valid day", "Error — row skipped. All days in the field must be valid"],
-            ["picture (verification)", "Invalid verification type", "Silently becomes 'none'. Use: photo, text, or photo,text"],
+            ["picture (verification)", "Invalid verification type", "Silently becomes 'none'. Use: none, photo, text, video, or combinations like photo,text"],
             ["mon,tue,wed,thu,fri,sat,sun", "All 7 days selected", "Auto-converted to daily (not an error)"],
         ]
         for row_data in error_rows:
