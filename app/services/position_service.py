@@ -134,12 +134,18 @@ class PositionService:
                 "A position with this name already exists in this store"
             )
 
+        # sort_order 자동 계산 — 항상 맨 마지막에 추가
+        existing_positions: list[Position] = await position_repository.get_by_store(
+            db, store_id
+        )
+        next_order: int = max((p.sort_order for p in existing_positions), default=-1) + 1
+
         position: Position = await position_repository.create(
             db,
             {
                 "store_id": store_id,
                 "name": data.name,
-                "sort_order": data.sort_order,
+                "sort_order": next_order,
             },
         )
         return self._to_response(position)

@@ -133,12 +133,16 @@ class ShiftService:
         if exists:
             raise DuplicateError("A shift with this name already exists in this store")
 
+        # sort_order 자동 계산 — 항상 맨 마지막에 추가
+        existing_shifts: list[Shift] = await shift_repository.get_by_store(db, store_id)
+        next_order: int = max((s.sort_order for s in existing_shifts), default=-1) + 1
+
         shift: Shift = await shift_repository.create(
             db,
             {
                 "store_id": store_id,
                 "name": data.name,
-                "sort_order": data.sort_order,
+                "sort_order": next_order,
             },
         )
         return self._to_response(shift)
