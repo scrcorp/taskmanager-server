@@ -11,7 +11,7 @@ from app.database import Base
 from app.models import *  # noqa: F401, F403 — import all models for autogenerate
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -38,11 +38,8 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    # Use session pooler (port 5432) instead of transaction pooler (port 6543)
-    # to avoid pgbouncer prepared statement conflicts during migrations
-    migration_url = settings.DATABASE_URL.replace(":6543/", ":5432/")
     connectable = create_async_engine(
-        migration_url,
+        settings.DATABASE_URL,
         poolclass=pool.NullPool,
         connect_args={
             "statement_cache_size": 0,
