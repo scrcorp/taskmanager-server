@@ -20,7 +20,7 @@ from app.schemas.common import (
     MessageResponse,
     PaginatedResponse,
 )
-from app.schemas.checklist_review import ItemReviewResponse, ItemReviewUpsert
+from app.schemas.checklist_review import ItemReviewResponse, ItemReviewUpsert, ReviewContentCreate, ReviewContentResponse
 from app.services.checklist_instance_service import checklist_instance_service
 
 router: APIRouter = APIRouter()
@@ -171,8 +171,6 @@ async def upsert_review(
         item_index=item_index,
         reviewer_id=current_user.id,
         result=data.result,
-        comment=data.comment,
-        photo_url=data.photo_url,
     )
     await db.commit()
 
@@ -183,8 +181,7 @@ async def upsert_review(
         "reviewer_id": str(review.reviewer_id),
         "reviewer_name": current_user.full_name,
         "result": review.result,
-        "comment": review.comment,
-        "photo_url": review.photo_url,
+        "contents": [],
         "created_at": review.created_at,
         "updated_at": review.updated_at,
     }
@@ -201,3 +198,47 @@ async def delete_review(
     await checklist_instance_service.delete_review(db, instance_id, item_index)
     await db.commit()
     return {"message": "리뷰가 삭제되었습니다 (Review deleted)"}
+
+
+@router.post("/{instance_id}/items/{item_index}/review/contents", response_model=ReviewContentResponse)
+async def add_review_content(
+    instance_id: UUID,
+    item_index: int,
+    data: ReviewContentCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+) -> dict:
+    """리뷰에 콘텐츠(텍스트/사진/영상)를 추가합니다."""
+    rc = await checklist_instance_service.add_review_content(
+        db,
+        instance_id=instance_id,
+        item_index=item_index,
+        author_id=current_user.id,
+        content_type=data.type,
+        content=data.content,
+    )
+    await db.commit()
+
+    return {
+        "id": str(rc.id),
+        "review_id": str(rc.review_id),
+        "author_id": str(rc.author_id),
+        "author_name": current_user.full_name,
+        "type": rc.type,
+        "content": rc.content,
+        "created_at": rc.created_at,
+    }
+
+
+@router.delete("/{instance_id}/items/{item_index}/review/contents/{content_id}", response_model=MessageResponse)
+async def delete_review_content(
+    instance_id: UUID,
+    item_index: int,
+    content_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+) -> dict:
+    """리뷰 콘텐츠를 삭제합니다."""
+    await checklist_instance_service.delete_review_content(db, content_id)
+    await db.commit()
+    return {"message": "콘텐츠가 삭제되었습니다 (Content deleted)"}

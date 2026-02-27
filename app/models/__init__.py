@@ -25,7 +25,7 @@ from app.models.user import Role, User
 from app.models.work import Shift, Position
 from app.models.token import RefreshToken
 from app.models.user_store import UserStore
-from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistTemplateLink, ChecklistInstance, ChecklistCompletion, ChecklistItemReview, ChecklistComment
+from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistTemplateLink, ChecklistInstance, ChecklistCompletion, ChecklistItemReview, ChecklistReviewContent, ChecklistComment
 from app.models.assignment import WorkAssignment
 from app.models.communication import Announcement, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, AnnouncementRead, IssueReport
 from app.models.notification import Notification
@@ -39,7 +39,7 @@ __all__ = [
     "Role", "User",
     "Shift", "Position",
     "RefreshToken", "UserStore",
-    "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistTemplateLink", "ChecklistInstance", "ChecklistCompletion", "ChecklistItemReview", "ChecklistComment",
+    "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistTemplateLink", "ChecklistInstance", "ChecklistCompletion", "ChecklistItemReview", "ChecklistReviewContent", "ChecklistComment",
     "WorkAssignment",
     "Announcement", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "AnnouncementRead", "IssueReport",
     "Notification",

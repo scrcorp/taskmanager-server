@@ -105,7 +105,7 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
             .where(ChecklistInstance.id == instance_id)
             .options(
                 selectinload(ChecklistInstance.completions),
-                selectinload(ChecklistInstance.reviews),
+                selectinload(ChecklistInstance.reviews).selectinload(ChecklistItemReview.contents),
             )
         )
 
@@ -136,7 +136,7 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
             .where(ChecklistInstance.work_assignment_id == work_assignment_id)
             .options(
                 selectinload(ChecklistInstance.completions),
-                selectinload(ChecklistInstance.reviews),
+                selectinload(ChecklistInstance.reviews).selectinload(ChecklistItemReview.contents),
             )
         )
         result = await db.execute(query)

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.assignment import WorkAssignment
-from app.models.checklist import ChecklistCompletion, ChecklistInstance, ChecklistItemReview, ChecklistTemplate
+from app.models.checklist import ChecklistCompletion, ChecklistInstance, ChecklistItemReview, ChecklistReviewContent, ChecklistTemplate
 from app.models.organization import Store
 from app.models.user import User
 from app.repositories.checklist_instance_repository import checklist_instance_repository
@@ -432,21 +432,24 @@ class ChecklistInstanceService:
                 for rev in instance.reviews:
                     reviews_map[rev.item_index] = rev
 
-            # 리뷰어 이름 일괄 조회 — Bulk fetch reviewer names
-            reviewer_names: dict[UUID, str] = {}
-            reviewer_ids = {rev.reviewer_id for rev in reviews_map.values()}
-            if reviewer_ids:
-                for rid in reviewer_ids:
-                    r = await db.execute(select(User.full_name).where(User.id == rid))
-                    reviewer_names[rid] = r.scalar() or "Unknown"
+            # 리뷰어+콘텐츠 작성자 이름 일괄 조회 — Bulk fetch user names
+            user_name_cache: dict[UUID, str] = {}
+            user_ids_to_fetch: set[UUID] = {rev.reviewer_id for rev in reviews_map.values()}
+            for rev in reviews_map.values():
+                if hasattr(rev, "contents") and rev.contents:
+                    for c in rev.contents:
+                        user_ids_to_fetch.add(c.author_id)
+            if user_ids_to_fetch:
+                for uid in user_ids_to_fetch:
+                    r = await db.execute(select(User.full_name).where(User.id == uid))
+                    user_name_cache[uid] = r.scalar() or "Unknown"
 
-            # 완료자 이름 일괄 조회 — Bulk fetch completer names
-            completer_names: dict[UUID, str] = {}
+            # 완료자 이름 일괄 조회 — Bulk fetch completer names (reuse cache)
             completer_ids = {comp.user_id for comp in completions_map.values()}
-            if completer_ids:
-                for cid in completer_ids:
+            for cid in completer_ids:
+                if cid not in user_name_cache:
                     r = await db.execute(select(User.full_name).where(User.id == cid))
-                    completer_names[cid] = r.scalar() or "Unknown"
+                    user_name_cache[cid] = r.scalar() or "Unknown"
 
             merged_items: list[dict] = []
             for item in snapshot["items"]:
@@ -457,7 +460,7 @@ class ChecklistInstanceService:
                     item_data["completed_at"] = comp.completed_at.isoformat() if comp.completed_at else None
                     item_data["completed_timezone"] = comp.completed_timezone
                     item_data["completed_by"] = str(comp.user_id)
-                    item_data["completed_by_name"] = completer_names.get(comp.user_id)
+                    item_data["completed_by_name"] = user_name_cache.get(comp.user_id)
                     item_data["photo_url"] = comp.photo_url
                     item_data["note"] = comp.note
                     item_data["location"] = comp.location
@@ -474,13 +477,24 @@ class ChecklistInstanceService:
                 # 리뷰 병합 — Merge review data
                 rev: ChecklistItemReview | None = reviews_map.get(item["item_index"])
                 if rev is not None:
+                    contents_list = []
+                    if hasattr(rev, "contents") and rev.contents:
+                        for c in rev.contents:
+                            contents_list.append({
+                                "id": str(c.id),
+                                "review_id": str(c.review_id),
+                                "author_id": str(c.author_id),
+                                "author_name": user_name_cache.get(c.author_id),
+                                "type": c.type,
+                                "content": c.content,
+                                "created_at": c.created_at.isoformat(),
+                            })
                     item_data["review"] = {
                         "id": str(rev.id),
                         "reviewer_id": str(rev.reviewer_id),
-                        "reviewer_name": reviewer_names.get(rev.reviewer_id),
+                        "reviewer_name": user_name_cache.get(rev.reviewer_id),
                         "result": rev.result,
-                        "comment": rev.comment,
-                        "photo_url": rev.photo_url,
+                        "contents": contents_list,
                         "created_at": rev.created_at.isoformat(),
                         "updated_at": rev.updated_at.isoformat(),
                     }
@@ -503,8 +517,6 @@ class ChecklistInstanceService:
         item_index: int,
         reviewer_id: UUID,
         result: str,
-        comment: str | None = None,
-        photo_url: str | None = None,
     ) -> ChecklistItemReview:
         """항목 리뷰를 생성하거나 수정합니다 (upsert).
 
@@ -519,10 +531,6 @@ class ChecklistInstanceService:
         if item_index < 0 or item_index >= len(snapshot_items):
             raise BadRequestError(f"항목 인덱스가 범위를 벗어났습니다 (Item index out of range: {item_index})")
 
-        # temp 파일 최종 위치로 이동 — Move temp file to final location
-        if photo_url:
-            photo_url = storage_service.finalize_upload(photo_url)
-
         # 기존 리뷰 조회
         existing = (
             await db.execute(
@@ -535,8 +543,6 @@ class ChecklistInstanceService:
 
         if existing is not None:
             existing.result = result
-            existing.comment = comment
-            existing.photo_url = photo_url
             existing.reviewer_id = reviewer_id
             await db.flush()
             await db.refresh(existing)
@@ -547,8 +553,6 @@ class ChecklistInstanceService:
             item_index=item_index,
             reviewer_id=reviewer_id,
             result=result,
-            comment=comment,
-            photo_url=photo_url,
         )
         db.add(review)
         await db.flush()
@@ -586,27 +590,100 @@ class ChecklistInstanceService:
         result = await db.execute(
             select(ChecklistItemReview)
             .where(ChecklistItemReview.instance_id == instance_id)
+            .options(selectinload(ChecklistItemReview.contents))
             .order_by(ChecklistItemReview.item_index)
         )
         reviews = list(result.scalars().all())
 
+        # 이름 캐시
+        name_cache: dict[UUID, str] = {}
+        async def get_name(uid: UUID) -> str:
+            if uid not in name_cache:
+                r = await db.execute(select(User.full_name).where(User.id == uid))
+                name_cache[uid] = r.scalar() or "Unknown"
+            return name_cache[uid]
+
         items: list[dict] = []
         for rev in reviews:
-            user_result = await db.execute(select(User.full_name).where(User.id == rev.reviewer_id))
-            reviewer_name = user_result.scalar() or "Unknown"
+            contents_list = []
+            for c in rev.contents:
+                contents_list.append({
+                    "id": str(c.id),
+                    "review_id": str(c.review_id),
+                    "author_id": str(c.author_id),
+                    "author_name": await get_name(c.author_id),
+                    "type": c.type,
+                    "content": c.content,
+                    "created_at": c.created_at,
+                })
             items.append({
                 "id": str(rev.id),
                 "instance_id": str(rev.instance_id),
                 "item_index": rev.item_index,
                 "reviewer_id": str(rev.reviewer_id),
-                "reviewer_name": reviewer_name,
+                "reviewer_name": await get_name(rev.reviewer_id),
                 "result": rev.result,
-                "comment": rev.comment,
-                "photo_url": rev.photo_url,
+                "contents": contents_list,
                 "created_at": rev.created_at,
                 "updated_at": rev.updated_at,
             })
         return items
+
+    async def add_review_content(
+        self,
+        db: AsyncSession,
+        instance_id: UUID,
+        item_index: int,
+        author_id: UUID,
+        content_type: str,
+        content: str,
+    ) -> ChecklistReviewContent:
+        """리뷰에 콘텐츠(텍스트/사진/영상)를 추가합니다."""
+        # 리뷰 존재 확인
+        review = (
+            await db.execute(
+                select(ChecklistItemReview).where(
+                    ChecklistItemReview.instance_id == instance_id,
+                    ChecklistItemReview.item_index == item_index,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if review is None:
+            raise NotFoundError("리뷰를 찾을 수 없습니다 (Review not found)")
+
+        # 미디어 URL이면 finalize
+        if content_type in ("photo", "video"):
+            content = storage_service.finalize_upload(content)
+
+        rc = ChecklistReviewContent(
+            review_id=review.id,
+            author_id=author_id,
+            type=content_type,
+            content=content,
+        )
+        db.add(rc)
+        await db.flush()
+        await db.refresh(rc)
+        return rc
+
+    async def delete_review_content(
+        self,
+        db: AsyncSession,
+        content_id: UUID,
+    ) -> None:
+        """리뷰 콘텐츠를 삭제합니다."""
+        existing = (
+            await db.execute(
+                select(ChecklistReviewContent).where(ChecklistReviewContent.id == content_id)
+            )
+        ).scalar_one_or_none()
+
+        if existing is None:
+            raise NotFoundError("콘텐츠를 찾을 수 없습니다 (Content not found)")
+
+        await db.delete(existing)
+        await db.flush()
 
 
 # 싱글턴 인스턴스 — Singleton instance

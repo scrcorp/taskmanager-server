@@ -291,7 +291,8 @@ class ChecklistItemReview(Base):
 
     Per-item review by supervisor/manager.
     One review per item per instance (UNIQUE constraint).
-    Stores pass/fail/caution result, optional comment, and optional photo.
+    Stores pass/fail/caution result only. Contents (text/photo/video)
+    are stored in cl_review_contents.
     """
 
     __tablename__ = "cl_item_reviews"
@@ -301,8 +302,6 @@ class ChecklistItemReview(Base):
     item_index: Mapped[int] = mapped_column(Integer, nullable=False)
     reviewer_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     result: Mapped[str] = mapped_column(String(10), nullable=False)  # pass, fail, caution
-    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
-    photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -311,6 +310,26 @@ class ChecklistItemReview(Base):
     )
 
     instance = relationship("ChecklistInstance", back_populates="reviews", foreign_keys=[instance_id])
+    contents = relationship("ChecklistReviewContent", back_populates="review", cascade="all, delete-orphan", order_by="ChecklistReviewContent.created_at")
+
+
+class ChecklistReviewContent(Base):
+    """체크리스트 리뷰 콘텐츠 — 리뷰에 달리는 텍스트/사진/영상.
+
+    Multiple contents per review. Any authorized user can add content
+    (not just the original reviewer). Displayed in chat-like format.
+    """
+
+    __tablename__ = "cl_review_contents"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    review_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_item_reviews.id", ondelete="CASCADE"), nullable=False)
+    author_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    type: Mapped[str] = mapped_column(String(10), nullable=False)  # text, photo, video
+    content: Mapped[str] = mapped_column(Text, nullable=False)  # text body or media URL
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    review = relationship("ChecklistItemReview", back_populates="contents", foreign_keys=[review_id])
 
 
 class ChecklistComment(Base):
