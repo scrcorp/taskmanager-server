@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     AWS_S3_BUCKET: str = ""
     AWS_S3_REGION: str = "ap-northeast-2"
 
+    # 로컬 파일 저장 경로 — 비어있으면 server/uploads/ 사용
+    LOCAL_UPLOADS_DIR: str = ""
+
     # SMTP 이메일 설정 — Brevo (smtp-relay.brevo.com)
     SMTP_HOST: str = "smtp-relay.brevo.com"
     SMTP_PORT: int = 587

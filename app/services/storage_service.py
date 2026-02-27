@@ -12,8 +12,9 @@ from pathlib import Path
 
 from app.config import settings
 
-# 로컬 업로드 디렉토리 — server/uploads/
-UPLOADS_DIR: Path = Path(__file__).resolve().parent.parent / "uploads"
+# 로컬 업로드 디렉토리 — .env의 LOCAL_UPLOADS_DIR 또는 server/uploads/
+_SERVER_ROOT: Path = Path(__file__).resolve().parent.parent.parent
+UPLOADS_DIR: Path = Path(settings.LOCAL_UPLOADS_DIR) if settings.LOCAL_UPLOADS_DIR else _SERVER_ROOT / "uploads"
 
 
 class StorageService:

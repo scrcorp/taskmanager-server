@@ -14,5 +14,7 @@ htmlcov/
 .claude/
 .DS_Store
 
+uploads/
+
 # exception
 !.env.example
