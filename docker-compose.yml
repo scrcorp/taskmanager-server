@@ -1,10 +1,26 @@
 services:
   api:
     build: .
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     env_file:
       - .env
     environment:
       - WORKERS=2
+    volumes:
+      - uploads:/app/uploads
     restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "18000:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - uploads:/app/uploads:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  uploads:
