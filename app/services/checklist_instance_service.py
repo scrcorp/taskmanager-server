@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.assignment import WorkAssignment
-from app.models.checklist import ChecklistCompletion, ChecklistInstance, ChecklistTemplate
+from app.models.checklist import ChecklistCompletion, ChecklistInstance, ChecklistItemReview, ChecklistTemplate
 from app.models.organization import Store
 from app.models.user import User
 from app.repositories.checklist_instance_repository import checklist_instance_repository
@@ -425,6 +425,20 @@ class ChecklistInstanceService:
                 for comp in instance.completions:
                     completions_map[comp.item_index] = comp
 
+            # 리뷰 기록을 item_index로 인덱싱 — Index reviews by item_index
+            reviews_map: dict[int, ChecklistItemReview] = {}
+            if hasattr(instance, "reviews") and instance.reviews:
+                for rev in instance.reviews:
+                    reviews_map[rev.item_index] = rev
+
+            # 리뷰어 이름 일괄 조회 — Bulk fetch reviewer names
+            reviewer_names: dict[UUID, str] = {}
+            reviewer_ids = {rev.reviewer_id for rev in reviews_map.values()}
+            if reviewer_ids:
+                for rid in reviewer_ids:
+                    r = await db.execute(select(User.full_name).where(User.id == rid))
+                    reviewer_names[rid] = r.scalar() or "Unknown"
+
             merged_items: list[dict] = []
             for item in snapshot["items"]:
                 item_data: dict[str, Any] = {**item}
@@ -446,6 +460,22 @@ class ChecklistInstanceService:
                     item_data["note"] = None
                     item_data["location"] = None
 
+                # 리뷰 병합 — Merge review data
+                rev: ChecklistItemReview | None = reviews_map.get(item["item_index"])
+                if rev is not None:
+                    item_data["review"] = {
+                        "id": str(rev.id),
+                        "reviewer_id": str(rev.reviewer_id),
+                        "reviewer_name": reviewer_names.get(rev.reviewer_id),
+                        "result": rev.result,
+                        "comment": rev.comment,
+                        "photo_url": rev.photo_url,
+                        "created_at": rev.created_at.isoformat(),
+                        "updated_at": rev.updated_at.isoformat(),
+                    }
+                else:
+                    item_data["review"] = None
+
                 merged_items.append(item_data)
 
             response["snapshot"] = merged_items
@@ -453,6 +483,115 @@ class ChecklistInstanceService:
             response["snapshot"] = None
 
         return response
+
+
+    async def upsert_review(
+        self,
+        db: AsyncSession,
+        instance_id: UUID,
+        item_index: int,
+        reviewer_id: UUID,
+        result: str,
+        comment: str | None = None,
+        photo_url: str | None = None,
+    ) -> ChecklistItemReview:
+        """항목 리뷰를 생성하거나 수정합니다 (upsert).
+
+        Create or update an item review. One review per (instance_id, item_index).
+        """
+        # 인스턴스 존재 확인 + item_index 범위 검증
+        instance = await checklist_instance_repository.get_with_completions(db, instance_id)
+        if instance is None:
+            raise NotFoundError("체크리스트 인스턴스를 찾을 수 없습니다 (Checklist instance not found)")
+
+        snapshot_items = instance.snapshot.get("items", []) if instance.snapshot else []
+        if item_index < 0 or item_index >= len(snapshot_items):
+            raise BadRequestError(f"항목 인덱스가 범위를 벗어났습니다 (Item index out of range: {item_index})")
+
+        # 기존 리뷰 조회
+        existing = (
+            await db.execute(
+                select(ChecklistItemReview).where(
+                    ChecklistItemReview.instance_id == instance_id,
+                    ChecklistItemReview.item_index == item_index,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if existing is not None:
+            existing.result = result
+            existing.comment = comment
+            existing.photo_url = photo_url
+            existing.reviewer_id = reviewer_id
+            await db.flush()
+            await db.refresh(existing)
+            return existing
+
+        review = ChecklistItemReview(
+            instance_id=instance_id,
+            item_index=item_index,
+            reviewer_id=reviewer_id,
+            result=result,
+            comment=comment,
+            photo_url=photo_url,
+        )
+        db.add(review)
+        await db.flush()
+        await db.refresh(review)
+        return review
+
+    async def delete_review(
+        self,
+        db: AsyncSession,
+        instance_id: UUID,
+        item_index: int,
+    ) -> None:
+        """항목 리뷰를 삭제합니다."""
+        existing = (
+            await db.execute(
+                select(ChecklistItemReview).where(
+                    ChecklistItemReview.instance_id == instance_id,
+                    ChecklistItemReview.item_index == item_index,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if existing is None:
+            raise NotFoundError("리뷰를 찾을 수 없습니다 (Review not found)")
+
+        await db.delete(existing)
+        await db.flush()
+
+    async def get_reviews_for_instance(
+        self,
+        db: AsyncSession,
+        instance_id: UUID,
+    ) -> list[dict]:
+        """인스턴스의 모든 리뷰를 조회합니다."""
+        result = await db.execute(
+            select(ChecklistItemReview)
+            .where(ChecklistItemReview.instance_id == instance_id)
+            .order_by(ChecklistItemReview.item_index)
+        )
+        reviews = list(result.scalars().all())
+
+        items: list[dict] = []
+        for rev in reviews:
+            user_result = await db.execute(select(User.full_name).where(User.id == rev.reviewer_id))
+            reviewer_name = user_result.scalar() or "Unknown"
+            items.append({
+                "id": str(rev.id),
+                "instance_id": str(rev.instance_id),
+                "item_index": rev.item_index,
+                "reviewer_id": str(rev.reviewer_id),
+                "reviewer_name": reviewer_name,
+                "result": rev.result,
+                "comment": rev.comment,
+                "photo_url": rev.photo_url,
+                "created_at": rev.created_at,
+                "updated_at": rev.updated_at,
+            })
+        return items
 
 
 # 싱글턴 인스턴스 — Singleton instance

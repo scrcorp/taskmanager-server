@@ -11,18 +11,16 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sqlalchemy import select
-
 from app.api.deps import require_permission
 from app.database import get_db
-from app.models.checklist import ChecklistComment
 from app.models.user import User
 from app.schemas.common import (
     ChecklistInstanceDetailResponse,
     ChecklistInstanceResponse,
+    MessageResponse,
     PaginatedResponse,
 )
-from app.schemas.checklist_comment import ChecklistCommentCreate, ChecklistCommentResponse
+from app.schemas.checklist_review import ItemReviewResponse, ItemReviewUpsert
 from app.services.checklist_instance_service import checklist_instance_service
 
 router: APIRouter = APIRouter()
@@ -148,59 +146,58 @@ async def get_checklist_instance(
     return await checklist_instance_service.build_detail_response(db, instance)
 
 
-@router.get("/{instance_id}/comments", response_model=list[ChecklistCommentResponse])
-async def list_comments(
+@router.get("/{instance_id}/reviews", response_model=list[ItemReviewResponse])
+async def list_reviews(
     instance_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("checklists:read"))],
-) -> list[ChecklistCommentResponse]:
-    """체크리스트 인스턴스의 코멘트 목록을 조회합니다."""
-    query = (
-        select(ChecklistComment)
-        .where(ChecklistComment.instance_id == instance_id)
-        .order_by(ChecklistComment.created_at)
-    )
-    result = await db.execute(query)
-    comments = list(result.scalars().all())
-
-    responses: list[ChecklistCommentResponse] = []
-    for c in comments:
-        user_result = await db.execute(select(User).where(User.id == c.user_id))
-        user = user_result.scalar_one_or_none()
-        responses.append(ChecklistCommentResponse(
-            id=str(c.id),
-            instance_id=str(c.instance_id),
-            user_id=str(c.user_id),
-            user_name=user.full_name if user else None,
-            text=c.text,
-            created_at=c.created_at,
-        ))
-    return responses
+) -> list[dict]:
+    """인스턴스의 전체 아이템 리뷰 목록을 조회합니다."""
+    return await checklist_instance_service.get_reviews_for_instance(db, instance_id)
 
 
-@router.post("/{instance_id}/comments", response_model=ChecklistCommentResponse, status_code=201)
-async def create_comment(
+@router.put("/{instance_id}/items/{item_index}/review", response_model=ItemReviewResponse)
+async def upsert_review(
     instance_id: UUID,
-    data: ChecklistCommentCreate,
+    item_index: int,
+    data: ItemReviewUpsert,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("checklists:read"))],
-) -> ChecklistCommentResponse:
-    """체크리스트 인스턴스에 코멘트를 추가합니다."""
-    comment = ChecklistComment(
+) -> dict:
+    """아이템 리뷰를 생성하거나 수정합니다 (upsert)."""
+    review = await checklist_instance_service.upsert_review(
+        db,
         instance_id=instance_id,
-        user_id=current_user.id,
-        text=data.text,
+        item_index=item_index,
+        reviewer_id=current_user.id,
+        result=data.result,
+        comment=data.comment,
+        photo_url=data.photo_url,
     )
-    db.add(comment)
-    await db.flush()
-    await db.refresh(comment)
     await db.commit()
 
-    return ChecklistCommentResponse(
-        id=str(comment.id),
-        instance_id=str(comment.instance_id),
-        user_id=str(comment.user_id),
-        user_name=current_user.full_name,
-        text=comment.text,
-        created_at=comment.created_at,
-    )
+    return {
+        "id": str(review.id),
+        "instance_id": str(review.instance_id),
+        "item_index": review.item_index,
+        "reviewer_id": str(review.reviewer_id),
+        "reviewer_name": current_user.full_name,
+        "result": review.result,
+        "comment": review.comment,
+        "photo_url": review.photo_url,
+        "created_at": review.created_at,
+        "updated_at": review.updated_at,
+    }
+
+
+@router.delete("/{instance_id}/items/{item_index}/review", response_model=MessageResponse)
+async def delete_review(
+    instance_id: UUID,
+    item_index: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+) -> dict:
+    """아이템 리뷰를 삭제합니다."""
+    await checklist_instance_service.delete_review(db, instance_id, item_index)
+    await db.commit()
+    return {"message": "리뷰가 삭제되었습니다 (Review deleted)"}

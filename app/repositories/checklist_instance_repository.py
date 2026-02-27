@@ -13,7 +13,7 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.checklist import ChecklistCompletion, ChecklistInstance
+from app.models.checklist import ChecklistCompletion, ChecklistInstance, ChecklistItemReview
 from app.repositories.base import BaseRepository
 
 
@@ -103,7 +103,10 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
         query: Select = (
             select(ChecklistInstance)
             .where(ChecklistInstance.id == instance_id)
-            .options(selectinload(ChecklistInstance.completions))
+            .options(
+                selectinload(ChecklistInstance.completions),
+                selectinload(ChecklistInstance.reviews),
+            )
         )
 
         if organization_id is not None:
@@ -131,7 +134,10 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
         query: Select = (
             select(ChecklistInstance)
             .where(ChecklistInstance.work_assignment_id == work_assignment_id)
-            .options(selectinload(ChecklistInstance.completions))
+            .options(
+                selectinload(ChecklistInstance.completions),
+                selectinload(ChecklistInstance.reviews),
+            )
         )
         result = await db.execute(query)
         return result.scalar_one_or_none()
