@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     AXIOM_API_TOKEN: str = ""  # Axiom API 토큰 (API token from Axiom dashboard)
     AXIOM_DATASET: str = ""  # Axiom 데이터셋 이름 (Dataset name for API logs)
 
+    # AWS S3 설정 — 파일 업로드 presigned URL 생성용
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_S3_BUCKET: str = ""
+    AWS_S3_REGION: str = "ap-northeast-2"
+
     # SMTP 이메일 설정 — Brevo (smtp-relay.brevo.com)
     SMTP_HOST: str = "smtp-relay.brevo.com"
     SMTP_PORT: int = 587

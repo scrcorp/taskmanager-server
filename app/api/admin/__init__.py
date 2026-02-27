@@ -73,6 +73,9 @@ from app.api.admin.template_links import router as template_links_router
 # Phase 10 — Issue Reports 라우터 임포트
 from app.api.admin.issue_reports import router as issue_reports_router
 
+# Storage 라우터 임포트
+from app.api.admin.storage import router as storage_router
+
 # Permission 관리 라우터 임포트
 from app.api.admin.permissions import router as permissions_router
 
@@ -155,3 +158,8 @@ admin_router.include_router(issue_reports_router, prefix="/issue-reports", tags=
 # Permission 관리 라우터 등록
 # ---------------------------------------------------------------------------
 admin_router.include_router(permissions_router, prefix="/permissions", tags=["Permissions"])
+
+# ---------------------------------------------------------------------------
+# Storage 라우터 등록 — S3 presigned URL
+# ---------------------------------------------------------------------------
+admin_router.include_router(storage_router, prefix="/storage", tags=["Storage"])

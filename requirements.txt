@@ -30,3 +30,6 @@ axiom-py==0.10.0
 
 # Email
 aiosmtplib==3.0.2
+
+# AWS
+boto3==1.35.0
