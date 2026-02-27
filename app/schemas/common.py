@@ -283,10 +283,12 @@ class AssignmentDetailResponse(AssignmentResponse):
 
     Attributes:
         checklist_snapshot: JSONB 체크리스트 스냅샷 (Snapshot of checklist items at assignment time)
+        checklist_instance_id: 체크리스트 인스턴스 UUID (Linked cl_instances.id, nullable)
     """
 
     # JSONB 스냅샷 — 각 항목: {item_index, title, description, verification_type, is_completed, completed_at, completed_tz}
     checklist_snapshot: list[dict[str, Any]] | None = None
+    checklist_instance_id: str | None = None
 
 
 class ChecklistItemComplete(BaseModel):

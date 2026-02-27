@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.assignment import WorkAssignment
-from app.models.checklist import ChecklistTemplate
+from app.models.checklist import ChecklistInstance, ChecklistTemplate
 from app.models.organization import Store
 from app.models.user import User
 from app.models.work import Position, Shift
@@ -334,6 +334,17 @@ class AssignmentService:
         response: dict = await self.build_response(db, assignment)
         snapshot: dict | None = assignment.checklist_snapshot
         response["checklist_snapshot"] = snapshot.get("items") if snapshot else None
+
+        # cl_instances에서 연결된 인스턴스 ID 조회 (for comments)
+        instance_row = (
+            await db.execute(
+                select(ChecklistInstance.id).where(
+                    ChecklistInstance.work_assignment_id == assignment.id
+                )
+            )
+        ).scalar_one_or_none()
+        response["checklist_instance_id"] = str(instance_row) if instance_row else None
+
         return response
 
     async def list_assignments(
