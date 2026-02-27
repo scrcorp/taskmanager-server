@@ -18,6 +18,7 @@ from app.models.checklist import ChecklistCompletion, ChecklistInstance, Checkli
 from app.models.organization import Store
 from app.models.user import User
 from app.repositories.checklist_instance_repository import checklist_instance_repository
+from app.services.storage_service import storage_service
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 
 
@@ -439,6 +440,14 @@ class ChecklistInstanceService:
                     r = await db.execute(select(User.full_name).where(User.id == rid))
                     reviewer_names[rid] = r.scalar() or "Unknown"
 
+            # 완료자 이름 일괄 조회 — Bulk fetch completer names
+            completer_names: dict[UUID, str] = {}
+            completer_ids = {comp.user_id for comp in completions_map.values()}
+            if completer_ids:
+                for cid in completer_ids:
+                    r = await db.execute(select(User.full_name).where(User.id == cid))
+                    completer_names[cid] = r.scalar() or "Unknown"
+
             merged_items: list[dict] = []
             for item in snapshot["items"]:
                 item_data: dict[str, Any] = {**item}
@@ -448,6 +457,7 @@ class ChecklistInstanceService:
                     item_data["completed_at"] = comp.completed_at.isoformat() if comp.completed_at else None
                     item_data["completed_timezone"] = comp.completed_timezone
                     item_data["completed_by"] = str(comp.user_id)
+                    item_data["completed_by_name"] = completer_names.get(comp.user_id)
                     item_data["photo_url"] = comp.photo_url
                     item_data["note"] = comp.note
                     item_data["location"] = comp.location
@@ -456,6 +466,7 @@ class ChecklistInstanceService:
                     item_data["completed_at"] = None
                     item_data["completed_timezone"] = None
                     item_data["completed_by"] = None
+                    item_data["completed_by_name"] = None
                     item_data["photo_url"] = None
                     item_data["note"] = None
                     item_data["location"] = None
@@ -507,6 +518,10 @@ class ChecklistInstanceService:
         snapshot_items = instance.snapshot.get("items", []) if instance.snapshot else []
         if item_index < 0 or item_index >= len(snapshot_items):
             raise BadRequestError(f"항목 인덱스가 범위를 벗어났습니다 (Item index out of range: {item_index})")
+
+        # temp 파일 최종 위치로 이동 — Move temp file to final location
+        if photo_url:
+            photo_url = storage_service.finalize_upload(photo_url)
 
         # 기존 리뷰 조회
         existing = (
