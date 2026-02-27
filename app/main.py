@@ -6,6 +6,7 @@ Configures CORS, health check, and includes routers for each phase.
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.middleware.axiom_logging import AxiomLoggingMiddleware
@@ -55,3 +56,9 @@ app.include_router(common_auth_router, prefix="/api/v1/auth", tags=["Auth"])
 app.include_router(admin_router, prefix="/api/v1/admin")
 app.include_router(app_router, prefix="/api/v1/app")
 app.include_router(setup_page_router, tags=["Setup Page"])
+
+# 로컬 파일 업로드 정적 파일 서빙 — Local file upload static serving
+from app.services.storage_service import UPLOADS_DIR  # noqa: E402
+
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
