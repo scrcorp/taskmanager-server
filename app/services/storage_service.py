@@ -1,8 +1,12 @@
 """스토리지 서비스 — S3 또는 로컬 파일 저장.
 
 Storage Service — S3 presigned URL or local file storage.
-AWS 키가 비어있으면 자동으로 로컬 모드로 전환됩니다.
+STORAGE_MODE 환경변수로 모드 결정 ("local" 또는 "s3").
+S3 모드에서 access key가 없으면 IAM role을 사용합니다 (EC2 배포 시).
 모든 업로드는 temp/ 폴더에 먼저 저장되고, finalize_upload()로 최종 위치로 이동합니다.
+
+폴더별 경로는 .env에서 설정 가능 (STORAGE_FOLDER_*). 기본값:
+  reviews, completions, profiles, announcements, issues
 """
 
 import shutil
@@ -16,6 +20,20 @@ from app.config import settings
 _SERVER_ROOT: Path = Path(__file__).resolve().parent.parent.parent
 UPLOADS_DIR: Path = Path(settings.LOCAL_UPLOADS_DIR) if settings.LOCAL_UPLOADS_DIR else _SERVER_ROOT / "uploads"
 
+# 폴더별 경로 매핑 — .env에서 오버라이드 가능
+FOLDER_MAP: dict[str, str] = {
+    "reviews": settings.STORAGE_FOLDER_REVIEWS,
+    "completions": settings.STORAGE_FOLDER_COMPLETIONS,
+    "profiles": settings.STORAGE_FOLDER_PROFILES,
+    "announcements": settings.STORAGE_FOLDER_ANNOUNCEMENTS,
+    "issues": settings.STORAGE_FOLDER_ISSUES,
+}
+
+
+def resolve_folder(folder: str) -> str:
+    """폴더 이름을 .env 설정값으로 변환합니다. 미등록 폴더는 그대로 반환."""
+    return FOLDER_MAP.get(folder, folder)
+
 
 class StorageService:
     """파일 업로드 서비스 — S3 또는 로컬 모드 자동 선택."""
@@ -25,7 +43,7 @@ class StorageService:
 
     @property
     def is_local(self) -> bool:
-        return not settings.AWS_ACCESS_KEY_ID or not settings.AWS_S3_BUCKET
+        return settings.STORAGE_MODE != "s3"
 
     @property
     def client(self):
@@ -35,19 +53,22 @@ class StorageService:
             import boto3
             from botocore.config import Config as BotoConfig
 
-            self._client = boto3.client(
-                "s3",
-                region_name=settings.AWS_S3_REGION,
-                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-                config=BotoConfig(signature_version="s3v4"),
-            )
+            kwargs: dict = {
+                "region_name": settings.AWS_S3_REGION,
+                "config": BotoConfig(signature_version="s3v4"),
+            }
+            # access key가 있으면 명시적 사용, 없으면 IAM role (boto3 기본 credential chain)
+            if settings.AWS_ACCESS_KEY_ID:
+                kwargs["aws_access_key_id"] = settings.AWS_ACCESS_KEY_ID
+                kwargs["aws_secret_access_key"] = settings.AWS_SECRET_ACCESS_KEY
+            self._client = boto3.client("s3", **kwargs)
         return self._client
 
     def _generate_key(self, filename: str, folder: str) -> str:
         ext = filename.rsplit(".", 1)[-1] if "." in filename else "bin"
         date_prefix = datetime.now(timezone.utc).strftime("%Y/%m/%d")
-        return f"temp/{folder}/{date_prefix}/{uuid.uuid4().hex}.{ext}"
+        resolved = resolve_folder(folder)
+        return f"temp/{resolved}/{date_prefix}/{uuid.uuid4().hex}.{ext}"
 
     def generate_presigned_upload_url(
         self,

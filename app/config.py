@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     AXIOM_API_TOKEN: str = ""  # Axiom API 토큰 (API token from Axiom dashboard)
     AXIOM_DATASET: str = ""  # Axiom 데이터셋 이름 (Dataset name for API logs)
 
+    # Storage 모드 — "local" 또는 "s3" (s3일 때 access key 없으면 IAM role 사용)
+    STORAGE_MODE: str = "local"
+
     # AWS S3 설정 — 파일 업로드 presigned URL 생성용
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
@@ -59,6 +62,13 @@ class Settings(BaseSettings):
 
     # 로컬 파일 저장 경로 — 비어있으면 server/uploads/ 사용
     LOCAL_UPLOADS_DIR: str = ""
+
+    # 폴더별 저장 경로 (S3 key prefix / 로컬 하위 폴더명)
+    STORAGE_FOLDER_REVIEWS: str = "reviews"
+    STORAGE_FOLDER_COMPLETIONS: str = "completions"
+    STORAGE_FOLDER_PROFILES: str = "profiles"
+    STORAGE_FOLDER_ANNOUNCEMENTS: str = "announcements"
+    STORAGE_FOLDER_ISSUES: str = "issues"
 
     # SMTP 이메일 설정 — Brevo (smtp-relay.brevo.com)
     SMTP_HOST: str = "smtp-relay.brevo.com"
