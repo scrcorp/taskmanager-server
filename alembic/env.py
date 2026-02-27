@@ -38,8 +38,11 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
+    # Supabase: transaction pooler(6543) → session pooler(5432) 전환
+    # RDS(5432)는 치환 발생 안 하므로 무해
+    migration_url = settings.DATABASE_URL.replace(":6543/", ":5432/")
     connectable = create_async_engine(
-        settings.DATABASE_URL,
+        migration_url,
         poolclass=pool.NullPool,
         connect_args={
             "statement_cache_size": 0,
