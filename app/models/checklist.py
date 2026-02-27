@@ -187,6 +187,8 @@ class ChecklistInstance(Base):
 
     # 관계 — Completion records ordered by item_index
     completions = relationship("ChecklistCompletion", back_populates="instance", cascade="all, delete-orphan", order_by="ChecklistCompletion.item_index")
+    # 관계 — Item reviews ordered by item_index
+    reviews = relationship("ChecklistItemReview", back_populates="instance", cascade="all, delete-orphan", order_by="ChecklistItemReview.item_index")
 
 
 class ChecklistCompletion(Base):
@@ -282,6 +284,33 @@ class ChecklistTemplateLink(Base):
     )
 
     template = relationship("ChecklistTemplate", foreign_keys=[template_id])
+
+
+class ChecklistItemReview(Base):
+    """체크리스트 항목 리뷰 모델 — 관리자의 항목별 검수 결과.
+
+    Per-item review by supervisor/manager.
+    One review per item per instance (UNIQUE constraint).
+    Stores pass/fail/caution result, optional comment, and optional photo.
+    """
+
+    __tablename__ = "cl_item_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instances.id", ondelete="CASCADE"), nullable=False)
+    item_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    reviewer_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    result: Mapped[str] = mapped_column(String(10), nullable=False)  # pass, fail, caution
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("instance_id", "item_index", name="uq_cl_item_review_instance_item"),
+    )
+
+    instance = relationship("ChecklistInstance", back_populates="reviews", foreign_keys=[instance_id])
 
 
 class ChecklistComment(Base):
