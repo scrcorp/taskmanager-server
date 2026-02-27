@@ -22,6 +22,7 @@ from app.schemas.common import (
 )
 from app.schemas.checklist_review import ItemReviewResponse, ItemReviewUpsert
 from app.services.checklist_instance_service import checklist_instance_service
+from app.utils.exceptions import NotFoundError
 
 router: APIRouter = APIRouter()
 
@@ -117,6 +118,23 @@ async def get_completion_log(
         "page": page,
         "per_page": per_page,
     }
+
+
+@router.get("/by-assignment/{assignment_id}")
+async def get_instance_id_by_assignment(
+    assignment_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+) -> dict:
+    """work_assignment_id로 cl_instance_id를 조회합니다.
+
+    Lookup checklist instance ID by work assignment ID.
+    Used for notification deep-linking.
+    """
+    instance = await checklist_instance_service.get_instance_by_assignment(db, assignment_id)
+    if instance is None:
+        raise NotFoundError("해당 배정에 대한 체크리스트 인스턴스가 없습니다 (No checklist instance for this assignment)")
+    return {"instance_id": str(instance.id)}
 
 
 @router.get("/{instance_id}", response_model=ChecklistInstanceDetailResponse)
