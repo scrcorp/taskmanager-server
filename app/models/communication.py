@@ -219,7 +219,7 @@ class Voice(Base):
         organization_id: 소속 조직 FK
         store_id: 관련 매장 FK (optional)
         title: 제목
-        description: 상세 설명
+        content: 본문 내용
         category: 유형 (idea, facility, equipment, safety, hr, other)
         status: 상태 (open, in_progress, resolved)
         priority: 우선순위 (low, normal, high, urgent)
@@ -236,7 +236,7 @@ class Voice(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     store_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str] = mapped_column(String(30), default="other")  # idea, facility, equipment, safety, hr, other
     status: Mapped[str] = mapped_column(String(20), default="open")  # open, in_progress, resolved
     priority: Mapped[str] = mapped_column(String(20), default="normal")  # low, normal, high, urgent

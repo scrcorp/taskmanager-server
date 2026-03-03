@@ -35,7 +35,7 @@ class VoiceService:
         return {
             "id": str(voice.id),
             "title": voice.title,
-            "description": voice.description,
+            "content": voice.content,
             "category": voice.category,
             "status": voice.status,
             "priority": voice.priority,
@@ -82,13 +82,14 @@ class VoiceService:
         created_by: UUID,
     ) -> Voice:
         store_id = UUID(data.store_id) if data.store_id else None
+        title = data.title or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         return await voice_repository.create(
             db,
             {
                 "organization_id": organization_id,
                 "store_id": store_id,
-                "title": data.title,
-                "description": data.description,
+                "title": title,
+                "content": data.content,
                 "category": data.category,
                 "priority": data.priority,
                 "created_by": created_by,
