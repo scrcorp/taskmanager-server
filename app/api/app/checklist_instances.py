@@ -1,7 +1,7 @@
 """앱 체크리스트 인스턴스 라우터 — 내 체크리스트 API.
 
 App Checklist Instance Router — API endpoints for user's own checklist instances.
-Provides read access and item completion for the mobile app.
+Provides read access, item completion, resubmission, and review comment for the mobile app.
 """
 
 from datetime import date
@@ -19,6 +19,7 @@ from app.schemas.common import (
     ChecklistInstanceDetailResponse,
     ChecklistInstanceResponse,
 )
+from app.schemas.checklist_review import ResubmitRequest, ReviewContentCreate, ReviewContentResponse
 from app.services.checklist_instance_service import checklist_instance_service
 from app.utils.exceptions import ForbiddenError
 
@@ -34,14 +35,6 @@ async def list_my_checklist_instances(
     """내 체크리스트 인스턴스 목록을 조회합니다.
 
     List my checklist instances with optional date filter.
-
-    Args:
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 사용자 (Authenticated user)
-        work_date: 근무일 필터, 선택 (Optional work date filter)
-
-    Returns:
-        list[dict]: 내 인스턴스 목록 (My instance list)
     """
     instances = await checklist_instance_service.get_my_instances(
         db,
@@ -63,24 +56,12 @@ async def get_my_checklist_instance(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
-    """내 체크리스트 인스턴스 상세를 조회합니다.
-
-    Get my checklist instance detail with snapshot merged with completions.
-
-    Args:
-        instance_id: 인스턴스 UUID (Instance UUID)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 사용자 (Authenticated user)
-
-    Returns:
-        dict: 인스턴스 상세 (Instance detail with merged snapshot)
-    """
+    """내 체크리스트 인스턴스 상세를 조회합니다."""
     instance = await checklist_instance_service.get_instance(
         db,
         instance_id=instance_id,
     )
 
-    # 본인 인스턴스만 조회 가능 — Only allow viewing own instances
     if instance.user_id != current_user.id:
         raise ForbiddenError("본인의 체크리스트만 조회할 수 있습니다 (Can only view your own checklist)")
 
@@ -99,20 +80,7 @@ async def complete_checklist_item(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
-    """체크리스트 항목을 완료 처리합니다.
-
-    Complete a checklist item in an instance.
-
-    Args:
-        instance_id: 인스턴스 UUID (Instance UUID)
-        item_index: 체크리스트 항목 인덱스 (Checklist item index)
-        data: 완료 데이터 (Completion data: photo_url, note, location)
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 사용자 (Authenticated user)
-
-    Returns:
-        dict: 업데이트된 인스턴스 상세 (Updated instance detail)
-    """
+    """체크리스트 항목을 완료 처리합니다."""
     instance = await checklist_instance_service.complete_item(
         db,
         instance_id=instance_id,
@@ -126,3 +94,73 @@ async def complete_checklist_item(
     await db.commit()
 
     return await checklist_instance_service.build_detail_response(db, instance)
+
+
+@router.put(
+    "/{instance_id}/items/{item_index}/resubmit",
+    response_model=ChecklistInstanceDetailResponse,
+)
+async def resubmit_checklist_item(
+    instance_id: UUID,
+    item_index: int,
+    data: ResubmitRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """체크리스트 항목을 재제출합니다 (Staff용).
+
+    Archives existing evidence, updates with new data,
+    sets review to pending_re_review, notifies reviewer.
+    """
+    instance = await checklist_instance_service.resubmit_completion(
+        db,
+        instance_id=instance_id,
+        item_index=item_index,
+        user_id=current_user.id,
+        photo_url=data.photo_url,
+        note=data.note,
+        location=data.location,
+        client_timezone=data.client_timezone,
+    )
+    await db.commit()
+
+    return await checklist_instance_service.build_detail_response(db, instance)
+
+
+@router.post(
+    "/{instance_id}/items/{item_index}/review/contents",
+    response_model=ReviewContentResponse,
+    status_code=201,
+)
+async def add_review_content_as_staff(
+    instance_id: UUID,
+    item_index: int,
+    data: ReviewContentCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Staff가 리뷰 코멘트 스레드에 댓글을 추가합니다."""
+    # 본인 인스턴스 확인
+    instance = await checklist_instance_service.get_instance(db, instance_id)
+    if instance.user_id != current_user.id:
+        raise ForbiddenError("본인의 체크리스트에만 코멘트를 추가할 수 있습니다")
+
+    rc = await checklist_instance_service.add_review_content(
+        db,
+        instance_id=instance_id,
+        item_index=item_index,
+        author_id=current_user.id,
+        content_type=data.type,
+        content=data.content,
+    )
+    await db.commit()
+
+    return {
+        "id": str(rc.id),
+        "review_id": str(rc.review_id),
+        "author_id": str(rc.author_id),
+        "author_name": current_user.full_name,
+        "type": rc.type,
+        "content": rc.content,
+        "created_at": rc.created_at,
+    }

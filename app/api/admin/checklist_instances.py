@@ -164,13 +164,15 @@ async def upsert_review(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("checklists:read"))],
 ) -> dict:
-    """아이템 리뷰를 생성하거나 수정합니다 (upsert)."""
+    """아이템 리뷰를 생성하거나 수정합니다 (upsert). 인라인 코멘트 옵션 포함."""
     review = await checklist_instance_service.upsert_review(
         db,
         instance_id=instance_id,
         item_index=item_index,
         reviewer_id=current_user.id,
         result=data.result,
+        comment_text=data.comment_text,
+        comment_photo_url=data.comment_photo_url,
     )
     await db.commit()
 
@@ -182,6 +184,7 @@ async def upsert_review(
         "reviewer_name": current_user.full_name,
         "result": review.result,
         "contents": [],
+        "history": [],
         "created_at": review.created_at,
         "updated_at": review.updated_at,
     }
