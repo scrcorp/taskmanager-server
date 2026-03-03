@@ -17,8 +17,12 @@ from app.models.user import User
 from app.schemas.common import (
     AssignmentDetailResponse,
     ChecklistItemComplete,
+    ChecklistItemRespond,
 )
 from app.services.assignment_service import assignment_service
+from app.services.checklist_instance_service import checklist_instance_service
+from app.repositories.checklist_instance_repository import checklist_instance_repository
+from app.utils.exceptions import NotFoundError, ForbiddenError
 
 router: APIRouter = APIRouter()
 
@@ -104,9 +108,7 @@ async def get_my_assignment(
 
     # 본인 배정만 조회 가능 — Only allow viewing own assignments
     if assignment.user_id != current_user.id:
-        from app.utils.exceptions import ForbiddenError
-
-        raise ForbiddenError("본인의 배정만 조회할 수 있습니다 (Can only view your own assignment)")
+        raise ForbiddenError("Can only view your own assignment")
 
     return await assignment_service.build_detail_response(db, assignment)
 
@@ -148,4 +150,47 @@ async def complete_checklist_item(
     )
     await db.commit()
 
+    return await assignment_service.build_detail_response(db, assignment)
+
+
+@router.patch(
+    "/work-assignments/{assignment_id}/checklist/{item_index}/respond",
+    response_model=AssignmentDetailResponse,
+)
+async def respond_to_rejection(
+    assignment_id: UUID,
+    item_index: int,
+    data: ChecklistItemRespond,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """거절된 체크리스트 항목에 대해 재제출합니다.
+
+    Respond to a rejected checklist item by resubmitting with new evidence.
+    Wraps the checklist-instance resubmit flow using assignment_id.
+    """
+    instance = await checklist_instance_repository.get_by_assignment_id(
+        db, assignment_id
+    )
+    if instance is None:
+        raise NotFoundError("Checklist instance not found for this assignment")
+    if instance.user_id != current_user.id:
+        raise ForbiddenError("Can only respond to your own assignment")
+
+    await checklist_instance_service.resubmit_completion(
+        db,
+        instance_id=instance.id,
+        item_index=item_index,
+        user_id=current_user.id,
+        photo_url=data.photo_url,
+        note=data.response_comment,
+        client_timezone=data.timezone,
+    )
+    await db.commit()
+
+    assignment = await assignment_service.get_detail(
+        db,
+        assignment_id=assignment_id,
+        organization_id=current_user.organization_id,
+    )
     return await assignment_service.build_detail_response(db, assignment)

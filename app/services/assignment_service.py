@@ -16,7 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.assignment import WorkAssignment
-from app.models.checklist import ChecklistInstance, ChecklistTemplate
+from app.models.checklist import (
+    ChecklistCompletion,
+    ChecklistInstance,
+    ChecklistItemReview,
+    ChecklistTemplate,
+)
+from app.repositories.checklist_instance_repository import checklist_instance_repository
 from app.models.organization import Store
 from app.models.user import User
 from app.models.work import Position, Shift
@@ -319,31 +325,161 @@ class AssignmentService:
         db: AsyncSession,
         assignment: WorkAssignment,
     ) -> dict:
-        """배정 상세 응답 딕셔너리를 구성합니다 (체크리스트 스냅샷 포함).
+        """배정 상세 응답 딕셔너리를 구성합니다 (체크리스트 스냅샷 + 리뷰 병합).
 
-        Build assignment detail response dict with checklist snapshot.
+        Build assignment detail response dict with checklist snapshot
+        merged with review data from cl_instances.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             assignment: 업무 배정 ORM 객체 (Work assignment ORM object)
 
         Returns:
-            dict: 체크리스트 스냅샷이 포함된 상세 응답 딕셔너리
-                  (Detail response dict with checklist snapshot)
+            dict: 리뷰 데이터가 병합된 체크리스트 스냅샷 포함 상세 응답 딕셔너리
+                  (Detail response dict with review-merged checklist snapshot)
         """
         response: dict = await self.build_response(db, assignment)
         snapshot: dict | None = assignment.checklist_snapshot
-        response["checklist_snapshot"] = snapshot.get("items") if snapshot else None
+        raw_items: list[dict] | None = snapshot.get("items") if snapshot else None
 
-        # cl_instances에서 연결된 인스턴스 ID 조회 (for comments)
-        instance_row = (
-            await db.execute(
-                select(ChecklistInstance.id).where(
-                    ChecklistInstance.work_assignment_id == assignment.id
-                )
-            )
-        ).scalar_one_or_none()
-        response["checklist_instance_id"] = str(instance_row) if instance_row else None
+        # cl_instances에서 연결된 인스턴스 조회 (completions + reviews eager loaded)
+        instance = await checklist_instance_repository.get_by_assignment_id(
+            db, assignment.id
+        )
+        response["checklist_instance_id"] = str(instance.id) if instance else None
+
+        if raw_items and instance:
+            # Index completions and reviews by item_index
+            completions_map: dict[int, ChecklistCompletion] = {}
+            if hasattr(instance, "completions") and instance.completions:
+                for comp in instance.completions:
+                    completions_map[comp.item_index] = comp
+
+            reviews_map: dict[int, ChecklistItemReview] = {}
+            if hasattr(instance, "reviews") and instance.reviews:
+                for rev in instance.reviews:
+                    reviews_map[rev.item_index] = rev
+
+            # Bulk fetch user names
+            user_name_cache: dict[UUID, str] = {}
+            user_ids: set[UUID] = set()
+            for rev in reviews_map.values():
+                user_ids.add(rev.reviewer_id)
+                if hasattr(rev, "contents") and rev.contents:
+                    for c in rev.contents:
+                        user_ids.add(c.author_id)
+            for comp in completions_map.values():
+                user_ids.add(comp.user_id)
+            for uid in user_ids:
+                if uid not in user_name_cache:
+                    r = await db.execute(select(User.full_name).where(User.id == uid))
+                    user_name_cache[uid] = r.scalar() or "Unknown"
+
+            merged_items: list[dict] = []
+            for item in raw_items:
+                item_data: dict = {**item}
+                idx = item.get("item_index", 0)
+
+                # Merge completion data
+                comp = completions_map.get(idx)
+                if comp is not None:
+                    item_data["is_completed"] = True
+                    item_data["completed_at"] = (
+                        comp.completed_at.isoformat() if comp.completed_at else None
+                    )
+                    item_data["completed_tz"] = comp.completed_timezone
+                    item_data["completed_by"] = user_name_cache.get(comp.user_id)
+                    item_data["photo_url"] = comp.photo_url
+                    item_data["note"] = comp.note
+
+                # Merge review → flatten to is_rejected / rejection_comment / etc.
+                rev = reviews_map.get(idx)
+                if rev is not None and rev.result in ("fail", "pending_re_review"):
+                    item_data["is_rejected"] = True
+                    item_data["rejected_by"] = user_name_cache.get(rev.reviewer_id)
+                    item_data["rejected_at"] = rev.updated_at.isoformat()
+
+                    # First text content as rejection_comment
+                    if hasattr(rev, "contents") and rev.contents:
+                        text_contents = [
+                            c for c in rev.contents if c.type == "text"
+                        ]
+                        if text_contents:
+                            item_data["rejection_comment"] = text_contents[0].content
+                        else:
+                            item_data["rejection_comment"] = None
+                    else:
+                        item_data["rejection_comment"] = None
+
+                    # Check if staff responded (resubmitted)
+                    if comp and comp.resubmission_count > 0:
+                        item_data["responded_at"] = (
+                            comp.completed_at.isoformat() if comp.completed_at else None
+                        )
+                        item_data["responded_by"] = user_name_cache.get(comp.user_id)
+                        item_data["response_comment"] = comp.note
+                    else:
+                        item_data["responded_at"] = None
+                        item_data["responded_by"] = None
+                        item_data["response_comment"] = None
+                else:
+                    item_data["is_rejected"] = False
+                    item_data["rejection_comment"] = None
+                    item_data["rejected_by"] = None
+                    item_data["rejected_at"] = None
+                    item_data["responded_at"] = None
+                    item_data["responded_by"] = None
+                    item_data["response_comment"] = None
+
+                # Build history timeline
+                history: list[dict] = []
+                # 1) Previous submissions from completion_history
+                if comp and hasattr(comp, "history") and comp.history:
+                    for ch in comp.history:
+                        history.append({
+                            "type": "completed",
+                            "comment": ch.note,
+                            "photo_urls": [ch.photo_url] if ch.photo_url else [],
+                            "by": user_name_cache.get(comp.user_id),
+                            "at": ch.submitted_at.isoformat(),
+                        })
+                elif comp and comp.resubmission_count == 0:
+                    # Single submission (no resubmission yet)
+                    history.append({
+                        "type": "completed",
+                        "comment": comp.note,
+                        "photo_urls": [comp.photo_url] if comp.photo_url else [],
+                        "by": user_name_cache.get(comp.user_id),
+                        "at": comp.completed_at.isoformat() if comp.completed_at else None,
+                    })
+
+                # 2) Rejection event
+                if rev and rev.result in ("fail", "pending_re_review"):
+                    rej_comment = item_data.get("rejection_comment")
+                    history.append({
+                        "type": "rejected",
+                        "comment": rej_comment,
+                        "photo_urls": [],
+                        "by": user_name_cache.get(rev.reviewer_id),
+                        "at": rev.updated_at.isoformat(),
+                    })
+
+                # 3) Resubmission (current completion is the response)
+                if comp and comp.resubmission_count > 0:
+                    history.append({
+                        "type": "responded",
+                        "comment": comp.note,
+                        "photo_urls": [comp.photo_url] if comp.photo_url else [],
+                        "by": user_name_cache.get(comp.user_id),
+                        "at": comp.completed_at.isoformat() if comp.completed_at else None,
+                    })
+
+                item_data["history"] = history
+                merged_items.append(item_data)
+
+            response["checklist_snapshot"] = merged_items
+        else:
+            response["checklist_snapshot"] = raw_items
 
         return response
 

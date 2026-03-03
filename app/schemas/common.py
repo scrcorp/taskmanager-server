@@ -308,6 +308,17 @@ class ChecklistItemComplete(BaseModel):
     note: str | None = None  # 메모 — verification_type이 text일 때 필수 (Note, optional)
 
 
+class ChecklistItemRespond(BaseModel):
+    """거절된 체크리스트 항목 재제출 요청 스키마.
+
+    Request schema for responding to a rejected checklist item.
+    """
+
+    timezone: str = "America/Los_Angeles"
+    response_comment: str | None = None
+    photo_url: str | None = None
+
+
 # === 공지사항 (Announcement) 스키마 ===
 
 class AnnouncementCreate(BaseModel):
