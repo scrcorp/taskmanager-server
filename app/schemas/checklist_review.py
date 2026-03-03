@@ -9,9 +9,11 @@ from pydantic import BaseModel, Field
 
 
 class ItemReviewUpsert(BaseModel):
-    """항목 리뷰 생성/수정 요청 — result만."""
+    """항목 리뷰 생성/수정 요청 — result + 선택적 인라인 코멘트."""
 
-    result: str = Field(..., pattern=r"^(pass|fail|caution)$")
+    result: str = Field(..., pattern=r"^(pass|fail|caution|pending_re_review)$")
+    comment_text: str | None = None
+    comment_photo_url: str | None = None
 
 
 class ReviewContentCreate(BaseModel):
@@ -33,6 +35,17 @@ class ReviewContentResponse(BaseModel):
     created_at: datetime
 
 
+class ReviewHistoryItem(BaseModel):
+    """리뷰 결과 변경 히스토리 항목."""
+
+    id: str
+    changed_by: str
+    changed_by_name: str | None = None
+    old_result: str | None = None
+    new_result: str
+    created_at: datetime
+
+
 class ItemReviewResponse(BaseModel):
     """항목 리뷰 응답."""
 
@@ -43,5 +56,26 @@ class ItemReviewResponse(BaseModel):
     reviewer_name: str | None = None
     result: str
     contents: list[ReviewContentResponse] = []
+    history: list[ReviewHistoryItem] = []
     created_at: datetime
     updated_at: datetime
+
+
+class ResubmitRequest(BaseModel):
+    """Staff 재제출 요청."""
+
+    photo_url: str | None = None
+    note: str | None = None
+    location: dict | None = None
+    client_timezone: str | None = None
+
+
+class CompletionHistoryResponse(BaseModel):
+    """완료 히스토리 (재제출 아카이브) 응답."""
+
+    id: str
+    photo_url: str | None = None
+    note: str | None = None
+    location: dict | None = None
+    submitted_at: datetime
+    created_at: datetime
