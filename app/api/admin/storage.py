@@ -30,13 +30,17 @@ class PresignedUrlResponse(BaseModel):
 @router.post("/presigned-url", response_model=PresignedUrlResponse)
 async def create_presigned_url(
     data: PresignedUrlRequest,
+    request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     """presigned upload URL을 생성합니다 (S3 또는 로컬)."""
+    base_url = str(request.base_url).rstrip("/")
     result = storage_service.generate_presigned_upload_url(
         filename=data.filename,
         content_type=data.content_type,
         folder=data.folder,
+        base_url=base_url,
+        upload_path_prefix="/api/v1/admin/storage",
     )
     return {"upload_url": result["upload_url"], "file_url": result["file_url"]}
 

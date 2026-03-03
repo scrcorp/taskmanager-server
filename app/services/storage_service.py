@@ -76,18 +76,25 @@ class StorageService:
         content_type: str,
         folder: str = "reviews",
         expires: int = 3600,
+        *,
+        base_url: str = "http://localhost:8000",
+        upload_path_prefix: str = "/api/v1/app/storage",
     ) -> dict[str, str]:
         """presigned PUT URL과 temp file URL을 반환합니다.
 
         모든 업로드는 temp/ 하위에 저장됩니다.
         finalize_upload()로 최종 위치로 이동해야 합니다.
+
+        Args:
+            base_url: 요청의 base URL (request.base_url에서 추출, 로컬 모드 전용)
+            upload_path_prefix: 업로드 엔드포인트 prefix (admin/app 구분)
         """
         key = self._generate_key(filename, folder)
 
         if self.is_local:
-            base = f"http://localhost:8000/api/v1/admin/storage/upload/{key}"
-            file_url = f"http://localhost:8000/uploads/{key}"
-            return {"upload_url": base, "file_url": file_url, "key": key}
+            upload_url = f"{base_url}{upload_path_prefix}/upload/{key}"
+            file_url = f"{base_url}/uploads/{key}"
+            return {"upload_url": upload_url, "file_url": file_url, "key": key}
 
         upload_url = self.client.generate_presigned_url(
             "put_object",
@@ -111,9 +118,11 @@ class StorageService:
     def _extract_key(self, file_url: str) -> str | None:
         """file URL에서 storage key를 추출합니다."""
         if self.is_local:
-            prefix = "http://localhost:8000/uploads/"
-            if file_url.startswith(prefix):
-                return file_url[len(prefix):]
+            # /uploads/ 마커로 key 추출 — 호스트에 무관하게 동작
+            marker = "/uploads/"
+            idx = file_url.find(marker)
+            if idx != -1:
+                return file_url[idx + len(marker):]
         else:
             prefix = f"https://{settings.AWS_S3_BUCKET}.s3.{settings.AWS_S3_REGION}.amazonaws.com/"
             if file_url.startswith(prefix):
@@ -135,7 +144,11 @@ class StorageService:
         if self.is_local:
             src = UPLOADS_DIR / key
             dst = UPLOADS_DIR / final_key
-            final_url = f"http://localhost:8000/uploads/{final_key}"
+            # file_url에서 base URL 추출 — 하드코딩 방지
+            marker = "/uploads/"
+            idx = file_url.find(marker)
+            base = file_url[:idx] if idx != -1 else "http://localhost:8000"
+            final_url = f"{base}/uploads/{final_key}"
             if not src.exists():
                 # 이미 finalize됨 또는 파일 없음 — 최종 URL 반환
                 return final_url
