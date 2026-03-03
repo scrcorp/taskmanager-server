@@ -206,7 +206,9 @@ class ChecklistCompletion(Base):
         photo_url: 사진 URL (Photo evidence URL, optional)
         note: 메모 (Text note, optional)
         location: GPS 위치 JSONB (lat/lng, optional)
+        resubmission_count: 재제출 횟수 (Number of times resubmitted)
         created_at: 생성 일시 UTC (Creation timestamp)
+        updated_at: 수정 일시 UTC (Last update timestamp)
 
     Constraints:
         uq_cl_completion_instance_item: (instance_id, item_index) — one completion per item
@@ -232,8 +234,12 @@ class ChecklistCompletion(Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     # GPS 위치 — Optional location data as JSONB {lat, lng}
     location: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 재제출 횟수 — Number of times this completion has been resubmitted
+    resubmission_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # 수정 일시 — Last modification timestamp (UTC, auto-updated)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         UniqueConstraint("instance_id", "item_index", name="uq_cl_completion_instance_item"),
@@ -241,6 +247,8 @@ class ChecklistCompletion(Base):
 
     # 관계 — Parent instance
     instance = relationship("ChecklistInstance", back_populates="completions")
+    # 관계 — Completion history (resubmission archives)
+    history = relationship("ChecklistCompletionHistory", back_populates="completion", cascade="all, delete-orphan", order_by="ChecklistCompletionHistory.created_at")
 
 
 class ChecklistTemplateLink(Base):
@@ -301,7 +309,7 @@ class ChecklistItemReview(Base):
     instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instances.id", ondelete="CASCADE"), nullable=False)
     item_index: Mapped[int] = mapped_column(Integer, nullable=False)
     reviewer_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    result: Mapped[str] = mapped_column(String(10), nullable=False)  # pass, fail, caution
+    result: Mapped[str] = mapped_column(String(20), nullable=False)  # pass, fail, caution, pending_re_review
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -311,6 +319,7 @@ class ChecklistItemReview(Base):
 
     instance = relationship("ChecklistInstance", back_populates="reviews", foreign_keys=[instance_id])
     contents = relationship("ChecklistReviewContent", back_populates="review", cascade="all, delete-orphan", order_by="ChecklistReviewContent.created_at")
+    review_history = relationship("ChecklistReviewHistory", back_populates="review", cascade="all, delete-orphan", order_by="ChecklistReviewHistory.created_at")
 
 
 class ChecklistReviewContent(Base):
@@ -330,6 +339,43 @@ class ChecklistReviewContent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     review = relationship("ChecklistItemReview", back_populates="contents", foreign_keys=[review_id])
+
+
+class ChecklistReviewHistory(Base):
+    """체크리스트 리뷰 변경 히스토리 — 리뷰 결과 변경 추적.
+
+    Tracks review result changes. old_result is null for initial creation.
+    """
+
+    __tablename__ = "cl_review_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    review_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_item_reviews.id", ondelete="CASCADE"), nullable=False)
+    changed_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    old_result: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    new_result: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    review = relationship("ChecklistItemReview", back_populates="review_history", foreign_keys=[review_id])
+
+
+class ChecklistCompletionHistory(Base):
+    """체크리스트 완료 히스토리 — 재제출 시 기존 evidence 아카이빙.
+
+    Archives previous completion evidence when staff resubmits.
+    """
+
+    __tablename__ = "cl_completion_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    completion_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_completions.id", ondelete="CASCADE"), nullable=False)
+    photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    location: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    completion = relationship("ChecklistCompletion", back_populates="history", foreign_keys=[completion_id])
 
 
 class ChecklistComment(Base):
