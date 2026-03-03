@@ -1,7 +1,7 @@
-"""앱 이슈 리포트 라우터 — 직원용 이슈 리포트 API.
+"""앱 Voice 라우터 — 직원용 Voice API.
 
-App Issue Report Router — Employee-facing issue report endpoints.
-Any authenticated user can create and view their own issue reports.
+App Voice Router — Employee-facing voice endpoints.
+Any authenticated user can create and view their own voices.
 """
 
 from typing import Annotated
@@ -14,47 +14,47 @@ from app.api.deps import get_current_user
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import PaginatedResponse
-from app.schemas.issue_report import IssueReportCreate
-from app.services.issue_report_service import issue_report_service
+from app.schemas.voice import VoiceCreate
+from app.services.voice_service import voice_service
 
 router: APIRouter = APIRouter()
 
 
 @router.get("", response_model=PaginatedResponse)
-async def list_my_issue_reports(
+async def list_my_voices(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     page: int = 1,
     per_page: int = 20,
 ) -> dict:
-    """내 이슈 리포트 목록 조회."""
-    reports, total = await issue_report_service.list_for_user(
+    """내 Voice 목록 조회."""
+    voices, total = await voice_service.list_for_user(
         db, current_user.organization_id, current_user.id, page, per_page
     )
-    items = [await issue_report_service.build_response(db, r) for r in reports]
+    items = [await voice_service.build_response(db, v) for v in voices]
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
-@router.get("/{report_id}")
-async def get_my_issue_report(
-    report_id: UUID,
+@router.get("/{voice_id}")
+async def get_my_voice(
+    voice_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
-    """내 이슈 리포트 상세 조회."""
-    report = await issue_report_service.get_detail(db, report_id, current_user.organization_id)
-    return await issue_report_service.build_response(db, report)
+    """내 Voice 상세 조회."""
+    voice = await voice_service.get_detail(db, voice_id, current_user.organization_id)
+    return await voice_service.build_response(db, voice)
 
 
 @router.post("", status_code=201)
-async def create_issue_report(
-    data: IssueReportCreate,
+async def create_voice(
+    data: VoiceCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
-    """이슈 리포트 생성."""
-    report = await issue_report_service.create_report(
+    """Voice 생성."""
+    voice = await voice_service.create_voice(
         db, current_user.organization_id, data, current_user.id
     )
     await db.commit()
-    return await issue_report_service.build_response(db, report)
+    return await voice_service.build_response(db, voice)

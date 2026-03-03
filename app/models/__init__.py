@@ -27,7 +27,7 @@ from app.models.token import RefreshToken
 from app.models.user_store import UserStore
 from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistTemplateLink, ChecklistInstance, ChecklistCompletion, ChecklistItemReview, ChecklistReviewContent, ChecklistComment
 from app.models.assignment import WorkAssignment
-from app.models.communication import Announcement, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, AnnouncementRead, IssueReport
+from app.models.communication import Announcement, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, AnnouncementRead, Voice
 from app.models.notification import Notification
 from app.models.schedule import Schedule, ScheduleApproval
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
@@ -41,7 +41,7 @@ __all__ = [
     "RefreshToken", "UserStore",
     "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistTemplateLink", "ChecklistInstance", "ChecklistCompletion", "ChecklistItemReview", "ChecklistReviewContent", "ChecklistComment",
     "WorkAssignment",
-    "Announcement", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "AnnouncementRead", "IssueReport",
+    "Announcement", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "AnnouncementRead", "Voice",
     "Notification",
     "Schedule", "ScheduleApproval",
     "QRCode", "Attendance", "AttendanceCorrection",

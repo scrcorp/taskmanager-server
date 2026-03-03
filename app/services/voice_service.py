@@ -1,6 +1,6 @@
-"""이슈 리포트 서비스.
+"""Voice 서비스.
 
-Issue report service — Business logic for issue report CRUD.
+Voice service — Business logic for voice CRUD.
 """
 
 from datetime import datetime, timezone
@@ -10,79 +10,79 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.communication import IssueReport
+from app.models.communication import Voice
 from app.models.user import User
-from app.repositories.issue_report_repository import issue_report_repository
-from app.schemas.issue_report import IssueReportCreate, IssueReportUpdate
+from app.repositories.voice_repository import voice_repository
+from app.schemas.voice import VoiceCreate, VoiceUpdate
 from app.utils.exceptions import NotFoundError
 
 
-class IssueReportService:
+class VoiceService:
 
-    async def build_response(self, db: AsyncSession, report: IssueReport) -> dict:
+    async def build_response(self, db: AsyncSession, voice: Voice) -> dict:
         creator_result = await db.execute(
-            select(User.full_name).where(User.id == report.created_by)
+            select(User.full_name).where(User.id == voice.created_by)
         )
         created_by_name: str = creator_result.scalar() or "Unknown"
 
         resolved_by_name: str | None = None
-        if report.resolved_by:
+        if voice.resolved_by:
             r = await db.execute(
-                select(User.full_name).where(User.id == report.resolved_by)
+                select(User.full_name).where(User.id == voice.resolved_by)
             )
             resolved_by_name = r.scalar()
 
         return {
-            "id": str(report.id),
-            "title": report.title,
-            "description": report.description,
-            "category": report.category,
-            "status": report.status,
-            "priority": report.priority,
-            "store_id": str(report.store_id) if report.store_id else None,
-            "created_by": str(report.created_by),
+            "id": str(voice.id),
+            "title": voice.title,
+            "description": voice.description,
+            "category": voice.category,
+            "status": voice.status,
+            "priority": voice.priority,
+            "store_id": str(voice.store_id) if voice.store_id else None,
+            "created_by": str(voice.created_by),
             "created_by_name": created_by_name,
-            "resolved_by": str(report.resolved_by) if report.resolved_by else None,
+            "resolved_by": str(voice.resolved_by) if voice.resolved_by else None,
             "resolved_by_name": resolved_by_name,
-            "resolved_at": report.resolved_at,
-            "created_at": report.created_at,
-            "updated_at": report.updated_at,
+            "resolved_at": voice.resolved_at,
+            "created_at": voice.created_at,
+            "updated_at": voice.updated_at,
         }
 
     # --- Admin ---
 
-    async def list_reports(
+    async def list_voices(
         self,
         db: AsyncSession,
         organization_id: UUID,
         status: str | None = None,
         page: int = 1,
         per_page: int = 20,
-    ) -> tuple[Sequence[IssueReport], int]:
-        return await issue_report_repository.get_by_org(
+    ) -> tuple[Sequence[Voice], int]:
+        return await voice_repository.get_by_org(
             db, organization_id, status, page, per_page
         )
 
     async def get_detail(
         self,
         db: AsyncSession,
-        report_id: UUID,
+        voice_id: UUID,
         organization_id: UUID,
-    ) -> IssueReport:
-        report = await issue_report_repository.get_by_id(db, report_id, organization_id)
-        if report is None:
-            raise NotFoundError("이슈 리포트를 찾을 수 없습니다 (Issue report not found)")
-        return report
+    ) -> Voice:
+        voice = await voice_repository.get_by_id(db, voice_id, organization_id)
+        if voice is None:
+            raise NotFoundError("Voice를 찾을 수 없습니다 (Voice not found)")
+        return voice
 
-    async def create_report(
+    async def create_voice(
         self,
         db: AsyncSession,
         organization_id: UUID,
-        data: IssueReportCreate,
+        data: VoiceCreate,
         created_by: UUID,
-    ) -> IssueReport:
+    ) -> Voice:
         store_id = UUID(data.store_id) if data.store_id else None
-        return await issue_report_repository.create(
+        return await voice_repository.create(
             db,
             {
                 "organization_id": organization_id,
@@ -95,14 +95,14 @@ class IssueReportService:
             },
         )
 
-    async def update_report(
+    async def update_voice(
         self,
         db: AsyncSession,
-        report_id: UUID,
+        voice_id: UUID,
         organization_id: UUID,
-        data: IssueReportUpdate,
+        data: VoiceUpdate,
         current_user_id: UUID,
-    ) -> IssueReport:
+    ) -> Voice:
         update_data = data.model_dump(exclude_unset=True)
 
         # Auto-set resolved_by/resolved_at when status changes to resolved
@@ -114,22 +114,22 @@ class IssueReportService:
             val = update_data["store_id"]
             update_data["store_id"] = UUID(val) if val else None
 
-        updated = await issue_report_repository.update(
-            db, report_id, update_data, organization_id
+        updated = await voice_repository.update(
+            db, voice_id, update_data, organization_id
         )
         if updated is None:
-            raise NotFoundError("이슈 리포트를 찾을 수 없습니다 (Issue report not found)")
+            raise NotFoundError("Voice를 찾을 수 없습니다 (Voice not found)")
         return updated
 
-    async def delete_report(
+    async def delete_voice(
         self,
         db: AsyncSession,
-        report_id: UUID,
+        voice_id: UUID,
         organization_id: UUID,
     ) -> bool:
-        deleted = await issue_report_repository.delete(db, report_id, organization_id)
+        deleted = await voice_repository.delete(db, voice_id, organization_id)
         if not deleted:
-            raise NotFoundError("이슈 리포트를 찾을 수 없습니다 (Issue report not found)")
+            raise NotFoundError("Voice를 찾을 수 없습니다 (Voice not found)")
         return deleted
 
     # --- App (사용자용) ---
@@ -141,10 +141,10 @@ class IssueReportService:
         user_id: UUID,
         page: int = 1,
         per_page: int = 20,
-    ) -> tuple[Sequence[IssueReport], int]:
-        return await issue_report_repository.get_by_user(
+    ) -> tuple[Sequence[Voice], int]:
+        return await voice_repository.get_by_user(
             db, organization_id, user_id, page, per_page
         )
 
 
-issue_report_service: IssueReportService = IssueReportService()
+voice_service: VoiceService = VoiceService()

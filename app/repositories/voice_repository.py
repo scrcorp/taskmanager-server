@@ -1,6 +1,6 @@
-"""이슈 리포트 레포지토리.
+"""Voice 레포지토리.
 
-Issue report repository — Handles issue_reports DB queries.
+Voice repository — Handles voices DB queries.
 """
 
 from typing import Sequence
@@ -9,14 +9,14 @@ from uuid import UUID
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.communication import IssueReport
+from app.models.communication import Voice
 from app.repositories.base import BaseRepository
 
 
-class IssueReportRepository(BaseRepository[IssueReport]):
+class VoiceRepository(BaseRepository[Voice]):
 
     def __init__(self) -> None:
-        super().__init__(IssueReport)
+        super().__init__(Voice)
 
     async def get_by_org(
         self,
@@ -25,14 +25,14 @@ class IssueReportRepository(BaseRepository[IssueReport]):
         status: str | None = None,
         page: int = 1,
         per_page: int = 20,
-    ) -> tuple[Sequence[IssueReport], int]:
+    ) -> tuple[Sequence[Voice], int]:
         query: Select = (
-            select(IssueReport)
-            .where(IssueReport.organization_id == organization_id)
-            .order_by(IssueReport.created_at.desc())
+            select(Voice)
+            .where(Voice.organization_id == organization_id)
+            .order_by(Voice.created_at.desc())
         )
         if status:
-            query = query.where(IssueReport.status == status)
+            query = query.where(Voice.status == status)
         return await self.get_paginated(db, query, page, per_page)
 
     async def get_by_user(
@@ -42,16 +42,16 @@ class IssueReportRepository(BaseRepository[IssueReport]):
         user_id: UUID,
         page: int = 1,
         per_page: int = 20,
-    ) -> tuple[Sequence[IssueReport], int]:
+    ) -> tuple[Sequence[Voice], int]:
         query: Select = (
-            select(IssueReport)
+            select(Voice)
             .where(
-                IssueReport.organization_id == organization_id,
-                IssueReport.created_by == user_id,
+                Voice.organization_id == organization_id,
+                Voice.created_by == user_id,
             )
-            .order_by(IssueReport.created_at.desc())
+            .order_by(Voice.created_at.desc())
         )
         return await self.get_paginated(db, query, page, per_page)
 
 
-issue_report_repository: IssueReportRepository = IssueReportRepository()
+voice_repository: VoiceRepository = VoiceRepository()

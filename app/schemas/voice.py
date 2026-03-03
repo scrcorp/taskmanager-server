@@ -1,20 +1,20 @@
-"""이슈 리포트 Pydantic 스키마.
+"""Voice Pydantic 스키마.
 
-Issue report request/response schemas.
+Voice request/response schemas.
 """
 
 from pydantic import BaseModel
 
 
-class IssueReportCreate(BaseModel):
+class VoiceCreate(BaseModel):
     title: str
     description: str | None = None
-    category: str = "other"  # facility, equipment, safety, hr, other
+    category: str = "idea"  # idea, facility, equipment, safety, hr, other
     priority: str = "normal"  # low, normal, high, urgent
     store_id: str | None = None
 
 
-class IssueReportUpdate(BaseModel):
+class VoiceUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
     category: str | None = None
