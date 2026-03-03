@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     STORAGE_FOLDER_ANNOUNCEMENTS: str = "announcements"
     STORAGE_FOLDER_ISSUES: str = "issues"
 
+    # 체크리스트 샘플 Excel 경로 — 비어있으면 server/static/checklist_template_sample.xlsx 사용
+    CHECKLIST_SAMPLE_EXCEL_PATH: str = ""
+
     # SMTP 이메일 설정 — Brevo (smtp-relay.brevo.com)
     SMTP_HOST: str = "smtp-relay.brevo.com"
     SMTP_PORT: int = 587

@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import check_store_access, get_accessible_store_ids, require_permission
+from app.config import settings
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
@@ -36,6 +37,8 @@ from app.services.checklist_service import checklist_service
 from app.utils.exceptions import BadRequestError
 
 router: APIRouter = APIRouter()
+
+_DEFAULT_SAMPLE_PATH = Path(__file__).resolve().parents[3] / "static" / "checklist_template_sample.xlsx"
 
 
 # === 템플릿 엔드포인트 (Template Endpoints) ===
@@ -182,11 +185,11 @@ async def download_sample_excel(
 
     Download a sample Excel template for checklist import.
     """
-    sample_path = Path(__file__).resolve().parents[3] / "static" / "checklist_template_sample.xlsx"
+    sample_path = Path(settings.CHECKLIST_SAMPLE_EXCEL_PATH) if settings.CHECKLIST_SAMPLE_EXCEL_PATH else _DEFAULT_SAMPLE_PATH
     return FileResponse(
         path=sample_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename="checklist_template_sample.xlsx",
+        filename=sample_path.name,
     )
 
 

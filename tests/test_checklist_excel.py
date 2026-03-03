@@ -5,16 +5,14 @@ and the full import_from_excel flow with a mocked async DB session.
 """
 
 from io import BytesIO
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from openpyxl import Workbook, load_workbook
 
+from app.api.admin.checklists import _DEFAULT_SAMPLE_PATH as SAMPLE_EXCEL_PATH
 from app.services.checklist_service import ChecklistService, DAY_MAP
-
-SAMPLE_PATH = Path(__file__).resolve().parents[1] / "static" / "checklist_template_sample.xlsx"
 
 
 # ---------------------------------------------------------------------------
@@ -60,24 +58,24 @@ class TestSampleExcelStaticFile:
 
     def test_file_exists(self):
         """static 파일이 존재하는지 확인."""
-        assert SAMPLE_PATH.exists(), f"Sample file not found: {SAMPLE_PATH}"
+        assert SAMPLE_EXCEL_PATH.exists(), f"Sample file not found: {SAMPLE_EXCEL_PATH}"
 
     def test_is_valid_xlsx(self):
         """유효한 xlsx 파일인지 확인."""
-        wb = load_workbook(filename=SAMPLE_PATH)
+        wb = load_workbook(filename=SAMPLE_EXCEL_PATH)
         assert len(wb.sheetnames) == 2
         wb.close()
 
     def test_sheet_names(self):
         """시트 이름이 올바른지 확인."""
-        wb = load_workbook(filename=SAMPLE_PATH)
+        wb = load_workbook(filename=SAMPLE_EXCEL_PATH)
         assert wb.sheetnames[0] == "Checklist Template"
         assert wb.sheetnames[1] == "Guide"
         wb.close()
 
     def test_has_required_headers(self):
         """필수 컬럼 헤더가 존재하는지 확인."""
-        wb = load_workbook(filename=SAMPLE_PATH)
+        wb = load_workbook(filename=SAMPLE_EXCEL_PATH)
         ws = wb.active
         headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
         for col in ["store", "shift", "position", "recurrence", "item_title"]:
@@ -86,7 +84,7 @@ class TestSampleExcelStaticFile:
 
     def test_has_diverse_stores(self):
         """여러 매장이 포함되어 있는지 확인."""
-        wb = load_workbook(filename=SAMPLE_PATH)
+        wb = load_workbook(filename=SAMPLE_EXCEL_PATH)
         ws = wb.active
         stores = set()
         for row in ws.iter_rows(min_row=3, max_col=1, values_only=True):
@@ -97,7 +95,7 @@ class TestSampleExcelStaticFile:
 
     def test_has_diverse_shifts(self):
         """여러 시간대가 포함되어 있는지 확인."""
-        wb = load_workbook(filename=SAMPLE_PATH)
+        wb = load_workbook(filename=SAMPLE_EXCEL_PATH)
         ws = wb.active
         shifts = set()
         for row in ws.iter_rows(min_row=3, min_col=2, max_col=2, values_only=True):
@@ -108,7 +106,7 @@ class TestSampleExcelStaticFile:
 
     def test_has_diverse_recurrence(self):
         """다양한 recurrence 패턴이 포함되어 있는지 확인."""
-        wb = load_workbook(filename=SAMPLE_PATH)
+        wb = load_workbook(filename=SAMPLE_EXCEL_PATH)
         ws = wb.active
         recurrences = set()
         for row in ws.iter_rows(min_row=3, min_col=4, max_col=4, values_only=True):
@@ -120,7 +118,7 @@ class TestSampleExcelStaticFile:
 
     def test_has_multi_type_verification(self):
         """photo,text 같은 multi-type verification이 포함되어 있는지 확인."""
-        wb = load_workbook(filename=SAMPLE_PATH)
+        wb = load_workbook(filename=SAMPLE_EXCEL_PATH)
         ws = wb.active
         vtypes = set()
         for row in ws.iter_rows(min_row=3, min_col=7, max_col=7, values_only=True):
@@ -131,7 +129,7 @@ class TestSampleExcelStaticFile:
 
     def test_guide_sheet_in_english(self):
         """가이드 시트가 영어로 작성되어 있는지 확인."""
-        wb = load_workbook(filename=SAMPLE_PATH)
+        wb = load_workbook(filename=SAMPLE_EXCEL_PATH)
         guide = wb["Guide"]
         headers = [cell.value for cell in next(guide.iter_rows(min_row=1, max_row=1))]
         assert "Column" in headers
@@ -463,7 +461,7 @@ class TestImportFromExcel:
     @pytest.mark.asyncio
     async def test_sample_excel_roundtrip(self, service, org_id):
         """static sample Excel → import_from_excel 라운드트립 테스트."""
-        sample_bytes = SAMPLE_PATH.read_bytes()
+        sample_bytes = SAMPLE_EXCEL_PATH.read_bytes()
 
         mock_store = MagicMock(id=uuid4())
         mock_shift = MagicMock(id=uuid4())
