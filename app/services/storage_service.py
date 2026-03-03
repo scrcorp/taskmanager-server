@@ -124,6 +124,7 @@ class StorageService:
         """temp 파일을 최종 위치로 이동합니다. 최종 file_url을 반환합니다.
 
         temp/ 경로가 아닌 파일은 그대로 반환합니다.
+        멱등(idempotent): 이미 finalize된 파일은 최종 URL을 반환합니다.
         """
         key = self._extract_key(file_url)
         if not key or not key.startswith("temp/"):
@@ -134,16 +135,24 @@ class StorageService:
         if self.is_local:
             src = UPLOADS_DIR / key
             dst = UPLOADS_DIR / final_key
+            final_url = f"http://localhost:8000/uploads/{final_key}"
+            if not src.exists():
+                # 이미 finalize됨 또는 파일 없음 — 최종 URL 반환
+                return final_url
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dst))
-            return f"http://localhost:8000/uploads/{final_key}"
+            return final_url
 
-        self.client.copy_object(
-            Bucket=settings.AWS_S3_BUCKET,
-            Key=final_key,
-            CopySource={"Bucket": settings.AWS_S3_BUCKET, "Key": key},
-        )
-        self.client.delete_object(Bucket=settings.AWS_S3_BUCKET, Key=key)
+        # S3: temp → final copy + delete (이미 없으면 무시)
+        try:
+            self.client.copy_object(
+                Bucket=settings.AWS_S3_BUCKET,
+                Key=final_key,
+                CopySource={"Bucket": settings.AWS_S3_BUCKET, "Key": key},
+            )
+            self.client.delete_object(Bucket=settings.AWS_S3_BUCKET, Key=key)
+        except self.client.exceptions.NoSuchKey:
+            pass
         return f"https://{settings.AWS_S3_BUCKET}.s3.{settings.AWS_S3_REGION}.amazonaws.com/{final_key}"
 
 
