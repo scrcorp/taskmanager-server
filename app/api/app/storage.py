@@ -67,9 +67,9 @@ async def upload_local(
 @router.post("/upload")
 async def upload_multipart(
     request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
     file: UploadFile = File(...),
     folder: str = Form("completions"),
-    current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     """로컬 모드 전용 — multipart form으로 파일을 업로드합니다.
 
