@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.models.assignment import WorkAssignment
+from app.models.checklist import ChecklistInstance, ChecklistItemReview
 from app.models.communication import AdditionalTask, Announcement
 from app.models.notification import Notification
 from app.models.schedule import Schedule
@@ -284,6 +285,27 @@ class NotificationService:
             notifications.append(notification)
 
         return notifications
+
+    async def create_for_checklist_re_review(
+        self,
+        db: AsyncSession,
+        instance: ChecklistInstance,
+        review: ChecklistItemReview,
+    ) -> Notification:
+        """체크리스트 재제출 시 reviewer에게 알림을 생성합니다.
+
+        Auto-create a notification for the reviewer when staff resubmits.
+        """
+        message = f"체크리스트 항목이 재제출되었습니다 (Checklist item resubmitted for re-review)"
+        return await notification_repository.create_notification(
+            db,
+            organization_id=instance.organization_id,
+            user_id=review.reviewer_id,
+            notification_type="checklist_re_review",
+            message=message,
+            reference_type="cl_item_reviews",
+            reference_id=review.id,
+        )
 
     async def create_for_attendance_correction(
         self,

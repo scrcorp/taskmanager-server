@@ -14,7 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.assignment import WorkAssignment
-from app.models.checklist import ChecklistCompletion, ChecklistInstance, ChecklistItemReview, ChecklistReviewContent, ChecklistTemplate
+from app.models.checklist import (
+    ChecklistCompletion,
+    ChecklistCompletionHistory,
+    ChecklistInstance,
+    ChecklistItemReview,
+    ChecklistReviewContent,
+    ChecklistReviewHistory,
+    ChecklistTemplate,
+)
 from app.models.organization import Store
 from app.models.user import User
 from app.repositories.checklist_instance_repository import checklist_instance_repository
@@ -432,13 +440,16 @@ class ChecklistInstanceService:
                 for rev in instance.reviews:
                     reviews_map[rev.item_index] = rev
 
-            # 리뷰어+콘텐츠 작성자 이름 일괄 조회 — Bulk fetch user names
+            # 리뷰어+콘텐츠 작성자+히스토리 작성자 이름 일괄 조회 — Bulk fetch user names
             user_name_cache: dict[UUID, str] = {}
             user_ids_to_fetch: set[UUID] = {rev.reviewer_id for rev in reviews_map.values()}
             for rev in reviews_map.values():
                 if hasattr(rev, "contents") and rev.contents:
                     for c in rev.contents:
                         user_ids_to_fetch.add(c.author_id)
+                if hasattr(rev, "review_history") and rev.review_history:
+                    for h in rev.review_history:
+                        user_ids_to_fetch.add(h.changed_by)
             if user_ids_to_fetch:
                 for uid in user_ids_to_fetch:
                     r = await db.execute(select(User.full_name).where(User.id == uid))
@@ -489,17 +500,45 @@ class ChecklistInstanceService:
                                 "content": c.content,
                                 "created_at": c.created_at.isoformat(),
                             })
+                    history_list = []
+                    if hasattr(rev, "review_history") and rev.review_history:
+                        for h in rev.review_history:
+                            history_list.append({
+                                "id": str(h.id),
+                                "changed_by": str(h.changed_by),
+                                "changed_by_name": user_name_cache.get(h.changed_by),
+                                "old_result": h.old_result,
+                                "new_result": h.new_result,
+                                "created_at": h.created_at.isoformat(),
+                            })
                     item_data["review"] = {
                         "id": str(rev.id),
                         "reviewer_id": str(rev.reviewer_id),
                         "reviewer_name": user_name_cache.get(rev.reviewer_id),
                         "result": rev.result,
                         "contents": contents_list,
+                        "history": history_list,
                         "created_at": rev.created_at.isoformat(),
                         "updated_at": rev.updated_at.isoformat(),
                     }
                 else:
                     item_data["review"] = None
+
+                # 완료 히스토리 (재제출 아카이브) 병합
+                comp_for_history: ChecklistCompletion | None = completions_map.get(item["item_index"])
+                completion_history_list = []
+                if comp_for_history is not None and hasattr(comp_for_history, "history") and comp_for_history.history:
+                    for ch in comp_for_history.history:
+                        completion_history_list.append({
+                            "id": str(ch.id),
+                            "photo_url": ch.photo_url,
+                            "note": ch.note,
+                            "location": ch.location,
+                            "submitted_at": ch.submitted_at.isoformat(),
+                            "created_at": ch.created_at.isoformat(),
+                        })
+                item_data["completion_history"] = completion_history_list
+                item_data["resubmission_count"] = comp_for_history.resubmission_count if comp_for_history else 0
 
                 merged_items.append(item_data)
 
@@ -517,10 +556,13 @@ class ChecklistInstanceService:
         item_index: int,
         reviewer_id: UUID,
         result: str,
+        comment_text: str | None = None,
+        comment_photo_url: str | None = None,
     ) -> ChecklistItemReview:
         """항목 리뷰를 생성하거나 수정합니다 (upsert).
 
         Create or update an item review. One review per (instance_id, item_index).
+        Records history when result changes. Optionally adds inline comment.
         """
         # 인스턴스 존재 확인 + item_index 범위 검증
         instance = await checklist_instance_repository.get_with_completions(db, instance_id)
@@ -542,22 +584,152 @@ class ChecklistInstanceService:
         ).scalar_one_or_none()
 
         if existing is not None:
+            # 결과 변경 시 히스토리 기록
+            if existing.result != result:
+                history = ChecklistReviewHistory(
+                    review_id=existing.id,
+                    changed_by=reviewer_id,
+                    old_result=existing.result,
+                    new_result=result,
+                )
+                db.add(history)
             existing.result = result
             existing.reviewer_id = reviewer_id
             await db.flush()
             await db.refresh(existing)
-            return existing
+            review = existing
+        else:
+            review = ChecklistItemReview(
+                instance_id=instance_id,
+                item_index=item_index,
+                reviewer_id=reviewer_id,
+                result=result,
+            )
+            db.add(review)
+            await db.flush()
+            await db.refresh(review)
+            # 최초 생성 히스토리
+            history = ChecklistReviewHistory(
+                review_id=review.id,
+                changed_by=reviewer_id,
+                old_result=None,
+                new_result=result,
+            )
+            db.add(history)
+            await db.flush()
 
-        review = ChecklistItemReview(
-            instance_id=instance_id,
-            item_index=item_index,
-            reviewer_id=reviewer_id,
-            result=result,
-        )
-        db.add(review)
-        await db.flush()
-        await db.refresh(review)
+        # 인라인 코멘트 추가
+        if comment_text:
+            rc = ChecklistReviewContent(
+                review_id=review.id,
+                author_id=reviewer_id,
+                type="text",
+                content=comment_text,
+            )
+            db.add(rc)
+            await db.flush()
+
+        if comment_photo_url:
+            finalized_url = storage_service.finalize_upload(comment_photo_url)
+            rc = ChecklistReviewContent(
+                review_id=review.id,
+                author_id=reviewer_id,
+                type="photo",
+                content=finalized_url,
+            )
+            db.add(rc)
+            await db.flush()
+
         return review
+
+    async def resubmit_completion(
+        self,
+        db: AsyncSession,
+        instance_id: UUID,
+        item_index: int,
+        user_id: UUID,
+        photo_url: str | None = None,
+        note: str | None = None,
+        location: dict | None = None,
+        client_timezone: str | None = None,
+    ) -> ChecklistInstance:
+        """Staff가 완료된 항목을 재제출합니다.
+
+        Archives existing evidence, updates completion with new data,
+        sets review to pending_re_review, and notifies the reviewer.
+        """
+        from app.services.notification_service import notification_service
+
+        instance = await checklist_instance_repository.get_with_completions(db, instance_id)
+        if instance is None:
+            raise NotFoundError("체크리스트 인스턴스를 찾을 수 없습니다 (Checklist instance not found)")
+
+        if instance.user_id != user_id:
+            raise ForbiddenError("본인의 체크리스트만 재제출할 수 있습니다 (Can only resubmit your own checklist)")
+
+        # 완료 기록 조회
+        completion = await checklist_instance_repository.get_completion(db, instance_id, item_index)
+        if completion is None:
+            raise BadRequestError("완료되지 않은 항목은 재제출할 수 없습니다 (Cannot resubmit uncompleted item)")
+
+        # 기존 evidence를 completion_history에 아카이빙
+        archive = ChecklistCompletionHistory(
+            completion_id=completion.id,
+            photo_url=completion.photo_url,
+            note=completion.note,
+            location=completion.location,
+            submitted_at=completion.completed_at,
+        )
+        db.add(archive)
+
+        # completion 업데이트
+        now = datetime.now(timezone.utc)
+        if photo_url:
+            completion.photo_url = storage_service.finalize_upload(photo_url)
+        elif photo_url is not None:
+            completion.photo_url = None
+        if note is not None:
+            completion.note = note
+        if location is not None:
+            completion.location = location
+        completion.completed_at = now
+        if client_timezone:
+            completion.completed_timezone = client_timezone
+        completion.resubmission_count = (completion.resubmission_count or 0) + 1
+
+        await db.flush()
+
+        # 리뷰가 있으면 pending_re_review로 변경
+        existing_review = (
+            await db.execute(
+                select(ChecklistItemReview).where(
+                    ChecklistItemReview.instance_id == instance_id,
+                    ChecklistItemReview.item_index == item_index,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if existing_review is not None:
+            old_result = existing_review.result
+            if old_result != "pending_re_review":
+                history = ChecklistReviewHistory(
+                    review_id=existing_review.id,
+                    changed_by=user_id,
+                    old_result=old_result,
+                    new_result="pending_re_review",
+                )
+                db.add(history)
+            existing_review.result = "pending_re_review"
+            await db.flush()
+
+            # reviewer에게 알림
+            await notification_service.create_for_checklist_re_review(
+                db,
+                instance=instance,
+                review=existing_review,
+            )
+
+        return await self.get_instance(db, instance_id)
 
     async def delete_review(
         self,

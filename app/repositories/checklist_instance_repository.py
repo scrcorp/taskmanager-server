@@ -13,7 +13,7 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.checklist import ChecklistCompletion, ChecklistInstance, ChecklistItemReview
+from app.models.checklist import ChecklistCompletion, ChecklistCompletionHistory, ChecklistInstance, ChecklistItemReview, ChecklistReviewHistory
 from app.repositories.base import BaseRepository
 
 
@@ -104,8 +104,9 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
             select(ChecklistInstance)
             .where(ChecklistInstance.id == instance_id)
             .options(
-                selectinload(ChecklistInstance.completions),
+                selectinload(ChecklistInstance.completions).selectinload(ChecklistCompletion.history),
                 selectinload(ChecklistInstance.reviews).selectinload(ChecklistItemReview.contents),
+                selectinload(ChecklistInstance.reviews).selectinload(ChecklistItemReview.review_history),
             )
         )
 
@@ -135,8 +136,9 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
             select(ChecklistInstance)
             .where(ChecklistInstance.work_assignment_id == work_assignment_id)
             .options(
-                selectinload(ChecklistInstance.completions),
+                selectinload(ChecklistInstance.completions).selectinload(ChecklistCompletion.history),
                 selectinload(ChecklistInstance.reviews).selectinload(ChecklistItemReview.contents),
+                selectinload(ChecklistInstance.reviews).selectinload(ChecklistItemReview.review_history),
             )
         )
         result = await db.execute(query)
