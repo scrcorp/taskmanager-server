@@ -11,9 +11,10 @@ Permission Matrix (역할별 권한 설계):
 from typing import Annotated
 from uuid import UUID
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, File, Query, UploadFile
-from fastapi.responses import StreamingResponse
-from io import BytesIO
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import check_store_access, get_accessible_store_ids, require_permission
@@ -176,16 +177,16 @@ async def import_from_excel(
 )
 async def download_sample_excel(
     current_user: Annotated[User, Depends(require_permission("checklists:read"))],
-) -> StreamingResponse:
+) -> FileResponse:
     """샘플 Excel 템플릿을 다운로드합니다.
 
     Download a sample Excel template for checklist import.
     """
-    excel_bytes: bytes = checklist_service.generate_sample_excel()
-    return StreamingResponse(
-        BytesIO(excel_bytes),
+    sample_path = Path(__file__).resolve().parents[3] / "static" / "checklist_template_sample.xlsx"
+    return FileResponse(
+        path=sample_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=checklist_template_sample.xlsx"},
+        filename="checklist_template_sample.xlsx",
     )
 
 

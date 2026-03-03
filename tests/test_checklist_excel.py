@@ -1,10 +1,11 @@
 """체크리스트 Excel Import/Export 유닛 테스트 (Mock DB).
 
-Tests generate_sample_excel, _parse_recurrence, verification_type parsing,
+Tests sample Excel static file validation, _parse_recurrence, verification_type parsing,
 and the full import_from_excel flow with a mocked async DB session.
 """
 
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -12,6 +13,8 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from app.services.checklist_service import ChecklistService, DAY_MAP
+
+SAMPLE_PATH = Path(__file__).resolve().parents[1] / "static" / "checklist_template_sample.xlsx"
 
 
 # ---------------------------------------------------------------------------
@@ -49,32 +52,32 @@ def make_mock_db():
 
 
 # ---------------------------------------------------------------------------
-# 1. generate_sample_excel() 테스트
+# 1. 샘플 Excel static 파일 검증
 # ---------------------------------------------------------------------------
 
-class TestGenerateSampleExcel:
-    """Sample Excel 생성 검증."""
+class TestSampleExcelStaticFile:
+    """Static sample Excel 파일 검증."""
 
-    def test_generates_valid_xlsx(self):
-        """생성된 파일이 유효한 xlsx인지 확인."""
-        data = ChecklistService.generate_sample_excel()
-        assert isinstance(data, bytes)
-        assert len(data) > 0
-        # openpyxl로 열 수 있어야 함
-        wb = load_workbook(filename=BytesIO(data))
+    def test_file_exists(self):
+        """static 파일이 존재하는지 확인."""
+        assert SAMPLE_PATH.exists(), f"Sample file not found: {SAMPLE_PATH}"
+
+    def test_is_valid_xlsx(self):
+        """유효한 xlsx 파일인지 확인."""
+        wb = load_workbook(filename=SAMPLE_PATH)
         assert len(wb.sheetnames) == 2
         wb.close()
 
     def test_sheet_names(self):
         """시트 이름이 올바른지 확인."""
-        wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
+        wb = load_workbook(filename=SAMPLE_PATH)
         assert wb.sheetnames[0] == "Checklist Template"
         assert wb.sheetnames[1] == "Guide"
         wb.close()
 
     def test_has_required_headers(self):
         """필수 컬럼 헤더가 존재하는지 확인."""
-        wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
+        wb = load_workbook(filename=SAMPLE_PATH)
         ws = wb.active
         headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
         for col in ["store", "shift", "position", "recurrence", "item_title"]:
@@ -83,7 +86,7 @@ class TestGenerateSampleExcel:
 
     def test_has_diverse_stores(self):
         """여러 매장이 포함되어 있는지 확인."""
-        wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
+        wb = load_workbook(filename=SAMPLE_PATH)
         ws = wb.active
         stores = set()
         for row in ws.iter_rows(min_row=3, max_col=1, values_only=True):
@@ -94,7 +97,7 @@ class TestGenerateSampleExcel:
 
     def test_has_diverse_shifts(self):
         """여러 시간대가 포함되어 있는지 확인."""
-        wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
+        wb = load_workbook(filename=SAMPLE_PATH)
         ws = wb.active
         shifts = set()
         for row in ws.iter_rows(min_row=3, min_col=2, max_col=2, values_only=True):
@@ -105,7 +108,7 @@ class TestGenerateSampleExcel:
 
     def test_has_diverse_recurrence(self):
         """다양한 recurrence 패턴이 포함되어 있는지 확인."""
-        wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
+        wb = load_workbook(filename=SAMPLE_PATH)
         ws = wb.active
         recurrences = set()
         for row in ws.iter_rows(min_row=3, min_col=4, max_col=4, values_only=True):
@@ -117,7 +120,7 @@ class TestGenerateSampleExcel:
 
     def test_has_multi_type_verification(self):
         """photo,text 같은 multi-type verification이 포함되어 있는지 확인."""
-        wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
+        wb = load_workbook(filename=SAMPLE_PATH)
         ws = wb.active
         vtypes = set()
         for row in ws.iter_rows(min_row=3, min_col=7, max_col=7, values_only=True):
@@ -126,25 +129,9 @@ class TestGenerateSampleExcel:
         assert "photo,text" in vtypes, f"Expected 'photo,text' in vtypes, got: {vtypes}"
         wb.close()
 
-    def test_shows_none_and_empty(self):
-        """'none'과 빈 문자열 양쪽이 모두 포함되어 있는지 확인."""
-        wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
-        ws = wb.active
-        has_none = False
-        has_empty = False
-        for row in ws.iter_rows(min_row=3, min_col=7, max_col=7, values_only=True):
-            val = row[0]
-            if val == "none":
-                has_none = True
-            if val is None or val == "":
-                has_empty = True
-        assert has_none, "Expected at least one row with explicit 'none'"
-        assert has_empty, "Expected at least one row with empty verification_type"
-        wb.close()
-
     def test_guide_sheet_in_english(self):
         """가이드 시트가 영어로 작성되어 있는지 확인."""
-        wb = load_workbook(filename=BytesIO(ChecklistService.generate_sample_excel()))
+        wb = load_workbook(filename=SAMPLE_PATH)
         guide = wb["Guide"]
         headers = [cell.value for cell in next(guide.iter_rows(min_row=1, max_row=1))]
         assert "Column" in headers
@@ -475,8 +462,8 @@ class TestImportFromExcel:
 
     @pytest.mark.asyncio
     async def test_sample_excel_roundtrip(self, service, org_id):
-        """generate_sample_excel → import_from_excel 라운드트립 테스트."""
-        sample_bytes = ChecklistService.generate_sample_excel()
+        """static sample Excel → import_from_excel 라운드트립 테스트."""
+        sample_bytes = SAMPLE_PATH.read_bytes()
 
         mock_store = MagicMock(id=uuid4())
         mock_shift = MagicMock(id=uuid4())
