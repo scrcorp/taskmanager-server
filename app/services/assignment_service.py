@@ -487,22 +487,26 @@ class AssignmentService:
         db: AsyncSession,
         user_id: UUID,
         work_date: date | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
         status: str | None = None,
-    ) -> Sequence[WorkAssignment]:
+        page: int | None = None,
+        per_page: int | None = None,
+    ) -> Sequence[WorkAssignment] | tuple[Sequence[WorkAssignment], int]:
         """내 업무 배정 목록을 조회합니다 (앱용).
 
         Get my work assignments for the app.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            user_id: 사용자 UUID (User UUID)
-            work_date: 근무일 필터, 선택 (Optional work date filter)
-            status: 상태 필터, 선택 (Optional status filter)
-
-        Returns:
-            Sequence[WorkAssignment]: 내 배정 목록 (My assignment list)
+        Single date mode returns plain list; date range mode returns paginated tuple.
         """
-        return await assignment_repository.get_user_assignments(db, user_id, work_date, status)
+        return await assignment_repository.get_user_assignments(
+            db, user_id,
+            work_date=work_date,
+            date_from=date_from,
+            date_to=date_to,
+            status=status,
+            page=page,
+            per_page=per_page,
+        )
 
     async def complete_checklist_item(
         self,

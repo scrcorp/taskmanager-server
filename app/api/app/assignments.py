@@ -16,7 +16,6 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
     AssignmentDetailResponse,
-    AssignmentResponse,
     ChecklistItemComplete,
 )
 from app.services.assignment_service import assignment_service
@@ -24,37 +23,57 @@ from app.services.assignment_service import assignment_service
 router: APIRouter = APIRouter()
 
 
-@router.get("/work-assignments", response_model=list[AssignmentResponse])
+@router.get("/work-assignments")
 async def list_my_assignments(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     work_date: Annotated[date | None, Query()] = None,
+    date_from: Annotated[date | None, Query()] = None,
+    date_to: Annotated[date | None, Query()] = None,
     status: Annotated[str | None, Query()] = None,
-) -> list[dict]:
+    page: Annotated[int | None, Query(ge=1)] = None,
+    per_page: Annotated[int | None, Query(ge=1, le=50)] = None,
+) -> list[dict] | dict:
     """내 업무 배정 목록을 조회합니다.
 
     List my work assignments with optional filters.
 
-    Args:
-        db: 비동기 데이터베이스 세션 (Async database session)
-        current_user: 인증된 사용자 (Authenticated user)
-        work_date: 근무일 필터, 선택 (Optional work date filter)
-        status: 상태 필터, 선택 (Optional status filter)
-
-    Returns:
-        list[dict]: 내 배정 목록 (My assignment list)
+    - Single date mode (work_date): returns List[AssignmentResponse] (backward compatible)
+    - Date range mode (date_from/date_to): returns paginated response with items/total/page/per_page
     """
-    assignments = await assignment_service.get_my_assignments(
+    is_range_mode: bool = date_from is not None or date_to is not None
+
+    if is_range_mode:
+        actual_page: int = page or 1
+        actual_per_page: int = per_page or 20
+        result = await assignment_service.get_my_assignments(
+            db,
+            user_id=current_user.id,
+            date_from=date_from,
+            date_to=date_to,
+            status=status,
+            page=actual_page,
+            per_page=actual_per_page,
+        )
+        assignments, total = result  # type: ignore[misc]
+
+        items: list[dict] = []
+        for a in assignments:
+            items.append(await assignment_service.build_response(db, a))
+
+        return {"items": items, "total": total, "page": actual_page, "per_page": actual_per_page}
+
+    # 단일 날짜 모드 — Single date mode (backward compatible)
+    assignments_list = await assignment_service.get_my_assignments(
         db,
         user_id=current_user.id,
         work_date=work_date,
         status=status,
     )
 
-    items: list[dict] = []
-    for a in assignments:
-        response: dict = await assignment_service.build_response(db, a)
-        items.append(response)
+    items = []
+    for a in assignments_list:  # type: ignore[union-attr]
+        items.append(await assignment_service.build_response(db, a))
 
     return items
 

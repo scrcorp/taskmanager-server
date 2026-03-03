@@ -113,32 +113,53 @@ class AssignmentRepository(BaseRepository[WorkAssignment]):
         db: AsyncSession,
         user_id: UUID,
         work_date: date | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
         status: str | None = None,
-    ) -> Sequence[WorkAssignment]:
+        page: int | None = None,
+        per_page: int | None = None,
+    ) -> Sequence[WorkAssignment] | tuple[Sequence[WorkAssignment], int]:
         """특정 사용자의 업무 배정 목록을 조회합니다.
 
         Retrieve work assignments for a specific user.
+        Supports single date filter (returns plain list) and
+        date range filter with pagination (returns tuple of list + total count).
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             user_id: 사용자 UUID (User UUID)
-            work_date: 근무일 필터, 선택 (Optional work date filter)
+            work_date: 근무일 필터, 선택 (Optional single work date filter)
+            date_from: 시작일 범위 필터, 선택 (Optional range start date filter)
+            date_to: 종료일 범위 필터, 선택 (Optional range end date filter)
             status: 상태 필터, 선택 (Optional status filter)
+            page: 페이지 번호, date_from/date_to 사용 시에만 적용 (Page number, range mode only)
+            per_page: 페이지당 항목 수 (Items per page)
 
         Returns:
-            Sequence[WorkAssignment]: 사용자의 배정 목록 (User's assignment list)
+            Sequence[WorkAssignment]: 비페이지 모드 시 배정 목록 (Non-paginated assignment list)
+            tuple[Sequence[WorkAssignment], int]: 페이지 모드 시 (배정 목록, 전체 개수)
         """
         query: Select = (
             select(WorkAssignment)
             .where(WorkAssignment.user_id == user_id)
         )
 
-        if work_date is not None:
+        # 날짜 범위 필터 우선, 없으면 단일 날짜 필터
+        # Date range filter takes precedence; falls back to single date
+        if date_from is not None:
+            query = query.where(WorkAssignment.work_date >= date_from)
+        if date_to is not None:
+            query = query.where(WorkAssignment.work_date <= date_to)
+        if date_from is None and date_to is None and work_date is not None:
             query = query.where(WorkAssignment.work_date == work_date)
         if status is not None:
             query = query.where(WorkAssignment.status == status)
 
         query = query.order_by(WorkAssignment.work_date.desc(), WorkAssignment.created_at.desc())
+
+        if page is not None:
+            return await self.get_paginated(db, query, page, per_page or 20)
+
         result = await db.execute(query)
         return result.scalars().all()
 
