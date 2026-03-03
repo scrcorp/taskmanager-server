@@ -399,17 +399,21 @@ class AssignmentService:
                     item_data["rejected_by"] = user_name_cache.get(rev.reviewer_id)
                     item_data["rejected_at"] = rev.updated_at.isoformat()
 
-                    # First text content as rejection_comment
+                    # Extract text and photo contents from review
                     if hasattr(rev, "contents") and rev.contents:
                         text_contents = [
                             c for c in rev.contents if c.type == "text"
                         ]
-                        if text_contents:
-                            item_data["rejection_comment"] = text_contents[0].content
-                        else:
-                            item_data["rejection_comment"] = None
+                        photo_contents = [
+                            c.content for c in rev.contents if c.type == "photo"
+                        ]
+                        item_data["rejection_comment"] = (
+                            text_contents[0].content if text_contents else None
+                        )
+                        item_data["rejection_photo_urls"] = photo_contents
                     else:
                         item_data["rejection_comment"] = None
+                        item_data["rejection_photo_urls"] = []
 
                     # Check if staff responded (resubmitted)
                     if comp and comp.resubmission_count > 0:
@@ -425,6 +429,7 @@ class AssignmentService:
                 else:
                     item_data["is_rejected"] = False
                     item_data["rejection_comment"] = None
+                    item_data["rejection_photo_urls"] = []
                     item_data["rejected_by"] = None
                     item_data["rejected_at"] = None
                     item_data["responded_at"] = None
@@ -456,10 +461,13 @@ class AssignmentService:
                 # 2) Rejection event
                 if rev and rev.result in ("fail", "pending_re_review"):
                     rej_comment = item_data.get("rejection_comment")
+                    rej_photo_urls: list[str] = []
+                    if hasattr(rev, "contents") and rev.contents:
+                        rej_photo_urls = [c.content for c in rev.contents if c.type == "photo"]
                     history.append({
                         "type": "rejected",
                         "comment": rej_comment,
-                        "photo_urls": [],
+                        "photo_urls": rej_photo_urls,
                         "by": user_name_cache.get(rev.reviewer_id),
                         "at": rev.updated_at.isoformat(),
                     })
