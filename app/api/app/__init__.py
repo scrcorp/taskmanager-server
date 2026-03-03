@@ -37,6 +37,9 @@ from app.api.app.notifications import router as notifications_router
 # Phase 5 — Attendance 라우터 임포트
 from app.api.app.attendances import router as attendance_router
 
+# Phase — Storage 라우터 임포트
+from app.api.app.storage import router as storage_router
+
 # Phase 10 — Issue Reports 라우터 임포트
 from app.api.app.issue_reports import router as issue_reports_router
 
@@ -74,3 +77,8 @@ app_router.include_router(attendance_router, prefix="/my/attendance", tags=["My 
 # Phase 10 라우터 등록 — Register Phase 10 (Issue Reports) routers
 # ---------------------------------------------------------------------------
 app_router.include_router(issue_reports_router, prefix="/my/issue-reports", tags=["My Issue Reports"])
+
+# ---------------------------------------------------------------------------
+# Storage 라우터 등록 — Register Storage router
+# ---------------------------------------------------------------------------
+app_router.include_router(storage_router, prefix="/storage", tags=["App Storage"])
