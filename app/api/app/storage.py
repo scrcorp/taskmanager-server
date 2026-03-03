@@ -47,6 +47,7 @@ async def create_presigned_url(
         base_url=base_url,
         upload_path_prefix="/api/v1/app/storage",
     )
+    print(f"[PRESIGNED] upload_url={result['upload_url']}, file_url={result['file_url']}")
     return {"upload_url": result["upload_url"], "file_url": result["file_url"]}
 
 
@@ -60,6 +61,7 @@ async def upload_local(
     S3 presigned URL과 동일한 방식. 인증 없음.
     """
     body = await request.body()
+    print(f"[UPLOAD PUT] key={key}, size={len(body)} bytes, content_type={request.headers.get('content-type')}")
     storage_service.save_local(key, body)
     return {"ok": True}
 
