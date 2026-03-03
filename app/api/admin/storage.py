@@ -4,14 +4,17 @@ Admin Storage Router — Generates presigned URLs for S3 or local uploads.
 로컬 모드에서는 PUT 엔드포인트로 파일을 직접 받아 저장합니다.
 """
 
+import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.services.storage_service import storage_service
+
+logger = logging.getLogger(__name__)
 
 router: APIRouter = APIRouter()
 
@@ -35,13 +38,20 @@ async def create_presigned_url(
 ) -> dict:
     """presigned upload URL을 생성합니다 (S3 또는 로컬)."""
     base_url = str(request.base_url).rstrip("/")
-    result = storage_service.generate_presigned_upload_url(
-        filename=data.filename,
-        content_type=data.content_type,
-        folder=data.folder,
-        base_url=base_url,
-        upload_path_prefix="/api/v1/admin/storage",
-    )
+    try:
+        result = storage_service.generate_presigned_upload_url(
+            filename=data.filename,
+            content_type=data.content_type,
+            folder=data.folder,
+            base_url=base_url,
+            upload_path_prefix="/api/v1/admin/storage",
+        )
+    except Exception as e:
+        logger.error("Presigned URL 생성 실패: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="파일 업로드 서비스를 사용할 수 없습니다. AWS 자격증명을 확인해주세요. (Storage service unavailable. Check AWS credentials.)",
+        )
     return {"upload_url": result["upload_url"], "file_url": result["file_url"]}
 
 

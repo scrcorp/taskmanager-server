@@ -15,6 +15,7 @@ from app.models.communication import TaskEvidence
 from app.models.user import User
 from app.repositories.task_evidence_repository import task_evidence_repository
 from app.repositories.task_repository import task_repository
+from app.services.storage_service import storage_service
 from app.utils.exceptions import ForbiddenError, NotFoundError
 
 
@@ -65,13 +66,16 @@ class TaskEvidenceService:
                 "이 업무의 담당자만 증빙을 추가할 수 있습니다 (Only assignees can add evidence)"
             )
 
+        # temp → 최종 위치로 이동 — Finalize upload from temp/ to final path
+        finalized_url = storage_service.finalize_upload(file_url)
+
         # 증빙 생성 — Create evidence record
         evidence: TaskEvidence = await task_evidence_repository.create(
             db,
             {
                 "task_id": task_id,
                 "user_id": user_id,
-                "file_url": file_url,
+                "file_url": finalized_url,
                 "file_type": file_type,
                 "note": note,
             },
@@ -133,6 +137,9 @@ class TaskEvidenceService:
             raise ForbiddenError(
                 "본인의 증빙만 삭제할 수 있습니다 (Can only delete your own evidence)"
             )
+
+        # S3/로컬 파일 삭제 — Delete file from storage
+        storage_service.delete_file(evidence.file_url)
 
         await task_evidence_repository.delete(db, evidence)
 

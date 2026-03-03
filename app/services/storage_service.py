@@ -169,4 +169,30 @@ class StorageService:
         return f"https://{settings.AWS_S3_BUCKET}.s3.{settings.AWS_S3_REGION}.amazonaws.com/{final_key}"
 
 
+    def delete_file(self, file_url: str) -> bool:
+        """S3 또는 로컬에서 파일을 삭제합니다. 성공 여부를 반환합니다.
+
+        file_url이 빈 문자열이거나 None이면 무시합니다.
+        """
+        if not file_url:
+            return False
+
+        key = self._extract_key(file_url)
+        if not key:
+            return False
+
+        if self.is_local:
+            path = UPLOADS_DIR / key
+            if path.exists():
+                path.unlink()
+                return True
+            return False
+
+        try:
+            self.client.delete_object(Bucket=settings.AWS_S3_BUCKET, Key=key)
+            return True
+        except Exception:
+            return False
+
+
 storage_service: StorageService = StorageService()

@@ -854,6 +854,10 @@ class ChecklistInstanceService:
         if existing is None:
             raise NotFoundError("콘텐츠를 찾을 수 없습니다 (Content not found)")
 
+        # photo/video 콘텐츠인 경우 S3/로컬 파일 삭제
+        if existing.type in ("photo", "video"):
+            storage_service.delete_file(existing.content)
+
         await db.delete(existing)
         await db.flush()
 
