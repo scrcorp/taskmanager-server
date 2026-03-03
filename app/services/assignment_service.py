@@ -583,9 +583,18 @@ class AssignmentService:
             local_now = datetime.now(tz)
             items[item_index]["completed_at"] = local_now.strftime("%Y-%m-%dT%H:%M")  # "2026-02-20T14:05"
             items[item_index]["completed_tz"] = local_now.strftime("%Z")  # "PST", "KST"
+            # 사진/메모 저장 — Store photo_url and note in snapshot
+            if photo_url is not None:
+                from app.services.storage_service import storage_service
+                photo_url = storage_service.finalize_upload(photo_url)
+                items[item_index]["photo_url"] = photo_url
+            if note is not None:
+                items[item_index]["note"] = note
         else:
             items[item_index]["completed_at"] = None
             items[item_index]["completed_tz"] = None
+            items[item_index]["photo_url"] = None
+            items[item_index]["note"] = None
 
         # 완료 항목 수 재계산 — Recalculate completed count
         completed_count: int = sum(1 for item in items if item["is_completed"])
@@ -616,15 +625,19 @@ class AssignmentService:
                     db, cl_instance.id, item_index
                 )
                 if existing is None:
+                    completion_data: dict = {
+                        "instance_id": cl_instance.id,
+                        "item_index": item_index,
+                        "user_id": user_id,
+                        "completed_at": datetime.now(timezone.utc),
+                        "completed_timezone": client_timezone,
+                    }
+                    if photo_url is not None:
+                        completion_data["photo_url"] = photo_url
+                    if note is not None:
+                        completion_data["note"] = note
                     await checklist_instance_repository.create_completion(
-                        db,
-                        {
-                            "instance_id": cl_instance.id,
-                            "item_index": item_index,
-                            "user_id": user_id,
-                            "completed_at": datetime.now(timezone.utc),
-                            "completed_timezone": client_timezone,
-                        },
+                        db, completion_data,
                     )
             else:
                 existing = await checklist_instance_repository.get_completion(
