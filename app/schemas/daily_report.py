@@ -7,7 +7,6 @@ from pydantic import BaseModel
 class DailyReportTemplateSectionInput(BaseModel):
     title: str
     description: str | None = None
-    sort_order: int = 0
     is_required: bool = False
 
 

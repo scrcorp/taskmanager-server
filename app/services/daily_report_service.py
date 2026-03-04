@@ -105,10 +105,10 @@ class DailyReportService:
         )
         db.add(template)
         await db.flush()
-        for s in data.sections:
+        for idx, s in enumerate(data.sections, start=1):
             db.add(DailyReportTemplateSection(
                 template_id=template.id, title=s.title, description=s.description,
-                sort_order=s.sort_order, is_required=s.is_required,
+                sort_order=idx, is_required=s.is_required,
             ))
         await db.flush()
         return await self.get_template_detail(db, template.id, organization_id)
@@ -127,10 +127,10 @@ class DailyReportService:
             for old in list(template.sections):
                 await db.delete(old)
             await db.flush()
-            for s in data.sections:
+            for idx, s in enumerate(data.sections, start=1):
                 db.add(DailyReportTemplateSection(
                     template_id=template.id, title=s.title, description=s.description,
-                    sort_order=s.sort_order, is_required=s.is_required,
+                    sort_order=idx, is_required=s.is_required,
                 ))
             await db.flush()
         return await self.get_template_detail(db, template.id, organization_id)
