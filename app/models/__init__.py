@@ -18,6 +18,7 @@ Modules:
     schedule: 스케줄 및 승인 (Schedules and approvals)
     attendance: 근태 관리 (Attendance: QR codes, records, corrections)
     evaluation: 평가 템플릿, 평가, 응답 (Evaluation templates, evaluations, responses)
+    daily_report: 일일 보고서 템플릿, 보고서, 섹션, 코멘트 (Daily report templates, reports, sections, comments)
 """
 
 from app.models.organization import Organization, Store, ShiftPreset, LaborLawSetting
@@ -33,6 +34,7 @@ from app.models.schedule import Schedule, ScheduleApproval
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
 from app.models.evaluation import EvalTemplate, EvalTemplateItem, Evaluation, EvalResponse
 from app.models.permission import Permission, RolePermission
+from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSection, DailyReport, DailyReportSection, DailyReportComment
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -47,4 +49,5 @@ __all__ = [
     "QRCode", "Attendance", "AttendanceCorrection",
     "EvalTemplate", "EvalTemplateItem", "Evaluation", "EvalResponse",
     "Permission", "RolePermission",
+    "DailyReportTemplate", "DailyReportTemplateSection", "DailyReport", "DailyReportSection", "DailyReportComment",
 ]
