@@ -8,7 +8,7 @@
       "is_required": true
     },
     {
-      "title": "Operations / Service",
+      "title": "Operations Business Ops / Service",
       "description": "POS issues, system problems, customer service matters, operational incidents",
       "sort_order": 2,
       "is_required": true
@@ -26,19 +26,19 @@
       "is_required": true
     },
     {
-      "title": "Purchasing / Ordering",
+      "title": "Purchasing Procurement / Ordering",
       "description": "Order items, low-stock products, emergency purchases",
       "sort_order": 5,
       "is_required": true
     },
     {
-      "title": "Cleaning / Sanitation",
+      "title": "Cleaning Sanitation / Janitorial",
       "description": "Cleanliness status, sanitation inspection results, janitorial staff visit",
       "sort_order": 6,
       "is_required": true
     },
     {
-      "title": "Facilities / Equipment",
+      "title": "Facilities Maintenance / Equipment",
       "description": "Facility maintenance, equipment malfunctions, repair requests",
       "sort_order": 7,
       "is_required": false
