@@ -7,8 +7,6 @@ Create Date: 2026-03-04 17:46:17.440272
 Creates a default Daily Report template for each existing organization.
 New organizations get theirs automatically via create_default_template_for_org().
 """
-import json
-from pathlib import Path
 from typing import Sequence, Union
 from uuid import uuid4
 
@@ -23,10 +21,22 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+_DEFAULT_TEMPLATE = {
+    "name": "Supervisor Daily Report",
+    "sections": [
+        {"title": "Daily Sales", "description": "Sales figures, closing sales amount, performance against target", "sort_order": 1, "is_required": True},
+        {"title": "Operations Business Ops / Service", "description": "POS issues, system problems, customer service matters, operational incidents", "sort_order": 2, "is_required": True},
+        {"title": "Reservations", "description": "Reservation status, no-shows, special notes", "sort_order": 3, "is_required": False},
+        {"title": "Staff", "description": "Attendance, schedule changes, call-outs, early departures, staffing issues", "sort_order": 4, "is_required": True},
+        {"title": "Purchasing Procurement / Ordering", "description": "Order items, low-stock products, emergency purchases", "sort_order": 5, "is_required": True},
+        {"title": "Cleaning Sanitation / Janitorial", "description": "Cleanliness status, sanitation inspection results, janitorial staff visit", "sort_order": 6, "is_required": True},
+        {"title": "Facilities Maintenance / Equipment", "description": "Facility maintenance, equipment malfunctions, repair requests", "sort_order": 7, "is_required": False},
+    ],
+}
+
+
 def _load_template_config():
-    config_path = Path(__file__).resolve().parent.parent.parent / "static" / "default_daily_report_template.json"
-    with open(config_path) as f:
-        return json.load(f)
+    return _DEFAULT_TEMPLATE
 
 
 def upgrade() -> None:

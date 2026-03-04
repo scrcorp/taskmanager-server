@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini .
 COPY alembic/ alembic/
 COPY app/ app/
+COPY static/ static/
 COPY start.sh .
 
 EXPOSE 8000
