@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy.orm import selectinload
@@ -180,6 +180,18 @@ class DailyReportService:
         self, db: AsyncSession, template_id: UUID, organization_id: UUID
     ) -> None:
         template = await self.get_template_detail(db, template_id, organization_id)
+
+        # Prevent deleting the last active template for this org
+        count_result = await db.execute(
+            select(func.count()).where(
+                DailyReportTemplate.organization_id == organization_id,
+                DailyReportTemplate.is_active == True,
+            )
+        )
+        active_count = count_result.scalar() or 0
+        if active_count <= 1 and template.is_active:
+            raise BadRequestError("Cannot delete the last active template. At least one template must remain.")
+
         await db.delete(template)
         await db.flush()
 
@@ -271,12 +283,13 @@ class DailyReportService:
         db.add(report)
         await db.flush()
 
-        # Snapshot sections from template
+        # Snapshot sections from template (title + description)
         for ts in template.sections:
             section = DailyReportSection(
                 report_id=report.id,
                 template_section_id=ts.id,
                 title=ts.title,
+                description=ts.description,
                 content=None,
                 sort_order=ts.sort_order,
             )
@@ -369,6 +382,7 @@ class DailyReportService:
                     "id": str(s.id),
                     "template_section_id": str(s.template_section_id) if s.template_section_id else None,
                     "title": s.title,
+                    "description": s.description,
                     "content": s.content,
                     "sort_order": s.sort_order,
                 }

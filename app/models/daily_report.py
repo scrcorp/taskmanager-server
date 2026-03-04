@@ -64,6 +64,7 @@ class DailyReportSection(Base):
     report_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("daily_reports.id", ondelete="CASCADE"), nullable=False)
     template_section_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("daily_report_template_sections.id", ondelete="SET NULL"), nullable=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
