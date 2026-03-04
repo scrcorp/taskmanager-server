@@ -46,6 +46,7 @@ class DailyReportRepository(BaseRepository[DailyReport]):
         date_to: date | None = None,
         period: str | None = None,
         status: str | None = None,
+        exclude_status: str | None = None,
         page: int = 1,
         per_page: int = 20,
     ) -> tuple[Sequence[DailyReport], int]:
@@ -62,6 +63,8 @@ class DailyReportRepository(BaseRepository[DailyReport]):
             base = base.where(DailyReport.period == period)
         if status:
             base = base.where(DailyReport.status == status)
+        if exclude_status:
+            base = base.where(DailyReport.status != exclude_status)
 
         count_result = await db.execute(select(func.count()).select_from(base.subquery()))
         total: int = count_result.scalar() or 0
