@@ -7,6 +7,8 @@ Create Date: 2026-03-04 17:46:17.440272
 Creates a default Daily Report template for each existing organization.
 New organizations get theirs automatically via create_default_template_for_org().
 """
+import json
+from pathlib import Path
 from typing import Sequence, Union
 from uuid import uuid4
 
@@ -20,19 +22,16 @@ down_revision: Union[str, None] = '2414fb497698'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-# Same definition as app/defaults/daily_report_template.py
-TEMPLATE_NAME = "Daily Report"
-SECTIONS = [
-    ("Sales & Revenue", "Today's sales figures, transaction count, average ticket size, comparison to target", 1, True),
-    ("Staff & Operations", "Staffing levels, attendance issues, notable performance, shift handoff notes", 2, True),
-    ("Customer Feedback", "Customer complaints, compliments, special requests, service quality observations", 3, False),
-    ("Issues & Actions", "Problems encountered, actions taken, unresolved issues requiring follow-up", 4, True),
-    ("Notes", "Any other observations, reminders for next shift, upcoming events", 5, False),
-]
+
+def _load_template_config():
+    config_path = Path(__file__).resolve().parent.parent.parent / "static" / "default_daily_report_template.json"
+    with open(config_path) as f:
+        return json.load(f)
 
 
 def upgrade() -> None:
     conn = op.get_bind()
+    config = _load_template_config()
 
     # Remove system-level template if exists (from earlier approach)
     conn.execute(sa.text(
@@ -61,15 +60,15 @@ def upgrade() -> None:
                 INSERT INTO daily_report_templates (id, organization_id, store_id, name, is_default, is_active, created_at, updated_at)
                 VALUES (:id, :oid, NULL, :name, true, true, NOW(), NOW())
             """),
-            {"id": tid, "oid": org_id, "name": TEMPLATE_NAME},
+            {"id": tid, "oid": org_id, "name": config["name"]},
         )
-        for title, desc, sort_order, is_required in SECTIONS:
+        for s in config["sections"]:
             conn.execute(
                 sa.text("""
                     INSERT INTO daily_report_template_sections (id, template_id, title, description, sort_order, is_required, created_at)
                     VALUES (:id, :tid, :title, :desc, :sort, :req, NOW())
                 """),
-                {"id": str(uuid4()), "tid": tid, "title": title, "desc": desc, "sort": sort_order, "req": is_required},
+                {"id": str(uuid4()), "tid": tid, "title": s["title"], "desc": s["description"], "sort": s["sort_order"], "req": s["is_required"]},
             )
 
 

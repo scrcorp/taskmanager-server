@@ -36,19 +36,24 @@ class DailyReportService:
 
     async def create_default_template_for_org(self, db: AsyncSession, organization_id: UUID) -> DailyReportTemplate:
         """조직에 기본 일일 리포트 템플릿을 생성합니다. 조직 생성 시 호출."""
-        from app.defaults.daily_report_template import DEFAULT_TEMPLATE_NAME, DEFAULT_SECTIONS
+        import json
+        from pathlib import Path
+
+        config_path = Path(__file__).resolve().parent.parent.parent / "static" / "default_daily_report_template.json"
+        with open(config_path) as f:
+            config = json.load(f)
 
         template = DailyReportTemplate(
             organization_id=organization_id,
             store_id=None,
-            name=DEFAULT_TEMPLATE_NAME,
+            name=config["name"],
             is_default=True,
             is_active=True,
         )
         db.add(template)
         await db.flush()
 
-        for s in DEFAULT_SECTIONS:
+        for s in config["sections"]:
             section = DailyReportTemplateSection(
                 template_id=template.id,
                 title=s["title"],
