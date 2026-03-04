@@ -5,7 +5,7 @@
 
 ## Project Overview
 
-Multi-store employee management system. FastAPI + PostgreSQL (Supabase) backend serving two frontends: Admin (Next.js) and App (Flutter Web).
+Multi-store employee management system. FastAPI + PostgreSQL (AWS RDS) backend serving two frontends: Admin (Next.js on Vercel) and App (Flutter Web on S3+CloudFront). EC2에서 HTTP로 운영, Vercel/CloudFront가 HTTPS proxy.
 
 ## Tech Stack
 
@@ -14,7 +14,7 @@ Multi-store employee management system. FastAPI + PostgreSQL (Supabase) backend 
 - **ORM**: SQLAlchemy 2.0 (async) + asyncpg
 - **Validation**: Pydantic v2
 - **Auth**: JWT (PyJWT) + bcrypt (passlib)
-- **Database**: PostgreSQL (Supabase)
+- **Database**: PostgreSQL (AWS RDS, 로컬은 개별 PostgreSQL)
 - **Migration**: Alembic
 
 ## Project Structure
@@ -205,6 +205,15 @@ alembic upgrade head
 # Tests
 pytest tests/ -v
 ```
+
+## Git Workflow
+
+> 상세 규칙은 `../CLAUDE.md`의 "Git Branch Workflow" 참조.
+
+- 브랜치 prefix: `feat/*`, `fix/*`, `docs/*`, `refactor/*`, `chore/*` (업무 성격에 맞게)
+- **dev 머지는 반드시 사용자 허락 후 진행**
+- docs 같은 경량 작업은 main에서 직접 분기 허용
+- **AI Agent는 작업 시 무조건 worktree 사용**
 
 ## Coding Conventions
 
