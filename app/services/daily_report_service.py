@@ -3,13 +3,11 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from sqlalchemy.orm import selectinload
 
 from app.models.daily_report import (
     DailyReport,
     DailyReportComment,
-    DailyReportSection,
     DailyReportTemplate,
     DailyReportTemplateSection,
 )
@@ -35,7 +33,6 @@ class DailyReportService:
     # --- Default Template for New Orgs ---
 
     async def create_default_template_for_org(self, db: AsyncSession, organization_id: UUID) -> DailyReportTemplate:
-        """조직에 기본 일일 리포트 템플릿을 생성합니다. 조직 생성 시 호출."""
         import json
         from pathlib import Path
 
@@ -68,11 +65,8 @@ class DailyReportService:
     # --- Template CRUD ---
 
     async def list_templates(
-        self,
-        db: AsyncSession,
-        organization_id: UUID,
-        store_id: UUID | None = None,
-        is_active: bool | None = None,
+        self, db: AsyncSession, organization_id: UUID,
+        store_id: UUID | None = None, is_active: bool | None = None,
     ) -> list[DailyReportTemplate]:
         query = (
             select(DailyReportTemplate)
@@ -93,10 +87,7 @@ class DailyReportService:
         query = (
             select(DailyReportTemplate)
             .options(selectinload(DailyReportTemplate.sections))
-            .where(
-                DailyReportTemplate.id == template_id,
-                DailyReportTemplate.organization_id == organization_id,
-            )
+            .where(DailyReportTemplate.id == template_id, DailyReportTemplate.organization_id == organization_id)
         )
         result = await db.execute(query)
         template = result.scalar_one_or_none()
@@ -110,103 +101,56 @@ class DailyReportService:
         template = DailyReportTemplate(
             organization_id=organization_id,
             store_id=UUID(data.store_id) if data.store_id else None,
-            name=data.name,
-            is_default=data.is_default,
+            name=data.name, is_default=data.is_default,
         )
         db.add(template)
         await db.flush()
-
         for s in data.sections:
-            section = DailyReportTemplateSection(
-                template_id=template.id,
-                title=s.title,
-                description=s.description,
-                sort_order=s.sort_order,
-                is_required=s.is_required,
-            )
-            db.add(section)
+            db.add(DailyReportTemplateSection(
+                template_id=template.id, title=s.title, description=s.description,
+                sort_order=s.sort_order, is_required=s.is_required,
+            ))
         await db.flush()
-        await db.refresh(template)
-        # Eager load sections
-        query = (
-            select(DailyReportTemplate)
-            .options(selectinload(DailyReportTemplate.sections))
-            .where(DailyReportTemplate.id == template.id)
-        )
-        result = await db.execute(query)
-        return result.scalar_one()
+        return await self.get_template_detail(db, template.id, organization_id)
 
     async def update_template(
         self, db: AsyncSession, template_id: UUID, organization_id: UUID, data: DailyReportTemplateUpdate
     ) -> DailyReportTemplate:
         template = await self.get_template_detail(db, template_id, organization_id)
-
         if data.name is not None:
             template.name = data.name
         if data.is_default is not None:
             template.is_default = data.is_default
         if data.is_active is not None:
             template.is_active = data.is_active
-
-        # Replace sections if provided
         if data.sections is not None:
-            # Delete old sections
-            for old_section in list(template.sections):
-                await db.delete(old_section)
+            for old in list(template.sections):
+                await db.delete(old)
             await db.flush()
-            # Create new sections
             for s in data.sections:
-                section = DailyReportTemplateSection(
-                    template_id=template.id,
-                    title=s.title,
-                    description=s.description,
-                    sort_order=s.sort_order,
-                    is_required=s.is_required,
-                )
-                db.add(section)
+                db.add(DailyReportTemplateSection(
+                    template_id=template.id, title=s.title, description=s.description,
+                    sort_order=s.sort_order, is_required=s.is_required,
+                ))
             await db.flush()
-
-        await db.refresh(template)
-        # Eager load sections
-        query = (
-            select(DailyReportTemplate)
-            .options(selectinload(DailyReportTemplate.sections))
-            .where(DailyReportTemplate.id == template.id)
-        )
-        result = await db.execute(query)
-        return result.scalar_one()
+        return await self.get_template_detail(db, template.id, organization_id)
 
     async def delete_template(
         self, db: AsyncSession, template_id: UUID, organization_id: UUID
     ) -> None:
         template = await self.get_template_detail(db, template_id, organization_id)
-
-        # Prevent deleting the last active template for this org
         count_result = await db.execute(
             select(func.count()).where(
                 DailyReportTemplate.organization_id == organization_id,
                 DailyReportTemplate.is_active == True,
             )
         )
-        active_count = count_result.scalar() or 0
-        if active_count <= 1 and template.is_active:
-            raise BadRequestError("Cannot delete the last active template. At least one template must remain.")
-
+        if (count_result.scalar() or 0) <= 1 and template.is_active:
+            raise BadRequestError("Cannot delete the last active template.")
         await db.delete(template)
         await db.flush()
 
-    # --- Report Delete ---
-
-    async def delete_report(
-        self, db: AsyncSession, report_id: UUID, organization_id: UUID
-    ) -> None:
-        report = await daily_report_repository.get_with_details(db, report_id, organization_id)
-        if not report:
-            raise NotFoundError("일일 보고서를 찾을 수 없습니다")
-        await db.delete(report)
-        await db.flush()
-
-    # --- Existing methods ---
+    # --- Report CRUD ---
 
     async def get_template(self, db: AsyncSession, organization_id: UUID, store_id: UUID | None = None):
         template = await daily_report_template_repository.get_template_for_store(db, organization_id, store_id)
@@ -215,26 +159,17 @@ class DailyReportService:
         return template
 
     async def list_reports(
-        self,
-        db: AsyncSession,
-        organization_id: UUID,
-        store_id: UUID | None = None,
-        author_id: UUID | None = None,
-        date_from: date | None = None,
-        date_to: date | None = None,
-        period: str | None = None,
-        status: str | None = None,
-        exclude_draft: bool = True,
-        page: int = 1,
-        per_page: int = 20,
+        self, db: AsyncSession, organization_id: UUID,
+        store_id: UUID | None = None, author_id: UUID | None = None,
+        date_from: date | None = None, date_to: date | None = None,
+        period: str | None = None, status: str | None = None,
+        exclude_draft: bool = True, page: int = 1, per_page: int = 20,
     ):
-        # If no explicit status filter, exclude drafts by default
         exclude_status = "draft" if (status is None and exclude_draft) else None
         return await daily_report_repository.get_by_org(
             db, organization_id, store_id=store_id, author_id=author_id,
             date_from=date_from, date_to=date_to, period=period, status=status,
-            exclude_status=exclude_status,
-            page=page, per_page=per_page,
+            exclude_status=exclude_status, page=page, per_page=per_page,
         )
 
     async def get_report(self, db: AsyncSession, report_id: UUID, organization_id: UUID):
@@ -249,19 +184,14 @@ class DailyReportService:
         store_id = UUID(data.store_id)
         report_date = date.fromisoformat(data.report_date)
 
-        # Check duplicate — return existing report ID in error
         existing = await daily_report_repository.find_duplicate(db, store_id, report_date, data.period)
         if existing:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": "해당 매장/날짜/시간대에 이미 보고서가 존재합니다",
-                    "existing_report_id": str(existing.id),
-                    "status": existing.status,
-                },
-            )
+            raise HTTPException(status_code=409, detail={
+                "message": "해당 매장/날짜/시간대에 이미 보고서가 존재합니다",
+                "existing_report_id": str(existing.id),
+                "status": existing.status,
+            })
 
-        # Resolve template
         template_id = UUID(data.template_id) if data.template_id else None
         if template_id:
             template = await daily_report_template_repository.get_by_id_with_sections(db, template_id)
@@ -270,7 +200,18 @@ class DailyReportService:
         if not template:
             raise NotFoundError("사용 가능한 보고서 템플릿이 없습니다")
 
-        # Create report
+        # Snapshot template sections to JSONB
+        sections_snapshot = [
+            {
+                "title": ts.title,
+                "description": ts.description,
+                "content": None,
+                "sort_order": ts.sort_order,
+                "is_required": ts.is_required,
+            }
+            for ts in template.sections
+        ]
+
         report = DailyReport(
             organization_id=organization_id,
             store_id=store_id,
@@ -279,21 +220,9 @@ class DailyReportService:
             report_date=report_date,
             period=data.period,
             status="draft",
+            sections_data=sections_snapshot,
         )
         db.add(report)
-        await db.flush()
-
-        # Snapshot sections from template (title + description)
-        for ts in template.sections:
-            section = DailyReportSection(
-                report_id=report.id,
-                template_section_id=ts.id,
-                title=ts.title,
-                description=ts.description,
-                content=None,
-                sort_order=ts.sort_order,
-            )
-            db.add(section)
         await db.flush()
         await db.refresh(report)
         return report
@@ -307,11 +236,15 @@ class DailyReportService:
         if report.status != "draft":
             raise BadRequestError("작성 중인 보고서만 수정할 수 있습니다")
 
-        section_map = {str(s.id): s for s in report.sections}
-        for update in data.sections:
-            section = section_map.get(update.section_id)
-            if section:
-                section.content = update.content
+        # Update content in JSONB by sort_order
+        sections = list(report.sections_data or [])
+        update_map = {u.sort_order: u.content for u in data.sections}
+        for section in sections:
+            if section["sort_order"] in update_map:
+                section["content"] = update_map[section["sort_order"]]
+
+        # Force SQLAlchemy to detect JSONB mutation
+        report.sections_data = sections
         await db.flush()
         await db.refresh(report)
         return report
@@ -328,32 +261,39 @@ class DailyReportService:
         await db.refresh(report)
         return report
 
+    async def delete_report(
+        self, db: AsyncSession, report_id: UUID, organization_id: UUID, author_id: UUID | None = None
+    ) -> None:
+        report = await daily_report_repository.get_with_details(db, report_id, organization_id)
+        if not report:
+            raise NotFoundError("일일 보고서를 찾을 수 없습니다")
+        # If author_id provided, only author can delete drafts
+        if author_id:
+            if report.author_id != author_id:
+                raise ForbiddenError("본인이 작성한 보고서만 삭제할 수 있습니다")
+            if report.status != "draft":
+                raise BadRequestError("작성 중인 보고서만 삭제할 수 있습니다")
+        await db.delete(report)
+        await db.flush()
+
     async def add_comment(
         self, db: AsyncSession, report_id: UUID, organization_id: UUID, user_id: UUID, data: DailyReportCommentCreate
     ):
         report = await daily_report_repository.get_with_details(db, report_id, organization_id)
         if not report:
             raise NotFoundError("일일 보고서를 찾을 수 없습니다")
-        comment = DailyReportComment(
-            report_id=report.id,
-            user_id=user_id,
-            content=data.content,
-        )
+        comment = DailyReportComment(report_id=report.id, user_id=user_id, content=data.content)
         db.add(comment)
         await db.flush()
         await db.refresh(comment)
         return comment
 
     async def build_response(self, db: AsyncSession, report: DailyReport, include_details: bool = False) -> dict:
-        # Resolve author name
         user_result = await db.execute(select(User.full_name).where(User.id == report.author_id))
         author_name = user_result.scalar() or "Unknown"
-
-        # Resolve store name
         store_result = await db.execute(select(Store.name).where(Store.id == report.store_id))
         store_name = store_result.scalar()
 
-        # Comment count (comments may be eager-loaded from list query)
         try:
             comment_count = len(report.comments)
         except Exception:
@@ -377,27 +317,14 @@ class DailyReportService:
         }
 
         if include_details:
-            resp["sections"] = [
-                {
-                    "id": str(s.id),
-                    "template_section_id": str(s.template_section_id) if s.template_section_id else None,
-                    "title": s.title,
-                    "description": s.description,
-                    "content": s.content,
-                    "sort_order": s.sort_order,
-                }
-                for s in report.sections
-            ]
-            # Resolve comment user names
+            resp["sections"] = report.sections_data or []
             comments = []
             for c in report.comments:
                 cu_result = await db.execute(select(User.full_name).where(User.id == c.user_id))
                 cu_name = cu_result.scalar() or "Unknown"
                 comments.append({
-                    "id": str(c.id),
-                    "user_id": str(c.user_id),
-                    "user_name": cu_name,
-                    "content": c.content,
+                    "id": str(c.id), "user_id": str(c.user_id),
+                    "user_name": cu_name, "content": c.content,
                     "created_at": c.created_at,
                 })
             resp["comments"] = comments
@@ -412,13 +339,8 @@ class DailyReportService:
             "id": str(template.id),
             "name": template.name,
             "sections": [
-                {
-                    "id": str(s.id),
-                    "title": s.title,
-                    "description": s.description,
-                    "sort_order": s.sort_order,
-                    "is_required": s.is_required,
-                }
+                {"id": str(s.id), "title": s.title, "description": s.description,
+                 "sort_order": s.sort_order, "is_required": s.is_required}
                 for s in template.sections
             ],
         }

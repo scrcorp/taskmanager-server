@@ -10,7 +10,6 @@ from app.models.daily_report import (
     DailyReport,
     DailyReportComment,
     DailyReportTemplate,
-    DailyReportTemplateSection,
 )
 from app.repositories.base import BaseRepository
 
@@ -25,7 +24,6 @@ class DailyReportRepository(BaseRepository[DailyReport]):
         query: Select = (
             select(DailyReport)
             .options(
-                selectinload(DailyReport.sections),
                 selectinload(DailyReport.comments),
             )
             .where(

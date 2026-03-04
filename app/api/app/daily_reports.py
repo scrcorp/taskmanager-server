@@ -97,6 +97,18 @@ async def update_report(
     return await daily_report_service.build_response(db, report, include_details=True)
 
 
+@router.delete("/{report_id}", status_code=204)
+async def delete_my_report(
+    report_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("daily_reports:create"))],
+) -> None:
+    await daily_report_service.delete_report(
+        db, report_id, current_user.organization_id, author_id=current_user.id
+    )
+    await db.commit()
+
+
 @router.post("/{report_id}/submit", response_model=DailyReportResponse)
 async def submit_report(
     report_id: UUID,

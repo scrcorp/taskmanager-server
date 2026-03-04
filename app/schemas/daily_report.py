@@ -44,8 +44,10 @@ class DailyReportTemplateResponse(BaseModel):
     sections: list[DailyReportTemplateSectionResponse] = []
 
 
+# --- Report Schemas ---
+
 class SectionContentUpdate(BaseModel):
-    section_id: str
+    sort_order: int
     content: str | None = None
 
 
@@ -58,22 +60,6 @@ class DailyReportCreate(BaseModel):
 
 class DailyReportUpdate(BaseModel):
     sections: list[SectionContentUpdate]
-
-
-class DailyReportSectionResponse(BaseModel):
-    id: str
-    template_section_id: str | None = None
-    title: str
-    content: str | None = None
-    sort_order: int
-
-
-class DailyReportCommentResponse(BaseModel):
-    id: str
-    user_id: str
-    user_name: str | None = None
-    content: str
-    created_at: datetime
 
 
 class DailyReportCommentCreate(BaseModel):
@@ -94,18 +80,6 @@ class DailyReportResponse(BaseModel):
     submitted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
-    sections: list[DailyReportSectionResponse] = []
-    comments: list[DailyReportCommentResponse] = []
-
-
-class DailyReportListResponse(BaseModel):
-    id: str
-    store_id: str
-    store_name: str | None = None
-    author_id: str
-    author_name: str | None = None
-    report_date: date
-    period: str
-    status: str
-    submitted_at: datetime | None = None
-    created_at: datetime
+    comment_count: int = 0
+    sections: list[dict] = []
+    comments: list[dict] = []
