@@ -32,6 +32,34 @@ from app.utils.exceptions import BadRequestError, DuplicateError, ForbiddenError
 
 class DailyReportService:
 
+    # --- Default Template for New Orgs ---
+
+    async def create_default_template_for_org(self, db: AsyncSession, organization_id: UUID) -> DailyReportTemplate:
+        """조직에 기본 일일 리포트 템플릿을 생성합니다. 조직 생성 시 호출."""
+        from app.defaults.daily_report_template import DEFAULT_TEMPLATE_NAME, DEFAULT_SECTIONS
+
+        template = DailyReportTemplate(
+            organization_id=organization_id,
+            store_id=None,
+            name=DEFAULT_TEMPLATE_NAME,
+            is_default=True,
+            is_active=True,
+        )
+        db.add(template)
+        await db.flush()
+
+        for s in DEFAULT_SECTIONS:
+            section = DailyReportTemplateSection(
+                template_id=template.id,
+                title=s["title"],
+                description=s["description"],
+                sort_order=s["sort_order"],
+                is_required=s["is_required"],
+            )
+            db.add(section)
+        await db.flush()
+        return template
+
     # --- Template CRUD ---
 
     async def list_templates(
