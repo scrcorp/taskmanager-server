@@ -4,18 +4,163 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.daily_report import DailyReport, DailyReportComment, DailyReportSection
+from sqlalchemy.orm import selectinload
+
+from app.models.daily_report import (
+    DailyReport,
+    DailyReportComment,
+    DailyReportSection,
+    DailyReportTemplate,
+    DailyReportTemplateSection,
+)
 from app.models.organization import Store
 from app.models.user import User
 from app.repositories.daily_report_repository import (
     daily_report_repository,
     daily_report_template_repository,
 )
-from app.schemas.daily_report import DailyReportCreate, DailyReportUpdate, DailyReportCommentCreate
+from app.schemas.daily_report import (
+    DailyReportCommentCreate,
+    DailyReportCreate,
+    DailyReportTemplateCreate,
+    DailyReportTemplateUpdate,
+    DailyReportUpdate,
+)
 from app.utils.exceptions import BadRequestError, DuplicateError, ForbiddenError, NotFoundError
 
 
 class DailyReportService:
+
+    # --- Template CRUD ---
+
+    async def list_templates(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID | None = None,
+        is_active: bool | None = None,
+    ) -> list[DailyReportTemplate]:
+        query = (
+            select(DailyReportTemplate)
+            .options(selectinload(DailyReportTemplate.sections))
+            .where(DailyReportTemplate.organization_id == organization_id)
+        )
+        if store_id is not None:
+            query = query.where(DailyReportTemplate.store_id == store_id)
+        if is_active is not None:
+            query = query.where(DailyReportTemplate.is_active == is_active)
+        query = query.order_by(DailyReportTemplate.created_at.desc())
+        result = await db.execute(query)
+        return list(result.scalars().all())
+
+    async def get_template_detail(
+        self, db: AsyncSession, template_id: UUID, organization_id: UUID
+    ) -> DailyReportTemplate:
+        query = (
+            select(DailyReportTemplate)
+            .options(selectinload(DailyReportTemplate.sections))
+            .where(
+                DailyReportTemplate.id == template_id,
+                DailyReportTemplate.organization_id == organization_id,
+            )
+        )
+        result = await db.execute(query)
+        template = result.scalar_one_or_none()
+        if not template:
+            raise NotFoundError("템플릿을 찾을 수 없습니다")
+        return template
+
+    async def create_template(
+        self, db: AsyncSession, organization_id: UUID, data: DailyReportTemplateCreate
+    ) -> DailyReportTemplate:
+        template = DailyReportTemplate(
+            organization_id=organization_id,
+            store_id=UUID(data.store_id) if data.store_id else None,
+            name=data.name,
+            is_default=data.is_default,
+        )
+        db.add(template)
+        await db.flush()
+
+        for s in data.sections:
+            section = DailyReportTemplateSection(
+                template_id=template.id,
+                title=s.title,
+                description=s.description,
+                sort_order=s.sort_order,
+                is_required=s.is_required,
+            )
+            db.add(section)
+        await db.flush()
+        await db.refresh(template)
+        # Eager load sections
+        query = (
+            select(DailyReportTemplate)
+            .options(selectinload(DailyReportTemplate.sections))
+            .where(DailyReportTemplate.id == template.id)
+        )
+        result = await db.execute(query)
+        return result.scalar_one()
+
+    async def update_template(
+        self, db: AsyncSession, template_id: UUID, organization_id: UUID, data: DailyReportTemplateUpdate
+    ) -> DailyReportTemplate:
+        template = await self.get_template_detail(db, template_id, organization_id)
+
+        if data.name is not None:
+            template.name = data.name
+        if data.is_default is not None:
+            template.is_default = data.is_default
+        if data.is_active is not None:
+            template.is_active = data.is_active
+
+        # Replace sections if provided
+        if data.sections is not None:
+            # Delete old sections
+            for old_section in list(template.sections):
+                await db.delete(old_section)
+            await db.flush()
+            # Create new sections
+            for s in data.sections:
+                section = DailyReportTemplateSection(
+                    template_id=template.id,
+                    title=s.title,
+                    description=s.description,
+                    sort_order=s.sort_order,
+                    is_required=s.is_required,
+                )
+                db.add(section)
+            await db.flush()
+
+        await db.refresh(template)
+        # Eager load sections
+        query = (
+            select(DailyReportTemplate)
+            .options(selectinload(DailyReportTemplate.sections))
+            .where(DailyReportTemplate.id == template.id)
+        )
+        result = await db.execute(query)
+        return result.scalar_one()
+
+    async def delete_template(
+        self, db: AsyncSession, template_id: UUID, organization_id: UUID
+    ) -> None:
+        template = await self.get_template_detail(db, template_id, organization_id)
+        await db.delete(template)
+        await db.flush()
+
+    # --- Report Delete ---
+
+    async def delete_report(
+        self, db: AsyncSession, report_id: UUID, organization_id: UUID
+    ) -> None:
+        report = await daily_report_repository.get_with_details(db, report_id, organization_id)
+        if not report:
+            raise NotFoundError("일일 보고서를 찾을 수 없습니다")
+        await db.delete(report)
+        await db.flush()
+
+    # --- Existing methods ---
 
     async def get_template(self, db: AsyncSession, organization_id: UUID, store_id: UUID | None = None):
         template = await daily_report_template_repository.get_template_for_store(db, organization_id, store_id)
@@ -33,12 +178,16 @@ class DailyReportService:
         date_to: date | None = None,
         period: str | None = None,
         status: str | None = None,
+        exclude_draft: bool = True,
         page: int = 1,
         per_page: int = 20,
     ):
+        # If no explicit status filter, exclude drafts by default
+        exclude_status = "draft" if (status is None and exclude_draft) else None
         return await daily_report_repository.get_by_org(
             db, organization_id, store_id=store_id, author_id=author_id,
             date_from=date_from, date_to=date_to, period=period, status=status,
+            exclude_status=exclude_status,
             page=page, per_page=per_page,
         )
 

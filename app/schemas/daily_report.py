@@ -2,6 +2,29 @@ from datetime import datetime, date
 from pydantic import BaseModel
 
 
+# --- Template CRUD Schemas ---
+
+class DailyReportTemplateSectionInput(BaseModel):
+    title: str
+    description: str | None = None
+    sort_order: int = 0
+    is_required: bool = False
+
+
+class DailyReportTemplateCreate(BaseModel):
+    name: str
+    store_id: str | None = None
+    is_default: bool = False
+    sections: list[DailyReportTemplateSectionInput] = []
+
+
+class DailyReportTemplateUpdate(BaseModel):
+    name: str | None = None
+    is_default: bool | None = None
+    is_active: bool | None = None
+    sections: list[DailyReportTemplateSectionInput] | None = None
+
+
 class DailyReportTemplateSectionResponse(BaseModel):
     id: str
     title: str
@@ -12,7 +35,12 @@ class DailyReportTemplateSectionResponse(BaseModel):
 
 class DailyReportTemplateResponse(BaseModel):
     id: str
+    organization_id: str | None = None
+    store_id: str | None = None
     name: str
+    is_default: bool = False
+    is_active: bool = True
+    created_at: datetime | None = None
     sections: list[DailyReportTemplateSectionResponse] = []
 
 

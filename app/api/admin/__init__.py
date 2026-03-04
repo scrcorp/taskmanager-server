@@ -75,6 +75,7 @@ from app.api.admin.voices import router as voices_router
 
 # Daily Reports 라우터 임포트
 from app.api.admin.daily_reports import router as daily_reports_router
+from app.api.admin.daily_report_templates import router as daily_report_templates_router
 
 # Storage 라우터 임포트
 from app.api.admin.storage import router as storage_router
@@ -166,6 +167,7 @@ admin_router.include_router(permissions_router, prefix="/permissions", tags=["Pe
 # Daily Reports 라우터 등록 — Register Daily Reports routers
 # ---------------------------------------------------------------------------
 admin_router.include_router(daily_reports_router, prefix="/daily-reports", tags=["Daily Reports"])
+admin_router.include_router(daily_report_templates_router, prefix="/daily-report-templates", tags=["Daily Report Templates"])
 
 # ---------------------------------------------------------------------------
 # Storage 라우터 등록 — S3 presigned URL
