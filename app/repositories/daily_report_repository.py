@@ -69,7 +69,12 @@ class DailyReportRepository(BaseRepository[DailyReport]):
         count_result = await db.execute(select(func.count()).select_from(base.subquery()))
         total: int = count_result.scalar() or 0
 
-        query = base.order_by(DailyReport.report_date.desc(), DailyReport.created_at.desc()).offset((page - 1) * per_page).limit(per_page)
+        query = (
+            base.options(selectinload(DailyReport.comments))
+            .order_by(DailyReport.report_date.desc(), DailyReport.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
         result = await db.execute(query)
         return list(result.scalars().all()), total
 

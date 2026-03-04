@@ -298,6 +298,12 @@ class DailyReportService:
         store_result = await db.execute(select(Store.name).where(Store.id == report.store_id))
         store_name = store_result.scalar()
 
+        # Comment count (comments may be eager-loaded from list query)
+        try:
+            comment_count = len(report.comments)
+        except Exception:
+            comment_count = 0
+
         resp = {
             "id": str(report.id),
             "organization_id": str(report.organization_id),
@@ -312,6 +318,7 @@ class DailyReportService:
             "submitted_at": report.submitted_at,
             "created_at": report.created_at,
             "updated_at": report.updated_at,
+            "comment_count": comment_count,
         }
 
         if include_details:

@@ -49,6 +49,7 @@ async def list_my_reports(
         author_id=current_user.id,
         store_id=UUID(store_id) if store_id else None,
         status=status,
+        exclude_draft=False,
         page=page,
         per_page=per_page,
     )
