@@ -78,17 +78,17 @@ class DailyReportRepository(BaseRepository[DailyReport]):
         result = await db.execute(query)
         return list(result.scalars().all()), total
 
-    async def check_duplicate(
+    async def find_duplicate(
         self, db: AsyncSession, store_id: UUID, report_date: date, period: str
-    ) -> bool:
+    ) -> DailyReport | None:
         result = await db.execute(
-            select(func.count()).where(
+            select(DailyReport).where(
                 DailyReport.store_id == store_id,
                 DailyReport.report_date == report_date,
                 DailyReport.period == period,
             )
         )
-        return (result.scalar() or 0) > 0
+        return result.scalar_one_or_none()
 
 
 class DailyReportTemplateRepository:

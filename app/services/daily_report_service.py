@@ -26,6 +26,7 @@ from app.schemas.daily_report import (
     DailyReportTemplateUpdate,
     DailyReportUpdate,
 )
+from fastapi import HTTPException
 from app.utils.exceptions import BadRequestError, DuplicateError, ForbiddenError, NotFoundError
 
 
@@ -203,9 +204,17 @@ class DailyReportService:
         store_id = UUID(data.store_id)
         report_date = date.fromisoformat(data.report_date)
 
-        # Check duplicate
-        if await daily_report_repository.check_duplicate(db, store_id, report_date, data.period):
-            raise DuplicateError("해당 매장/날짜/시간대에 이미 보고서가 존재합니다")
+        # Check duplicate — return existing report ID in error
+        existing = await daily_report_repository.find_duplicate(db, store_id, report_date, data.period)
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "해당 매장/날짜/시간대에 이미 보고서가 존재합니다",
+                    "existing_report_id": str(existing.id),
+                    "status": existing.status,
+                },
+            )
 
         # Resolve template
         template_id = UUID(data.template_id) if data.template_id else None
