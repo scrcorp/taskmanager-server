@@ -1,0 +1,47 @@
+{
+  "name": "Supervisor Daily Report",
+  "sections": [
+    {
+      "title": "Daily Sales",
+      "description": "Sales figures, closing sales amount, performance against target",
+      "sort_order": 1,
+      "is_required": true
+    },
+    {
+      "title": "Operations Business Ops / Service",
+      "description": "POS issues, system problems, customer service matters, operational incidents",
+      "sort_order": 2,
+      "is_required": true
+    },
+    {
+      "title": "Reservations",
+      "description": "Reservation status, no-shows, special notes",
+      "sort_order": 3,
+      "is_required": false
+    },
+    {
+      "title": "Staff",
+      "description": "Attendance, schedule changes, call-outs, early departures, staffing issues",
+      "sort_order": 4,
+      "is_required": true
+    },
+    {
+      "title": "Purchasing Procurement / Ordering",
+      "description": "Order items, low-stock products, emergency purchases",
+      "sort_order": 5,
+      "is_required": true
+    },
+    {
+      "title": "Cleaning Sanitation / Janitorial",
+      "description": "Cleanliness status, sanitation inspection results, janitorial staff visit",
+      "sort_order": 6,
+      "is_required": true
+    },
+    {
+      "title": "Facilities Maintenance / Equipment",
+      "description": "Facility maintenance, equipment malfunctions, repair requests",
+      "sort_order": 7,
+      "is_required": false
+    }
+  ]
+}

@@ -101,6 +101,10 @@ async def admin_setup(
             db.add(RolePermission(role_id=r.id, permission_id=all_perms[code]))
     await db.flush()
 
+    # 기본 일일 리포트 템플릿 생성
+    from app.services.daily_report_service import daily_report_service
+    await daily_report_service.create_default_template_for_org(db, org.id)
+
     # 관리자 계정 생성
     user = User(
         organization_id=org.id,

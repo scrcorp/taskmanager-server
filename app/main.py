@@ -62,3 +62,39 @@ from app.services.storage_service import UPLOADS_DIR  # noqa: E402
 
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+
+
+# ---------------------------------------------------------------------------
+# Startup: ensure all organizations have a default daily report template
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def ensure_daily_report_templates() -> None:
+    """Check all organizations and create default template for those missing one."""
+    import logging
+    from sqlalchemy import select, func
+    from app.database import async_session
+    from app.models.organization import Organization
+    from app.models.daily_report import DailyReportTemplate
+    from app.services.daily_report_service import daily_report_service
+
+    logger = logging.getLogger("uvicorn.error")
+    try:
+        async with async_session() as db:
+            # Find orgs that have no templates at all
+            orgs_with_template = (
+                select(DailyReportTemplate.organization_id)
+                .where(DailyReportTemplate.organization_id.isnot(None))
+                .distinct()
+            )
+            orgs_without = await db.execute(
+                select(Organization.id).where(Organization.id.notin_(orgs_with_template))
+            )
+            org_ids = [row[0] for row in orgs_without.fetchall()]
+
+            if org_ids:
+                for org_id in org_ids:
+                    await daily_report_service.create_default_template_for_org(db, org_id)
+                    logger.info(f"Created default daily report template for org {org_id}")
+                await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to ensure daily report templates: {e}")
