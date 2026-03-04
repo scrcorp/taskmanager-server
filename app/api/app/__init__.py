@@ -37,6 +37,9 @@ from app.api.app.notifications import router as notifications_router
 # Phase 5 — Attendance 라우터 임포트
 from app.api.app.attendances import router as attendance_router
 
+# Phase — Daily Reports 라우터 임포트
+from app.api.app.daily_reports import router as daily_reports_router
+
 # Phase — Storage 라우터 임포트
 from app.api.app.storage import router as storage_router
 
@@ -72,6 +75,11 @@ app_router.include_router(notifications_router, prefix="/my/notifications", tags
 # ---------------------------------------------------------------------------
 # 내 근태: /my/attendance 하위 (My attendance: QR scan, today, history)
 app_router.include_router(attendance_router, prefix="/my/attendance", tags=["My Attendance"])
+
+# ---------------------------------------------------------------------------
+# Daily Reports 라우터 등록 — Register Daily Reports routers
+# ---------------------------------------------------------------------------
+app_router.include_router(daily_reports_router, prefix="/my/daily-reports", tags=["My Daily Reports"])
 
 # ---------------------------------------------------------------------------
 # Phase 10 라우터 등록 — Register Phase 10 (Voices) routers
