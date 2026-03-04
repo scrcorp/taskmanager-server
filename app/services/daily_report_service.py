@@ -4,6 +4,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.daily_report import (
     DailyReport,
@@ -237,14 +238,14 @@ class DailyReportService:
             raise BadRequestError("작성 중인 보고서만 수정할 수 있습니다")
 
         # Update content in JSONB by sort_order
-        sections = list(report.sections_data or [])
+        # dict()로 새 객체를 생성해야 SQLAlchemy가 JSONB 변경을 감지함
         update_map = {u.sort_order: u.content for u in data.sections}
-        for section in sections:
-            if section["sort_order"] in update_map:
-                section["content"] = update_map[section["sort_order"]]
-
-        # Force SQLAlchemy to detect JSONB mutation
+        sections = [
+            {**s, "content": update_map[s["sort_order"]]} if s["sort_order"] in update_map else dict(s)
+            for s in (report.sections_data or [])
+        ]
         report.sections_data = sections
+        flag_modified(report, "sections_data")
         await db.flush()
         await db.refresh(report)
         return report
