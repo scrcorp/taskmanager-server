@@ -242,6 +242,10 @@ class UserService:
                 raise ForbiddenError("Cannot assign a role at or above your priority")
             update_data["role_id"] = UUID(update_data["role_id"])
 
+            # Staff(priority>=40)로 변경 시 모든 매장의 is_manager 초기화
+            if role.priority >= 40:
+                await user_repository.reset_manager_flags(db, user_id)
+
         user: User | None = await user_repository.update(
             db, user_id, update_data, organization_id
         )
