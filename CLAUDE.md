@@ -1,6 +1,6 @@
 # Employee Management Service — Backend
 
-> **IMPORTANT**: Before implementing any feature, read the parent `../CLAUDE.md` and relevant task docs in `../docs/tasks/`.
+> **IMPORTANT**: Before implementing any feature, read the parent `../CLAUDE.md` and relevant task docs in `../docs/02_plan/`.
 > Task documents are the Source of Truth for API paths, table names, permissions, and status values.
 
 ## Project Overview
