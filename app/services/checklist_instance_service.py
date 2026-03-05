@@ -470,6 +470,7 @@ class ChecklistInstanceService:
                     item_data["is_completed"] = True
                     item_data["completed_at"] = comp.completed_at.isoformat() if comp.completed_at else None
                     item_data["completed_timezone"] = comp.completed_timezone
+                    item_data["completed_tz"] = comp.completed_timezone  # Flutter 앱 호환용 alias
                     item_data["completed_by"] = str(comp.user_id)
                     item_data["completed_by_name"] = user_name_cache.get(comp.user_id)
                     item_data["photo_url"] = comp.photo_url
@@ -479,6 +480,7 @@ class ChecklistInstanceService:
                     item_data["is_completed"] = False
                     item_data["completed_at"] = None
                     item_data["completed_timezone"] = None
+                    item_data["completed_tz"] = None
                     item_data["completed_by"] = None
                     item_data["completed_by_name"] = None
                     item_data["photo_url"] = None
@@ -521,8 +523,93 @@ class ChecklistInstanceService:
                         "created_at": rev.created_at.isoformat(),
                         "updated_at": rev.updated_at.isoformat(),
                     }
+
+                    # 앱용 플랫 필드 — review_status + 개별 반려/승인 필드
+                    # review_status: null, "pass", "fail", "caution", "pending_re_review"
+                    item_data["review_status"] = rev.result
+                    reviewer_name = user_name_cache.get(rev.reviewer_id)
+
+                    # review_history 이벤트별 contents 파티셔닝 — Partition contents by review action
+                    # cl_review_contents는 review당 1개 레코드에 모두 연결되므로,
+                    # review_history 시간 구간으로 분리하여 각 액션별 코멘트/사진을 정확히 추출
+                    sorted_history = sorted(rev.review_history, key=lambda h: h.created_at) if hasattr(rev, "review_history") and rev.review_history else []
+                    all_contents = sorted(rev.contents, key=lambda c: c.created_at) if hasattr(rev, "contents") and rev.contents else []
+
+                    def _get_contents_for_history_event(event_idx: int) -> tuple[str | None, list[str]]:
+                        """특정 review_history 이벤트에 해당하는 리뷰어 코멘트/사진 추출."""
+                        if not sorted_history or event_idx >= len(sorted_history):
+                            return None, []
+                        event = sorted_history[event_idx]
+                        # 이 이벤트 ~ 다음 이벤트 사이에 생성된 콘텐츠
+                        event_time = event.created_at
+                        next_time = sorted_history[event_idx + 1].created_at if event_idx + 1 < len(sorted_history) else None
+                        texts: list[str] = []
+                        photos: list[str] = []
+                        for c in all_contents:
+                            if c.created_at < event_time:
+                                continue
+                            if next_time is not None and c.created_at >= next_time:
+                                break
+                            if c.author_id == rev.reviewer_id:
+                                if c.type == "text":
+                                    texts.append(c.content)
+                                elif c.type in ("photo", "video"):
+                                    photos.append(c.content)
+                        return (texts[-1] if texts else None), photos
+
+                    # 마지막 fail/pass 이벤트의 코멘트/사진 추출 — Find latest event's contents
+                    def _find_latest_event_contents(target_result: str) -> tuple[str | None, list[str], str | None, str]:
+                        """마지막 target_result 이벤트의 (comment, photos, reviewer_name, at) 반환."""
+                        for i in range(len(sorted_history) - 1, -1, -1):
+                            if sorted_history[i].new_result == target_result:
+                                comment, photos = _get_contents_for_history_event(i)
+                                at = sorted_history[i].created_at.isoformat()
+                                by = user_name_cache.get(sorted_history[i].changed_by)
+                                return comment, photos, by, at
+                        return None, [], None, rev.updated_at.isoformat()
+
+                    # 반려 플랫 필드
+                    is_rejected = rev.result == "fail"
+                    item_data["is_rejected"] = is_rejected
+                    if is_rejected:
+                        rej_comment, rej_photos, rej_by, rej_at = _find_latest_event_contents("fail")
+                        item_data["rejection_comment"] = rej_comment
+                        item_data["rejection_photo_urls"] = rej_photos
+                        item_data["rejected_by"] = rej_by or reviewer_name
+                        item_data["rejected_at"] = rej_at
+                    else:
+                        item_data["rejection_comment"] = None
+                        item_data["rejection_photo_urls"] = []
+                        item_data["rejected_by"] = None
+                        item_data["rejected_at"] = None
+
+                    # 승인 플랫 필드
+                    is_approved = rev.result == "pass"
+                    item_data["is_approved"] = is_approved
+                    if is_approved:
+                        app_comment, app_photos, app_by, app_at = _find_latest_event_contents("pass")
+                        item_data["approval_comment"] = app_comment
+                        item_data["approval_photo_urls"] = app_photos
+                        item_data["approved_by"] = app_by or reviewer_name
+                        item_data["approved_at"] = app_at
+                    else:
+                        item_data["approval_comment"] = None
+                        item_data["approval_photo_urls"] = []
+                        item_data["approved_by"] = None
+                        item_data["approved_at"] = None
                 else:
                     item_data["review"] = None
+                    item_data["review_status"] = None
+                    item_data["is_rejected"] = False
+                    item_data["rejection_comment"] = None
+                    item_data["rejection_photo_urls"] = []
+                    item_data["rejected_by"] = None
+                    item_data["rejected_at"] = None
+                    item_data["is_approved"] = False
+                    item_data["approval_comment"] = None
+                    item_data["approval_photo_urls"] = []
+                    item_data["approved_by"] = None
+                    item_data["approved_at"] = None
 
                 # 완료 히스토리 (재제출 아카이브) 병합
                 comp_for_history: ChecklistCompletion | None = completions_map.get(item["item_index"])
@@ -539,6 +626,123 @@ class ChecklistInstanceService:
                         })
                 item_data["completion_history"] = completion_history_list
                 item_data["resubmission_count"] = comp_for_history.resubmission_count if comp_for_history else 0
+
+                # 앱용 재제출 응답 필드 — Flat resubmission response fields for Flutter app
+                # 현재 반려 상태이면 아직 응답 전이므로 responded_at = None
+                is_currently_rejected = item_data.get("is_rejected", False)
+                if (
+                    not is_currently_rejected
+                    and comp_for_history is not None
+                    and comp_for_history.resubmission_count
+                    and comp_for_history.resubmission_count > 0
+                ):
+                    item_data["response_comment"] = comp_for_history.note
+                    item_data["responded_by"] = user_name_cache.get(comp_for_history.user_id)
+                    if completion_history_list:
+                        item_data["responded_at"] = completion_history_list[-1]["created_at"]
+                    else:
+                        item_data["responded_at"] = comp_for_history.completed_at.isoformat() if comp_for_history.completed_at else None
+                else:
+                    item_data["response_comment"] = None
+                    item_data["responded_at"] = None
+                    item_data["responded_by"] = None
+
+                # 앱용 타임라인 이벤트 — Build interleaved history from review_history + completion_history
+                timeline_events: list[dict] = []
+                rev_for_timeline = reviews_map.get(item["item_index"])
+                comp_for_timeline = completions_map.get(item["item_index"])
+
+                # 1) 최초 완료 이벤트
+                if comp_for_timeline is not None:
+                    # 재제출 이력이 있으면 첫 완료 시점은 첫 번째 completion_history의 submitted_at
+                    if comp_for_timeline.history:
+                        first_archive = comp_for_timeline.history[0]
+                        timeline_events.append({
+                            "type": "completed",
+                            "comment": first_archive.note,
+                            "photo_urls": [first_archive.photo_url] if first_archive.photo_url else [],
+                            "by": user_name_cache.get(comp_for_timeline.user_id),
+                            "at": first_archive.submitted_at.isoformat(),
+                        })
+                    else:
+                        timeline_events.append({
+                            "type": "completed",
+                            "comment": comp_for_timeline.note,
+                            "photo_urls": [comp_for_timeline.photo_url] if comp_for_timeline.photo_url else [],
+                            "by": user_name_cache.get(comp_for_timeline.user_id),
+                            "at": comp_for_timeline.completed_at.isoformat() if comp_for_timeline.completed_at else None,
+                        })
+
+                # 2) review_history + completion_history 이벤트를 시간순 인터리빙
+                if rev_for_timeline is not None and hasattr(rev_for_timeline, "review_history") and rev_for_timeline.review_history:
+                    tl_history = sorted(rev_for_timeline.review_history, key=lambda h: h.created_at)
+                    tl_contents = sorted(rev_for_timeline.contents, key=lambda c: c.created_at) if hasattr(rev_for_timeline, "contents") and rev_for_timeline.contents else []
+
+                    for idx, rh in enumerate(tl_history):
+                        event_time = rh.created_at
+                        next_time = tl_history[idx + 1].created_at if idx + 1 < len(tl_history) else None
+
+                        # 이 이벤트 시간 윈도우에 해당하는 리뷰어 코멘트/사진 추출
+                        rh_comment = None
+                        rh_photos: list[str] = []
+                        for c in tl_contents:
+                            if c.created_at < event_time:
+                                continue
+                            if next_time is not None and c.created_at >= next_time:
+                                break
+                            if c.author_id == rev_for_timeline.reviewer_id:
+                                if c.type == "text":
+                                    rh_comment = c.content
+                                elif c.type in ("photo", "video"):
+                                    rh_photos.append(c.content)
+
+                        if rh.new_result == "fail":
+                            timeline_events.append({
+                                "type": "rejected",
+                                "comment": rh_comment,
+                                "photo_urls": rh_photos,
+                                "by": user_name_cache.get(rh.changed_by),
+                                "at": rh.created_at.isoformat(),
+                            })
+                        elif rh.new_result == "pass":
+                            timeline_events.append({
+                                "type": "approved",
+                                "comment": rh_comment,
+                                "photo_urls": rh_photos,
+                                "by": user_name_cache.get(rh.changed_by),
+                                "at": rh.created_at.isoformat(),
+                            })
+                        elif rh.new_result == "pending_re_review":
+                            timeline_events.append({
+                                "type": "pending",
+                                "comment": None,
+                                "photo_urls": [],
+                                "by": user_name_cache.get(rh.changed_by),
+                                "at": rh.created_at.isoformat(),
+                            })
+
+                # 3) 재제출 이벤트 (completion_history의 각 아카이브 = 재제출 시점)
+                if comp_for_timeline is not None and comp_for_timeline.history:
+                    for i, arch in enumerate(comp_for_timeline.history):
+                        # 재제출 시 새 데이터: 다음 아카이브의 원본 또는 현재 completion
+                        if i + 1 < len(comp_for_timeline.history):
+                            next_arch = comp_for_timeline.history[i + 1]
+                            resp_note = next_arch.note
+                            resp_photo = [next_arch.photo_url] if next_arch.photo_url else []
+                        else:
+                            resp_note = comp_for_timeline.note
+                            resp_photo = [comp_for_timeline.photo_url] if comp_for_timeline.photo_url else []
+                        timeline_events.append({
+                            "type": "responded",
+                            "comment": resp_note,
+                            "photo_urls": resp_photo,
+                            "by": user_name_cache.get(comp_for_timeline.user_id),
+                            "at": arch.created_at.isoformat(),
+                        })
+
+                # 시간순 정렬
+                timeline_events.sort(key=lambda e: e.get("at") or "")
+                item_data["history"] = timeline_events
 
                 merged_items.append(item_data)
 
