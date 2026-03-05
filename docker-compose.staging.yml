@@ -1,16 +1,13 @@
 services:
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.staging
     container_name: taskmanager-api-staging
     ports:
       - "28000:8000"
     env_file:
-      - .env
+      - .env.staging
     environment:
       - WORKERS=1
-    volumes:
-      - uploads-staging:/app/uploads
     restart: unless-stopped
-
-volumes:
-  uploads-staging:
