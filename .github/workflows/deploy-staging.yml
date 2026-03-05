@@ -17,5 +17,18 @@ jobs:
           script: |
             cd ~/taskmanager-server-staging
             git pull origin staging
-            docker compose down
-            docker compose up -d --build
+
+            # 컨테이너 빌드
+            docker compose -f docker-compose.staging.yml build
+
+            # 컨테이너 내에서 prod DB → staging DB 복사 (.env.staging의 DB 접속 정보 사용)
+            docker compose -f docker-compose.staging.yml run --rm api sh -c "\
+              DB_HOST=\$(echo \$DATABASE_URL | sed -n 's|.*@\(.*\):[0-9]*/.*|\1|p') && \
+              DB_USER=\$(echo \$DATABASE_URL | sed -n 's|.*://\(.*\):.*@.*|\1|p') && \
+              DB_PASS=\$(echo \$DATABASE_URL | sed -n 's|.*://[^:]*:\(.*\)@.*|\1|p') && \
+              PGPASSWORD=\$DB_PASS pg_dump -h \$DB_HOST -U \$DB_USER -d postgres --clean --if-exists \
+              | PGPASSWORD=\$DB_PASS psql -h \$DB_HOST -U \$DB_USER -d taskmanager_staging"
+
+            # 서버 시작 (start.sh에서 alembic + gunicorn 실행)
+            docker compose -f docker-compose.staging.yml down
+            docker compose -f docker-compose.staging.yml up -d
