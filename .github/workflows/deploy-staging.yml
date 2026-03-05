@@ -21,11 +21,11 @@ jobs:
             # 컨테이너 빌드
             docker compose -f docker-compose.staging.yml build
 
-            # prod DB → staging DB 복사
+            # prod DB → staging DB 복사 (GitHub Secrets 사용)
             docker compose -f docker-compose.staging.yml run --rm \
-              -e PGPASSWORD="$RDS_PASSWORD" \
-              api sh -c 'pg_dump -h "$RDS_HOST" -U "$RDS_USER" -d "$RDS_PROD_DB" --clean --if-exists | psql -h "$RDS_HOST" -U "$RDS_USER" -d taskmanager_staging'
+              -e PGPASSWORD='${{ secrets.RDS_PASSWORD }}' \
+              api sh -c 'pg_dump -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} -d postgres --clean --if-exists | psql -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} -d taskmanager_staging'
 
-            # 서버 시작 (start.sh에서 alembic + gunicorn 실행)
+            # 서버 시작
             docker compose -f docker-compose.staging.yml down
             docker compose -f docker-compose.staging.yml up -d
