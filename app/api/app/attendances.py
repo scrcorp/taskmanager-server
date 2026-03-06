@@ -59,6 +59,7 @@ async def scan_attendance(
 async def get_my_today_attendance(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    timezone_param: Annotated[str | None, Query(alias="timezone")] = None,
 ) -> dict | None:
     """오늘 내 근태 기록을 조회합니다.
 
@@ -67,13 +68,22 @@ async def get_my_today_attendance(
     Args:
         db: 비동기 데이터베이스 세션 (Async database session)
         current_user: 인증된 사용자 (Authenticated user)
+        timezone_param: 클라이언트 타임존, 선택 (Optional client timezone)
 
     Returns:
         dict | None: 오늘 근태 기록 또는 None (Today's attendance or None)
     """
-    from datetime import timezone, datetime
+    from zoneinfo import ZoneInfo
+    from app.utils.timezone import get_org_timezone, resolve_timezone
 
-    today: date = datetime.now(timezone.utc).date()
+    org_tz: str = await get_org_timezone(db, current_user.organization_id)
+    effective_tz: str = resolve_timezone(timezone_param, org_tz)
+    today: date = date.today()  # fallback
+    try:
+        from datetime import datetime as dt_cls
+        today = dt_cls.now(ZoneInfo(effective_tz)).date()
+    except Exception:
+        pass
 
     from app.repositories.attendance_repository import attendance_repository
 
