@@ -50,6 +50,7 @@ class StoreService:
             operating_hours=store.operating_hours,
             max_work_hours_weekly=store.max_work_hours_weekly,
             state_code=store.state_code,
+            timezone=store.timezone,
             created_at=store.created_at,
         )
 
@@ -114,6 +115,7 @@ class StoreService:
             operating_hours=store.operating_hours,
             max_work_hours_weekly=store.max_work_hours_weekly,
             state_code=store.state_code,
+            timezone=store.timezone,
             created_at=store.created_at,
             shifts=[
                 ShiftResponse(id=str(s.id), name=s.name, sort_order=s.sort_order)
@@ -154,14 +156,14 @@ class StoreService:
         if exists:
             raise DuplicateError("A store with this name already exists")
 
-        store: Store = await store_repository.create(
-            db,
-            {
-                "organization_id": organization_id,
-                "name": data.name,
-                "address": data.address,
-            },
-        )
+        create_data: dict = {
+            "organization_id": organization_id,
+            "name": data.name,
+            "address": data.address,
+        }
+        if data.timezone is not None:
+            create_data["timezone"] = data.timezone
+        store: Store = await store_repository.create(db, create_data)
         return self._to_response(store)
 
     async def update_store(
