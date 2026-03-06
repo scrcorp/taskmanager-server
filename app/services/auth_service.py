@@ -386,6 +386,7 @@ class AuthService:
             organization_id=str(loaded_user.organization_id),
             organization_name=org.name,
             company_code=org.code,
+            organization_timezone=org.timezone,
             is_active=loaded_user.is_active,
             permissions=sorted(permissions),
         )

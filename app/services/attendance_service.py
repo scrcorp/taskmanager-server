@@ -150,7 +150,7 @@ class AttendanceService:
         user_id: UUID,
         organization_id: UUID,
         action: str,
-        client_timezone: str = "America/Los_Angeles",
+        client_timezone: str | None = None,
         location: dict | None = None,
     ) -> Attendance:
         """QR 코드를 스캔하여 출퇴근/휴식을 기록합니다.
@@ -183,8 +183,15 @@ class AttendanceService:
             raise BadRequestError("만료된 QR 코드입니다 (QR code has expired)")
 
         now: datetime = datetime.now(timezone.utc)
-        today: date = now.date()
         store_id: UUID = qr.store_id
+
+        # 타임존 해석 — Resolve effective timezone from store/org
+        from zoneinfo import ZoneInfo
+        from app.utils.timezone import get_store_timezone, resolve_timezone
+        store_tz: str = await get_store_timezone(db, store_id)
+        effective_tz: str = resolve_timezone(client_timezone, store_tz)
+        client_timezone = effective_tz
+        today: date = datetime.now(ZoneInfo(effective_tz)).date()
 
         # 오늘의 근태 기록 조회/생성 — Get or create today's attendance record
         attendance: Attendance | None = await attendance_repository.get_user_today(db, user_id, today)

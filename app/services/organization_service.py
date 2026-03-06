@@ -50,6 +50,7 @@ class OrganizationService:
             id=str(org.id),
             name=org.name,
             code=org.code,
+            timezone=org.timezone,
             is_active=org.is_active,
             created_at=org.created_at,
         )
@@ -86,6 +87,7 @@ class OrganizationService:
             id=str(org.id),
             name=org.name,
             code=org.code,
+            timezone=org.timezone,
             is_active=org.is_active,
             created_at=org.created_at,
         )

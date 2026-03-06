@@ -4,9 +4,10 @@ Dashboard Service — Aggregation logic for admin dashboard.
 Provides checklist completion rates, attendance summary, and overtime summary.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -17,8 +18,9 @@ from app.models.assignment import WorkAssignment
 from app.models.attendance import Attendance
 from app.models.checklist import ChecklistInstance, ChecklistCompletion
 from app.models.evaluation import Evaluation
-from app.models.organization import LaborLawSetting, Store
+from app.models.organization import LaborLawSetting, Organization, Store
 from app.models.user import User
+from app.utils.timezone import DEFAULT_TIMEZONE
 
 
 class DashboardService:
@@ -26,6 +28,30 @@ class DashboardService:
 
     Dashboard aggregation service for admin dashboard views.
     """
+
+    async def _resolve_today(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID | None = None,
+    ) -> date:
+        """매장/조직 타임존 기준 오늘 날짜를 반환합니다."""
+        if store_id:
+            result = await db.execute(
+                select(Store.timezone, Organization.timezone.label("org_timezone"))
+                .join(Organization, Store.organization_id == Organization.id)
+                .where(Store.id == store_id)
+            )
+            row = result.one_or_none()
+            if row:
+                tz_str = row.timezone or row.org_timezone or DEFAULT_TIMEZONE
+                return datetime.now(ZoneInfo(tz_str)).date()
+        # 조직 타임존 사용
+        result = await db.execute(
+            select(Organization.timezone).where(Organization.id == organization_id)
+        )
+        tz_str = result.scalar_one_or_none() or DEFAULT_TIMEZONE
+        return datetime.now(ZoneInfo(tz_str)).date()
 
     async def get_checklist_completion(
         self,
@@ -36,10 +62,11 @@ class DashboardService:
         store_id: UUID | None = None,
     ) -> dict:
         """체크리스트 완료율 집계."""
+        today = await self._resolve_today(db, organization_id, store_id)
         if date_from is None:
-            date_from = date.today() - timedelta(days=7)
+            date_from = today - timedelta(days=7)
         if date_to is None:
-            date_to = date.today()
+            date_to = today
 
         base = (
             select(
@@ -83,10 +110,11 @@ class DashboardService:
         store_id: UUID | None = None,
     ) -> dict:
         """근태 요약 집계."""
+        today = await self._resolve_today(db, organization_id, store_id)
         if date_from is None:
-            date_from = date.today() - timedelta(days=7)
+            date_from = today - timedelta(days=7)
         if date_to is None:
-            date_to = date.today()
+            date_to = today
 
         base = (
             select(
@@ -128,7 +156,8 @@ class DashboardService:
         store_id: UUID | None = None,
     ) -> dict:
         """초과근무 현황 요약."""
-        target_date = week_date or date.today()
+        today = await self._resolve_today(db, organization_id, store_id)
+        target_date = week_date or today
         weekday = target_date.weekday()
         week_start = target_date - timedelta(days=(weekday + 1) % 7)
         week_end = week_start + timedelta(days=6)
@@ -212,10 +241,11 @@ class DashboardService:
         store_id: UUID | None = None,
     ) -> bytes:
         """대시보드 데이터를 Excel 파일로 내보내기."""
+        today = await self._resolve_today(db, organization_id, store_id)
         if date_from is None:
-            date_from = date.today() - timedelta(days=7)
+            date_from = today - timedelta(days=7)
         if date_to is None:
-            date_to = date.today()
+            date_to = today
 
         wb = Workbook()
         header_font = Font(bold=True, color="FFFFFF", size=11)
