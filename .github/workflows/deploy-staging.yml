@@ -17,5 +17,15 @@ jobs:
           script: |
             cd ~/taskmanager-server-staging
             git pull origin staging
-            docker compose down
-            docker compose up -d --build
+
+            # 컨테이너 빌드
+            docker compose -f docker-compose.staging.yml build
+
+            # prod DB → staging DB 복사 (GitHub Secrets 사용)
+            docker compose -f docker-compose.staging.yml run --rm \
+              -e PGPASSWORD='${{ secrets.RDS_PASSWORD }}' \
+              api sh -c 'pg_dump -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} -d postgres --clean --if-exists | psql -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} -d taskmanager_staging'
+
+            # 서버 시작
+            docker compose -f docker-compose.staging.yml down
+            docker compose -f docker-compose.staging.yml up -d

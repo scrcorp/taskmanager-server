@@ -23,6 +23,7 @@ from app.services.assignment_service import assignment_service
 from app.services.checklist_instance_service import checklist_instance_service
 from app.repositories.checklist_instance_repository import checklist_instance_repository
 from app.utils.exceptions import NotFoundError, ForbiddenError
+from app.utils.timezone import get_store_timezone, resolve_timezone
 
 router: APIRouter = APIRouter()
 
@@ -138,13 +139,20 @@ async def complete_checklist_item(
     Returns:
         dict: 업데이트된 배정 상세 (Updated assignment detail)
     """
+    # 배정의 store_id 조회 후 타임존 해석
+    assignment_detail = await assignment_service.get_detail(
+        db, assignment_id=assignment_id, organization_id=current_user.organization_id
+    )
+    store_tz = await get_store_timezone(db, assignment_detail.store_id)
+    effective_tz = resolve_timezone(data.timezone, store_tz)
+
     assignment = await assignment_service.complete_checklist_item(
         db,
         assignment_id=assignment_id,
         user_id=current_user.id,
         item_index=item_index,
         is_completed=data.is_completed,
-        client_timezone=data.timezone,
+        client_timezone=effective_tz,
         photo_url=data.photo_url,
         note=data.note,
     )
@@ -177,6 +185,10 @@ async def respond_to_rejection(
     if instance.user_id != current_user.id:
         raise ForbiddenError("Can only respond to your own assignment")
 
+    # 매장 타임존 해석
+    store_tz = await get_store_timezone(db, instance.store_id)
+    effective_tz = resolve_timezone(data.timezone, store_tz)
+
     await checklist_instance_service.resubmit_completion(
         db,
         instance_id=instance.id,
@@ -184,7 +196,7 @@ async def respond_to_rejection(
         user_id=current_user.id,
         photo_url=data.photo_url,
         note=data.response_comment,
-        client_timezone=data.timezone,
+        client_timezone=effective_tz,
     )
     await db.commit()
 

@@ -7,7 +7,7 @@ including filtering, eager loading, and user-store associations.
 
 from uuid import UUID
 
-from sqlalchemy import Select, and_, delete, select
+from sqlalchemy import Select, and_, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -279,6 +279,19 @@ class UserRepository(BaseRepository[User]):
             elif existing.is_manager != is_manager:
                 existing.is_manager = is_manager
 
+        await db.flush()
+
+    async def reset_manager_flags(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+    ) -> None:
+        """사용자의 모든 매장에서 is_manager를 false로 초기화합니다."""
+        await db.execute(
+            update(UserStore)
+            .where(UserStore.user_id == user_id, UserStore.is_manager.is_(True))
+            .values(is_manager=False)
+        )
         await db.flush()
 
     async def user_store_exists(

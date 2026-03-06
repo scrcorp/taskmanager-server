@@ -22,6 +22,7 @@ from app.schemas.common import (
 from app.schemas.checklist_review import ResubmitRequest, ReviewContentCreate, ReviewContentResponse
 from app.services.checklist_instance_service import checklist_instance_service
 from app.utils.exceptions import ForbiddenError
+from app.utils.timezone import get_store_timezone, resolve_timezone
 
 router: APIRouter = APIRouter()
 
@@ -81,6 +82,11 @@ async def complete_checklist_item(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     """체크리스트 항목을 완료 처리합니다."""
+    # 인스턴스 조회 후 매장 타임존 해석
+    inst = await checklist_instance_service.get_instance(db, instance_id)
+    store_tz = await get_store_timezone(db, inst.store_id)
+    effective_tz = resolve_timezone(data.timezone, store_tz)
+
     instance = await checklist_instance_service.complete_item(
         db,
         instance_id=instance_id,
@@ -89,7 +95,7 @@ async def complete_checklist_item(
         photo_url=data.photo_url,
         note=data.note,
         location=data.location,
-        client_timezone=data.timezone,
+        client_timezone=effective_tz,
     )
     await db.commit()
 
@@ -112,6 +118,11 @@ async def resubmit_checklist_item(
     Archives existing evidence, updates with new data,
     sets review to pending_re_review, notifies reviewer.
     """
+    # 매장 타임존 해석
+    inst = await checklist_instance_service.get_instance(db, instance_id)
+    store_tz = await get_store_timezone(db, inst.store_id)
+    effective_tz = resolve_timezone(data.client_timezone, store_tz)
+
     instance = await checklist_instance_service.resubmit_completion(
         db,
         instance_id=instance_id,
@@ -120,7 +131,7 @@ async def resubmit_checklist_item(
         photo_url=data.photo_url,
         note=data.note,
         location=data.location,
-        client_timezone=data.client_timezone,
+        client_timezone=effective_tz,
     )
     await db.commit()
 

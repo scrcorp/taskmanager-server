@@ -303,7 +303,7 @@ class ChecklistItemComplete(BaseModel):
     """
 
     is_completed: bool  # 완료 여부 — True이면 completed_at 자동 설정 (Completion flag)
-    timezone: str = "America/Los_Angeles"  # 클라이언트 타임존 — 완료 시각 표시용 (Client timezone for display)
+    timezone: str | None = None  # 클라이언트 타임존 — None이면 매장/조직 타임존 사용 (Client timezone, falls back to store/org)
     photo_url: str | None = None  # 사진 URL — verification_type이 photo일 때 필수 (Photo URL, optional)
     note: str | None = None  # 메모 — verification_type이 text일 때 필수 (Note, optional)
 
@@ -314,7 +314,7 @@ class ChecklistItemRespond(BaseModel):
     Request schema for responding to a rejected checklist item.
     """
 
-    timezone: str = "America/Los_Angeles"
+    timezone: str | None = None  # 클라이언트 타임존 — None이면 매장/조직 타임존 사용
     response_comment: str | None = None
     photo_url: str | None = None
 
@@ -578,7 +578,7 @@ class ChecklistCompletionCreate(BaseModel):
     photo_url: str | None = None  # 사진 URL — Supabase Storage (Photo URL, optional)
     note: str | None = None  # 메모 (Text note, optional)
     location: dict | None = None  # GPS 위치 — {lat, lng} (Location data, optional)
-    timezone: str = "America/Los_Angeles"  # IANA 타임존 — 완료 시점 로컬 타임존 (Client IANA timezone)
+    timezone: str | None = None  # IANA 타임존 — None이면 매장/조직 타임존 사용 (Client IANA timezone)
 
 
 class ChecklistCompletionResponse(BaseModel):
@@ -775,7 +775,7 @@ class AttendanceScanRequest(BaseModel):
 
     qr_code: str  # 스캔한 QR 코드 (Scanned QR code string)
     action: str  # 동작 — "clock_in"|"break_start"|"break_end"|"clock_out" (Action type)
-    timezone: str = "America/Los_Angeles"  # 클라이언트 타임존 (Client IANA timezone)
+    timezone: str | None = None  # 클라이언트 타임존 — None이면 매장/조직 타임존 사용 (Client IANA timezone)
     location: dict | None = None  # GPS 위치 — {lat, lng}, 선택 (Optional GPS location)
 
 
