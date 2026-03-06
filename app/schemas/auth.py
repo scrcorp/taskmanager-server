@@ -102,5 +102,6 @@ class UserMeResponse(BaseModel):
     organization_id: str
     organization_name: str
     company_code: str
+    organization_timezone: str  # 조직 IANA 타임존 (Organization timezone)
     is_active: bool
     permissions: list[str] = []  # 역할에 할당된 permission code 목록

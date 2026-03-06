@@ -21,6 +21,7 @@ class OrganizationCreate(BaseModel):
     """
 
     name: str  # 조직 이름 (Organization display name)
+    timezone: str = "America/Los_Angeles"  # IANA 타임존 (Organization timezone)
 
 
 class OrganizationUpdate(BaseModel):
@@ -35,6 +36,7 @@ class OrganizationUpdate(BaseModel):
 
     name: str | None = None  # 변경할 조직 이름 (New name, optional)
     is_active: bool | None = None  # 활성 상태 변경 (Activate/deactivate, optional)
+    timezone: str | None = None  # IANA 타임존 (New timezone, optional)
 
 
 class OrganizationResponse(BaseModel):
@@ -52,6 +54,7 @@ class OrganizationResponse(BaseModel):
     id: str  # 조직 UUID 문자열 (Organization UUID as string)
     name: str  # 조직 이름 (Organization name)
     code: str  # 회사 코드 (Company code for staff app login)
+    timezone: str  # IANA 타임존 (Organization timezone)
     is_active: bool  # 활성 상태 (Active flag)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
@@ -71,6 +74,7 @@ class StoreCreate(BaseModel):
 
     name: str  # 매장 이름 (Store name)
     address: str | None = None  # 매장 주소 (Physical address, optional)
+    timezone: str | None = None  # IANA 타임존 (Store timezone override, optional)
 
 
 class StoreUpdate(BaseModel):
@@ -90,6 +94,7 @@ class StoreUpdate(BaseModel):
     operating_hours: dict[str, Any] | None = None  # 운영시간 JSONB (Operating hours, optional)
     max_work_hours_weekly: int | None = None  # 주간 최대 근무시간 (Max weekly hours, optional)
     state_code: str | None = None  # 주(State) 코드 (US state code, optional)
+    timezone: str | None = None  # IANA 타임존 (Store timezone override, optional)
 
 
 class StoreResponse(BaseModel):
@@ -115,6 +120,7 @@ class StoreResponse(BaseModel):
     operating_hours: dict[str, Any] | None = None  # 운영시간 (Operating hours JSONB)
     max_work_hours_weekly: int | None = None  # 주간 최대 근무시간 (Max weekly hours)
     state_code: str | None = None  # 주(State) 코드 (US state code)
+    timezone: str | None = None  # IANA 타임존 (Store timezone override)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 
