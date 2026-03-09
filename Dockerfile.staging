@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # System dependencies (postgresql-client for DB copy)
-RUN apt-get update && apt-get install -y --no-install-recommends curl postgresql-client && \
+RUN apt-get update && apt-get install -y --no-install-recommends curl postgresql-client fonts-dejavu-core && \
     rm -rf /var/lib/apt/lists/*
 
 # Python dependencies

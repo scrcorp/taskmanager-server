@@ -4,8 +4,11 @@ from pathlib import Path
 
 from fpdf import FPDF
 
-# 유니코드 지원 폰트 — macOS 시스템 폰트, 없으면 Helvetica fallback
-_FONT_PATH = Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
+# 유니코드 지원 폰트 — 환경별 fallback 순서
+_FONT_CANDIDATES = [
+    Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),  # macOS
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),       # Linux (fonts-dejavu)
+]
 
 
 def create_pdf() -> tuple[FPDF, str]:
@@ -17,9 +20,10 @@ def create_pdf() -> tuple[FPDF, str]:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=20)
 
-    if _FONT_PATH.exists():
-        pdf.add_font("main", "", str(_FONT_PATH))
-        pdf.add_font("main", "B", str(_FONT_PATH))
+    font_path = next((p for p in _FONT_CANDIDATES if p.exists()), None)
+    if font_path:
+        pdf.add_font("main", "", str(font_path))
+        pdf.add_font("main", "B", str(font_path))
         font = "main"
     else:
         font = "Helvetica"
