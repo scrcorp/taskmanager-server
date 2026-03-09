@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: str = ""  # 발신 이메일 주소
     SMTP_FROM_NAME: str = "TaskManager"  # 발신자 표시 이름
 
+    # 보고서 제출 알림 수신 이메일 — Daily Report submit 시 알림 발송
+    REPORT_NOTIFICATION_EMAIL: str = ""
+
     model_config = {"env_file": _ENV_FILE, "env_file_encoding": "utf-8"}
 
 
