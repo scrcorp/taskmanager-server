@@ -1,7 +1,8 @@
 import logging
-from datetime import date, timedelta, timezone as tz
+from datetime import date, datetime
 from typing import Annotated
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,7 @@ from app.services.daily_report_service import daily_report_service
 from app.utils.email import send_email
 from app.utils.email_templates import build_daily_report_email
 from app.utils.pdf import build_daily_report_pdf
+from app.utils.timezone import get_store_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -132,16 +134,28 @@ async def submit_report(
 
     # 이메일 알림 (background)
     if settings.REPORT_NOTIFICATION_EMAIL:
-        submitted_at_kst = ""
+        store_tz_name = await get_store_timezone(db, report.store_id)
+        store_tz = ZoneInfo(store_tz_name)
+
+        # 제출 시각: 매장 타임존 기준 US 포맷
+        submitted_at_fmt = ""
         if report.submitted_at:
-            kst = tz(timedelta(hours=9))
-            submitted_at_kst = report.submitted_at.astimezone(kst).strftime("%Y-%m-%d %H:%M")
+            local_dt = report.submitted_at.astimezone(store_tz)
+            submitted_at_fmt = local_dt.strftime("%b %d, %Y (%a) %I:%M %p")
+
+        # 리포트 날짜: 요일 포함 US 포맷
+        report_date_obj = datetime(
+            report.report_date.year, report.report_date.month, report.report_date.day,
+            tzinfo=store_tz,
+        )
+        report_date_fmt = report_date_obj.strftime("%b %d, %Y (%a)")
+
         email_kwargs = dict(
             store_name=resp.get("store_name", ""),
-            report_date=str(report.report_date),
+            report_date=report_date_fmt,
             period=report.period,
             author_name=resp.get("author_name", ""),
-            submitted_at=submitted_at_kst,
+            submitted_at=submitted_at_fmt,
             sections=resp.get("sections", []),
         )
         subject, html = build_daily_report_email(**email_kwargs)
