@@ -199,12 +199,24 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 
 # Alembic migration
-alembic revision --autogenerate -m "description"
-alembic upgrade head
+alembic revision --autogenerate -m "description"  # 반드시 autogenerate 사용, revision ID 직접 지정 금지
+alembic upgrade head                              # migration 생성 후 반드시 실행하여 검증
 
 # Tests
 pytest tests/ -v
 ```
+
+## Alembic Migration 규칙
+
+1. **`alembic revision --autogenerate -m "설명"`으로 생성** — revision ID를 직접 지정하지 않는다 (자동 해시 사용)
+2. 생성된 파일의 `upgrade()`/`downgrade()` 검토 후 누락/오류만 수동 수정
+3. autogenerate가 감지 못하는 케이스 (수동 수정 필요):
+   - 테이블/컬럼 이름 변경 (drop+create로 인식됨)
+   - 데이터 migration (INSERT, UPDATE 등)
+   - Enum 타입 변경
+   - 인덱스명만 변경
+4. **`alembic upgrade head` 실행하여 검증** 후 커밋
+5. 기존 데이터와 충돌 가능한 migration은 alembic 코드 내에서 해결 (배포서버에서도 동일하게 동작해야 함)
 
 ## Git Workflow
 
