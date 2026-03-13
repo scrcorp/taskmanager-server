@@ -30,7 +30,7 @@ from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, Check
 from app.models.assignment import WorkAssignment
 from app.models.communication import Announcement, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, AnnouncementRead, Voice
 from app.models.notification import Notification
-from app.models.schedule import Schedule, ScheduleApproval
+from app.models.schedule import Schedule, StoreWorkRole, StoreBreakRule, SchedulePeriod, ScheduleRequestTemplate, ScheduleRequestTemplateItem, ScheduleRequest
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
 from app.models.evaluation import EvalTemplate, EvalTemplateItem, Evaluation, EvalResponse
 from app.models.permission import Permission, RolePermission
@@ -45,7 +45,7 @@ __all__ = [
     "WorkAssignment",
     "Announcement", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "AnnouncementRead", "Voice",
     "Notification",
-    "Schedule", "ScheduleApproval",
+    "Schedule", "StoreWorkRole", "StoreBreakRule", "SchedulePeriod", "ScheduleRequestTemplate", "ScheduleRequestTemplateItem", "ScheduleRequest",
     "QRCode", "Attendance", "AttendanceCorrection",
     "EvalTemplate", "EvalTemplateItem", "Evaluation", "EvalResponse",
     "Permission", "RolePermission",
