@@ -243,24 +243,16 @@ class ScheduleRequestService:
         return result
 
     async def _to_staff_request_response(self, db: AsyncSession, req: ScheduleRequest) -> ScheduleRequestResponse:
-        """Staff용 response — admin 수정 내역 마스킹."""
+        """Staff용 response — 실제 상태와 변경 내역을 표시."""
         user_result = await db.execute(select(User.full_name).where(User.id == req.user_id))
         user_name: str | None = user_result.scalar()
 
         store_result = await db.execute(select(Store.name).where(Store.id == req.store_id))
         store_name: str | None = store_result.scalar()
 
-        # modified/rejected → 원본 값 사용, 상태는 submitted
-        is_admin_modified = req.status in ("modified", "rejected")
-
-        effective_start = req.original_preferred_start_time if (is_admin_modified and req.original_preferred_start_time) else req.preferred_start_time
-        effective_end = req.original_preferred_end_time if (is_admin_modified and req.original_preferred_end_time) else req.preferred_end_time
-        effective_role_id = req.original_work_role_id if (is_admin_modified and req.original_work_role_id) else req.work_role_id
-        effective_date = req.original_work_date if (is_admin_modified and req.original_work_date) else req.work_date
-
         work_role_name: str | None = None
-        if effective_role_id:
-            wr_result = await db.execute(select(StoreWorkRole.name).where(StoreWorkRole.id == effective_role_id))
+        if req.work_role_id:
+            wr_result = await db.execute(select(StoreWorkRole.name).where(StoreWorkRole.id == req.work_role_id))
             work_role_name = wr_result.scalar()
 
         return ScheduleRequestResponse(
@@ -270,24 +262,23 @@ class ScheduleRequestService:
             user_name=user_name,
             store_id=str(req.store_id),
             store_name=store_name,
-            work_role_id=str(effective_role_id) if effective_role_id else None,
+            work_role_id=str(req.work_role_id) if req.work_role_id else None,
             work_role_name=work_role_name,
-            work_date=effective_date,
-            preferred_start_time=self._format_time(effective_start),
-            preferred_end_time=self._format_time(effective_end),
+            work_date=req.work_date,
+            preferred_start_time=self._format_time(req.preferred_start_time),
+            preferred_end_time=self._format_time(req.preferred_end_time),
             note=req.note,
-            status="submitted",  # 항상 submitted
+            status=req.status,
             submitted_at=req.submitted_at,
             created_at=req.created_at,
-            # original 필드 숨김
-            original_preferred_start_time=None,
-            original_preferred_end_time=None,
-            original_work_role_id=None,
+            original_preferred_start_time=self._format_time(req.original_preferred_start_time) if req.original_preferred_start_time else None,
+            original_preferred_end_time=self._format_time(req.original_preferred_end_time) if req.original_preferred_end_time else None,
+            original_work_role_id=str(req.original_work_role_id) if req.original_work_role_id else None,
             original_user_id=None,
             original_user_name=None,
-            original_work_date=None,
+            original_work_date=str(req.original_work_date) if req.original_work_date else None,
             created_by=None,
-            rejection_reason=None,
+            rejection_reason=req.rejection_reason,
         )
 
     async def list_requests_admin(
