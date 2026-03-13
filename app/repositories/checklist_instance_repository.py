@@ -9,7 +9,7 @@ from datetime import date
 from typing import Sequence
 from uuid import UUID
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -116,14 +116,42 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
         result = await db.execute(query)
         return result.scalar_one_or_none()
 
+    async def get_by_schedule_id(
+        self,
+        db: AsyncSession,
+        schedule_id: UUID,
+    ) -> ChecklistInstance | None:
+        """스케줄 ID로 인스턴스를 조회합니다.
+
+        Retrieve a checklist instance by its schedule ID.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            schedule_id: 스케줄 UUID (Schedule UUID)
+
+        Returns:
+            ChecklistInstance | None: 인스턴스 또는 None (Instance or None)
+        """
+        query: Select = (
+            select(ChecklistInstance)
+            .where(ChecklistInstance.schedule_id == schedule_id)
+            .options(
+                selectinload(ChecklistInstance.completions).selectinload(ChecklistCompletion.history),
+                selectinload(ChecklistInstance.reviews).selectinload(ChecklistItemReview.contents),
+                selectinload(ChecklistInstance.reviews).selectinload(ChecklistItemReview.review_history),
+            )
+        )
+        result = await db.execute(query)
+        return result.scalar_one_or_none()
+
     async def get_by_assignment_id(
         self,
         db: AsyncSession,
         work_assignment_id: UUID,
     ) -> ChecklistInstance | None:
-        """근무 배정 ID로 인스턴스를 조회합니다.
+        """근무 배정 ID로 인스턴스를 조회합니다 (레거시 호환).
 
-        Retrieve a checklist instance by its work assignment ID.
+        Retrieve a checklist instance by its work assignment ID (legacy compat).
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -223,6 +251,108 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
         )
         result = await db.execute(query)
         return result.scalar_one_or_none()
+
+    async def get_review_summary(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> dict:
+        """리뷰 요약 통계를 집계합니다.
+
+        Aggregate review summary counts for checklist instances in a date range.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            organization_id: 조직 UUID (Organization UUID)
+            store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
+            date_from: 시작일 필터, 선택 (Optional start date filter)
+            date_to: 종료일 필터, 선택 (Optional end date filter)
+
+        Returns:
+            dict: 리뷰 요약 통계 (Review summary counts)
+        """
+        # 1) total_items, completed_items from cl_instances
+        instance_filter = ChecklistInstance.organization_id == organization_id
+        filters = [instance_filter]
+        if store_id is not None:
+            filters.append(ChecklistInstance.store_id == store_id)
+        if date_from is not None:
+            filters.append(ChecklistInstance.work_date >= date_from)
+        if date_to is not None:
+            filters.append(ChecklistInstance.work_date <= date_to)
+
+        totals_q = select(
+            func.coalesce(func.sum(ChecklistInstance.total_items), 0).label("total_items"),
+            func.coalesce(func.sum(ChecklistInstance.completed_items), 0).label("completed_items"),
+        ).where(*filters)
+
+        totals_result = await db.execute(totals_q)
+        totals_row = totals_result.one()
+
+        # 2) review counts grouped by result from cl_item_reviews
+        review_q = (
+            select(
+                ChecklistItemReview.result,
+                func.count().label("cnt"),
+            )
+            .join(ChecklistInstance, ChecklistItemReview.instance_id == ChecklistInstance.id)
+            .where(*filters)
+            .group_by(ChecklistItemReview.result)
+        )
+
+        review_result = await db.execute(review_q)
+        review_counts: dict[str, int] = {row.result: row.cnt for row in review_result.all()}
+
+        reviewed_items = sum(review_counts.values())
+        total_items_val = int(totals_row.total_items)
+
+        # 3) assignment-level counts: total + fully approved (all items pass)
+        total_assignments_q = select(func.count()).select_from(
+            ChecklistInstance
+        ).where(*filters)
+        total_assignments_result = await db.execute(total_assignments_q)
+        total_assignments = total_assignments_result.scalar_one()
+
+        # Subquery: per-instance pass count
+        pass_counts = (
+            select(
+                ChecklistItemReview.instance_id,
+                func.count().label("pass_cnt"),
+            )
+            .join(ChecklistInstance, ChecklistItemReview.instance_id == ChecklistInstance.id)
+            .where(*filters, ChecklistItemReview.result == "pass")
+            .group_by(ChecklistItemReview.instance_id)
+        ).subquery()
+
+        # Instance is fully approved when pass_cnt == total_items and total_items > 0
+        fully_approved_q = (
+            select(func.count())
+            .select_from(ChecklistInstance)
+            .join(pass_counts, ChecklistInstance.id == pass_counts.c.instance_id)
+            .where(
+                *filters,
+                ChecklistInstance.total_items > 0,
+                pass_counts.c.pass_cnt == ChecklistInstance.total_items,
+            )
+        )
+        fully_approved_result = await db.execute(fully_approved_q)
+        fully_approved = fully_approved_result.scalar_one()
+
+        return {
+            "total_items": total_items_val,
+            "completed_items": int(totals_row.completed_items),
+            "reviewed_items": reviewed_items,
+            "pass": review_counts.get("pass", 0),
+            "fail": review_counts.get("fail", 0),
+            "caution": review_counts.get("caution", 0),
+            "pending_re_review": review_counts.get("pending_re_review", 0),
+            "unreviewed": total_items_val - reviewed_items,
+            "total_assignments": total_assignments,
+            "fully_approved_assignments": fully_approved,
+        }
 
     async def delete_completion(
         self,

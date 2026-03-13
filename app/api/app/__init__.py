@@ -49,6 +49,13 @@ from app.api.app.storage import router as storage_router
 # Phase 10 — Voices 라우터 임포트
 from app.api.app.voices import router as voices_router
 
+# Schedule System — Schedule Requests + Templates + Work Roles 라우터 임포트
+from app.api.app.schedule_requests import router as schedule_requests_router
+from app.api.app.request_templates import router as request_templates_router
+from app.api.app.work_roles import router as app_work_roles_router
+from app.api.app.schedules import router as schedule_entries_router
+from app.api.app.schedule_periods import router as app_schedule_periods_router
+
 app_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -96,3 +103,12 @@ app_router.include_router(voices_router, prefix="/my/voices", tags=["My Voices"]
 # Storage 라우터 등록 — Register Storage router
 # ---------------------------------------------------------------------------
 app_router.include_router(storage_router, prefix="/storage", tags=["App Storage"])
+
+# ---------------------------------------------------------------------------
+# Schedule System 라우터 등록 — Work Roles + Request Templates + Schedule Requests
+# ---------------------------------------------------------------------------
+app_router.include_router(app_work_roles_router, prefix="/my", tags=["My Work Roles"])
+app_router.include_router(request_templates_router, prefix="/my", tags=["My Schedule Templates"])
+app_router.include_router(schedule_requests_router, prefix="/my", tags=["My Schedule Requests"])
+app_router.include_router(schedule_entries_router, prefix="/my", tags=["My Schedules"])
+app_router.include_router(app_schedule_periods_router, prefix="/my", tags=["app-schedule-periods"])

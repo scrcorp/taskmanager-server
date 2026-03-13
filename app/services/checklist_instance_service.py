@@ -278,6 +278,26 @@ class ChecklistInstanceService:
         # completions 재로드 — Reload with completions
         return await self.get_instance(db, instance_id)
 
+    async def get_review_summary(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> dict:
+        """리뷰 요약 통계를 조회합니다.
+
+        Get aggregated review summary counts for a date range.
+        """
+        return await checklist_instance_repository.get_review_summary(
+            db,
+            organization_id=organization_id,
+            store_id=store_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
     async def get_completion_log(
         self,
         db: AsyncSession,

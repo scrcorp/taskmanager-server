@@ -119,6 +119,39 @@ async def get_completion_log(
     }
 
 
+@router.get("/review-summary")
+async def get_review_summary(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    store_id: Annotated[str | None, Query()] = None,
+    date_from: Annotated[date | None, Query()] = None,
+    date_to: Annotated[date | None, Query()] = None,
+) -> dict:
+    """체크리스트 리뷰 요약 통계를 조회합니다.
+
+    Get aggregated review summary counts for a date range.
+
+    Args:
+        db: 비동기 데이터베이스 세션 (Async database session)
+        current_user: 인증된 사용자 (Authenticated user with checklists:read)
+        store_id: 매장 UUID 필터, 선택 (Optional store UUID filter)
+        date_from: 시작일 필터, 선택 (Optional start date filter)
+        date_to: 종료일 필터, 선택 (Optional end date filter)
+
+    Returns:
+        dict: 리뷰 요약 통계 (Review summary counts)
+    """
+    store_uuid: UUID | None = UUID(store_id) if store_id else None
+
+    return await checklist_instance_service.get_review_summary(
+        db,
+        organization_id=current_user.organization_id,
+        store_id=store_uuid,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
 @router.get("/{instance_id}", response_model=ChecklistInstanceDetailResponse)
 async def get_checklist_instance(
     instance_id: UUID,

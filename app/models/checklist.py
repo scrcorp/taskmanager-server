@@ -138,7 +138,8 @@ class ChecklistInstance(Base):
         id: 고유 식별자 UUID (Unique identifier)
         organization_id: 소속 조직 FK (Organization scope for multi-tenant isolation)
         template_id: 원본 템플릿 FK (Source template, nullable — template may be deleted)
-        work_assignment_id: 근무 배정 FK (Work assignment, UNIQUE — one instance per assignment)
+        schedule_id: 스케줄 FK (Schedule, nullable — one instance per schedule)
+        work_assignment_id: 근무 배정 FK (Legacy, nullable — kept for backward compat)
         store_id: 매장 FK (Store where the work is performed)
         user_id: 배정 대상 사용자 FK (Assigned worker)
         work_date: 근무 날짜 (Date of the work assignment)
@@ -153,7 +154,7 @@ class ChecklistInstance(Base):
         completions: 완료 기록 목록 (Completion records for this instance)
 
     Constraints:
-        work_assignment_id UNIQUE — one checklist instance per assignment
+        schedule_id UNIQUE — one checklist instance per schedule
     """
 
     __tablename__ = "cl_instances"
@@ -164,8 +165,10 @@ class ChecklistInstance(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     # 원본 템플릿 FK — Source template (SET NULL: 템플릿 삭제 시 null, 스냅샷은 유지)
     template_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("checklist_templates.id", ondelete="SET NULL"), nullable=True)
-    # 근무 배정 FK — Work assignment (CASCADE: 배정 삭제 시 인스턴스도 삭제, UNIQUE)
-    work_assignment_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("work_assignments.id", ondelete="CASCADE"), nullable=False, unique=True)
+    # 스케줄 FK — Schedule (SET NULL: 스케줄 삭제 시 null, nullable for migration)
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True, unique=True)
+    # 근무 배정 FK — Legacy, kept for backward compat (nullable)
+    work_assignment_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("work_assignments.id", ondelete="SET NULL"), nullable=True, unique=True)
     # 매장 FK — Store where the work takes place
     store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
     # 배정 대상 사용자 FK — Worker assigned to this checklist
