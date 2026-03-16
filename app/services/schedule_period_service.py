@@ -176,15 +176,36 @@ class SchedulePeriodService:
     async def submit_review(self, db: AsyncSession, period_id: UUID, organization_id: UUID) -> SchedulePeriodResponse:
         return await self._transition_status(db, period_id, organization_id, "sv_draft", "gm_review")
 
+    async def get_by_store_and_date(
+        self, db: AsyncSession, store_id: UUID, d: date,
+    ) -> SchedulePeriod | None:
+        """주어진 date를 포함하는 period를 store_id로 조회. 없으면 None."""
+        result = await db.execute(
+            select(SchedulePeriod)
+            .where(
+                SchedulePeriod.store_id == store_id,
+                SchedulePeriod.period_start <= d,
+                SchedulePeriod.period_end >= d,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def finalize(self, db: AsyncSession, period_id: UUID, organization_id: UUID) -> SchedulePeriodResponse:
         """확정 — gm_review → finalized, 스케줄 confirmed 처리."""
         period = await self._get_period_or_404(db, period_id, organization_id)
         if period.status != "gm_review":
             raise BadRequestError(f"현재 상태({period.status})에서는 이 작업을 수행할 수 없습니다. 'gm_review' 상태여야 합니다.")
 
-        # Finalize entries — mark all as confirmed
+        # Finalize entries — mark all as confirmed (store + date range 기반)
         from app.services.schedule_service import schedule_service
-        await schedule_service.finalize_period_entries(db, organization_id, period_id, period.created_by or period_id)
+        await schedule_service.finalize_period_entries(
+            db, organization_id,
+            store_id=period.store_id,
+            date_from=period.period_start,
+            date_to=period.period_end,
+            approved_by=period.created_by or period_id,
+        )
 
         period.status = "finalized"
         await db.flush()

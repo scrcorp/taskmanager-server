@@ -139,7 +139,6 @@ class ChecklistInstance(Base):
         organization_id: 소속 조직 FK (Organization scope for multi-tenant isolation)
         template_id: 원본 템플릿 FK (Source template, nullable — template may be deleted)
         schedule_id: 스케줄 FK (Schedule, nullable — one instance per schedule)
-        work_assignment_id: 근무 배정 FK (Legacy, nullable — kept for backward compat)
         store_id: 매장 FK (Store where the work is performed)
         user_id: 배정 대상 사용자 FK (Assigned worker)
         work_date: 근무 날짜 (Date of the work assignment)
@@ -167,8 +166,6 @@ class ChecklistInstance(Base):
     template_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("checklist_templates.id", ondelete="SET NULL"), nullable=True)
     # 스케줄 FK — Schedule (SET NULL: 스케줄 삭제 시 null, nullable for migration)
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True, unique=True)
-    # 근무 배정 FK — Legacy, kept for backward compat (nullable)
-    work_assignment_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("work_assignments.id", ondelete="SET NULL"), nullable=True, unique=True)
     # 매장 FK — Store where the work takes place
     store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
     # 배정 대상 사용자 FK — Worker assigned to this checklist

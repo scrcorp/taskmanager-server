@@ -23,7 +23,6 @@ router: APIRouter = APIRouter()
 async def list_entries(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("schedules:read"))],
-    period_id: str | None = None,
     store_id: str | None = None,
     user_id: str | None = None,
     date_from: date | None = None,
@@ -35,7 +34,6 @@ async def list_entries(
     """스케줄 목록."""
     items, total = await schedule_service.list_entries(
         db, current_user.organization_id,
-        period_id=UUID(period_id) if period_id else None,
         store_id=UUID(store_id) if store_id else None,
         user_id=UUID(user_id) if user_id else None,
         date_from=date_from, date_to=date_to,
@@ -76,14 +74,16 @@ async def bulk_create(
 async def generate_from_requests(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("schedules:create"))],
-    period_id: str = "",
+    store_id: str = "",
+    date_from: date | None = None,
+    date_to: date | None = None,
 ) -> list[ScheduleResponse]:
     """신청 기반 스케줄 자동생성."""
-    if not period_id:
-        from app.utils.exceptions import BadRequestError
-        raise BadRequestError("period_id is required")
+    from app.utils.exceptions import BadRequestError
+    if not store_id or date_from is None or date_to is None:
+        raise BadRequestError("store_id, date_from, date_to are required")
     results = await schedule_service.generate_from_requests(
-        db, current_user.organization_id, UUID(period_id), current_user.id,
+        db, current_user.organization_id, UUID(store_id), date_from, date_to, current_user.id,
     )
     await db.commit()
     return results

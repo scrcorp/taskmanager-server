@@ -26,7 +26,7 @@ from app.api.app.auth import router as auth_router
 from app.api.app.profile import router as profile_router
 
 # Phase 2 — Core Workflow 라우터 임포트
-from app.api.app.assignments import router as assignments_router
+# assignments 라우터 제거됨 — /my/schedules 엔드포인트로 대체
 from app.api.app.checklist_instances import router as checklist_instances_router
 
 # Phase 3 — Communication 라우터 임포트
@@ -68,8 +68,7 @@ app_router.include_router(profile_router, tags=["App Profile"])
 # ---------------------------------------------------------------------------
 # Phase 2 라우터 등록 — Register Phase 2 (Core Workflow) routers
 # ---------------------------------------------------------------------------
-# 내 업무 배정: /my/work-assignments 하위 (My work assignments)
-app_router.include_router(assignments_router, prefix="/my", tags=["My Assignments"])
+# 내 업무 배정 라우터 제거됨 — /my/schedules 엔드포인트로 대체
 # 내 체크리스트 인스턴스: /my/checklist-instances 하위 (My checklist instances)
 app_router.include_router(checklist_instances_router, prefix="/my/checklist-instances", tags=["My Checklists"])
 

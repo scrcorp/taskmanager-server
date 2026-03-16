@@ -211,86 +211,6 @@ class ExcelImportResponse(BaseModel):
     errors: list[str] = []
 
 
-# === 근무 배정 (Assignment) 스키마 ===
-
-class AssignmentCreate(BaseModel):
-    """근무 배정 생성 요청 스키마.
-
-    Work assignment creation request schema.
-    Creates a daily assignment for a user at a specific store/shift/position.
-    The server automatically snapshots the matching checklist template.
-
-    Attributes:
-        store_id: 대상 매장 UUID (Target store)
-        shift_id: 대상 시간대 UUID (Target shift)
-        position_id: 대상 포지션 UUID (Target position)
-        user_id: 배정 대상 사용자 UUID (Worker to assign)
-        work_date: 근무 날짜 (Work date)
-    """
-
-    store_id: str  # 대상 매장 UUID (Store identifier)
-    shift_id: str  # 대상 시간대 UUID (Shift identifier)
-    position_id: str  # 대상 포지션 UUID (Position identifier)
-    user_id: str  # 배정 대상 사용자 UUID (Worker identifier)
-    work_date: date  # 근무 날짜 — 시간 없이 날짜만 (Date only, no time component)
-
-
-class AssignmentResponse(BaseModel):
-    """근무 배정 응답 스키마 (목록용).
-
-    Work assignment response schema for list views.
-    Includes resolved names for store, shift, position, and user
-    to avoid additional API calls on the client.
-
-    Attributes:
-        id: 배정 UUID (Assignment unique identifier)
-        store_id: 매장 UUID (Store identifier)
-        store_name: 매장 이름 (Resolved store name)
-        shift_id: 시간대 UUID (Shift identifier)
-        shift_name: 시간대 이름 (Resolved shift name)
-        position_id: 포지션 UUID (Position identifier)
-        position_name: 포지션 이름 (Resolved position name)
-        user_id: 사용자 UUID (Worker identifier)
-        user_name: 사용자 이름 (Resolved worker name)
-        work_date: 근무 날짜 (Assignment date)
-        status: 진행 상태 (Status: assigned/in_progress/completed)
-        total_items: 총 항목 수 (Total checklist items)
-        completed_items: 완료 항목 수 (Completed checklist items)
-        created_at: 생성 일시 (Creation timestamp)
-    """
-
-    id: str  # 배정 UUID 문자열 (Assignment UUID as string)
-    store_id: str  # 매장 UUID 문자열 (Store UUID as string)
-    store_name: str  # 매장 이름 — 조인된 값 (Store name, resolved)
-    shift_id: str  # 시간대 UUID 문자열 (Shift UUID as string)
-    shift_name: str  # 시간대 이름 — 조인된 값 (Shift name, resolved)
-    position_id: str  # 포지션 UUID 문자열 (Position UUID as string)
-    position_name: str  # 포지션 이름 — 조인된 값 (Position name, resolved)
-    user_id: str  # 사용자 UUID 문자열 (Worker UUID as string)
-    user_name: str  # 사용자 이름 — 조인된 값 (Worker name, resolved)
-    work_date: date  # 근무 날짜 (Work date)
-    status: str  # 진행 상태 — "assigned"|"in_progress"|"completed" (Workflow status)
-    total_items: int  # 총 체크리스트 항목 수 (Total items for progress display)
-    completed_items: int  # 완료된 항목 수 (Completed items for progress display)
-    created_at: datetime  # 생성 일시 UTC (Assignment creation timestamp)
-
-
-class AssignmentDetailResponse(AssignmentResponse):
-    """근무 배정 상세 응답 스키마 — 체크리스트 스냅샷 포함.
-
-    Work assignment detail response with full JSONB checklist snapshot.
-    Used when viewing a single assignment with all checklist items.
-
-    Attributes:
-        checklist_snapshot: JSONB 체크리스트 스냅샷 (Snapshot of checklist items at assignment time)
-        checklist_instance_id: 체크리스트 인스턴스 UUID (Linked cl_instances.id, nullable)
-    """
-
-    # JSONB 스냅샷 — 각 항목: {item_index, title, description, verification_type, is_completed, completed_at, completed_tz}
-    checklist_snapshot: list[dict[str, Any]] | None = None
-    checklist_instance_id: str | None = None
-
-
 class ChecklistItemComplete(BaseModel):
     """체크리스트 항목 완료 토글 요청 스키마.
 
@@ -615,7 +535,7 @@ class ChecklistInstanceResponse(BaseModel):
     Attributes:
         id: 인스턴스 UUID (Instance unique identifier)
         template_id: 원본 템플릿 UUID (Source template, nullable)
-        work_assignment_id: 근무 배정 UUID (Work assignment identifier)
+        schedule_id: 스케줄 UUID (Schedule identifier, nullable)
         store_id: 매장 UUID (Store identifier)
         user_id: 사용자 UUID (Worker identifier)
         user_name: 사용자 이름 (Resolved worker name)
@@ -629,7 +549,7 @@ class ChecklistInstanceResponse(BaseModel):
 
     id: str  # 인스턴스 UUID 문자열 (Instance UUID as string)
     template_id: str | None  # 원본 템플릿 UUID — None이면 삭제됨 (Template UUID, null if deleted)
-    work_assignment_id: str  # 근무 배정 UUID 문자열 (Assignment UUID as string)
+    schedule_id: str | None = None  # 스케줄 UUID (Schedule UUID as string)
     store_id: str  # 매장 UUID 문자열 (Store UUID as string)
     store_name: str  # 매장 이름 — 조인된 값 (Store name, resolved)
     user_id: str  # 사용자 UUID 문자열 (User UUID as string)
@@ -894,7 +814,6 @@ class ScheduleResponse(BaseModel):
         approved_by: 승인자 UUID, nullable (Approver identifier)
         approved_by_name: 승인자 이름, nullable (Resolved approver name)
         approved_at: 승인 일시, nullable (Approval timestamp)
-        work_assignment_id: 생성된 배정 UUID, nullable (Linked work assignment)
         created_at: 생성 일시 (Creation timestamp)
     """
 
@@ -918,5 +837,4 @@ class ScheduleResponse(BaseModel):
     approved_by: str | None  # 승인자 UUID, nullable (Approver UUID as string)
     approved_by_name: str | None  # 승인자 이름, nullable (Approver name, resolved)
     approved_at: datetime | None  # 승인 일시, nullable (Approval timestamp)
-    work_assignment_id: str | None  # 배정 UUID, nullable (Work assignment UUID as string)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)

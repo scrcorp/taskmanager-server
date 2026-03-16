@@ -81,6 +81,21 @@ async def list_checklist_instances(
     }
 
 
+@router.get("/by-schedule/{schedule_id}", response_model=ChecklistInstanceDetailResponse)
+async def get_instance_by_schedule(
+    schedule_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+) -> dict:
+    """스케줄 ID로 체크리스트 인스턴스 상세를 조회합니다."""
+    from app.repositories.checklist_instance_repository import checklist_instance_repository
+    instance = await checklist_instance_repository.get_by_schedule_id(db, schedule_id)
+    if not instance:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="No checklist instance for this schedule")
+    return await checklist_instance_service.build_detail_response(db, instance)
+
+
 @router.get("/checklist-audit")
 @router.get("/completion-log")
 async def get_completion_log(

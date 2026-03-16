@@ -11,12 +11,14 @@ from app.models.schedule import SchedulePeriod, ScheduleRequest, ScheduleRequest
 from app.models.user import User
 from app.models.work import Shift, Position
 from app.repositories.request_template_repository import request_template_repository
-from app.repositories.schedule_period_repository import schedule_period_repository
 from app.repositories.schedule_request_repository import schedule_request_repository
 from app.schemas.schedule import (
     RequestTemplateCreate, RequestTemplateItemResponse, RequestTemplateResponse, RequestTemplateUpdate,
     ScheduleRequestAdminCreate, ScheduleRequestAdminUpdate, ScheduleRequestCreate,
+    ScheduleRequestBatchItem, ScheduleRequestBatchResult, ScheduleRequestBatchSubmit,
     ScheduleRequestResponse, ScheduleRequestUpdate, ScheduleConfirmResult,
+    ScheduleConfirmPreview, ScheduleConfirmPreviewFail,
+    ScheduleRequestFromTemplateResult, ScheduleRequestSkippedItem,
 )
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 
@@ -36,6 +38,20 @@ class ScheduleRequestService:
             return None
         return t.strftime("%H:%M")
 
+    async def _resolve_work_role_name(self, db: AsyncSession, work_role_id) -> str | None:
+        """WorkRole 이름 조회 — name이 없으면 shift·position 이름으로 fallback."""
+        wr_result = await db.execute(select(StoreWorkRole).where(StoreWorkRole.id == work_role_id))
+        wr = wr_result.scalar_one_or_none()
+        if wr is None:
+            return None
+        if wr.name:
+            return wr.name
+        s = await db.execute(select(Shift.name).where(Shift.id == wr.shift_id))
+        p = await db.execute(select(Position.name).where(Position.id == wr.position_id))
+        sn = s.scalar() or ""
+        pn = p.scalar() or ""
+        return f"{sn} - {pn}" if sn or pn else None
+
     async def _to_request_response(self, db: AsyncSession, req: ScheduleRequest) -> ScheduleRequestResponse:
         user_result = await db.execute(select(User.full_name).where(User.id == req.user_id))
         user_name: str | None = user_result.scalar()
@@ -45,8 +61,7 @@ class ScheduleRequestService:
 
         work_role_name: str | None = None
         if req.work_role_id:
-            wr_result = await db.execute(select(StoreWorkRole.name).where(StoreWorkRole.id == req.work_role_id))
-            work_role_name = wr_result.scalar()
+            work_role_name = await self._resolve_work_role_name(db, req.work_role_id)
 
         # Original user name (for modified display)
         original_user_name: str | None = None
@@ -56,7 +71,6 @@ class ScheduleRequestService:
 
         return ScheduleRequestResponse(
             id=str(req.id),
-            period_id=str(req.period_id) if req.period_id else None,
             user_id=str(req.user_id),
             user_name=user_name,
             store_id=str(req.store_id),
@@ -89,15 +103,19 @@ class ScheduleRequestService:
         store_result = await db.execute(select(Store.name).where(Store.id == template.store_id))
         store_name: str | None = store_result.scalar()
 
-        # work_role_name 일괄 조회
+        # work_role_name 일괄 조회 (name이 null이면 shift_name · position_name 조합)
         wr_ids = [item.work_role_id for item in items if item.work_role_id]
         wr_name_map: dict[str, str] = {}
         if wr_ids:
+            from app.models.work import Shift, Position
             wr_result = await db.execute(
-                select(StoreWorkRole.id, StoreWorkRole.name).where(StoreWorkRole.id.in_(wr_ids))
+                select(StoreWorkRole.id, StoreWorkRole.name, Shift.name, Position.name)
+                .join(Shift, StoreWorkRole.shift_id == Shift.id)
+                .join(Position, StoreWorkRole.position_id == Position.id)
+                .where(StoreWorkRole.id.in_(wr_ids))
             )
             for row in wr_result.all():
-                wr_name_map[str(row[0])] = row[1] or ""
+                wr_name_map[str(row[0])] = row[1] or f"{row[2]} · {row[3]}"
 
         return RequestTemplateResponse(
             id=str(template.id),
@@ -211,29 +229,34 @@ class ScheduleRequestService:
 
     # ─── Request CRUD ───
 
-    async def _validate_period_open(self, db: AsyncSession, period_id: UUID) -> SchedulePeriod:
-        period = await schedule_period_repository.get_by_id(db, period_id)
-        if period is None:
-            raise NotFoundError("Schedule period not found")
-        if period.status != "open":
-            raise BadRequestError("신청 마감된 기간입니다 (Request period is closed)")
-        return period
+    async def _find_period_for_date(
+        self, db: AsyncSession, store_id: UUID, work_date: date_type,
+    ) -> SchedulePeriod | None:
+        """store_id + work_date로 해당 날짜를 포함하는 period 조회."""
+        result = await db.execute(
+            select(SchedulePeriod)
+            .where(
+                SchedulePeriod.store_id == store_id,
+                SchedulePeriod.period_start <= work_date,
+                SchedulePeriod.period_end >= work_date,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def list_requests_for_user(
         self,
         db: AsyncSession,
         user_id: UUID,
-        period_id: UUID | None = None,
         date_from: date_type | None = None,
         date_to: date_type | None = None,
     ) -> list[ScheduleRequestResponse]:
         requests, _ = await schedule_request_repository.get_by_filters(
-            db, period_id=period_id, user_id=user_id,
+            db, user_id=user_id,
             date_from=date_from, date_to=date_to, per_page=200,
         )
         # Staff 에게는 admin 수정 내역 숨김:
-        # 1) admin이 생성한 request (created_by != null)는 제외
-        # 2) modified/rejected 상태도 submitted로 보이고, original 값 사용
+        # admin이 생성한 request (created_by != null)는 제외
         result = []
         for r in requests:
             if r.created_by is not None:
@@ -252,12 +275,10 @@ class ScheduleRequestService:
 
         work_role_name: str | None = None
         if req.work_role_id:
-            wr_result = await db.execute(select(StoreWorkRole.name).where(StoreWorkRole.id == req.work_role_id))
-            work_role_name = wr_result.scalar()
+            work_role_name = await self._resolve_work_role_name(db, req.work_role_id)
 
         return ScheduleRequestResponse(
             id=str(req.id),
-            period_id=str(req.period_id) if req.period_id else None,
             user_id=str(req.user_id),
             user_name=user_name,
             store_id=str(req.store_id),
@@ -284,7 +305,6 @@ class ScheduleRequestService:
     async def list_requests_admin(
         self,
         db: AsyncSession,
-        period_id: UUID | None = None,
         store_id: UUID | None = None,
         date_from: date_type | None = None,
         date_to: date_type | None = None,
@@ -292,7 +312,7 @@ class ScheduleRequestService:
         per_page: int = 50,
     ) -> tuple[list[ScheduleRequestResponse], int]:
         requests, total = await schedule_request_repository.get_by_filters(
-            db, period_id=period_id, store_id=store_id,
+            db, store_id=store_id,
             date_from=date_from, date_to=date_to,
             page=page, per_page=per_page,
         )
@@ -320,22 +340,26 @@ class ScheduleRequestService:
     async def create_request(
         self, db: AsyncSession, user_id: UUID, data: ScheduleRequestCreate,
     ) -> ScheduleRequestResponse:
-        period_id: UUID | None = UUID(data.period_id) if data.period_id else None
         store_id = UUID(data.store_id)
 
-        if period_id is not None:
-            # Period-based validation
-            period = await self._validate_period_open(db, period_id)
-            if period.store_id != store_id:
-                raise BadRequestError("해당 기간의 매장과 일치하지 않습니다")
-            if data.work_date < period.period_start or data.work_date > period.period_end:
-                raise BadRequestError("근무일이 기간 범위를 벗어났습니다")
+        # Period 상태 체크: store_id + work_date로 period lookup
+        period = await self._find_period_for_date(db, store_id, data.work_date)
+        if period is not None:
+            if period.status != "open":
+                raise BadRequestError("신청 마감된 기간입니다 (Request period is closed)")
         else:
-            # Date-based validation (no period)
+            # Period 없으면 날짜 기반 검증
             self._validate_work_date_week(data.work_date)
 
+        # 중복 신청 체크 (rejected 제외)
+        work_role_id = UUID(data.work_role_id) if data.work_role_id else None
+        duplicate = await schedule_request_repository.find_active_duplicate(
+            db, user_id, data.work_date, work_role_id
+        )
+        if duplicate is not None:
+            raise BadRequestError("이미 해당 날짜에 같은 역할로 신청이 존재합니다")
+
         req = await schedule_request_repository.create(db, {
-            "period_id": period_id,
             "user_id": user_id,
             "store_id": store_id,
             "work_role_id": UUID(data.work_role_id) if data.work_role_id else None,
@@ -348,80 +372,129 @@ class ScheduleRequestService:
         return await self._to_request_response(db, req)
 
     async def create_requests_from_template(
-        self, db: AsyncSession, user_id: UUID, period_id: UUID, template_id: UUID,
-    ) -> list[ScheduleRequestResponse]:
-        period = await self._validate_period_open(db, period_id)
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        store_id: UUID,
+        date_from: date_type,
+        date_to: date_type,
+        template_id: UUID,
+        on_conflict: str = "skip",
+    ) -> ScheduleRequestFromTemplateResult:
+        # Period 상태 체크
+        period = await self._find_period_for_date(db, store_id, date_from)
+        if period is not None and period.status != "open":
+            raise BadRequestError("신청 마감된 기간입니다 (Request period is closed)")
+
         template = await request_template_repository.get_by_id(db, template_id)
         if template is None or template.user_id != user_id:
             raise NotFoundError("Template not found")
 
         items = await request_template_repository.get_items(db, template_id)
-        results = []
-        current = period.period_start
-        while current <= period.period_end:
-            weekday = current.weekday()  # 0=Mon
+        result = ScheduleRequestFromTemplateResult()
+        current = date_from
+        while current <= date_to:
+            weekday = (current.weekday() + 1) % 7  # 0=Sun, 6=Sat
             for item in items:
-                if item.day_of_week == weekday:
+                if item.day_of_week != weekday:
+                    continue
+                duplicate = await schedule_request_repository.find_active_duplicate(
+                    db, user_id, current, item.work_role_id
+                )
+                if duplicate is not None:
+                    if on_conflict == "replace" and duplicate.status == "submitted":
+                        # 기존 submitted request 업데이트
+                        updated = await schedule_request_repository.update(db, duplicate.id, {
+                            "preferred_start_time": item.preferred_start_time,
+                            "preferred_end_time": item.preferred_end_time,
+                        })
+                        result.replaced.append(await self._to_request_response(db, updated))  # type: ignore[arg-type]
+                    else:
+                        work_role_name = await self._resolve_work_role_name(db, item.work_role_id) if item.work_role_id else None
+                        result.skipped.append(ScheduleRequestSkippedItem(
+                            work_date=current,
+                            work_role_id=str(item.work_role_id) if item.work_role_id else None,
+                            work_role_name=work_role_name,
+                            reason="이미 신청이 존재합니다" if duplicate.status != "submitted" else "중복 신청",
+                        ))
+                else:
                     req = await schedule_request_repository.create(db, {
-                        "period_id": period.id,
                         "user_id": user_id,
-                        "store_id": period.store_id,
+                        "store_id": store_id,
                         "work_role_id": item.work_role_id,
                         "work_date": current,
                         "preferred_start_time": item.preferred_start_time,
                         "preferred_end_time": item.preferred_end_time,
                         "status": "submitted",
                     })
-                    results.append(await self._to_request_response(db, req))
+                    result.created.append(await self._to_request_response(db, req))
             current += timedelta(days=1)
-        return results
+        return result
 
     async def copy_last_period(
-        self, db: AsyncSession, user_id: UUID, period_id: UUID, store_id: UUID,
-    ) -> list[ScheduleRequestResponse]:
-        period = await self._validate_period_open(db, period_id)
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        store_id: UUID,
+        date_from: date_type,
+        date_to: date_type,
+        on_conflict: str = "skip",
+    ) -> ScheduleRequestFromTemplateResult:
+        # 대상 기간 상태 체크
+        period = await self._find_period_for_date(db, store_id, date_from)
+        if period is not None and period.status != "open":
+            raise BadRequestError("신청 마감된 기간입니다")
 
-        # Find previous period for this store (most recent before this one)
-        prev_result = await db.execute(
-            select(SchedulePeriod)
-            .where(
-                SchedulePeriod.store_id == store_id,
-                SchedulePeriod.period_end < period.period_start,
-            )
-            .order_by(SchedulePeriod.period_end.desc())
-            .limit(1)
-        )
-        prev_period = prev_result.scalar_one_or_none()
-        if prev_period is None:
-            raise NotFoundError("이전 기간을 찾을 수 없습니다")
+        # 이전 주 날짜 범위 (7일 전)
+        prev_date_from = date_from - timedelta(days=7)
+        prev_date_to = date_to - timedelta(days=7)
 
-        prev_requests = await schedule_request_repository.get_by_previous_period_user(
-            db, prev_period.id, user_id
+        prev_requests = await schedule_request_repository.get_by_store_date_range_user(
+            db, store_id, user_id, prev_date_from, prev_date_to
         )
         if not prev_requests:
             raise NotFoundError("이전 기간에 신청 내역이 없습니다")
 
-        # Calculate date offset
-        day_offset = (period.period_start - prev_period.period_start).days
+        # 날짜 오프셋 계산
+        day_offset = (date_from - prev_date_from).days
 
-        results = []
+        result = ScheduleRequestFromTemplateResult()
         for prev_req in prev_requests:
             new_date = prev_req.work_date + timedelta(days=day_offset)
-            if new_date < period.period_start or new_date > period.period_end:
+            if new_date < date_from or new_date > date_to:
                 continue
-            req = await schedule_request_repository.create(db, {
-                "period_id": period.id,
-                "user_id": user_id,
-                "store_id": store_id,
-                "work_role_id": prev_req.work_role_id,
-                "work_date": new_date,
-                "preferred_start_time": prev_req.preferred_start_time,
-                "preferred_end_time": prev_req.preferred_end_time,
-                "note": prev_req.note,
-                "status": "submitted",
-            })
-            results.append(await self._to_request_response(db, req))
-        return results
+            duplicate = await schedule_request_repository.find_active_duplicate(
+                db, user_id, new_date, prev_req.work_role_id
+            )
+            if duplicate is not None:
+                if on_conflict == "replace" and duplicate.status == "submitted":
+                    updated = await schedule_request_repository.update(db, duplicate.id, {
+                        "preferred_start_time": prev_req.preferred_start_time,
+                        "preferred_end_time": prev_req.preferred_end_time,
+                        "note": prev_req.note,
+                    })
+                    result.replaced.append(await self._to_request_response(db, updated))  # type: ignore[arg-type]
+                else:
+                    work_role_name = await self._resolve_work_role_name(db, prev_req.work_role_id) if prev_req.work_role_id else None
+                    result.skipped.append(ScheduleRequestSkippedItem(
+                        work_date=new_date,
+                        work_role_id=str(prev_req.work_role_id) if prev_req.work_role_id else None,
+                        work_role_name=work_role_name,
+                        reason="이미 신청이 존재합니다" if duplicate.status != "submitted" else "중복 신청",
+                    ))
+            else:
+                req = await schedule_request_repository.create(db, {
+                    "user_id": user_id,
+                    "store_id": store_id,
+                    "work_role_id": prev_req.work_role_id,
+                    "work_date": new_date,
+                    "preferred_start_time": prev_req.preferred_start_time,
+                    "preferred_end_time": prev_req.preferred_end_time,
+                    "note": prev_req.note,
+                    "status": "submitted",
+                })
+                result.created.append(await self._to_request_response(db, req))
+        return result
 
     async def update_request(
         self, db: AsyncSession, request_id: UUID, user_id: UUID, data: ScheduleRequestUpdate,
@@ -432,12 +505,13 @@ class ScheduleRequestService:
         if req.status not in ("submitted",):
             raise BadRequestError("승인/반려된 신청은 수정할 수 없습니다")
 
-        if req.period_id is not None:
-            period = await schedule_period_repository.get_by_id(db, req.period_id)
-            if period is None or period.status != "open":
+        # Period 상태 체크: store_id + work_date로 lookup
+        work_date = data.work_date or req.work_date
+        period = await self._find_period_for_date(db, req.store_id, work_date)
+        if period is not None:
+            if period.status != "open":
                 raise BadRequestError("마감된 기간의 신청은 수정할 수 없습니다")
         else:
-            work_date = data.work_date or req.work_date
             self._validate_work_date_week(work_date)
 
         update_data: dict = {}
@@ -467,16 +541,67 @@ class ScheduleRequestService:
         if req is None or req.user_id != user_id:
             raise NotFoundError("Request not found")
 
-        if req.period_id is not None:
-            # Period-based check
-            period = await schedule_period_repository.get_by_id(db, req.period_id)
-            if period is None or period.status != "open":
+        # Period 상태 체크: store_id + work_date로 lookup
+        period = await self._find_period_for_date(db, req.store_id, req.work_date)
+        if period is not None:
+            if period.status != "open":
                 raise BadRequestError("마감된 기간의 신청은 삭제할 수 없습니다")
         else:
-            # Date-based check: only allow delete if work_date is in a future week
             self._validate_work_date_week(req.work_date)
 
         await schedule_request_repository.delete(db, request_id)
+
+    async def batch_submit(
+        self, db: AsyncSession, user_id: UUID, data: ScheduleRequestBatchSubmit,
+    ) -> ScheduleRequestBatchResult:
+        """배치 제출 — 생성/수정/삭제를 한번에 처리."""
+        result = ScheduleRequestBatchResult()
+
+        for item in data.creates:
+            try:
+                req = await self.create_request(
+                    db, user_id,
+                    ScheduleRequestCreate(
+                        store_id=item.store_id,
+                        work_date=item.work_date,
+                        work_role_id=item.work_role_id,
+                        preferred_start_time=item.preferred_start_time,
+                        preferred_end_time=item.preferred_end_time,
+                        note=item.note,
+                    ),
+                )
+                result.created.append(req)
+            except Exception as e:
+                detail = e.detail if hasattr(e, "detail") else str(e)
+                result.errors.append(f"create ({item.work_date}): {detail}")
+
+        for item in data.updates:
+            try:
+                req = await self.update_request(
+                    db, UUID(item.id), user_id,
+                    ScheduleRequestUpdate(
+                        store_id=item.store_id,
+                        work_role_id=item.work_role_id,
+                        work_date=item.work_date,
+                        preferred_start_time=item.preferred_start_time,
+                        preferred_end_time=item.preferred_end_time,
+                        note=item.note,
+                    ),
+                )
+                result.updated.append(req)
+            except Exception as e:
+                detail = e.detail if hasattr(e, "detail") else str(e)
+                result.errors.append(f"update ({item.id}): {detail}")
+
+        for rid in data.deletes:
+            try:
+                await self.delete_request(db, UUID(rid), user_id)
+                result.deleted_count += 1
+            except Exception as e:
+                detail = e.detail if hasattr(e, "detail") else str(e)
+                result.errors.append(f"delete ({rid}): {detail}")
+
+        return result
 
     async def update_request_status(
         self, db: AsyncSession, request_id: UUID, status: str,
@@ -501,6 +626,14 @@ class ScheduleRequestService:
         self, db: AsyncSession, data: ScheduleRequestAdminCreate, created_by: UUID,
     ) -> ScheduleRequestResponse:
         """Admin이 직접 request 생성 (staff에게 안 보임, confirm 시 entry로 변환)."""
+        # 중복 신청 체크 (rejected 제외)
+        work_role_id = UUID(data.work_role_id) if data.work_role_id else None
+        duplicate = await schedule_request_repository.find_active_duplicate(
+            db, UUID(data.user_id), data.work_date, work_role_id
+        )
+        if duplicate is not None:
+            raise BadRequestError("이미 해당 날짜에 같은 역할로 신청이 존재합니다")
+
         req = await schedule_request_repository.create(db, {
             "user_id": UUID(data.user_id),
             "store_id": UUID(data.store_id),
@@ -661,6 +794,54 @@ class ScheduleRequestService:
 
     # ─── Admin: Confirm requests → create schedules ───
 
+    async def _collect_confirm_items(
+        self,
+        db: AsyncSession,
+        store_id: UUID,
+        date_from: date_type,
+        date_to: date_type,
+    ) -> tuple[list[ScheduleRequest], list[ScheduleRequest], list[tuple[ScheduleRequest, str]]]:
+        """
+        Confirm 대상 분류.
+        Returns: (to_confirm, rejected, will_fail_with_reason)
+        """
+        from app.models.schedule import StoreWorkRole
+
+        requests, _ = await schedule_request_repository.get_by_filters(
+            db, store_id=store_id, date_from=date_from, date_to=date_to, per_page=500,
+        )
+
+        to_confirm: list[ScheduleRequest] = []
+        rejected: list[ScheduleRequest] = []
+        will_fail: list[tuple[ScheduleRequest, str]] = []
+
+        for req in requests:
+            if req.status == "rejected":
+                rejected.append(req)
+                continue
+
+            # 시간 정보 유효성 체크
+            start_time = req.preferred_start_time
+            end_time = req.preferred_end_time
+
+            if req.work_role_id:
+                wr_result = await db.execute(
+                    select(StoreWorkRole).where(StoreWorkRole.id == req.work_role_id)
+                )
+                wr = wr_result.scalar_one_or_none()
+                if wr:
+                    if start_time is None:
+                        start_time = wr.default_start_time
+                    if end_time is None:
+                        end_time = wr.default_end_time
+
+            if start_time is None or end_time is None:
+                will_fail.append((req, "시간 정보 없음"))
+            else:
+                to_confirm.append(req)
+
+        return to_confirm, rejected, will_fail
+
     async def confirm_requests(
         self,
         db: AsyncSession,
@@ -669,11 +850,11 @@ class ScheduleRequestService:
         date_from: date_type,
         date_to: date_type,
         confirmed_by: UUID,
-        period_id: UUID | None = None,
     ) -> ScheduleConfirmResult:
-        """Non-rejected request를 schedule로 일괄 변환."""
+        """Non-rejected request를 schedule로 일괄 변환 + 체크리스트 인스턴스 자동 생성."""
         from app.models.schedule import StoreWorkRole
         from app.repositories.schedule_repository import schedule_repository
+        from app.services.checklist_instance_service import checklist_instance_service
 
         requests, _ = await schedule_request_repository.get_by_filters(
             db, store_id=store_id, date_from=date_from, date_to=date_to, per_page=500,
@@ -729,9 +910,8 @@ class ScheduleRequestService:
             net = max(net, 0)
 
             try:
-                await schedule_repository.create(db, {
+                schedule = await schedule_repository.create(db, {
                     "organization_id": organization_id,
-                    "period_id": period_id,
                     "request_id": req.id,
                     "user_id": req.user_id,
                     "store_id": req.store_id,
@@ -747,6 +927,17 @@ class ScheduleRequestService:
                     "approved_by": confirmed_by,
                 })
 
+                # 체크리스트 인스턴스 자동 생성 (work_role에 default_checklist가 있으면)
+                await checklist_instance_service.create_for_schedule(
+                    db,
+                    schedule_id=schedule.id,
+                    organization_id=organization_id,
+                    store_id=req.store_id,
+                    user_id=req.user_id,
+                    work_date=req.work_date,
+                    work_role_id=req.work_role_id,
+                )
+
                 # Update request status to accepted
                 await schedule_request_repository.update(db, req.id, {"status": "accepted"})
                 entries_created += 1
@@ -760,6 +951,61 @@ class ScheduleRequestService:
             requests_confirmed=requests_confirmed,
             requests_rejected=requests_rejected,
             errors=errors,
+        )
+
+    async def preview_confirm(
+        self,
+        db: AsyncSession,
+        store_id: UUID,
+        date_from: date_type,
+        date_to: date_type,
+    ) -> ScheduleConfirmPreview:
+        """Confirm dry-run — DB 변경 없이 결과 예측만 반환 (S1)."""
+        from app.models.schedule import StoreWorkRole
+
+        requests, _ = await schedule_request_repository.get_by_filters(
+            db, store_id=store_id, date_from=date_from, date_to=date_to, per_page=500,
+        )
+
+        will_confirm = 0
+        will_skip_rejected = 0
+        will_fail: list[ScheduleConfirmPreviewFail] = []
+
+        for req in requests:
+            if req.status == "rejected":
+                will_skip_rejected += 1
+                continue
+
+            start_time = req.preferred_start_time
+            end_time = req.preferred_end_time
+
+            if req.work_role_id:
+                wr_result = await db.execute(
+                    select(StoreWorkRole).where(StoreWorkRole.id == req.work_role_id)
+                )
+                wr = wr_result.scalar_one_or_none()
+                if wr:
+                    if start_time is None:
+                        start_time = wr.default_start_time
+                    if end_time is None:
+                        end_time = wr.default_end_time
+
+            if start_time is None or end_time is None:
+                user_result = await db.execute(select(User.full_name).where(User.id == req.user_id))
+                user_name: str | None = user_result.scalar()
+                will_fail.append(ScheduleConfirmPreviewFail(
+                    request_id=str(req.id),
+                    user_name=user_name,
+                    work_date=req.work_date,
+                    reason="시간 정보 없음",
+                ))
+            else:
+                will_confirm += 1
+
+        return ScheduleConfirmPreview(
+            will_confirm=will_confirm,
+            will_skip_rejected=will_skip_rejected,
+            will_fail=will_fail,
         )
 
 

@@ -83,7 +83,6 @@ class ScheduleService:
         return ScheduleResponse(
             id=str(entry.id),
             organization_id=str(entry.organization_id),
-            period_id=str(entry.period_id) if entry.period_id else None,
             request_id=str(entry.request_id) if entry.request_id else None,
             user_id=str(entry.user_id),
             user_name=user_name,
@@ -158,7 +157,6 @@ class ScheduleService:
         self,
         db: AsyncSession,
         organization_id: UUID,
-        period_id: UUID | None = None,
         store_id: UUID | None = None,
         user_id: UUID | None = None,
         date_from: date | None = None,
@@ -168,7 +166,7 @@ class ScheduleService:
         per_page: int = 100,
     ) -> tuple[list[ScheduleResponse], int]:
         entries, total = await schedule_repository.get_by_filters(
-            db, organization_id, period_id, store_id, user_id,
+            db, organization_id, store_id, user_id,
             date_from, date_to, status, page, per_page,
         )
         responses = [await self._to_response(db, e) for e in entries]
@@ -204,7 +202,6 @@ class ScheduleService:
 
         entry = await schedule_repository.create(db, {
             "organization_id": organization_id,
-            "period_id": UUID(data.period_id) if data.period_id else None,
             "request_id": UUID(data.request_id) if data.request_id else None,
             "user_id": user_id,
             "store_id": store_id,
@@ -218,6 +215,19 @@ class ScheduleService:
             "status": "confirmed",
             "created_by": created_by,
         })
+
+        # 체크리스트 인스턴스 자동 생성
+        from app.services.checklist_instance_service import checklist_instance_service
+        await checklist_instance_service.create_for_schedule(
+            db,
+            schedule_id=entry.id,
+            organization_id=organization_id,
+            store_id=store_id,
+            user_id=user_id,
+            work_date=data.work_date,
+            work_role_id=UUID(data.work_role_id) if data.work_role_id else None,
+        )
+
         return await self._to_response(db, entry)
 
     async def bulk_create(
@@ -237,12 +247,16 @@ class ScheduleService:
         self,
         db: AsyncSession,
         organization_id: UUID,
-        period_id: UUID,
+        store_id: UUID,
+        date_from: date,
+        date_to: date,
         created_by: UUID,
     ) -> list[ScheduleResponse]:
         """신청(accepted) 기반으로 스케줄 자동 생성."""
         from app.repositories.schedule_request_repository import schedule_request_repository as sr_repo
-        requests, _ = await sr_repo.get_by_filters(db, period_id=period_id, per_page=500)
+        requests, _ = await sr_repo.get_by_filters(
+            db, store_id=store_id, date_from=date_from, date_to=date_to, per_page=500
+        )
 
         results = []
         for req in requests:
@@ -270,7 +284,6 @@ class ScheduleService:
             net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
             entry = await schedule_repository.create(db, {
                 "organization_id": organization_id,
-                "period_id": period_id,
                 "request_id": req.id,
                 "user_id": req.user_id,
                 "store_id": req.store_id,
@@ -284,6 +297,19 @@ class ScheduleService:
                 "status": "confirmed",
                 "created_by": created_by,
             })
+
+            # 체크리스트 인스턴스 자동 생성
+            from app.services.checklist_instance_service import checklist_instance_service
+            await checklist_instance_service.create_for_schedule(
+                db,
+                schedule_id=entry.id,
+                organization_id=organization_id,
+                store_id=req.store_id,
+                user_id=req.user_id,
+                work_date=req.work_date,
+                work_role_id=req.work_role_id,
+            )
+
             results.append(await self._to_response(db, entry))
         return results
 
@@ -389,11 +415,13 @@ class ScheduleService:
         self,
         db: AsyncSession,
         organization_id: UUID,
-        period_id: UUID,
+        store_id: UUID,
+        date_from: date,
+        date_to: date,
         approved_by: UUID,
     ) -> FinalizeResult:
-        """기간 확정 — 모든 스케줄을 confirmed로 변경."""
-        entries = await schedule_repository.get_by_period(db, period_id)
+        """기간 확정 — 해당 날짜 범위의 모든 스케줄을 confirmed로 변경."""
+        entries = await schedule_repository.get_by_store_date_range(db, store_id, date_from, date_to)
 
         created = 0
         failed = 0

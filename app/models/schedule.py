@@ -103,7 +103,7 @@ class ScheduleRequestTemplateItem(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     template_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("schedule_request_templates.id", ondelete="CASCADE"), nullable=False)
-    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False)  # 0=Mon, 6=Sun
+    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False)  # 0=Sun, 6=Sat
     work_role_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="CASCADE"), nullable=False)
     preferred_start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
     preferred_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
@@ -119,7 +119,6 @@ class ScheduleRequest(Base):
     __tablename__ = "schedule_requests"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    period_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("schedule_periods.id", ondelete="SET NULL"), nullable=True)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
     work_role_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="SET NULL"), nullable=True)
@@ -144,7 +143,6 @@ class ScheduleRequest(Base):
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
-        Index("ix_schedule_requests_period", "period_id"),
         Index("ix_schedule_requests_user_date", "user_id", "work_date"),
         Index("ix_schedule_requests_store", "store_id"),
     )
@@ -160,7 +158,6 @@ class Schedule(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    period_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("schedule_periods.id", ondelete="SET NULL"), nullable=True)
     request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("schedule_requests.id", ondelete="SET NULL"), nullable=True)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
@@ -181,5 +178,4 @@ class Schedule(Base):
     __table_args__ = (
         Index("ix_schedules_org_store_date", "organization_id", "store_id", "work_date"),
         Index("ix_schedules_user_date", "user_id", "work_date"),
-        Index("ix_schedules_period", "period_id"),
     )
