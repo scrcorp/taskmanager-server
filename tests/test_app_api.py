@@ -41,59 +41,35 @@ class TestAppProfile:
         assert data["email"] == "updated@test.com"
 
 
-# ===== My Assignments =====
+# ===== My Schedules =====
 
-class TestAppAssignments:
-    """직원 근무 배정 조회 테스트."""
+class TestAppSchedules:
+    """직원 스케줄 조회 테스트."""
 
     @pytest_asyncio.fixture
-    async def staff_assignment(self, db: AsyncSession, org, store, staff_user):
-        """스태프에게 배정된 근무를 DB에 직접 생성."""
-        from app.models.work import Shift, Position
-        from app.models.assignment import WorkAssignment
+    async def staff_schedule(self, db: AsyncSession, org, store, staff_user):
+        """스태프에게 배정된 스케줄을 DB에 직접 생성."""
+        from app.models.schedule import Schedule
 
-        shift = Shift(store_id=store.id, name="오전", sort_order=1)
-        db.add(shift)
-        position = Position(store_id=store.id, name="그릴", sort_order=1)
-        db.add(position)
-        await db.flush()
-
-        assignment = WorkAssignment(
+        schedule = Schedule(
             organization_id=org.id,
             store_id=store.id,
-            shift_id=shift.id,
-            position_id=position.id,
             user_id=staff_user.id,
             work_date=date.today(),
-            status="assigned",
-            checklist_snapshot={"items": [
-                {"item_index": 0, "title": "예열", "is_completed": False, "completed_at": None},
-                {"item_index": 1, "title": "재료 준비", "is_completed": False, "completed_at": None},
-            ]},
-            total_items=2,
-            completed_items=0,
+            status="confirmed",
         )
-        db.add(assignment)
+        db.add(schedule)
         await db.flush()
-        await db.refresh(assignment)
-        return assignment
+        await db.refresh(schedule)
+        return schedule
 
-    async def test_list_my_assignments(self, client: AsyncClient, staff_token, staff_assignment):
-        """내 근무 배정 목록 조회."""
+    async def test_list_my_schedules(self, client: AsyncClient, staff_token, staff_schedule):
+        """내 스케줄 목록 조회."""
         res = await client.get(
-            f"{APP}/my/work-assignments",
+            f"{APP}/my/schedules",
             headers=auth_header(staff_token),
         )
         assert res.status_code == 200
-
-    async def test_complete_checklist_item(self, client: AsyncClient, staff_token, staff_assignment):
-        """체크리스트 항목 완료 처리."""
-        res = await client.patch(
-            f"{APP}/my/work-assignments/{staff_assignment.id}/checklist/0",
-            json={"is_completed": True},
-            headers=auth_header(staff_token),
-        )
-        assert res.status_code == 200, res.json()
 
 
 # ===== My Announcements =====

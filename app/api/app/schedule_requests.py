@@ -11,8 +11,10 @@ from app.api.deps import get_current_user
 from app.database import get_db
 from app.models.user import User
 from app.schemas.schedule import (
+    ScheduleRequestBatchResult, ScheduleRequestBatchSubmit,
     ScheduleRequestCopyLastPeriod, ScheduleRequestCreate,
-    ScheduleRequestFromTemplate, ScheduleRequestResponse, ScheduleRequestUpdate,
+    ScheduleRequestFromTemplate, ScheduleRequestFromTemplateResult,
+    ScheduleRequestResponse, ScheduleRequestUpdate,
 )
 from app.services.schedule_request_service import schedule_request_service
 
@@ -23,14 +25,12 @@ router: APIRouter = APIRouter()
 async def list_my_requests(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-    period_id: str | None = None,
     date_from: date_type | None = None,
     date_to: date_type | None = None,
 ) -> list[ScheduleRequestResponse]:
     """내 스케줄 신청 목록."""
     return await schedule_request_service.list_requests_for_user(
         db, current_user.id,
-        period_id=UUID(period_id) if period_id else None,
         date_from=date_from,
         date_to=date_to,
     )
@@ -48,32 +48,53 @@ async def create_request(
     return result
 
 
-@router.post("/schedule-requests/from-template", response_model=list[ScheduleRequestResponse], status_code=201)
+@router.post("/schedule-requests/from-template", response_model=ScheduleRequestFromTemplateResult, status_code=201)
 async def create_from_template(
     data: ScheduleRequestFromTemplate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> list[ScheduleRequestResponse]:
-    """템플릿으로 자동 제출."""
-    results = await schedule_request_service.create_requests_from_template(
-        db, current_user.id, UUID(data.period_id), UUID(data.template_id),
+) -> ScheduleRequestFromTemplateResult:
+    """템플릿으로 자동 제출. on_conflict=skip(기본)/replace."""
+    result = await schedule_request_service.create_requests_from_template(
+        db, current_user.id,
+        store_id=UUID(data.store_id),
+        date_from=data.date_from,
+        date_to=data.date_to,
+        template_id=UUID(data.template_id),
+        on_conflict=data.on_conflict,
     )
     await db.commit()
-    return results
+    return result
 
 
-@router.post("/schedule-requests/copy-last-period", response_model=list[ScheduleRequestResponse], status_code=201)
+@router.post("/schedule-requests/copy-last-period", response_model=ScheduleRequestFromTemplateResult, status_code=201)
 async def copy_last_period(
     data: ScheduleRequestCopyLastPeriod,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> list[ScheduleRequestResponse]:
-    """지난 기간 복사."""
-    results = await schedule_request_service.copy_last_period(
-        db, current_user.id, UUID(data.period_id), UUID(data.store_id),
+) -> ScheduleRequestFromTemplateResult:
+    """지난 주 신청 복사. on_conflict=skip(기본)/replace."""
+    result = await schedule_request_service.copy_last_period(
+        db, current_user.id,
+        store_id=UUID(data.store_id),
+        date_from=data.date_from,
+        date_to=data.date_to,
+        on_conflict=data.on_conflict,
     )
     await db.commit()
-    return results
+    return result
+
+
+@router.post("/schedule-requests/batch", response_model=ScheduleRequestBatchResult)
+async def batch_submit_requests(
+    data: ScheduleRequestBatchSubmit,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> ScheduleRequestBatchResult:
+    """배치 제출 — 여러 신청을 한번에 생성/수정/삭제."""
+    result = await schedule_request_service.batch_submit(db, current_user.id, data)
+    await db.commit()
+    return result
 
 
 @router.put("/schedule-requests/{request_id}", response_model=ScheduleRequestResponse)

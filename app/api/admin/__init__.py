@@ -42,7 +42,7 @@ from app.api.admin.positions import router as positions_router
 
 # Phase 2 — Core Workflow 라우터 임포트
 from app.api.admin.checklists import router as checklists_router
-from app.api.admin.assignments import router as assignments_router
+# assignments 라우터 제거됨 — schedule 시스템으로 대체
 from app.api.admin.checklist_instances import router as checklist_instances_router
 
 # Phase 3 — Communication 라우터 임포트
@@ -107,8 +107,7 @@ admin_router.include_router(positions_router, tags=["Positions"])
 # ---------------------------------------------------------------------------
 # 체크리스트: /stores/{store_id}/checklist-templates 형태 (nested under stores)
 admin_router.include_router(checklists_router, tags=["Checklists"])
-# 업무 배정: /work-assignments 하위 (Work assignments)
-admin_router.include_router(assignments_router, prefix="/work-assignments", tags=["Assignments"])
+# 업무 배정 라우터 제거됨 — schedule 시스템으로 대체 (/admin/schedules 사용)
 # 체크리스트 인스턴스: /checklist-instances 하위 (Checklist instances)
 admin_router.include_router(checklist_instances_router, prefix="/checklist-instances", tags=["Checklist Instances"])
 

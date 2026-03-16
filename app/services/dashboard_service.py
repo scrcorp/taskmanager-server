@@ -14,9 +14,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy import func, select, case, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.assignment import WorkAssignment
 from app.models.attendance import Attendance
 from app.models.checklist import ChecklistInstance, ChecklistCompletion
+from app.models.schedule import Schedule
 from app.models.evaluation import Evaluation
 from app.models.organization import LaborLawSetting, Organization, Store
 from app.models.user import User
@@ -61,7 +61,7 @@ class DashboardService:
         date_to: date | None = None,
         store_id: UUID | None = None,
     ) -> dict:
-        """체크리스트 완료율 집계."""
+        """체크리스트 완료율 집계 (schedule + cl_instances 기반)."""
         today = await self._resolve_today(db, organization_id, store_id)
         if date_from is None:
             date_from = today - timedelta(days=7)
@@ -70,22 +70,22 @@ class DashboardService:
 
         base = (
             select(
-                func.count(WorkAssignment.id).label("total_assignments"),
+                func.count(ChecklistInstance.id).label("total_assignments"),
                 func.sum(
                     case(
-                        (WorkAssignment.status == "completed", 1),
+                        (ChecklistInstance.status == "completed", 1),
                         else_=0,
                     )
                 ).label("completed_assignments"),
             )
             .where(
-                WorkAssignment.organization_id == organization_id,
-                WorkAssignment.work_date >= date_from,
-                WorkAssignment.work_date <= date_to,
+                ChecklistInstance.organization_id == organization_id,
+                ChecklistInstance.work_date >= date_from,
+                ChecklistInstance.work_date <= date_to,
             )
         )
         if store_id:
-            base = base.where(WorkAssignment.store_id == store_id)
+            base = base.where(ChecklistInstance.store_id == store_id)
 
         result = await db.execute(base)
         row = result.one()
@@ -268,22 +268,22 @@ class DashboardService:
             select(
                 Store.name.label("store_name"),
                 User.full_name.label("user_name"),
-                WorkAssignment.work_date,
-                WorkAssignment.status,
-                WorkAssignment.total_items,
-                WorkAssignment.completed_items,
+                ChecklistInstance.work_date,
+                ChecklistInstance.status,
+                ChecklistInstance.total_items,
+                ChecklistInstance.completed_items,
             )
-            .join(Store, WorkAssignment.store_id == Store.id)
-            .join(User, WorkAssignment.user_id == User.id)
+            .join(Store, ChecklistInstance.store_id == Store.id)
+            .join(User, ChecklistInstance.user_id == User.id)
             .where(
-                WorkAssignment.organization_id == organization_id,
-                WorkAssignment.work_date >= date_from,
-                WorkAssignment.work_date <= date_to,
+                ChecklistInstance.organization_id == organization_id,
+                ChecklistInstance.work_date >= date_from,
+                ChecklistInstance.work_date <= date_to,
             )
-            .order_by(WorkAssignment.work_date.desc())
+            .order_by(ChecklistInstance.work_date.desc())
         )
         if store_id:
-            checklist_query = checklist_query.where(WorkAssignment.store_id == store_id)
+            checklist_query = checklist_query.where(ChecklistInstance.store_id == store_id)
 
         result = await db.execute(checklist_query)
         for row in result.all():

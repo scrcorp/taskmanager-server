@@ -11,6 +11,7 @@ from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.schedule import (
+    ScheduleConfirmPreview,
     ScheduleConfirmRequest,
     ScheduleConfirmResult,
     ScheduleRequestAdminCreate,
@@ -27,7 +28,6 @@ router: APIRouter = APIRouter()
 async def list_requests(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("schedules:read"))],
-    period_id: str | None = None,
     store_id: str | None = None,
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
@@ -37,7 +37,6 @@ async def list_requests(
     """직원 스케줄 신청 목록 조회."""
     items, total = await schedule_request_service.list_requests_admin(
         db,
-        period_id=UUID(period_id) if period_id else None,
         store_id=UUID(store_id) if store_id else None,
         date_from=date_from,
         date_to=date_to,
@@ -116,6 +115,21 @@ async def admin_delete_request(
     return {"ok": True}
 
 
+@router.post("/confirm/preview", response_model=ScheduleConfirmPreview)
+async def preview_confirm_requests(
+    data: ScheduleConfirmRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
+) -> ScheduleConfirmPreview:
+    """Confirm dry-run — DB 변경 없이 결과 예측만 반환 (S1)."""
+    return await schedule_request_service.preview_confirm(
+        db,
+        store_id=UUID(data.store_id),
+        date_from=data.date_from,
+        date_to=data.date_to,
+    )
+
+
 @router.post("/confirm", response_model=ScheduleConfirmResult)
 async def confirm_requests(
     data: ScheduleConfirmRequest,
@@ -130,7 +144,6 @@ async def confirm_requests(
         date_from=data.date_from,
         date_to=data.date_to,
         confirmed_by=current_user.id,
-        period_id=UUID(data.period_id) if data.period_id else None,
     )
     await db.commit()
     return result

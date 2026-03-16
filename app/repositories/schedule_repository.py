@@ -20,7 +20,6 @@ class ScheduleRepository(BaseRepository[Schedule]):
         self,
         db: AsyncSession,
         organization_id: UUID,
-        period_id: UUID | None = None,
         store_id: UUID | None = None,
         user_id: UUID | None = None,
         date_from: date | None = None,
@@ -32,8 +31,6 @@ class ScheduleRepository(BaseRepository[Schedule]):
         query: Select = select(Schedule).where(
             Schedule.organization_id == organization_id
         )
-        if period_id is not None:
-            query = query.where(Schedule.period_id == period_id)
         if store_id is not None:
             query = query.where(Schedule.store_id == store_id)
         if user_id is not None:
@@ -125,12 +122,20 @@ class ScheduleRepository(BaseRepository[Schedule]):
         result = await db.execute(query)
         return result.scalar() or 0
 
-    async def get_by_period(
-        self, db: AsyncSession, period_id: UUID,
+    async def get_by_store_date_range(
+        self,
+        db: AsyncSession,
+        store_id: UUID,
+        date_from: date,
+        date_to: date,
     ) -> list[Schedule]:
         result = await db.execute(
             select(Schedule)
-            .where(Schedule.period_id == period_id)
+            .where(
+                Schedule.store_id == store_id,
+                Schedule.work_date >= date_from,
+                Schedule.work_date <= date_to,
+            )
             .order_by(Schedule.work_date, Schedule.start_time)
         )
         return list(result.scalars().all())

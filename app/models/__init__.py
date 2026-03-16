@@ -12,7 +12,6 @@ Modules:
     token: 리프레시 토큰 (Refresh tokens)
     user_store: 사용자-매장 매핑 (User-Store association)
     checklist: 체크리스트 템플릿, 인스턴스, 완료, 코멘트 (Checklist templates, instances, completions, comments)
-    assignment: 근무 배정 (Work assignments with JSONB snapshots)
     communication: 공지사항, 추가 업무, 증빙, 읽음추적 (Announcements, tasks, evidences, read tracking)
     notification: 알림 (User notifications)
     schedule: 스케줄 및 승인 (Schedules and approvals)
@@ -27,7 +26,6 @@ from app.models.work import Shift, Position
 from app.models.token import RefreshToken
 from app.models.user_store import UserStore
 from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistTemplateLink, ChecklistInstance, ChecklistCompletion, ChecklistItemReview, ChecklistReviewContent, ChecklistComment
-from app.models.assignment import WorkAssignment
 from app.models.communication import Announcement, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, AnnouncementRead, Voice
 from app.models.notification import Notification
 from app.models.schedule import Schedule, StoreWorkRole, StoreBreakRule, SchedulePeriod, ScheduleRequestTemplate, ScheduleRequestTemplateItem, ScheduleRequest
@@ -42,7 +40,6 @@ __all__ = [
     "Shift", "Position",
     "RefreshToken", "UserStore",
     "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistTemplateLink", "ChecklistInstance", "ChecklistCompletion", "ChecklistItemReview", "ChecklistReviewContent", "ChecklistComment",
-    "WorkAssignment",
     "Announcement", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "AnnouncementRead", "Voice",
     "Notification",
     "Schedule", "StoreWorkRole", "StoreBreakRule", "SchedulePeriod", "ScheduleRequestTemplate", "ScheduleRequestTemplateItem", "ScheduleRequest",

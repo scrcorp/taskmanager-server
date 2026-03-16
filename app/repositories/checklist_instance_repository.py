@@ -144,34 +144,6 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
         result = await db.execute(query)
         return result.scalar_one_or_none()
 
-    async def get_by_assignment_id(
-        self,
-        db: AsyncSession,
-        work_assignment_id: UUID,
-    ) -> ChecklistInstance | None:
-        """근무 배정 ID로 인스턴스를 조회합니다 (레거시 호환).
-
-        Retrieve a checklist instance by its work assignment ID (legacy compat).
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            work_assignment_id: 근무 배정 UUID (Work assignment UUID)
-
-        Returns:
-            ChecklistInstance | None: 인스턴스 또는 None (Instance or None)
-        """
-        query: Select = (
-            select(ChecklistInstance)
-            .where(ChecklistInstance.work_assignment_id == work_assignment_id)
-            .options(
-                selectinload(ChecklistInstance.completions).selectinload(ChecklistCompletion.history),
-                selectinload(ChecklistInstance.reviews).selectinload(ChecklistItemReview.contents),
-                selectinload(ChecklistInstance.reviews).selectinload(ChecklistItemReview.review_history),
-            )
-        )
-        result = await db.execute(query)
-        return result.scalar_one_or_none()
-
     async def get_user_instances(
         self,
         db: AsyncSession,

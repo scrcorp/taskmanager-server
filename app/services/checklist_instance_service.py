@@ -13,7 +13,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.assignment import WorkAssignment
 from app.models.checklist import (
     ChecklistCompletion,
     ChecklistCompletionHistory,
@@ -37,40 +36,72 @@ class ChecklistInstanceService:
     status management, and response building.
     """
 
-    async def create_instance(
+    async def create_for_schedule(
         self,
         db: AsyncSession,
-        assignment: WorkAssignment,
-        template: ChecklistTemplate | None,
-        snapshot: dict,
-        total_items: int,
-    ) -> ChecklistInstance:
-        """근무 배정에 대한 체크리스트 인스턴스를 생성합니다.
+        schedule_id: UUID,
+        organization_id: UUID,
+        store_id: UUID,
+        user_id: UUID,
+        work_date: date,
+        work_role_id: UUID | None,
+    ) -> ChecklistInstance | None:
+        """스케줄에 대한 체크리스트 인스턴스를 자동 생성합니다.
 
-        Create a checklist instance for a work assignment.
-        Called during assignment creation to create the parallel cl_instances row.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            assignment: 근무 배정 ORM 객체 (Work assignment ORM object)
-            template: 원본 체크리스트 템플릿 (Source template, may be None)
-            snapshot: JSONB 스냅샷 데이터 (Snapshot data from assignment creation)
-            total_items: 총 항목 수 (Total items count)
-
-        Returns:
-            ChecklistInstance: 생성된 인스턴스 (Created instance)
+        work_role의 default_checklist_id에서 템플릿을 찾아 스냅샷 생성.
+        템플릿이 없으면 None 반환 (체크리스트 없는 스케줄).
         """
-        instance: ChecklistInstance = await checklist_instance_repository.create(
+        if not work_role_id:
+            return None
+
+        from app.models.schedule import StoreWorkRole
+
+        wr_result = await db.execute(
+            select(StoreWorkRole).where(StoreWorkRole.id == work_role_id)
+        )
+        wr = wr_result.scalar_one_or_none()
+        if not wr or not wr.default_checklist_id:
+            return None
+
+        # 템플릿 + 아이템 로드
+        template_result = await db.execute(
+            select(ChecklistTemplate)
+            .options(selectinload(ChecklistTemplate.items))
+            .where(ChecklistTemplate.id == wr.default_checklist_id)
+        )
+        template = template_result.scalar_one_or_none()
+        if not template or not template.items:
+            return None
+
+        # 스냅샷 생성
+        snapshot_items = []
+        for item in sorted(template.items, key=lambda x: x.sort_order):
+            snapshot_items.append({
+                "item_index": len(snapshot_items),
+                "title": item.title,
+                "description": item.description,
+                "verification_type": item.verification_type,
+                "is_completed": False,
+                "completed_at": None,
+            })
+
+        snapshot: dict = {
+            "template_id": str(template.id),
+            "template_name": template.title,
+            "items": snapshot_items,
+        }
+
+        instance = await checklist_instance_repository.create(
             db,
             {
-                "organization_id": assignment.organization_id,
-                "template_id": template.id if template else None,
-                "work_assignment_id": assignment.id,
-                "store_id": assignment.store_id,
-                "user_id": assignment.user_id,
-                "work_date": assignment.work_date,
+                "organization_id": organization_id,
+                "template_id": template.id,
+                "schedule_id": schedule_id,
+                "store_id": store_id,
+                "user_id": user_id,
+                "work_date": work_date,
                 "snapshot": snapshot,
-                "total_items": total_items,
+                "total_items": len(snapshot_items),
                 "completed_items": 0,
                 "status": "pending",
             },
@@ -136,24 +167,6 @@ class ChecklistInstanceService:
         if instance is None:
             raise NotFoundError("체크리스트 인스턴스를 찾을 수 없습니다 (Checklist instance not found)")
         return instance
-
-    async def get_instance_by_assignment(
-        self,
-        db: AsyncSession,
-        work_assignment_id: UUID,
-    ) -> ChecklistInstance | None:
-        """근무 배정 ID로 인스턴스를 조회합니다.
-
-        Get checklist instance by work assignment ID.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            work_assignment_id: 근무 배정 UUID (Work assignment UUID)
-
-        Returns:
-            ChecklistInstance | None: 인스턴스 또는 None (Instance or None)
-        """
-        return await checklist_instance_repository.get_by_assignment_id(db, work_assignment_id)
 
     async def get_my_instances(
         self,
@@ -276,6 +289,57 @@ class ChecklistInstanceService:
         await db.refresh(instance)
 
         # completions 재로드 — Reload with completions
+        return await self.get_instance(db, instance_id)
+
+    async def uncomplete_item(
+        self,
+        db: AsyncSession,
+        instance_id: UUID,
+        item_index: int,
+        user_id: UUID,
+    ) -> ChecklistInstance:
+        """체크리스트 항목 완료를 취소합니다.
+
+        Uncomplete a checklist item — delete the completion record and update counts.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            instance_id: 인스턴스 UUID (Instance UUID)
+            item_index: 취소할 항목 인덱스 (Item index to uncomplete)
+            user_id: 사용자 UUID (User UUID)
+
+        Returns:
+            ChecklistInstance: 업데이트된 인스턴스 (Updated instance)
+        """
+        instance: ChecklistInstance | None = await checklist_instance_repository.get_with_completions(
+            db, instance_id
+        )
+        if instance is None:
+            raise NotFoundError("체크리스트 인스턴스를 찾을 수 없습니다 (Checklist instance not found)")
+
+        if instance.user_id != user_id:
+            raise ForbiddenError("본인의 체크리스트만 수정할 수 있습니다 (Can only modify your own checklist)")
+
+        # 완료 기록 조회
+        existing: ChecklistCompletion | None = await checklist_instance_repository.get_completion(
+            db, instance_id, item_index
+        )
+        if existing is None:
+            raise BadRequestError("완료되지 않은 항목입니다 (Item is not completed)")
+
+        # 완료 기록 삭제
+        await checklist_instance_repository.delete_completion(db, existing)
+
+        # 카운트/상태 업데이트
+        new_completed: int = max(instance.completed_items - 1, 0)
+        instance.completed_items = new_completed
+        if new_completed == 0:
+            instance.status = "pending"
+        elif new_completed < instance.total_items:
+            instance.status = "in_progress"
+
+        await db.flush()
+        await db.refresh(instance)
         return await self.get_instance(db, instance_id)
 
     async def get_review_summary(
@@ -413,7 +477,7 @@ class ChecklistInstanceService:
         return {
             "id": str(instance.id),
             "template_id": str(instance.template_id) if instance.template_id else None,
-            "work_assignment_id": str(instance.work_assignment_id),
+            "schedule_id": str(instance.schedule_id) if instance.schedule_id else None,
             "store_id": str(instance.store_id),
             "store_name": store_name,
             "user_id": str(instance.user_id),

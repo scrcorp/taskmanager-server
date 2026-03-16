@@ -122,7 +122,7 @@ class SchedulePeriodResponse(BaseModel):
 
 
 class RequestTemplateItemCreate(BaseModel):
-    day_of_week: int  # 0=Mon, 6=Sun
+    day_of_week: int  # 0=Sun, 6=Sat
     work_role_id: str
     preferred_start_time: str | None = None
     preferred_end_time: str | None = None
@@ -167,7 +167,6 @@ class RequestTemplateResponse(BaseModel):
 
 
 class ScheduleRequestCreate(BaseModel):
-    period_id: str | None = None
     store_id: str
     work_role_id: str | None = None
     work_date: date
@@ -191,7 +190,6 @@ class ScheduleRequestUpdate(BaseModel):
 
 class ScheduleRequestResponse(BaseModel):
     id: str
-    period_id: str | None
     user_id: str
     user_name: str | None = None
     store_id: str
@@ -218,13 +216,67 @@ class ScheduleRequestResponse(BaseModel):
 
 
 class ScheduleRequestFromTemplate(BaseModel):
-    period_id: str
+    store_id: str
+    date_from: date
+    date_to: date
     template_id: str
+    on_conflict: str = "skip"  # "skip" | "replace"
 
 
 class ScheduleRequestCopyLastPeriod(BaseModel):
-    period_id: str
     store_id: str
+    date_from: date
+    date_to: date
+    on_conflict: str = "skip"  # "skip" | "replace"
+
+
+class ScheduleRequestSkippedItem(BaseModel):
+    work_date: date
+    work_role_id: str | None = None
+    work_role_name: str | None = None
+    reason: str
+
+
+class ScheduleRequestFromTemplateResult(BaseModel):
+    created: list[ScheduleRequestResponse] = []
+    skipped: list[ScheduleRequestSkippedItem] = []
+    replaced: list[ScheduleRequestResponse] = []
+
+
+class ScheduleRequestBatchItem(BaseModel):
+    """배치 제출 - 신규 생성 항목."""
+    store_id: str
+    work_date: date
+    work_role_id: str | None = None
+    preferred_start_time: str | None = None  # "HH:MM"
+    preferred_end_time: str | None = None
+    note: str | None = None
+
+
+class ScheduleRequestBatchUpdate(BaseModel):
+    """배치 제출 - 기존 수정 항목."""
+    id: str
+    store_id: str | None = None
+    work_role_id: str | None = None
+    work_date: date | None = None
+    preferred_start_time: str | None = None
+    preferred_end_time: str | None = None
+    note: str | None = None
+
+
+class ScheduleRequestBatchSubmit(BaseModel):
+    """배치 제출 요청 — 생성/수정/삭제를 한번에."""
+    creates: list[ScheduleRequestBatchItem] = []
+    updates: list[ScheduleRequestBatchUpdate] = []
+    deletes: list[str] = []  # request UUIDs
+
+
+class ScheduleRequestBatchResult(BaseModel):
+    """배치 제출 결과."""
+    created: list[ScheduleRequestResponse] = []
+    updated: list[ScheduleRequestResponse] = []
+    deleted_count: int = 0
+    errors: list[str] = []
 
 
 class ScheduleRequestAdminCreate(BaseModel):
@@ -258,7 +310,6 @@ class ScheduleConfirmRequest(BaseModel):
     store_id: str
     date_from: date
     date_to: date
-    period_id: str | None = None
 
 
 class ScheduleConfirmResult(BaseModel):
@@ -268,11 +319,24 @@ class ScheduleConfirmResult(BaseModel):
     errors: list[str] = []
 
 
+class ScheduleConfirmPreviewFail(BaseModel):
+    request_id: str
+    user_name: str | None = None
+    work_date: date
+    reason: str
+
+
+class ScheduleConfirmPreview(BaseModel):
+    """Confirm dry-run 결과 — DB 변경 없이 예측만 반환."""
+    will_confirm: int
+    will_skip_rejected: int
+    will_fail: list[ScheduleConfirmPreviewFail] = []
+
+
 # ─── Schedule (확정 스케줄) ──────────────────────────
 
 
 class ScheduleCreate(BaseModel):
-    period_id: str | None = None
     request_id: str | None = None
     user_id: str
     store_id: str
@@ -301,7 +365,6 @@ class ScheduleUpdate(BaseModel):
 class ScheduleResponse(BaseModel):
     id: str
     organization_id: str
-    period_id: str | None
     request_id: str | None
     user_id: str
     user_name: str | None = None

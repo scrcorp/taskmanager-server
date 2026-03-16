@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
-from app.models.assignment import WorkAssignment
 from app.models.checklist import ChecklistInstance, ChecklistItemReview
 from app.models.communication import AdditionalTask, Announcement
 from app.models.notification import Notification
@@ -112,33 +111,6 @@ class NotificationService:
         return await notification_repository.mark_all_read(db, user_id)
 
     # --- 자동 생성 (Auto-creation) ---
-
-    async def create_for_assignment(
-        self,
-        db: AsyncSession,
-        assignment: WorkAssignment,
-    ) -> Notification:
-        """업무 배정 시 알림을 자동 생성합니다.
-
-        Auto-create a notification when a work assignment is created.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            assignment: 업무 배정 객체 (Work assignment object)
-
-        Returns:
-            Notification: 생성된 알림 (Created notification)
-        """
-        message: str = f"새 업무가 배정되었습니다 (New work assignment for {assignment.work_date})"
-        return await notification_repository.create_notification(
-            db,
-            organization_id=assignment.organization_id,
-            user_id=assignment.user_id,
-            notification_type="work_assigned",
-            message=message,
-            reference_type="work_assignment",
-            reference_id=assignment.id,
-        )
 
     async def create_for_task(
         self,
