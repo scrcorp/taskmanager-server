@@ -222,15 +222,14 @@ async def upsert_review(
         comment_text=data.comment_text,
         comment_photo_url=data.comment_photo_url,
     )
-    await db.commit()
 
     return {
         "id": str(review.id),
-        "instance_id": str(review.instance_id),
-        "item_index": review.item_index,
+        "instance_id": str(instance_id),
+        "item_index": item_index,
         "reviewer_id": str(review.reviewer_id),
         "reviewer_name": current_user.full_name,
-        "result": review.result,
+        "result": review.review_result,
         "contents": [],
         "history": [],
         "created_at": review.created_at,
@@ -246,9 +245,8 @@ async def delete_review(
     current_user: Annotated[User, Depends(require_permission("checklists:read"))],
 ) -> dict:
     """아이템 리뷰를 삭제합니다."""
-    await checklist_instance_service.delete_review(db, instance_id, item_index)
-    await db.commit()
-    return {"message": "리뷰가 삭제되었습니다 (Review deleted)"}
+    await checklist_instance_service.delete_review(db, instance_id, item_index, current_user.id)
+    return {"message": "Review deleted"}
 
 
 @router.post("/{instance_id}/items/{item_index}/review/contents", response_model=ReviewContentResponse)
@@ -268,11 +266,11 @@ async def add_review_content(
         content_type=data.type,
         content=data.content,
     )
-    await db.commit()
 
+    review_id = getattr(rc, "review_id", rc.item_id)
     return {
         "id": str(rc.id),
-        "review_id": str(rc.review_id),
+        "review_id": str(review_id),
         "author_id": str(rc.author_id),
         "author_name": current_user.full_name,
         "type": rc.type,
@@ -291,5 +289,4 @@ async def delete_review_content(
 ) -> dict:
     """리뷰 콘텐츠를 삭제합니다."""
     await checklist_instance_service.delete_review_content(db, content_id)
-    await db.commit()
-    return {"message": "콘텐츠가 삭제되었습니다 (Content deleted)"}
+    return {"message": "Content deleted"}

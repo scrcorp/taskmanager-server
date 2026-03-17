@@ -116,7 +116,6 @@ async def complete_my_task(
         user_id=current_user.id,
         organization_id=current_user.organization_id,
     )
-    await db.commit()
 
     # 담당자 포함 상세 다시 조회 — Re-fetch with assignees loaded
     task = await task_service.get_detail(
@@ -155,7 +154,6 @@ async def add_task_evidence(
         file_type=data.file_type,
         note=data.note,
     )
-    await db.commit()
 
     return await task_evidence_service.build_response(db, evidence)
 
@@ -185,6 +183,5 @@ async def delete_task_evidence(
         evidence_id=evidence_id,
         user_id=current_user.id,
     )
-    await db.commit()
 
-    return {"message": "증빙이 삭제되었습니다 (Evidence deleted)"}
+    return {"message": "Evidence deleted"}

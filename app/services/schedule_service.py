@@ -196,39 +196,45 @@ class ScheduleService:
         )
         if not validation.valid:
             detail = "; ".join(validation.errors + validation.warnings)
-            raise BadRequestError(f"검증 실패: {detail}")
+            raise BadRequestError(f"Validation failed: {detail}")
 
         net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
 
-        entry = await schedule_repository.create(db, {
-            "organization_id": organization_id,
-            "request_id": UUID(data.request_id) if data.request_id else None,
-            "user_id": user_id,
-            "store_id": store_id,
-            "work_role_id": UUID(data.work_role_id) if data.work_role_id else None,
-            "work_date": data.work_date,
-            "start_time": start_time,
-            "end_time": end_time,
-            "break_start_time": break_start,
-            "break_end_time": break_end,
-            "net_work_minutes": net,
-            "status": "confirmed",
-            "created_by": created_by,
-        })
+        try:
+            entry = await schedule_repository.create(db, {
+                "organization_id": organization_id,
+                "request_id": UUID(data.request_id) if data.request_id else None,
+                "user_id": user_id,
+                "store_id": store_id,
+                "work_role_id": UUID(data.work_role_id) if data.work_role_id else None,
+                "work_date": data.work_date,
+                "start_time": start_time,
+                "end_time": end_time,
+                "break_start_time": break_start,
+                "break_end_time": break_end,
+                "net_work_minutes": net,
+                "status": "confirmed",
+                "created_by": created_by,
+            })
 
-        # 체크리스트 인스턴스 자동 생성
-        from app.services.checklist_instance_service import checklist_instance_service
-        await checklist_instance_service.create_for_schedule(
-            db,
-            schedule_id=entry.id,
-            organization_id=organization_id,
-            store_id=store_id,
-            user_id=user_id,
-            work_date=data.work_date,
-            work_role_id=UUID(data.work_role_id) if data.work_role_id else None,
-        )
+            # 체크리스트 인스턴스 자동 생성
+            from app.services.checklist_instance_service import checklist_instance_service
+            await checklist_instance_service.create_for_schedule(
+                db,
+                schedule_id=entry.id,
+                organization_id=organization_id,
+                store_id=store_id,
+                user_id=user_id,
+                work_date=data.work_date,
+                work_role_id=UUID(data.work_role_id) if data.work_role_id else None,
+            )
 
-        return await self._to_response(db, entry)
+            result = await self._to_response(db, entry)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def bulk_create(
         self,
@@ -259,59 +265,64 @@ class ScheduleService:
         )
 
         results = []
-        for req in requests:
-            if req.status not in ("submitted", "accepted"):
-                continue
-            # Get work role defaults
-            start_time = req.preferred_start_time
-            end_time = req.preferred_end_time
-            break_start = None
-            break_end = None
+        try:
+            for req in requests:
+                if req.status not in ("submitted", "accepted"):
+                    continue
+                # Get work role defaults
+                start_time = req.preferred_start_time
+                end_time = req.preferred_end_time
+                break_start = None
+                break_end = None
 
-            if req.work_role_id:
-                wr = await work_role_repository.get_by_id(db, req.work_role_id)
-                if wr:
-                    if start_time is None:
-                        start_time = wr.default_start_time
-                    if end_time is None:
-                        end_time = wr.default_end_time
-                    break_start = wr.break_start_time
-                    break_end = wr.break_end_time
+                if req.work_role_id:
+                    wr = await work_role_repository.get_by_id(db, req.work_role_id)
+                    if wr:
+                        if start_time is None:
+                            start_time = wr.default_start_time
+                        if end_time is None:
+                            end_time = wr.default_end_time
+                        break_start = wr.break_start_time
+                        break_end = wr.break_end_time
 
-            if start_time is None or end_time is None:
-                continue  # Skip if no time info
+                if start_time is None or end_time is None:
+                    continue  # Skip if no time info
 
-            net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
-            entry = await schedule_repository.create(db, {
-                "organization_id": organization_id,
-                "request_id": req.id,
-                "user_id": req.user_id,
-                "store_id": req.store_id,
-                "work_role_id": req.work_role_id,
-                "work_date": req.work_date,
-                "start_time": start_time,
-                "end_time": end_time,
-                "break_start_time": break_start,
-                "break_end_time": break_end,
-                "net_work_minutes": net,
-                "status": "confirmed",
-                "created_by": created_by,
-            })
+                net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
+                entry = await schedule_repository.create(db, {
+                    "organization_id": organization_id,
+                    "request_id": req.id,
+                    "user_id": req.user_id,
+                    "store_id": req.store_id,
+                    "work_role_id": req.work_role_id,
+                    "work_date": req.work_date,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "break_start_time": break_start,
+                    "break_end_time": break_end,
+                    "net_work_minutes": net,
+                    "status": "confirmed",
+                    "created_by": created_by,
+                })
 
-            # 체크리스트 인스턴스 자동 생성
-            from app.services.checklist_instance_service import checklist_instance_service
-            await checklist_instance_service.create_for_schedule(
-                db,
-                schedule_id=entry.id,
-                organization_id=organization_id,
-                store_id=req.store_id,
-                user_id=req.user_id,
-                work_date=req.work_date,
-                work_role_id=req.work_role_id,
-            )
+                # 체크리스트 인스턴스 자동 생성
+                from app.services.checklist_instance_service import checklist_instance_service
+                await checklist_instance_service.create_for_schedule(
+                    db,
+                    schedule_id=entry.id,
+                    organization_id=organization_id,
+                    store_id=req.store_id,
+                    user_id=req.user_id,
+                    work_date=req.work_date,
+                    work_role_id=req.work_role_id,
+                )
 
-            results.append(await self._to_response(db, entry))
-        return results
+                results.append(await self._to_response(db, entry))
+            await db.commit()
+            return results
+        except Exception:
+            await db.rollback()
+            raise
 
     async def get_entry(
         self, db: AsyncSession, entry_id: UUID, organization_id: UUID,
@@ -332,7 +343,7 @@ class ScheduleService:
         if entry is None:
             raise NotFoundError("Schedule not found")
         if entry.status == "cancelled":
-            raise BadRequestError("취소된 스케줄은 수정할 수 없습니다")
+            raise BadRequestError("Cancelled schedules cannot be updated")
 
         update_data: dict = {}
         new_user_id = entry.user_id
@@ -376,17 +387,23 @@ class ScheduleService:
         )
         if not validation.valid:
             detail = "; ".join(validation.errors + validation.warnings)
-            raise BadRequestError(f"검증 실패: {detail}")
+            raise BadRequestError(f"Validation failed: {detail}")
 
         # Recalculate net_work_minutes
         update_data["net_work_minutes"] = self._calc_net_minutes(
             new_start, new_end, new_break_start, new_break_end  # type: ignore[arg-type]
         )
 
-        updated = await schedule_repository.update(db, entry_id, update_data, organization_id)
-        if updated is None:
-            raise NotFoundError("Schedule not found")
-        return await self._to_response(db, updated)
+        try:
+            updated = await schedule_repository.update(db, entry_id, update_data, organization_id)
+            if updated is None:
+                raise NotFoundError("Schedule not found")
+            result = await self._to_response(db, updated)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_entry(
         self, db: AsyncSession, entry_id: UUID, organization_id: UUID,
@@ -394,7 +411,12 @@ class ScheduleService:
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
             raise NotFoundError("Schedule not found")
-        await schedule_repository.delete(db, entry_id, organization_id)
+        try:
+            await schedule_repository.delete(db, entry_id, organization_id)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     async def validate_entry(
         self, db: AsyncSession, organization_id: UUID, data: ScheduleCreate,

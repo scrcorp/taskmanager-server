@@ -49,11 +49,9 @@ async def create_entry(
     current_user: Annotated[User, Depends(require_permission("schedules:create"))],
 ) -> ScheduleResponse:
     """단일 스케줄 생성."""
-    result = await schedule_service.create_entry(
+    return await schedule_service.create_entry(
         db, current_user.organization_id, data, current_user.id,
     )
-    await db.commit()
-    return result
 
 
 @router.post("/bulk", response_model=list[ScheduleResponse], status_code=201)
@@ -63,11 +61,9 @@ async def bulk_create(
     current_user: Annotated[User, Depends(require_permission("schedules:create"))],
 ) -> list[ScheduleResponse]:
     """벌크 스케줄 생성."""
-    results = await schedule_service.bulk_create(
+    return await schedule_service.bulk_create(
         db, current_user.organization_id, data.entries, current_user.id,
     )
-    await db.commit()
-    return results
 
 
 @router.post("/generate-from-requests", response_model=list[ScheduleResponse], status_code=201)
@@ -82,11 +78,9 @@ async def generate_from_requests(
     from app.utils.exceptions import BadRequestError
     if not store_id or date_from is None or date_to is None:
         raise BadRequestError("store_id, date_from, date_to are required")
-    results = await schedule_service.generate_from_requests(
+    return await schedule_service.generate_from_requests(
         db, current_user.organization_id, UUID(store_id), date_from, date_to, current_user.id,
     )
-    await db.commit()
-    return results
 
 
 @router.get("/{entry_id}", response_model=ScheduleResponse)
@@ -107,11 +101,9 @@ async def update_entry(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleResponse:
     """스케줄 수정."""
-    result = await schedule_service.update_entry(
+    return await schedule_service.update_entry(
         db, entry_id, current_user.organization_id, data,
     )
-    await db.commit()
-    return result
 
 
 @router.delete("/{entry_id}", status_code=204)
@@ -122,7 +114,6 @@ async def delete_entry(
 ) -> None:
     """스케줄 삭제."""
     await schedule_service.delete_entry(db, entry_id, current_user.organization_id)
-    await db.commit()
 
 
 @router.post("/validate", response_model=ScheduleValidation)

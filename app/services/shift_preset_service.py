@@ -40,16 +40,21 @@ class ShiftPresetService:
     ) -> ShiftPresetResponse:
         h1, m1 = map(int, data.start_time.split(":"))
         h2, m2 = map(int, data.end_time.split(":"))
-        preset = await shift_preset_repository.create(db, {
-            "organization_id": organization_id,
-            "store_id": store_id,
-            "shift_id": UUID(data.shift_id),
-            "name": data.name,
-            "start_time": time(h1, m1),
-            "end_time": time(h2, m2),
-            "sort_order": data.sort_order,
-        })
-        return self._to_response(preset)
+        try:
+            preset = await shift_preset_repository.create(db, {
+                "organization_id": organization_id,
+                "store_id": store_id,
+                "shift_id": UUID(data.shift_id),
+                "name": data.name,
+                "start_time": time(h1, m1),
+                "end_time": time(h2, m2),
+                "sort_order": data.sort_order,
+            })
+            await db.commit()
+            return self._to_response(preset)
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_preset(
         self, db: AsyncSession, preset_id: UUID, organization_id: UUID, data: ShiftPresetUpdate
@@ -61,17 +66,27 @@ class ShiftPresetService:
         if "end_time" in update_data and update_data["end_time"]:
             h, m = map(int, update_data["end_time"].split(":"))
             update_data["end_time"] = time(h, m)
-        preset = await shift_preset_repository.update(db, preset_id, update_data, organization_id)
-        if preset is None:
-            raise NotFoundError("Shift preset not found")
-        return self._to_response(preset)
+        try:
+            preset = await shift_preset_repository.update(db, preset_id, update_data, organization_id)
+            if preset is None:
+                raise NotFoundError("Shift preset not found")
+            await db.commit()
+            return self._to_response(preset)
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_preset(
         self, db: AsyncSession, preset_id: UUID, organization_id: UUID
     ) -> None:
-        deleted = await shift_preset_repository.delete(db, preset_id, organization_id)
-        if not deleted:
-            raise NotFoundError("Shift preset not found")
+        try:
+            deleted = await shift_preset_repository.delete(db, preset_id, organization_id)
+            if not deleted:
+                raise NotFoundError("Shift preset not found")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 shift_preset_service: ShiftPresetService = ShiftPresetService()

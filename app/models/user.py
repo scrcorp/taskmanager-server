@@ -11,6 +11,7 @@ Tables:
 
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 from sqlalchemy import String, Boolean, DateTime, Integer, ForeignKey, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,15 +21,15 @@ from app.database import Base
 class Role(Base):
     """역할 모델 — 조직 내 권한 수준을 정의.
 
-    Role model — Defines permission levels within an organization.
-    Lower level numbers indicate higher authority:
-        1 = owner, 2 = general_manager, 3 = supervisor, 4 = staff
+    Role model — Defines permission priority within an organization.
+    Lower priority numbers indicate higher authority:
+        10 = owner, 20 = general_manager, 30 = supervisor, 40 = staff
 
     Attributes:
         id: 고유 식별자 UUID (Unique identifier)
         organization_id: 소속 조직 FK (Parent organization foreign key)
         name: 역할 이름 (Role name, e.g. "owner", "staff")
-        level: 권한 레벨 (Permission level, 1=highest)
+        priority: 권한 우선순위 (Permission priority, 10=highest/owner)
         created_at: 생성 일시 UTC (Creation timestamp)
         updated_at: 수정 일시 UTC (Last update timestamp)
 
@@ -38,7 +39,7 @@ class Role(Base):
 
     Constraints:
         uq_role_org_name: 조직 내 역할 이름 고유 (Unique role name per org)
-        uq_role_org_level: 조직 내 역할 레벨 고유 (Unique role level per org)
+        uq_role_org_priority: 조직 내 역할 우선순위 고유 (Unique role priority per org)
     """
 
     __tablename__ = "roles"
@@ -117,6 +118,12 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # 이메일 인증 여부 — Whether email has been verified
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 로그인 실패 횟수 — Failed login attempt counter (reset on success)
+    failed_login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # 잠금 일시 — Timestamp when account was locked due to too many failed logins
+    locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 소프트 삭제 일시 — Timestamp when user was soft-deleted (NULL = active)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)

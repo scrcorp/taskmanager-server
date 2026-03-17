@@ -140,15 +140,20 @@ class PositionService:
         )
         next_order: int = max((p.sort_order for p in existing_positions), default=-1) + 1
 
-        position: Position = await position_repository.create(
-            db,
-            {
-                "store_id": store_id,
-                "name": data.name,
-                "sort_order": next_order,
-            },
-        )
-        return self._to_response(position)
+        try:
+            position: Position = await position_repository.create(
+                db,
+                {
+                    "store_id": store_id,
+                    "name": data.name,
+                    "sort_order": next_order,
+                },
+            )
+            await db.commit()
+            return self._to_response(position)
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_position(
         self,
@@ -197,13 +202,17 @@ class PositionService:
                 )
 
         update_data: dict = data.model_dump(exclude_unset=True)
-        position: Position | None = await position_repository.update(
-            db, position_id, update_data
-        )
-        if position is None:
-            raise NotFoundError("Position not found")
-
-        return self._to_response(position)
+        try:
+            position: Position | None = await position_repository.update(
+                db, position_id, update_data
+            )
+            if position is None:
+                raise NotFoundError("Position not found")
+            await db.commit()
+            return self._to_response(position)
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_position(
         self,
@@ -234,9 +243,14 @@ class PositionService:
         if existing is None or existing.store_id != store_id:
             raise NotFoundError("Position not found in this store")
 
-        deleted: bool = await position_repository.delete(db, position_id)
-        if not deleted:
-            raise NotFoundError("Position not found")
+        try:
+            deleted: bool = await position_repository.delete(db, position_id)
+            if not deleted:
+                raise NotFoundError("Position not found")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # 싱글턴 인스턴스 — Singleton instance

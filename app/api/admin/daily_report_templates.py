@@ -68,7 +68,6 @@ async def create_template(
     template = await daily_report_service.create_template(
         db, current_user.organization_id, data
     )
-    await db.commit()
     return _build_template_response(template)
 
 
@@ -136,7 +135,6 @@ async def create_template_from_excel(
     template = await daily_report_service.create_template(
         db, current_user.organization_id, data
     )
-    await db.commit()
     return _build_template_response(template)
 
 
@@ -165,7 +163,6 @@ async def update_template(
     template = await daily_report_service.update_template(
         db, template_id, current_user.organization_id, data
     )
-    await db.commit()
     return _build_template_response(template)
 
 
@@ -178,4 +175,3 @@ async def delete_template(
     await daily_report_service.delete_template(
         db, template_id, current_user.organization_id
     )
-    await db.commit()

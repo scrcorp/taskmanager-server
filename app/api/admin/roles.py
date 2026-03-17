@@ -43,11 +43,9 @@ async def create_role(
     Create a new role in the current organization.
     """
     org_id: UUID = current_user.organization_id
-    result: RoleResponse = await role_service.create_role(
+    return await role_service.create_role(
         db, org_id, data, caller_priority=current_user.role.priority
     )
-    await db.commit()
-    return result
 
 
 @router.put("/{role_id}", response_model=RoleResponse)
@@ -62,11 +60,9 @@ async def update_role(
     Update an existing role.
     """
     org_id: UUID = current_user.organization_id
-    result: RoleResponse = await role_service.update_role(
+    return await role_service.update_role(
         db, role_id, org_id, data, caller_priority=current_user.role.priority
     )
-    await db.commit()
-    return result
 
 
 @router.delete("/{role_id}", status_code=204)
@@ -81,4 +77,3 @@ async def delete_role(
     """
     org_id: UUID = current_user.organization_id
     await role_service.delete_role(db, role_id, org_id, caller_priority=current_user.role.priority)
-    await db.commit()

@@ -15,6 +15,7 @@ Tables:
 
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 from sqlalchemy import String, Integer, DateTime, Text, ForeignKey, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -112,12 +113,14 @@ class Evaluation(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     store_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
-    evaluator_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    evaluatee_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    template_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("eval_templates.id", ondelete="SET NULL"), nullable=True)
+    evaluator_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    evaluatee_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    template_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("eval_templates.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="draft")  # draft, submitted
+    # 소프트 삭제 일시 — Timestamp when evaluation was soft-deleted (NULL = active)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     responses = relationship("EvalResponse", back_populates="evaluation", cascade="all, delete-orphan")
 

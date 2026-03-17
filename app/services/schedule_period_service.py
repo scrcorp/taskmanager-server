@@ -93,18 +93,24 @@ class SchedulePeriodService:
 
         # Overlap check
         if await schedule_period_repository.check_overlap(db, store_id, data.period_start, data.period_end):
-            raise BadRequestError("이 매장에 해당 기간과 겹치는 스케줄 기간이 이미 존재합니다")
+            raise BadRequestError("A schedule period overlapping this date range already exists for this store")
 
-        period = await schedule_period_repository.create(db, {
-            "organization_id": organization_id,
-            "store_id": store_id,
-            "period_start": data.period_start,
-            "period_end": data.period_end,
-            "request_deadline": data.request_deadline,
-            "status": "open",
-            "created_by": created_by,
-        })
-        return await self._to_response(db, period)
+        try:
+            period = await schedule_period_repository.create(db, {
+                "organization_id": organization_id,
+                "store_id": store_id,
+                "period_start": data.period_start,
+                "period_end": data.period_end,
+                "request_deadline": data.request_deadline,
+                "status": "open",
+                "created_by": created_by,
+            })
+            result = await self._to_response(db, period)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def get_period(
         self, db: AsyncSession, period_id: UUID, organization_id: UUID,
@@ -118,7 +124,7 @@ class SchedulePeriodService:
         period = await self._get_period_or_404(db, period_id, organization_id)
 
         if period.status not in ("open",):
-            raise BadRequestError("open 상태의 기간만 수정할 수 있습니다")
+            raise BadRequestError("Only open periods can be updated")
 
         update_data: dict = {}
         if data.period_start is not None:
@@ -137,23 +143,35 @@ class SchedulePeriodService:
         if new_start >= new_end:
             raise BadRequestError("period_start must be before period_end")
         if await schedule_period_repository.check_overlap(db, period.store_id, new_start, new_end, period.id):
-            raise BadRequestError("이 매장에 해당 기간과 겹치는 스케줄 기간이 이미 존재합니다")
+            raise BadRequestError("A schedule period overlapping this date range already exists for this store")
 
-        updated = await schedule_period_repository.update(db, period_id, update_data, organization_id)
-        if updated is None:
-            raise NotFoundError("Schedule period not found")
-        return await self._to_response(db, updated)
+        try:
+            updated = await schedule_period_repository.update(db, period_id, update_data, organization_id)
+            if updated is None:
+                raise NotFoundError("Schedule period not found")
+            result = await self._to_response(db, updated)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def _transition_status(
         self, db: AsyncSession, period_id: UUID, organization_id: UUID, expected_from: str, to_status: str,
     ) -> SchedulePeriodResponse:
         period = await self._get_period_or_404(db, period_id, organization_id)
         if period.status != expected_from:
-            raise BadRequestError(f"현재 상태({period.status})에서는 이 작업을 수행할 수 없습니다. '{expected_from}' 상태여야 합니다.")
-        period.status = to_status
-        await db.flush()
-        await db.refresh(period)
-        return await self._to_response(db, period)
+            raise BadRequestError(f"Cannot perform this action from status '{period.status}'. Expected status: '{expected_from}'.")
+        try:
+            period.status = to_status
+            await db.flush()
+            await db.refresh(period)
+            result = await self._to_response(db, period)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def reopen(self, db: AsyncSession, period_id: UUID, organization_id: UUID) -> SchedulePeriodResponse:
         """마감 해제 — sv_draft/closed → open."""
@@ -162,10 +180,16 @@ class SchedulePeriodService:
             raise BadRequestError(
                 f"현재 상태({period.status})에서는 다시 열 수 없습니다. 'closed' 또는 'sv_draft' 상태여야 합니다."
             )
-        period.status = "open"
-        await db.flush()
-        await db.refresh(period)
-        return await self._to_response(db, period)
+        try:
+            period.status = "open"
+            await db.flush()
+            await db.refresh(period)
+            result = await self._to_response(db, period)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def close_requests(self, db: AsyncSession, period_id: UUID, organization_id: UUID) -> SchedulePeriodResponse:
         return await self._transition_status(db, period_id, organization_id, "open", "closed")
@@ -195,22 +219,28 @@ class SchedulePeriodService:
         """확정 — gm_review → finalized, 스케줄 confirmed 처리."""
         period = await self._get_period_or_404(db, period_id, organization_id)
         if period.status != "gm_review":
-            raise BadRequestError(f"현재 상태({period.status})에서는 이 작업을 수행할 수 없습니다. 'gm_review' 상태여야 합니다.")
+            raise BadRequestError(f"Cannot perform this action from status '{period.status}'. Expected status: 'gm_review'.")
 
-        # Finalize entries — mark all as confirmed (store + date range 기반)
-        from app.services.schedule_service import schedule_service
-        await schedule_service.finalize_period_entries(
-            db, organization_id,
-            store_id=period.store_id,
-            date_from=period.period_start,
-            date_to=period.period_end,
-            approved_by=period.created_by or period_id,
-        )
+        try:
+            # Finalize entries — mark all as confirmed (store + date range 기반)
+            from app.services.schedule_service import schedule_service
+            await schedule_service.finalize_period_entries(
+                db, organization_id,
+                store_id=period.store_id,
+                date_from=period.period_start,
+                date_to=period.period_end,
+                approved_by=period.created_by or period_id,
+            )
 
-        period.status = "finalized"
-        await db.flush()
-        await db.refresh(period)
-        return await self._to_response(db, period)
+            period.status = "finalized"
+            await db.flush()
+            await db.refresh(period)
+            result = await self._to_response(db, period)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
 
 schedule_period_service: SchedulePeriodService = SchedulePeriodService()

@@ -28,7 +28,7 @@ class RegisterRequest(BaseModel):
     """앱 사용자 회원가입 요청 스키마.
 
     App user self-registration request schema.
-    Creates a new user with the default staff role (level 4).
+    Creates a new user with the default staff role (priority 40).
 
     Attributes:
         username: 사용자 아이디 (Desired login username)

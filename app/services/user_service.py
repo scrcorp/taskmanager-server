@@ -142,7 +142,7 @@ class UserService:
         """새 사용자를 생성합니다.
 
         Create a new user within an organization.
-        Caller can only create users with role level strictly greater than their own.
+        Caller can only create users with role priority strictly greater than their own.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -157,8 +157,8 @@ class UserService:
             DuplicateError: 같은 사용자명이 이미 존재할 때
                             (When the username already exists)
             NotFoundError: 지정한 역할을 찾을 수 없을 때 (Role not found)
-            ForbiddenError: 자기보다 높거나 같은 레벨의 역할 지정 시도
-                            (Attempting to assign a role at or above caller's level)
+            ForbiddenError: 자기보다 높거나 같은 우선순위의 역할 지정 시도
+                            (Attempting to assign a role at or above caller's priority)
         """
         # 사용자명 중복 확인 — Check username uniqueness within org
         exists: bool = await user_repository.exists(
@@ -179,26 +179,32 @@ class UserService:
             raise ForbiddenError("Cannot create a user with a role at or above your priority")
 
         password_hash: str = hash_password(data.password)
-        user: User = await user_repository.create(
-            db,
-            {
-                "organization_id": organization_id,
-                "role_id": UUID(data.role_id),
-                "username": data.username,
-                "full_name": data.full_name,
-                "email": data.email,
-                "password_hash": password_hash,
-            },
-        )
+        try:
+            user: User = await user_repository.create(
+                db,
+                {
+                    "organization_id": organization_id,
+                    "role_id": UUID(data.role_id),
+                    "username": data.username,
+                    "full_name": data.full_name,
+                    "email": data.email,
+                    "password_hash": password_hash,
+                },
+            )
 
-        # 역할 관계 로드를 위해 다시 조회 — Re-fetch with role loaded
-        loaded: User | None = await user_repository.get_detail(
-            db, user.id, organization_id
-        )
-        if loaded is None:
-            raise NotFoundError("User not found after creation")
+            # 역할 관계 로드를 위해 다시 조회 — Re-fetch with role loaded
+            loaded: User | None = await user_repository.get_detail(
+                db, user.id, organization_id
+            )
+            if loaded is None:
+                raise NotFoundError("User not found after creation")
 
-        return self._to_response(loaded)
+            result = self._to_response(loaded)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_user(
         self,
@@ -211,7 +217,7 @@ class UserService:
         """사용자 정보를 수정합니다.
 
         Update an existing user's information.
-        When changing role_id, caller can only assign roles below their own level.
+        When changing role_id, caller can only assign roles below their own priority.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -225,8 +231,8 @@ class UserService:
 
         Raises:
             NotFoundError: 사용자를 찾을 수 없을 때 (User not found)
-            ForbiddenError: 자기보다 높거나 같은 레벨의 역할 지정 시도
-                            (Attempting to assign a role at or above caller's level)
+            ForbiddenError: 자기보다 높거나 같은 우선순위의 역할 지정 시도
+                            (Attempting to assign a role at or above caller's priority)
         """
         update_data: dict = data.model_dump(exclude_unset=True)
 
@@ -246,20 +252,26 @@ class UserService:
             if role.priority >= 40:
                 await user_repository.reset_manager_flags(db, user_id)
 
-        user: User | None = await user_repository.update(
-            db, user_id, update_data, organization_id
-        )
-        if user is None:
-            raise NotFoundError("User not found")
+        try:
+            user: User | None = await user_repository.update(
+                db, user_id, update_data, organization_id
+            )
+            if user is None:
+                raise NotFoundError("User not found")
 
-        # 역할 관계 로드를 위해 다시 조회 — Re-fetch with role loaded
-        loaded: User | None = await user_repository.get_detail(
-            db, user_id, organization_id
-        )
-        if loaded is None:
-            raise NotFoundError("User not found")
+            # 역할 관계 로드를 위해 다시 조회 — Re-fetch with role loaded
+            loaded: User | None = await user_repository.get_detail(
+                db, user_id, organization_id
+            )
+            if loaded is None:
+                raise NotFoundError("User not found")
 
-        return self._to_response(loaded)
+            result = self._to_response(loaded)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def toggle_active(
         self,
@@ -288,21 +300,27 @@ class UserService:
         if user is None:
             raise NotFoundError("User not found")
 
-        # 현재 상태 반전 — Invert current status
-        toggled: User | None = await user_repository.update(
-            db, user_id, {"is_active": not user.is_active}, organization_id
-        )
-        if toggled is None:
-            raise NotFoundError("User not found")
+        try:
+            # 현재 상태 반전 — Invert current status
+            toggled: User | None = await user_repository.update(
+                db, user_id, {"is_active": not user.is_active}, organization_id
+            )
+            if toggled is None:
+                raise NotFoundError("User not found")
 
-        # 역할 관계 로드를 위해 다시 조회 — Re-fetch with role loaded
-        loaded: User | None = await user_repository.get_detail(
-            db, user_id, organization_id
-        )
-        if loaded is None:
-            raise NotFoundError("User not found")
+            # 역할 관계 로드를 위해 다시 조회 — Re-fetch with role loaded
+            loaded: User | None = await user_repository.get_detail(
+                db, user_id, organization_id
+            )
+            if loaded is None:
+                raise NotFoundError("User not found")
 
-        return self._to_response(loaded)
+            result = self._to_response(loaded)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_user(
         self,
@@ -328,10 +346,15 @@ class UserService:
         if user is None:
             raise NotFoundError("User not found")
 
-        # 소프트 삭제: 비활성화 — Soft-delete: deactivate user
-        await user_repository.update(
-            db, user_id, {"is_active": False}, organization_id
-        )
+        try:
+            # 소프트 삭제: 비활성화 — Soft-delete: deactivate user
+            await user_repository.update(
+                db, user_id, {"is_active": False}, organization_id
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     async def get_user_stores(
         self,
@@ -421,7 +444,12 @@ class UserService:
             if a["store_id"] not in org_store_ids:
                 raise NotFoundError(f"Store not found: {a['store_id']}")
 
-        await user_repository.sync_user_stores(db, user_id, assignments)
+        try:
+            await user_repository.sync_user_stores(db, user_id, assignments)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     async def add_user_store(
         self,
@@ -454,7 +482,12 @@ class UserService:
         if already_exists:
             raise DuplicateError("User is already assigned to this store")
 
-        await user_repository.add_user_store(db, user_id, store_id)
+        try:
+            await user_repository.add_user_store(db, user_id, store_id)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     async def remove_user_store(
         self,
@@ -476,9 +509,14 @@ class UserService:
         Raises:
             NotFoundError: 배정 관계를 찾을 수 없을 때 (Assignment not found)
         """
-        removed: bool = await user_repository.remove_user_store(db, user_id, store_id)
-        if not removed:
-            raise NotFoundError("User-store assignment not found")
+        try:
+            removed: bool = await user_repository.remove_user_store(db, user_id, store_id)
+            if not removed:
+                raise NotFoundError("User-store assignment not found")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # 싱글턴 인스턴스 — Singleton instance

@@ -110,7 +110,6 @@ async def create_task(
         data=data,
         created_by=current_user.id,
     )
-    await db.commit()
 
     # 담당자 포함 상세 다시 조회 — Re-fetch with assignees loaded
     task = await task_service.get_detail(
@@ -138,7 +137,6 @@ async def update_task(
         organization_id=current_user.organization_id,
         data=data,
     )
-    await db.commit()
 
     # 담당자 포함 상세 다시 조회 — Re-fetch with assignees loaded
     task = await task_service.get_detail(
@@ -164,9 +162,8 @@ async def delete_task(
         task_id=task_id,
         organization_id=current_user.organization_id,
     )
-    await db.commit()
 
-    return {"message": "추가 업무가 삭제되었습니다 (Additional task deleted)"}
+    return {"message": "Additional task deleted"}
 
 
 @router.get("/{task_id}/evidences", response_model=list[TaskEvidenceResponse])

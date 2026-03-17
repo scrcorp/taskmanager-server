@@ -8,6 +8,7 @@ Tables:
 
 import uuid
 from datetime import date, datetime, time, timezone
+from typing import Optional
 from sqlalchemy import String, DateTime, Date, Time, Text, Boolean, Integer, ForeignKey, UniqueConstraint, Index, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -119,9 +120,9 @@ class ScheduleRequest(Base):
     __tablename__ = "schedule_requests"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
-    work_role_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="SET NULL"), nullable=True)
+    work_role_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="SET NULL"), nullable=True)
     work_date: Mapped[date] = mapped_column(Date, nullable=False)
     preferred_start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
     preferred_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
@@ -159,14 +160,14 @@ class Schedule(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("schedule_requests.id", ondelete="SET NULL"), nullable=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
-    work_role_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="SET NULL"), nullable=True)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    store_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
+    work_role_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="SET NULL"), nullable=True)
     work_date: Mapped[date] = mapped_column(Date, nullable=False)
-    start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    break_start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    break_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
+    start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    break_start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    break_end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     net_work_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(20), default="confirmed")  # confirmed/cancelled
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

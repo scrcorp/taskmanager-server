@@ -47,23 +47,28 @@ class AttendanceService:
         Returns:
             QRCode: 생성된 QR 코드 (Created QR code)
         """
-        # 기존 활성 QR 코드 비활성화 — Deactivate existing active QR codes for the store
-        await qr_code_repository.deactivate_store_qr_codes(db, store_id)
+        try:
+            # 기존 활성 QR 코드 비활성화 — Deactivate existing active QR codes for the store
+            await qr_code_repository.deactivate_store_qr_codes(db, store_id)
 
-        # 새 QR 코드 생성 — Generate new random 32-char hex code
-        code: str = secrets.token_hex(16)
+            # 새 QR 코드 생성 — Generate new random 32-char hex code
+            code: str = secrets.token_hex(16)
 
-        qr: QRCode = await qr_code_repository.create_qr(
-            db,
-            {
-                "store_id": store_id,
-                "code": code,
-                "is_active": True,
-                "created_by": created_by,
-            },
-        )
+            qr: QRCode = await qr_code_repository.create_qr(
+                db,
+                {
+                    "store_id": store_id,
+                    "code": code,
+                    "is_active": True,
+                    "created_by": created_by,
+                },
+            )
 
-        return qr
+            await db.commit()
+            return qr
+        except Exception:
+            await db.rollback()
+            raise
 
     async def regenerate_qr_code(
         self,
@@ -89,9 +94,10 @@ class AttendanceService:
         # 기존 QR 코드 조회 — Find existing QR code
         old_qr: QRCode | None = await qr_code_repository.get_by_id(db, qr_id)
         if old_qr is None:
-            raise NotFoundError("QR 코드를 찾을 수 없습니다 (QR code not found)")
+            raise NotFoundError("QR code not found")
 
         # 기존 QR 비활성화 후 새 QR 생성 — Deactivate old and create new
+        # Note: create_qr_code handles commit internally
         return await self.create_qr_code(db, old_qr.store_id, created_by)
 
     async def get_store_qr(
@@ -176,11 +182,11 @@ class AttendanceService:
         # QR 코드 검증 — Validate QR code exists and is active
         qr: QRCode | None = await qr_code_repository.get_qr_by_code(db, qr_code_str)
         if qr is None or not qr.is_active:
-            raise BadRequestError("유효하지 않은 QR 코드입니다 (Invalid or inactive QR code)")
+            raise BadRequestError("Invalid or inactive QR code")
 
         # 만료 여부 확인 — Check expiration
         if qr.expires_at is not None and datetime.now(timezone.utc) > qr.expires_at:
-            raise BadRequestError("만료된 QR 코드입니다 (QR code has expired)")
+            raise BadRequestError("QR code has expired")
 
         now: datetime = datetime.now(timezone.utc)
         store_id: UUID = qr.store_id
@@ -280,11 +286,15 @@ class AttendanceService:
 
         else:
             raise BadRequestError(
-                f"유효하지 않은 동작입니다: {action} "
-                "(Invalid action. Use: clock_in, break_start, break_end, clock_out)"
+                f"Invalid action: {action}. Use: clock_in, break_start, break_end, clock_out"
             )
 
-        return attendance
+        try:
+            await db.commit()
+            return attendance
+        except Exception:
+            await db.rollback()
+            raise
 
     # === 관리자 기능 (Admin Functions) ===
 
@@ -349,7 +359,7 @@ class AttendanceService:
             db, attendance_id, organization_id
         )
         if attendance is None:
-            raise NotFoundError("근태 기록을 찾을 수 없습니다 (Attendance record not found)")
+            raise NotFoundError("Attendance record not found")
         return attendance
 
     async def correct_attendance(
@@ -433,7 +443,12 @@ class AttendanceService:
             db, attendance_id, organization_id, corrected_by, field_name
         )
 
-        return correction
+        try:
+            await db.commit()
+            return correction
+        except Exception:
+            await db.rollback()
+            raise
 
     async def get_corrections(
         self,
@@ -582,12 +597,16 @@ class AttendanceService:
         result = await db.execute(query)
         rows = result.all()
 
+        # 사용자 이름 일괄 조회 — Batch load user names
+        user_ids = [row.user_id for row in rows]
+        names_result = await db.execute(
+            select(User.id, User.full_name).where(User.id.in_(user_ids))
+        )
+        names_map = {row.id: row.full_name for row in names_result}
+
         summaries: list[dict] = []
         for row in rows:
-            user_result = await db.execute(
-                select(User.full_name).where(User.id == row.user_id)
-            )
-            user_name = user_result.scalar() or "Unknown"
+            user_name = names_map.get(row.user_id) or "Unknown"
             total_work = row.total_work or 0
             total_break = row.total_break or 0
             net_minutes = max(0, total_work - total_break)

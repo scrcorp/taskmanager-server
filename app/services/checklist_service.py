@@ -88,9 +88,9 @@ class ChecklistService:
         store: Store | None = result.scalar_one_or_none()
 
         if store is None:
-            raise NotFoundError("매장을 찾을 수 없습니다 (Store not found)")
+            raise NotFoundError("Store not found")
         if store.organization_id != organization_id:
-            raise ForbiddenError("해당 매장에 대한 권한이 없습니다 (No permission for this store)")
+            raise ForbiddenError("No permission for this store")
 
         return store
 
@@ -177,7 +177,7 @@ class ChecklistService:
             db, template_id
         )
         if template is None:
-            raise NotFoundError("체크리스트 템플릿을 찾을 수 없습니다 (Checklist template not found)")
+            raise NotFoundError("Checklist template not found")
 
         # 조직 소유권 검증 — Verify org ownership via store
         await self._validate_store_ownership(db, template.store_id, organization_id)
@@ -234,16 +234,21 @@ class ChecklistService:
         extra: str = data.title.strip() if data.title else ""
         template_title: str = f"{base_title} ({extra})" if extra else base_title
 
-        template: ChecklistTemplate = await checklist_repository.create(
-            db,
-            {
-                "store_id": store_id,
-                "shift_id": shift_id,
-                "position_id": position_id,
-                "title": template_title,
-            },
-        )
-        return template
+        try:
+            template: ChecklistTemplate = await checklist_repository.create(
+                db,
+                {
+                    "store_id": store_id,
+                    "shift_id": shift_id,
+                    "position_id": position_id,
+                    "title": template_title,
+                },
+            )
+            await db.commit()
+            return template
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_template(
         self,
@@ -274,7 +279,7 @@ class ChecklistService:
             db, template_id
         )
         if template is None:
-            raise NotFoundError("체크리스트 템플릿을 찾을 수 없습니다 (Checklist template not found)")
+            raise NotFoundError("Checklist template not found")
 
         await self._validate_store_ownership(db, template.store_id, organization_id)
 
@@ -303,12 +308,17 @@ class ChecklistService:
         if not update_fields:
             return template
 
-        updated: ChecklistTemplate | None = await checklist_repository.update(
-            db, template_id, update_fields
-        )
-        if updated is None:
-            raise NotFoundError("체크리스트 템플릿을 찾을 수 없습니다 (Checklist template not found)")
-        return updated
+        try:
+            updated: ChecklistTemplate | None = await checklist_repository.update(
+                db, template_id, update_fields
+            )
+            if updated is None:
+                raise NotFoundError("Checklist template not found")
+            await db.commit()
+            return updated
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_template(
         self,
@@ -336,10 +346,16 @@ class ChecklistService:
             db, template_id
         )
         if template is None:
-            raise NotFoundError("체크리스트 템플릿을 찾을 수 없습니다 (Checklist template not found)")
+            raise NotFoundError("Checklist template not found")
 
         await self._validate_store_ownership(db, template.store_id, organization_id)
-        return await checklist_repository.delete(db, template_id)
+        try:
+            result = await checklist_repository.delete(db, template_id)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     # --- 항목 CRUD (Item CRUD) ---
 
@@ -394,19 +410,24 @@ class ChecklistService:
         await self.get_template_detail(db, template_id, organization_id)
 
         rec_type, rec_days = self._normalize_recurrence(data.recurrence_type, data.recurrence_days)
-        item: ChecklistTemplateItem = await checklist_repository.create_item(
-            db,
-            {
-                "template_id": template_id,
-                "title": data.title,
-                "description": data.description,
-                "verification_type": data.verification_type,
-                "recurrence_type": rec_type,
-                "recurrence_days": rec_days,
-                "sort_order": data.sort_order,
-            },
-        )
-        return item
+        try:
+            item: ChecklistTemplateItem = await checklist_repository.create_item(
+                db,
+                {
+                    "template_id": template_id,
+                    "title": data.title,
+                    "description": data.description,
+                    "verification_type": data.verification_type,
+                    "recurrence_type": rec_type,
+                    "recurrence_days": rec_days,
+                    "sort_order": data.sort_order,
+                },
+            )
+            await db.commit()
+            return item
+        except Exception:
+            await db.rollback()
+            raise
 
     async def add_items_bulk(
         self,
@@ -448,7 +469,13 @@ class ChecklistService:
                 }
             )
 
-        return await checklist_repository.create_items_bulk(db, items_data)
+        try:
+            result = await checklist_repository.create_items_bulk(db, items_data)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_item(
         self,
@@ -478,14 +505,14 @@ class ChecklistService:
             db, item_id
         )
         if item is None:
-            raise NotFoundError("체크리스트 항목을 찾을 수 없습니다 (Checklist item not found)")
+            raise NotFoundError("Checklist item not found")
 
         # 소유권 검증 — Verify ownership via template's store
         template: ChecklistTemplate | None = await checklist_repository.get_with_items(
             db, item.template_id
         )
         if template is None:
-            raise NotFoundError("체크리스트 템플릿을 찾을 수 없습니다 (Checklist template not found)")
+            raise NotFoundError("Checklist template not found")
         await self._validate_store_ownership(db, template.store_id, organization_id)
 
         # None이 아닌 필드만 업데이트 — Only update non-None fields
@@ -499,12 +526,17 @@ class ChecklistService:
             update_data["recurrence_type"] = rec_type
             update_data["recurrence_days"] = rec_days
 
-        updated: ChecklistTemplateItem | None = await checklist_repository.update_item(
-            db, item_id, update_data
-        )
-        if updated is None:
-            raise NotFoundError("체크리스트 항목을 찾을 수 없습니다 (Checklist item not found)")
-        return updated
+        try:
+            updated: ChecklistTemplateItem | None = await checklist_repository.update_item(
+                db, item_id, update_data
+            )
+            if updated is None:
+                raise NotFoundError("Checklist item not found")
+            await db.commit()
+            return updated
+        except Exception:
+            await db.rollback()
+            raise
 
     async def reorder_items(
         self,
@@ -557,9 +589,14 @@ class ChecklistService:
             db, item_id
         )
         if item is None:
-            raise NotFoundError("체크리스트 항목을 찾을 수 없습니다 (Checklist item not found)")
+            raise NotFoundError("Checklist item not found")
 
-        await self.reorder_items(db, item.template_id, organization_id, item_ids)
+        try:
+            await self.reorder_items(db, item.template_id, organization_id, item_ids)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_item(
         self,
@@ -587,16 +624,22 @@ class ChecklistService:
             db, item_id
         )
         if item is None:
-            raise NotFoundError("체크리스트 항목을 찾을 수 없습니다 (Checklist item not found)")
+            raise NotFoundError("Checklist item not found")
 
         template: ChecklistTemplate | None = await checklist_repository.get_with_items(
             db, item.template_id
         )
         if template is None:
-            raise NotFoundError("체크리스트 템플릿을 찾을 수 없습니다 (Checklist template not found)")
+            raise NotFoundError("Checklist template not found")
         await self._validate_store_ownership(db, template.store_id, organization_id)
 
-        return await checklist_repository.delete_item(db, item_id)
+        try:
+            result = await checklist_repository.delete_item(db, item_id)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     # --- Excel Import/Export ---
 
@@ -973,6 +1016,12 @@ class ChecklistService:
                 await checklist_repository.create_items_bulk(db, items_data)
                 result["created_templates"] += 1
                 result["created_items"] += len(items_data)
+
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
         return result
 

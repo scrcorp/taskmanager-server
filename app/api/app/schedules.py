@@ -110,9 +110,9 @@ async def get_my_schedule(
         db, schedule_id, current_user.organization_id
     )
     if entry is None:
-        raise NotFoundError("스케줄을 찾을 수 없습니다 (Schedule not found)")
+        raise NotFoundError("Schedule not found")
     if entry.user_id != current_user.id:
-        raise ForbiddenError("본인의 스케줄만 조회할 수 있습니다 (Can only view your own schedule)")
+        raise ForbiddenError("Can only view your own schedule")
 
     # 스케줄 기본 응답 생성
     response_entry = await schedule_service._to_response(db, entry)
@@ -170,9 +170,9 @@ async def complete_checklist_item(
         db, schedule_id
     )
     if cl_instance is None:
-        raise NotFoundError("해당 스케줄의 체크리스트를 찾을 수 없습니다 (Checklist not found for this schedule)")
+        raise NotFoundError("Checklist not found for this schedule")
     if cl_instance.user_id != current_user.id:
-        raise ForbiddenError("본인의 체크리스트만 수정할 수 있습니다 (Can only modify your own checklist)")
+        raise ForbiddenError("Can only modify your own checklist")
 
     # 매장 타임존 해석
     store_tz = await get_store_timezone(db, cl_instance.store_id)
@@ -198,8 +198,6 @@ async def complete_checklist_item(
             user_id=current_user.id,
         )
 
-    await db.commit()
-
     # 업데이트된 스케줄 상세 반환
     return await get_my_schedule(schedule_id, db, current_user)
 
@@ -220,9 +218,9 @@ async def respond_to_rejection(
         db, schedule_id
     )
     if cl_instance is None:
-        raise NotFoundError("해당 스케줄의 체크리스트를 찾을 수 없습니다 (Checklist not found for this schedule)")
+        raise NotFoundError("Checklist not found for this schedule")
     if cl_instance.user_id != current_user.id:
-        raise ForbiddenError("본인의 체크리스트만 재제출할 수 있습니다 (Can only respond to your own checklist)")
+        raise ForbiddenError("Can only resubmit your own checklist")
 
     # 매장 타임존 해석
     store_tz = await get_store_timezone(db, cl_instance.store_id)
@@ -237,7 +235,6 @@ async def respond_to_rejection(
         note=data.response_comment,
         client_timezone=effective_tz,
     )
-    await db.commit()
 
     # 업데이트된 스케줄 상세 반환
     return await get_my_schedule(schedule_id, db, current_user)

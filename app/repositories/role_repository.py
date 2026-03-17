@@ -34,14 +34,14 @@ class RoleRepository(BaseRepository[Role]):
     ) -> list[Role]:
         """조직에 속한 모든 역할을 레벨 순으로 조회합니다.
 
-        Retrieve all roles belonging to an organization, ordered by level.
+        Retrieve all roles belonging to an organization, ordered by priority.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 ID (Organization UUID)
 
         Returns:
-            list[Role]: 역할 목록 (List of roles ordered by level)
+            list[Role]: 역할 목록 (List of roles ordered by priority)
         """
         query: Select = (
             select(Role)

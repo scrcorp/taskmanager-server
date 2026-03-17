@@ -64,7 +64,7 @@ async def get_my_checklist_instance(
     )
 
     if instance.user_id != current_user.id:
-        raise ForbiddenError("본인의 체크리스트만 조회할 수 있습니다 (Can only view your own checklist)")
+        raise ForbiddenError("Can only view your own checklist")
 
     return await checklist_instance_service.build_detail_response(db, instance)
 
@@ -97,7 +97,6 @@ async def complete_checklist_item(
         location=data.location,
         client_timezone=effective_tz,
     )
-    await db.commit()
 
     return await checklist_instance_service.build_detail_response(db, instance)
 
@@ -133,7 +132,6 @@ async def resubmit_checklist_item(
         location=data.location,
         client_timezone=effective_tz,
     )
-    await db.commit()
 
     return await checklist_instance_service.build_detail_response(db, instance)
 
@@ -154,7 +152,7 @@ async def add_review_content_as_staff(
     # 본인 인스턴스 확인
     instance = await checklist_instance_service.get_instance(db, instance_id)
     if instance.user_id != current_user.id:
-        raise ForbiddenError("본인의 체크리스트에만 코멘트를 추가할 수 있습니다")
+        raise ForbiddenError("Can only add comments to your own checklist")
 
     rc = await checklist_instance_service.add_review_content(
         db,
@@ -164,11 +162,11 @@ async def add_review_content_as_staff(
         content_type=data.type,
         content=data.content,
     )
-    await db.commit()
 
+    review_id = getattr(rc, "review_id", rc.item_id)
     return {
         "id": str(rc.id),
-        "review_id": str(rc.review_id),
+        "review_id": str(review_id),
         "author_id": str(rc.author_id),
         "author_name": current_user.full_name,
         "type": rc.type,

@@ -139,7 +139,7 @@ class AuthService:
     ) -> TokenResponse:
         """관리자 로그인을 처리합니다.
 
-        Process admin login. Rejects staff-level accounts (level >= 4).
+        Process admin login. Rejects staff-level accounts (priority >= 40).
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -171,7 +171,13 @@ class AuthService:
         if len(user_permissions) == 0:
             raise ForbiddenError("No admin permissions assigned to this role")
 
-        return await self._generate_tokens(db, user, role)
+        try:
+            result = await self._generate_tokens(db, user, role)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def app_login(
         self,
@@ -181,7 +187,7 @@ class AuthService:
     ) -> TokenResponse:
         """앱 로그인을 처리합니다.
 
-        Process app login. Allows staff (level 4) and supervisor (level 3) accounts.
+        Process app login. Allows staff (priority 40) and supervisor (priority 30) accounts.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -204,7 +210,13 @@ class AuthService:
             raise UnauthorizedError("Account is deactivated")
 
         role: Role = user.role
-        return await self._generate_tokens(db, user, role)
+        try:
+            result = await self._generate_tokens(db, user, role)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def app_register(
         self,
@@ -214,7 +226,7 @@ class AuthService:
     ) -> TokenResponse:
         """앱 사용자 회원가입을 처리합니다.
 
-        Process app user registration. Creates a staff-level (level 4) user.
+        Process app user registration. Creates a staff-level (priority 40) user.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -272,7 +284,13 @@ class AuthService:
         await db.flush()
         await db.refresh(user)
 
-        return await self._generate_tokens(db, user, staff_role)
+        try:
+            result = await self._generate_tokens(db, user, staff_role)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def refresh_tokens(
         self,
@@ -326,7 +344,13 @@ class AuthService:
 
         # 기존 리프레시 토큰 삭제 후 새 토큰 발급 — Delete old token and issue new pair
         await auth_repository.delete_refresh_token(db, data.refresh_token)
-        return await self._generate_tokens(db, user, user.role)
+        try:
+            result = await self._generate_tokens(db, user, user.role)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def logout(
         self,
@@ -341,7 +365,12 @@ class AuthService:
             db: 비동기 데이터베이스 세션 (Async database session)
             refresh_token: 삭제할 리프레시 토큰 (Refresh token to revoke)
         """
-        await auth_repository.delete_refresh_token(db, refresh_token)
+        try:
+            await auth_repository.delete_refresh_token(db, refresh_token)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     async def get_me(
         self,

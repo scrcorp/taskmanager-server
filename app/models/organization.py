@@ -13,6 +13,7 @@ import random
 import string
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 from sqlalchemy import String, Boolean, DateTime, Integer, Text, Time, ForeignKey, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -60,6 +61,8 @@ class Organization(Base):
     timezone: Mapped[str] = mapped_column(String(50), default="America/Los_Angeles")
     # 활성 상태 — Whether the organization is active (soft-delete pattern)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 소프트 삭제 일시 — Timestamp when organization was soft-deleted (NULL = active)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
@@ -108,6 +111,8 @@ class Store(Base):
     timezone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # 활성 상태 — Whether the store is active (soft-delete pattern)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 소프트 삭제 일시 — Timestamp when store was soft-deleted (NULL = active)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 승인 필요 여부 — Whether schedule approval is required (default True)
     # True: SV가 생성한 스케줄은 GM 승인 후 배정 생성
     # False: SV가 생성하면 즉시 배정 생성

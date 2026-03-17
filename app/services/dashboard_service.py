@@ -15,7 +15,7 @@ from sqlalchemy import func, select, case, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attendance import Attendance
-from app.models.checklist import ChecklistInstance, ChecklistCompletion
+from app.models.checklist import ChecklistInstance
 from app.models.schedule import Schedule
 from app.models.evaluation import Evaluation
 from app.models.organization import LaborLawSetting, Organization, Store

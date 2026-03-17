@@ -97,7 +97,6 @@ async def create_announcement(
         data=data,
         created_by=current_user.id,
     )
-    await db.commit()
 
     return await announcement_service.build_response(db, announcement)
 
@@ -119,7 +118,6 @@ async def update_announcement(
         organization_id=current_user.organization_id,
         data=data,
     )
-    await db.commit()
 
     return await announcement_service.build_response(db, announcement)
 
@@ -139,9 +137,8 @@ async def delete_announcement(
         announcement_id=announcement_id,
         organization_id=current_user.organization_id,
     )
-    await db.commit()
 
-    return {"message": "공지사항이 삭제되었습니다 (Announcement deleted)"}
+    return {"message": "Announcement deleted"}
 
 
 @router.get("/{announcement_id}/reads", response_model=list[AnnouncementReadResponse])

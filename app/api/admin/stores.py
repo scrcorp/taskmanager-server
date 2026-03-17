@@ -72,9 +72,7 @@ async def create_store(
     Create a new store in the current organization. Owner only.
     """
     org_id: UUID = current_user.organization_id
-    result: StoreResponse = await store_service.create_store(db, org_id, data)
-    await db.commit()
-    return result
+    return await store_service.create_store(db, org_id, data)
 
 
 @router.put("/{store_id}", response_model=StoreResponse)
@@ -89,9 +87,7 @@ async def update_store(
     Update an existing store. Owner only.
     """
     org_id: UUID = current_user.organization_id
-    result: StoreResponse = await store_service.update_store(db, store_id, org_id, data)
-    await db.commit()
-    return result
+    return await store_service.update_store(db, store_id, org_id, data)
 
 
 @router.delete("/{store_id}", status_code=204)
@@ -106,4 +102,3 @@ async def delete_store(
     """
     org_id: UUID = current_user.organization_id
     await store_service.delete_store(db, store_id, org_id)
-    await db.commit()

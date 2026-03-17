@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
-from app.models.checklist import ChecklistInstance, ChecklistItemReview
+from app.models.checklist import ChecklistInstance, ChecklistInstanceItem
 from app.models.communication import AdditionalTask, Announcement
 from app.models.notification import Notification
 from app.models.schedule import Schedule
@@ -90,7 +90,13 @@ class NotificationService:
         Returns:
             bool: 처리 성공 여부 (Whether the operation was successful)
         """
-        return await notification_repository.mark_read(db, notification_id, user_id)
+        try:
+            result = await notification_repository.mark_read(db, notification_id, user_id)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def mark_all_read(
         self,
@@ -108,7 +114,13 @@ class NotificationService:
         Returns:
             int: 읽음 처리된 알림 수 (Count of notifications marked as read)
         """
-        return await notification_repository.mark_all_read(db, user_id)
+        try:
+            count = await notification_repository.mark_all_read(db, user_id)
+            await db.commit()
+            return count
+        except Exception:
+            await db.rollback()
+            raise
 
     # --- 자동 생성 (Auto-creation) ---
 
@@ -258,25 +270,25 @@ class NotificationService:
 
         return notifications
 
-    async def create_for_checklist_re_review(
+    async def create_for_checklist_re_review_item(
         self,
         db: AsyncSession,
         instance: ChecklistInstance,
-        review: ChecklistItemReview,
+        item: ChecklistInstanceItem,
     ) -> Notification:
         """체크리스트 재제출 시 reviewer에게 알림을 생성합니다.
 
         Auto-create a notification for the reviewer when staff resubmits.
         """
-        message = f"체크리스트 항목이 재제출되었습니다 (Checklist item resubmitted for re-review)"
+        message = "체크리스트 항목이 재제출되었습니다 (Checklist item resubmitted for re-review)"
         return await notification_repository.create_notification(
             db,
             organization_id=instance.organization_id,
-            user_id=review.reviewer_id,
+            user_id=item.reviewer_id,
             notification_type="checklist_re_review",
             message=message,
-            reference_type="cl_item_reviews",
-            reference_id=review.id,
+            reference_type="cl_instance_items",
+            reference_id=item.id,
         )
 
     async def create_for_attendance_correction(

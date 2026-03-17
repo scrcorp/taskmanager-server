@@ -79,10 +79,14 @@ class PermissionService:
                 raise NotFoundError(f"Permission not found: {code}")
             permission_ids.append(perm_map[code])
 
-        await permission_repository.set_role_permissions(db, role_id, permission_ids)
-
-        # 업데이트된 결과 반환
-        return await self.get_role_permissions(db, role_id, organization_id)
+        try:
+            await permission_repository.set_role_permissions(db, role_id, permission_ids)
+            result = await self.get_role_permissions(db, role_id, organization_id)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
 
 permission_service: PermissionService = PermissionService()

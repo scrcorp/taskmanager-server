@@ -40,11 +40,9 @@ async def create_period(
     current_user: Annotated[User, Depends(require_permission("schedules:create"))],
 ) -> SchedulePeriodResponse:
     """새 스케줄 기간을 생성합니다."""
-    result = await schedule_period_service.create_period(
+    return await schedule_period_service.create_period(
         db, current_user.organization_id, data, current_user.id,
     )
-    await db.commit()
-    return result
 
 
 @router.get("/{period_id}", response_model=SchedulePeriodResponse)
@@ -65,11 +63,9 @@ async def update_period(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> SchedulePeriodResponse:
     """스케줄 기간을 수정합니다 (open 상태만)."""
-    result = await schedule_period_service.update_period(
+    return await schedule_period_service.update_period(
         db, period_id, current_user.organization_id, data,
     )
-    await db.commit()
-    return result
 
 
 @router.post("/{period_id}/reopen", response_model=SchedulePeriodResponse)
@@ -79,9 +75,7 @@ async def reopen_period(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> SchedulePeriodResponse:
     """마감 해제 (sv_draft/closed → open)."""
-    result = await schedule_period_service.reopen(db, period_id, current_user.organization_id)
-    await db.commit()
-    return result
+    return await schedule_period_service.reopen(db, period_id, current_user.organization_id)
 
 
 @router.post("/{period_id}/close-requests", response_model=SchedulePeriodResponse)
@@ -91,9 +85,7 @@ async def close_requests(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> SchedulePeriodResponse:
     """신청 마감 (open → closed)."""
-    result = await schedule_period_service.close_requests(db, period_id, current_user.organization_id)
-    await db.commit()
-    return result
+    return await schedule_period_service.close_requests(db, period_id, current_user.organization_id)
 
 
 @router.post("/{period_id}/start-draft", response_model=SchedulePeriodResponse)
@@ -103,9 +95,7 @@ async def start_draft(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> SchedulePeriodResponse:
     """SV 편집 시작 (closed → sv_draft)."""
-    result = await schedule_period_service.start_draft(db, period_id, current_user.organization_id)
-    await db.commit()
-    return result
+    return await schedule_period_service.start_draft(db, period_id, current_user.organization_id)
 
 
 @router.post("/{period_id}/submit-review", response_model=SchedulePeriodResponse)
@@ -115,9 +105,7 @@ async def submit_review(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> SchedulePeriodResponse:
     """GM 리뷰 제출 (sv_draft → gm_review)."""
-    result = await schedule_period_service.submit_review(db, period_id, current_user.organization_id)
-    await db.commit()
-    return result
+    return await schedule_period_service.submit_review(db, period_id, current_user.organization_id)
 
 
 @router.post("/{period_id}/finalize", response_model=SchedulePeriodResponse)
@@ -127,6 +115,4 @@ async def finalize_period(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> SchedulePeriodResponse:
     """확정 (gm_review → finalized)."""
-    result = await schedule_period_service.finalize(db, period_id, current_user.organization_id)
-    await db.commit()
-    return result
+    return await schedule_period_service.finalize(db, period_id, current_user.organization_id)

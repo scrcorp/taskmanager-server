@@ -39,8 +39,6 @@ async def upsert_break_rules(
 ) -> BreakRuleResponse:
     """매장의 휴게 규칙을 생성/수정합니다."""
     await check_store_access(db, current_user, store_id)
-    result = await break_rule_service.upsert_break_rule(
+    return await break_rule_service.upsert_break_rule(
         db, store_id, current_user.organization_id, data
     )
-    await db.commit()
-    return result

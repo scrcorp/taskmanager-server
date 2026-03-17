@@ -38,7 +38,7 @@ async def list_reports(
         page=page,
         per_page=per_page,
     )
-    items = [await daily_report_service.build_response(db, r) for r in reports]
+    items = await daily_report_service.build_responses_batch(db, reports)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
@@ -59,7 +59,6 @@ async def delete_report(
     current_user: Annotated[User, Depends(require_permission("daily_reports:delete"))],
 ) -> None:
     await daily_report_service.delete_report(db, report_id, current_user.organization_id)
-    await db.commit()
 
 
 @router.post("/{report_id}/comments")
@@ -72,7 +71,6 @@ async def add_comment(
     comment = await daily_report_service.add_comment(
         db, report_id, current_user.organization_id, current_user.id, data
     )
-    await db.commit()
     # Resolve user name for response
     user_result = await db.execute(sa_select(User.full_name).where(User.id == comment.user_id))
     user_name = user_result.scalar() or "Unknown"

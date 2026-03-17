@@ -37,6 +37,4 @@ async def upsert_labor_law(
     current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> LaborLawSettingResponse:
     await check_store_access(db, current_user, store_id)
-    result = await labor_law_service.upsert_setting(db, store_id, current_user.organization_id, data)
-    await db.commit()
-    return result
+    return await labor_law_service.upsert_setting(db, store_id, current_user.organization_id, data)
