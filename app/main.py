@@ -57,11 +57,11 @@ app.include_router(admin_router, prefix="/api/v1/admin")
 app.include_router(app_router, prefix="/api/v1/app")
 app.include_router(setup_page_router, tags=["Setup Page"])
 
-# 로컬 파일 업로드 정적 파일 서빙 — Local file upload static serving
-from app.services.storage_service import UPLOADS_DIR  # noqa: E402
+# 로컬 버킷 정적 파일 서빙 — Local bucket static file serving
+from app.services.storage_service import BUCKET_DIR  # noqa: E402
 
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+BUCKET_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/bucket", StaticFiles(directory=str(BUCKET_DIR)), name="bucket")
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,9 @@ from app.repositories.checklist_instance_repository import checklist_instance_re
 from app.services.storage_service import storage_service
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 
+# URL 해석 단축 — resolve_url alias for response building
+_resolve = storage_service.resolve_url
+
 
 class ChecklistInstanceService:
     """체크리스트 인스턴스 서비스.
@@ -444,7 +447,7 @@ class ChecklistInstanceService:
                 "work_date": inst.work_date.isoformat(),
                 "completed_at": comp.completed_at.isoformat() if comp.completed_at else None,
                 "completed_timezone": comp.completed_timezone,
-                "photo_url": comp.photo_url,
+                "photo_url": _resolve(comp.photo_url),
                 "note": comp.note,
             })
 
@@ -557,7 +560,7 @@ class ChecklistInstanceService:
                     item_data["completed_tz"] = comp.completed_timezone  # Flutter 앱 호환용 alias
                     item_data["completed_by"] = str(comp.user_id)
                     item_data["completed_by_name"] = user_name_cache.get(comp.user_id)
-                    item_data["photo_url"] = comp.photo_url
+                    item_data["photo_url"] = _resolve(comp.photo_url)
                     item_data["note"] = comp.note
                     item_data["location"] = comp.location
                 else:
@@ -583,7 +586,7 @@ class ChecklistInstanceService:
                                 "author_id": str(c.author_id),
                                 "author_name": user_name_cache.get(c.author_id),
                                 "type": c.type,
-                                "content": c.content,
+                                "content": _resolve(c.content) if c.type in ("photo", "video") else c.content,
                                 "created_at": c.created_at.isoformat(),
                             })
                     history_list = []
@@ -638,7 +641,7 @@ class ChecklistInstanceService:
                                 if c.type == "text":
                                     texts.append(c.content)
                                 elif c.type in ("photo", "video"):
-                                    photos.append(c.content)
+                                    photos.append(_resolve(c.content))
                         return (texts[-1] if texts else None), photos
 
                     # 마지막 fail/pass 이벤트의 코멘트/사진 추출 — Find latest event's contents
@@ -702,7 +705,7 @@ class ChecklistInstanceService:
                     for ch in comp_for_history.history:
                         completion_history_list.append({
                             "id": str(ch.id),
-                            "photo_url": ch.photo_url,
+                            "photo_url": _resolve(ch.photo_url),
                             "note": ch.note,
                             "location": ch.location,
                             "submitted_at": ch.submitted_at.isoformat(),
@@ -744,7 +747,7 @@ class ChecklistInstanceService:
                         timeline_events.append({
                             "type": "completed",
                             "comment": first_archive.note,
-                            "photo_urls": [first_archive.photo_url] if first_archive.photo_url else [],
+                            "photo_urls": [_resolve(first_archive.photo_url)] if first_archive.photo_url else [],
                             "by": user_name_cache.get(comp_for_timeline.user_id),
                             "at": first_archive.submitted_at.isoformat(),
                         })
@@ -752,7 +755,7 @@ class ChecklistInstanceService:
                         timeline_events.append({
                             "type": "completed",
                             "comment": comp_for_timeline.note,
-                            "photo_urls": [comp_for_timeline.photo_url] if comp_for_timeline.photo_url else [],
+                            "photo_urls": [_resolve(comp_for_timeline.photo_url)] if comp_for_timeline.photo_url else [],
                             "by": user_name_cache.get(comp_for_timeline.user_id),
                             "at": comp_for_timeline.completed_at.isoformat() if comp_for_timeline.completed_at else None,
                         })
@@ -778,7 +781,7 @@ class ChecklistInstanceService:
                                 if c.type == "text":
                                     rh_comment = c.content
                                 elif c.type in ("photo", "video"):
-                                    rh_photos.append(c.content)
+                                    rh_photos.append(_resolve(c.content))
 
                         if rh.new_result == "fail":
                             timeline_events.append({
@@ -812,10 +815,10 @@ class ChecklistInstanceService:
                         if i + 1 < len(comp_for_timeline.history):
                             next_arch = comp_for_timeline.history[i + 1]
                             resp_note = next_arch.note
-                            resp_photo = [next_arch.photo_url] if next_arch.photo_url else []
+                            resp_photo = [_resolve(next_arch.photo_url)] if next_arch.photo_url else []
                         else:
                             resp_note = comp_for_timeline.note
-                            resp_photo = [comp_for_timeline.photo_url] if comp_for_timeline.photo_url else []
+                            resp_photo = [_resolve(comp_for_timeline.photo_url)] if comp_for_timeline.photo_url else []
                         timeline_events.append({
                             "type": "responded",
                             "comment": resp_note,
