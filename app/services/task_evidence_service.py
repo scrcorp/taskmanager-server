@@ -171,7 +171,7 @@ class TaskEvidenceService:
             "task_id": str(evidence.task_id),
             "user_id": str(evidence.user_id),
             "user_name": user_name,
-            "file_url": evidence.file_url,
+            "file_url": storage_service.resolve_url(evidence.file_url),
             "file_type": evidence.file_type,
             "note": evidence.note,
             "created_at": evidence.created_at,
