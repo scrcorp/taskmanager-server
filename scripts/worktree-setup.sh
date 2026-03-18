@@ -17,10 +17,9 @@ BASE_BRANCH="${2:-dev}"
 # ── 경로 계산 ──────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-WORKTREE_DIR="$SERVER_DIR/.claude/worktrees/$BRANCH"
-
-# DB명에 사용할 sanitized branch명 (슬래시 → 하이픈, 특수문자 제거)
+# sanitized branch명 (슬래시 → 하이픈, 특수문자 제거) — 디렉토리/DB명에 공통 사용
 SANITIZED="$(echo "$BRANCH" | tr '/' '-' | tr -cd 'a-zA-Z0-9_-')"
+WORKTREE_DIR="$SERVER_DIR/.claude/worktrees/$SANITIZED"
 DB_NAME="taskmanager_${SANITIZED}"
 
 # 로컬 버킷 경로 — 프로젝트 루트(server/../) 아래에 통일
@@ -32,7 +31,7 @@ if [ -z "$DEV_BUCKET_DIR" ]; then
     DEV_BUCKET_DIR="$PROJECT_ROOT/bucket/dev"
 fi
 
-BUCKET_DIR="$PROJECT_ROOT/bucket/worktree/$BRANCH"
+BUCKET_DIR="$PROJECT_ROOT/bucket/worktree/$SANITIZED"
 FALLBACK_BUCKET_DIR="$DEV_BUCKET_DIR"
 
 # ── .env에서 원본 DB 정보 추출 ─────────────────────────────
