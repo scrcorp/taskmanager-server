@@ -11,6 +11,7 @@ from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.schedule import (
+    BulkAssignChecklistRequest, BulkAssignChecklistResult,
     FinalizeResult, ScheduleBulkCreate, ScheduleCreate,
     ScheduleResponse, ScheduleUpdate, ScheduleValidation,
 )
@@ -124,3 +125,23 @@ async def validate_entry(
 ) -> ScheduleValidation:
     """검증만 (저장 안함)."""
     return await schedule_service.validate_entry(db, current_user.organization_id, data)
+
+
+@router.post("/assign-checklist", response_model=BulkAssignChecklistResult, status_code=200)
+async def bulk_assign_checklist(
+    data: BulkAssignChecklistRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> BulkAssignChecklistResult:
+    """스케줄 일괄 체크리스트 할당/교체/제거.
+
+    Bulk assign, replace, or remove checklist instances for the given schedules.
+    - checklist_template_id provided: create or replace cl_instance for each schedule
+    - checklist_template_id is null: remove existing cl_instances for each schedule
+    """
+    return await schedule_service.bulk_assign_checklist(
+        db,
+        organization_id=current_user.organization_id,
+        schedule_ids=[UUID(sid) for sid in data.schedule_ids],
+        checklist_template_id=UUID(data.checklist_template_id) if data.checklist_template_id else None,
+    )

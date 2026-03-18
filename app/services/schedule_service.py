@@ -463,4 +463,136 @@ class ScheduleService:
         return FinalizeResult(created=created, failed=failed, errors=errors)
 
 
+    async def bulk_assign_checklist(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        schedule_ids: list[UUID],
+        checklist_template_id: UUID | None,
+    ) -> "BulkAssignChecklistResult":
+        """스케줄 목록에 체크리스트를 일괄 할당/교체/제거합니다.
+
+        Bulk assign, replace, or remove checklist instances for the given schedules.
+        - checklist_template_id provided: create or replace cl_instance for each schedule
+        - checklist_template_id is None: remove existing cl_instances for each schedule
+
+        Validates that each schedule belongs to the current organization.
+        """
+        from app.models.checklist import ChecklistInstance
+        from app.schemas.schedule import BulkAssignChecklistResult
+        from app.services.checklist_instance_service import checklist_instance_service
+
+        assigned = 0
+        removed = 0
+        skipped = 0
+        errors: list[str] = []
+
+        for schedule_id in schedule_ids:
+            try:
+                sched_result = await db.execute(
+                    select(Schedule).where(
+                        Schedule.id == schedule_id,
+                        Schedule.organization_id == organization_id,
+                    )
+                )
+                sched: Schedule | None = sched_result.scalar_one_or_none()
+                if sched is None:
+                    errors.append(f"Schedule {schedule_id} not found or not in org")
+                    skipped += 1
+                    continue
+
+                # 기존 cl_instance 조회
+                existing_result = await db.execute(
+                    select(ChecklistInstance).where(
+                        ChecklistInstance.schedule_id == schedule_id
+                    )
+                )
+                existing: ChecklistInstance | None = existing_result.scalar_one_or_none()
+
+                if checklist_template_id is None:
+                    # 제거 모드 — Remove mode
+                    if existing is not None:
+                        await db.delete(existing)
+                        await db.flush()
+                        removed += 1
+                    else:
+                        skipped += 1
+                else:
+                    # 할당/교체 모드 — Assign/Replace mode
+                    if existing is not None:
+                        # 기존 인스턴스 교체 — Replace existing instance
+                        await db.delete(existing)
+                        await db.flush()
+
+                    # 새 인스턴스 생성 — Create new instance with given template
+                    # checklist_instance_service.create_for_schedule uses work_role's default_checklist_id.
+                    # Here we need to create with a specific template, so we do it directly.
+                    from app.models.checklist import ChecklistTemplate, ChecklistInstanceItem
+                    from app.repositories.checklist_instance_repository import checklist_instance_repository
+                    from sqlalchemy.orm import selectinload
+
+                    template_result = await db.execute(
+                        select(ChecklistTemplate)
+                        .options(selectinload(ChecklistTemplate.items))
+                        .where(ChecklistTemplate.id == checklist_template_id)
+                    )
+                    template: ChecklistTemplate | None = template_result.scalar_one_or_none()
+                    if template is None:
+                        errors.append(f"Checklist template {checklist_template_id} not found")
+                        skipped += 1
+                        continue
+
+                    if not template.items:
+                        errors.append(f"Template {checklist_template_id} has no items — skipping schedule {schedule_id}")
+                        skipped += 1
+                        continue
+
+                    sorted_items = sorted(template.items, key=lambda x: x.sort_order)
+                    instance = await checklist_instance_repository.create(
+                        db,
+                        {
+                            "organization_id": organization_id,
+                            "template_id": template.id,
+                            "schedule_id": schedule_id,
+                            "store_id": sched.store_id,
+                            "user_id": sched.user_id,
+                            "work_date": sched.work_date,
+                            "total_items": len(sorted_items),
+                            "completed_items": 0,
+                            "status": "pending",
+                        },
+                    )
+                    for idx, item in enumerate(sorted_items):
+                        ii = ChecklistInstanceItem(
+                            instance_id=instance.id,
+                            item_index=idx,
+                            title=item.title,
+                            description=item.description,
+                            verification_type=item.verification_type,
+                            sort_order=item.sort_order,
+                            is_completed=False,
+                        )
+                        db.add(ii)
+
+                    await db.flush()
+                    assigned += 1
+
+            except Exception as exc:
+                errors.append(f"Error processing schedule {schedule_id}: {exc}")
+                skipped += 1
+
+        try:
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            raise
+
+        return BulkAssignChecklistResult(
+            assigned=assigned,
+            removed=removed,
+            skipped=skipped,
+            errors=errors,
+        )
+
+
 schedule_service: ScheduleService = ScheduleService()

@@ -400,3 +400,27 @@ class FinalizeResult(BaseModel):
     created: int
     failed: int
     errors: list[str] = []
+
+
+class BulkAssignChecklistRequest(BaseModel):
+    """스케줄 일괄 체크리스트 할당/교체/제거 요청.
+
+    Bulk checklist assign/replace/remove request for schedules.
+    - checklist_template_id provided: create or replace cl_instance for each schedule
+    - checklist_template_id is null: remove existing cl_instances for each schedule
+    """
+
+    schedule_ids: list[str]
+    checklist_template_id: str | None = None
+
+
+class BulkAssignChecklistResult(BaseModel):
+    """스케줄 일괄 체크리스트 할당 결과.
+
+    Result of bulk checklist assign/replace/remove.
+    """
+
+    assigned: int = 0
+    removed: int = 0
+    skipped: int = 0
+    errors: list[str] = []

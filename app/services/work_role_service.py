@@ -1,12 +1,13 @@
 """업무 역할 서비스."""
 
-from datetime import time
+from datetime import date, datetime, time, timezone
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.schedule import StoreWorkRole
+from app.models.checklist import ChecklistInstance
+from app.models.schedule import Schedule, StoreWorkRole
 from app.models.work import Position, Shift
 from app.repositories.store_repository import store_repository
 from app.repositories.work_role_repository import work_role_repository
@@ -139,6 +140,10 @@ class WorkRoleService:
             raise NotFoundError("Work role not found")
         await self._verify_store(db, wr.store_id, organization_id)
 
+        # default_checklist_id가 null → 값으로 변경되는지 추적
+        # Track whether default_checklist_id is transitioning from null to a value
+        prev_checklist_id: UUID | None = wr.default_checklist_id
+
         update_data: dict = {}
         if data.name is not None:
             update_data["name"] = data.name
@@ -170,12 +175,71 @@ class WorkRoleService:
             updated = await work_role_repository.update(db, work_role_id, update_data)
             if updated is None:
                 raise NotFoundError("Work role not found")
+
+            # null → 값으로 변경된 경우 미래 스케줄에 cl_instance 자동 생성
+            # Auto-create cl_instances for future schedules when checklist is newly linked
+            new_checklist_id: UUID | None = updated.default_checklist_id
+            if prev_checklist_id is None and new_checklist_id is not None:
+                await self._create_instances_for_future_schedules(
+                    db, work_role_id, new_checklist_id
+                )
+
             result = await self._to_response(db, updated)
             await db.commit()
             return result
         except Exception:
             await db.rollback()
             raise
+
+    @staticmethod
+    async def _create_instances_for_future_schedules(
+        db: AsyncSession,
+        work_role_id: UUID,
+        checklist_id: UUID,
+    ) -> None:
+        """work_role에 default_checklist_id가 새로 연결될 때 미래 스케줄에 cl_instance를 생성합니다.
+
+        Conditions:
+        - Schedule has this work_role_id
+        - work_date >= today
+        - No existing cl_instance for this schedule
+        - Schedule status is not 'cancelled'
+
+        Auto-creates cl_instance + cl_instance_items via checklist_instance_service.
+        """
+        from app.services.checklist_instance_service import checklist_instance_service
+
+        today: date = datetime.now(timezone.utc).date()
+
+        # 미래 스케줄 중 cl_instance가 없는 것 조회
+        # Find future schedules for this work_role with no existing cl_instance
+        result = await db.execute(
+            select(Schedule).where(
+                Schedule.work_role_id == work_role_id,
+                Schedule.work_date >= today,
+                Schedule.status != "cancelled",
+                ~Schedule.id.in_(
+                    select(ChecklistInstance.schedule_id).where(
+                        ChecklistInstance.schedule_id.isnot(None)
+                    )
+                ),
+            )
+        )
+        schedules = result.scalars().all()
+
+        for sched in schedules:
+            # store_id / user_id가 None이면 체크리스트 인스턴스 생성 불가 — skip
+            if sched.store_id is None or sched.user_id is None:
+                continue
+            await checklist_instance_service.create_for_schedule(
+                db,
+                schedule_id=sched.id,
+                organization_id=sched.organization_id,
+                store_id=sched.store_id,
+                user_id=sched.user_id,
+                work_date=sched.work_date,
+                work_role_id=work_role_id,
+            )
 
     async def reorder_work_roles(
         self,

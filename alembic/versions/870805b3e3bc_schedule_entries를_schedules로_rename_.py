@@ -71,15 +71,17 @@ def upgrade() -> None:
 
     # ─── Step 4: work_assignments → schedules 데이터 마이그레이션 ────
 
-    # 4a. work_role 자동 생성 (work_assignment의 shift+position 조합 중 store_work_roles에 없는 것)
+    # 4a. work_role 자동 생성 — checklist_template이 존재하는 store+shift+position 조합만 생성
+    # (체크리스트 없는 조합은 work_role 생성 안 함, default_checklist_id도 함께 설정)
     conn.execute(sa.text("""
-        INSERT INTO store_work_roles (id, store_id, shift_id, position_id, name, is_active, sort_order, created_at, updated_at)
+        INSERT INTO store_work_roles (id, store_id, shift_id, position_id, name, default_checklist_id, is_active, sort_order, created_at, updated_at)
         SELECT
             gen_random_uuid(),
             wa.store_id,
             wa.shift_id,
             wa.position_id,
             COALESCE(s.name, '') || ' - ' || COALESCE(p.name, ''),
+            ct.id,
             true,
             0,
             now(),
@@ -88,6 +90,10 @@ def upgrade() -> None:
             SELECT DISTINCT store_id, shift_id, position_id
             FROM work_assignments
         ) wa
+        JOIN checklist_templates ct
+          ON ct.store_id = wa.store_id
+         AND ct.shift_id = wa.shift_id
+         AND ct.position_id = wa.position_id
         LEFT JOIN shifts s ON s.id = wa.shift_id
         LEFT JOIN positions p ON p.id = wa.position_id
         WHERE NOT EXISTS (
