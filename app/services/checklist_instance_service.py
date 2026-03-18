@@ -21,11 +21,13 @@ from app.models.checklist import (
     ChecklistItemReviewLog,
     ChecklistItemSubmission,
     ChecklistTemplate,
+    ClScoreHistory,
 )
 from app.models.organization import Store
 from app.models.user import User
 from app.repositories.checklist_instance_repository import checklist_instance_repository
 from app.services.storage_service import storage_service
+from app.config import settings
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 
 # URL 해석 단축 — resolve_url alias for response building
@@ -160,6 +162,7 @@ class ChecklistInstanceService:
         item_index: int,
         user_id: UUID,
         photo_url: str | None = None,
+        photo_urls: list[str] | None = None,
         note: str | None = None,
         location: dict | None = None,
         client_timezone: str = "America/Los_Angeles",
@@ -167,6 +170,7 @@ class ChecklistInstanceService:
         """체크리스트 항목을 완료 처리합니다.
 
         Updates cl_instance_items row and creates cl_item_files + cl_item_submissions.
+        Accepts photo_urls (list, preferred) or photo_url (single, backward compat).
 
         Raises:
             NotFoundError: 인스턴스가 없을 때
@@ -188,17 +192,24 @@ class ChecklistInstanceService:
         )
         if target_item is None:
             raise BadRequestError(
-                f"항목 인덱스가 범위를 벗어났습니다 (Item index out of range: {item_index})"
+                f"Item index out of range: {item_index}"
             )
 
         if target_item.is_completed:
             raise BadRequestError(
-                f"이미 완료된 항목입니다 (Item {item_index} is already completed)"
+                f"Item {item_index} is already completed"
             )
+
+        # Resolve effective photo list: photo_urls takes priority over single photo_url
+        effective_photo_urls: list[str] = []
+        if photo_urls:
+            effective_photo_urls = photo_urls
+        elif photo_url:
+            effective_photo_urls = [photo_url]
 
         # 항목 타입별 검증
         v_type: str = target_item.verification_type or "none"
-        if "photo" in v_type and not photo_url:
+        if "photo" in v_type and not effective_photo_urls:
             raise BadRequestError("Photo is required for this item")
         if "text" in v_type and not note:
             raise BadRequestError("Note is required for this item")
@@ -224,15 +235,16 @@ class ChecklistInstanceService:
             db.add(submission)
             await db.flush()
 
-            # 파일 저장
-            if photo_url:
-                finalized = storage_service.finalize_upload(photo_url)
+            # 파일 저장 — one row per photo
+            for idx, p_url in enumerate(effective_photo_urls):
+                finalized = storage_service.finalize_upload(p_url)
                 file_row = ChecklistItemFile(
                     item_id=target_item.id,
                     context="submission",
                     context_id=submission.id,
                     file_url=finalized,
                     file_type="photo",
+                    sort_order=idx,
                     uploaded_by=user_id,
                 )
                 db.add(file_row)
@@ -313,6 +325,7 @@ class ChecklistInstanceService:
         item_index: int,
         user_id: UUID,
         photo_url: str | None = None,
+        photo_urls: list[str] | None = None,
         note: str | None = None,
         location: dict | None = None,
         client_timezone: str | None = None,
@@ -360,21 +373,26 @@ class ChecklistInstanceService:
             if client_timezone:
                 target_item.completed_tz = client_timezone
 
-            # 새 파일 추가
-            if photo_url is not None:
-                new_url = storage_service.finalize_upload(photo_url)
-                if new_url:
+            # 새 파일 추가 (photo_urls 우선, photo_url fallback)
+            effective_urls = photo_urls or ([photo_url] if photo_url else [])
+            for idx, url in enumerate(effective_urls):
+                finalized = storage_service.finalize_upload(url)
+                if finalized:
                     new_file = ChecklistItemFile(
                         item_id=target_item.id,
                         context="submission",
                         context_id=new_submission.id,
-                        file_url=new_url,
+                        file_url=finalized,
                         file_type="photo",
                         uploaded_by=user_id,
+                        sort_order=idx,
                     )
                     db.add(new_file)
 
             await db.flush()
+
+            # 재제출 시 reported_at 리셋 → 다시 Submit Report 가능
+            instance.reported_at = None
 
             # 리뷰가 있으면 pending_re_review로 변경
             if target_item.review_result is not None and target_item.review_result != "pending_re_review":
@@ -586,22 +604,43 @@ class ChecklistInstanceService:
         if target_item is None or target_item.review_result is None:
             raise NotFoundError("Review not found")
 
-        if content_type in ("photo", "video"):
-            content = storage_service.finalize_upload(content)
-
         try:
-            msg = ChecklistItemMessage(
-                item_id=target_item.id,
-                author_id=author_id,
-                type=content_type,
-                content=content,
-            )
-            db.add(msg)
-            await db.flush()
-            await db.refresh(msg)
+            if content_type in ("photo", "video"):
+                # photo/video: finalize upload → save as cl_item_file with context='chat'
+                file_key = storage_service.finalize_upload(content)
+                msg = ChecklistItemMessage(
+                    item_id=target_item.id,
+                    author_id=author_id,
+                    content=None,  # no text, just file
+                )
+                db.add(msg)
+                await db.flush()
+                await db.refresh(msg)
+                file_record = ChecklistItemFile(
+                    item_id=target_item.id,
+                    context="chat",
+                    context_id=msg.id,
+                    file_url=file_key,
+                    file_type=content_type,
+                    sort_order=0,
+                )
+                db.add(file_record)
+            else:
+                # text message
+                msg = ChecklistItemMessage(
+                    item_id=target_item.id,
+                    author_id=author_id,
+                    content=content,
+                )
+                db.add(msg)
+                await db.flush()
+                await db.refresh(msg)
 
-            # compatibility shim: attach review_id alias onto msg for router response
+            # compatibility shim: attach aliases for router response
             msg.review_id = target_item.id  # type: ignore[attr-defined]
+            msg.type = content_type  # type: ignore[attr-defined]
+            if content_type in ("photo", "video"):
+                msg.content = storage_service.resolve_url(file_key)  # type: ignore[assignment]
             await db.commit()
             return msg
         except Exception:
@@ -624,8 +663,18 @@ class ChecklistInstanceService:
             raise NotFoundError("Content not found")
 
         try:
-            if existing.type in ("photo", "video"):
-                storage_service.delete_file(existing.content)
+            # Delete associated files (context="chat", context_id=message.id)
+            related_files = (
+                await db.execute(
+                    select(ChecklistItemFile).where(
+                        ChecklistItemFile.context == "chat",
+                        ChecklistItemFile.context_id == existing.id,
+                    )
+                )
+            ).scalars().all()
+            for f in related_files:
+                storage_service.delete_file(f.file_url)
+                await db.delete(f)
 
             await db.delete(existing)
             await db.flush()
@@ -711,6 +760,9 @@ class ChecklistInstanceService:
             store_result = await db.execute(select(Store.name).where(Store.id == inst.store_id))
             store_name: str = store_result.scalar() or "Unknown"
 
+            # 최신 submission
+            log_latest_sub = sorted(item.submissions, key=lambda s: s.version)[-1] if item.submissions else None
+
             # 현재 파일 URL (최신 파일)
             photo_url: str | None = None
             if item.files:
@@ -730,10 +782,74 @@ class ChecklistInstanceService:
                 "completed_at": item.completed_at.isoformat() if item.completed_at else None,
                 "completed_timezone": item.completed_tz,
                 "photo_url": photo_url,
-                "note": item.note,
+                "note": log_latest_sub.note if log_latest_sub else None,
             })
 
         return items, total
+
+    async def update_score(
+        self,
+        db: AsyncSession,
+        instance_id: UUID,
+        organization_id: UUID,
+        scorer_id: UUID,
+        score: int,
+        score_note: str | None = None,
+    ) -> ChecklistInstance:
+        """인스턴스에 점수를 부여하거나 수정합니다. 변경 이력을 cl_score_history에 기록합니다."""
+        instance = await self.get_instance(db, instance_id, organization_id)
+
+        now = datetime.now(timezone.utc)
+
+        try:
+            history = ClScoreHistory(
+                instance_id=instance.id,
+                old_score=instance.score,
+                new_score=score,
+                old_score_note=instance.score_note,
+                new_score_note=score_note,
+                changed_by=scorer_id,
+            )
+            db.add(history)
+
+            instance.score = score
+            instance.score_note = score_note
+            instance.scored_by = scorer_id
+            instance.scored_at = now
+
+            await db.flush()
+            await db.refresh(instance)
+            await db.commit()
+            return instance
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def bulk_review(
+        self,
+        db: AsyncSession,
+        instance_id: UUID,
+        organization_id: UUID,
+        reviewer_id: UUID,
+        item_indexes: list[int],
+        result: str,
+    ) -> list[ChecklistInstanceItem]:
+        """여러 항목에 리뷰 결과를 일괄 적용합니다. 이미 동일 결과인 항목은 건너뜁니다."""
+        reviewed: list[ChecklistInstanceItem] = []
+        for idx in item_indexes:
+            try:
+                item = await self.upsert_review(
+                    db,
+                    instance_id=instance_id,
+                    item_index=idx,
+                    reviewer_id=reviewer_id,
+                    result=result,
+                )
+                reviewed.append(item)
+            except BadRequestError:
+                # 이미 동일 결과인 항목은 건너뜀
+                continue
+        return reviewed
 
     async def build_response(
         self,
@@ -759,305 +875,223 @@ class ChecklistInstanceService:
             "total_items": instance.total_items,
             "completed_items": instance.completed_items,
             "status": instance.status,
+            "reported_at": instance.reported_at,
             "created_at": instance.created_at,
         }
+
+    async def submit_report(
+        self,
+        db: AsyncSession,
+        instance_id: UUID,
+        user_id: UUID,
+    ) -> ChecklistInstance:
+        """체크리스트 완료 보고 — 해당 store SV/GM에게 알림 + 이메일 발송.
+
+        모든 항목이 완료된 상태에서만 호출 가능.
+        """
+        instance = await checklist_instance_repository.get_with_items(db, instance_id)
+        if instance is None:
+            raise NotFoundError("Checklist instance not found")
+        if instance.user_id != user_id:
+            raise ForbiddenError("Only the assigned user can submit the report")
+        if instance.completed_items < instance.total_items:
+            raise BadRequestError("Not all items are completed")
+
+        # record report submission time
+        instance.reported_at = datetime.now(timezone.utc)
+
+        # staff info
+        staff_result = await db.execute(
+            select(User).where(User.id == instance.user_id)
+        )
+        staff = staff_result.scalar_one_or_none()
+        staff_name = staff.full_name if staff else "Unknown"
+        # work role name (shift - position) from schedule
+        work_role_name = ""
+        if instance.schedule_id:
+            from app.models.schedule import Schedule, StoreWorkRole
+            from app.models.work import Shift, Position
+            sched_result = await db.execute(
+                select(Schedule.work_role_id).where(Schedule.id == instance.schedule_id)
+            )
+            work_role_id = sched_result.scalar()
+            if work_role_id:
+                wr_result = await db.execute(
+                    select(StoreWorkRole).where(StoreWorkRole.id == work_role_id)
+                )
+                wr = wr_result.scalar_one_or_none()
+                if wr:
+                    if wr.name:
+                        work_role_name = wr.name
+                    else:
+                        # name이 비어있으면 shift - position 조합
+                        sh_result = await db.execute(select(Shift.name).where(Shift.id == wr.shift_id))
+                        pos_result = await db.execute(select(Position.name).where(Position.id == wr.position_id))
+                        shift_name = sh_result.scalar() or ""
+                        pos_name = pos_result.scalar() or ""
+                        work_role_name = f"{shift_name} - {pos_name}".strip(" - ")
+
+        store_result = await db.execute(select(Store.name).where(Store.id == instance.store_id))
+        store_name = store_result.scalar() or "Unknown"
+
+        template_name = ""
+        if instance.template_id:
+            tpl_result = await db.execute(
+                select(ChecklistTemplate.title).where(ChecklistTemplate.id == instance.template_id)
+            )
+            template_name = tpl_result.scalar() or ""
+
+        # notification + get managers for email
+        from app.services.notification_service import notification_service
+        notifications, managers = await notification_service.create_for_checklist_submitted(
+            db, instance, staff_name, store_name
+        )
+        await db.commit()
+
+        # send email (background, don't block response)
+        import asyncio
+        from app.utils.email import send_email
+        from app.utils.email_templates import build_checklist_completed_email
+
+        work_date_str = instance.work_date.isoformat() if instance.work_date else ""
+        admin_url = f"{settings.ADMIN_BASE_URL}/schedules/{instance.schedule_id}"
+
+        for manager in managers:
+            if manager.email:
+                try:
+                    subject, html = build_checklist_completed_email(
+                        store_name=store_name,
+                        staff_name=staff_name,
+                        work_role_name=work_role_name,
+                        work_date=work_date_str,
+                        template_name=template_name,
+                        total_items=instance.total_items,
+                        completed_items=instance.completed_items,
+                        admin_url=admin_url,
+                    )
+                    asyncio.create_task(send_email(to=manager.email, subject=subject, html=html))
+                except Exception:
+                    pass  # email failure should not block
+
+        return instance
 
     async def build_detail_response(
         self,
         db: AsyncSession,
         instance: ChecklistInstance,
     ) -> dict:
-        """인스턴스 상세 응답 딕셔너리를 구성합니다 (cl_instance_items 기반).
+        """인스턴스 상세 응답 — 새 형식 (items + files + submissions + reviews_log + messages).
 
-        Replaces the old JSONB snapshot+completions merge with a direct
-        read from cl_instance_items.
+        가이드 문서 AFTER 형식에 맞춤. 타임라인은 프론트에서 합성.
         """
         response: dict = await self.build_response(db, instance)
 
         if not instance.items:
-            response["snapshot"] = None
+            response["items"] = []
             return response
 
-        # 이름 캐시 구성 — Collect all user IDs to fetch in bulk
+        # 이름 캐시 구성
         user_name_cache: dict[UUID, str] = {}
-        user_ids_to_fetch: set[UUID] = set()
+        user_ids: set[UUID] = set()
         for item in instance.items:
             if item.completed_by:
-                user_ids_to_fetch.add(item.completed_by)
+                user_ids.add(item.completed_by)
             if item.reviewer_id:
-                user_ids_to_fetch.add(item.reviewer_id)
+                user_ids.add(item.reviewer_id)
             for msg in (item.messages or []):
                 if msg.author_id:
-                    user_ids_to_fetch.add(msg.author_id)
+                    user_ids.add(msg.author_id)
             for log in (item.reviews_log or []):
                 if log.changed_by:
-                    user_ids_to_fetch.add(log.changed_by)
+                    user_ids.add(log.changed_by)
+            for sub in (item.submissions or []):
+                if sub.submitted_by:
+                    user_ids.add(sub.submitted_by)
 
-        for uid in user_ids_to_fetch:
+        for uid in user_ids:
             r = await db.execute(select(User.full_name).where(User.id == uid))
             user_name_cache[uid] = r.scalar() or "Unknown"
 
-        merged_items: list[dict] = []
-        for item in instance.items:
-            # 현재 파일들 (submission_id is None = 현재 제출)
-            current_files = [f for f in (item.files or []) if f.submission_id is None]
-            # 아카이빙된 파일 포함 최신 파일도 포함
-            all_files_sorted = sorted(item.files or [], key=lambda f: f.created_at)
-            current_photo_url: str | None = None
-            if current_files:
-                current_photo_url = _resolve(sorted(current_files, key=lambda f: f.sort_order)[0].file_url)
-
+        items_list: list[dict] = []
+        for item in sorted(instance.items, key=lambda i: i.sort_order):
             item_data: dict[str, Any] = {
+                "id": str(item.id),
                 "item_index": item.item_index,
                 "title": item.title,
                 "description": item.description,
                 "verification_type": item.verification_type,
+                "min_photos": item.min_photos,
+                "max_photos": item.max_photos,
                 "sort_order": item.sort_order,
+                # completion
                 "is_completed": item.is_completed,
                 "completed_at": item.completed_at.isoformat() if item.completed_at else None,
-                "completed_timezone": item.completed_tz,
                 "completed_tz": item.completed_tz,
                 "completed_by": str(item.completed_by) if item.completed_by else None,
                 "completed_by_name": user_name_cache.get(item.completed_by) if item.completed_by else None,
-                "photo_url": current_photo_url,
-                "note": item.note,
-                "location": item.location,
-                "resubmission_count": max(len(item.submissions) - 1, 0) if item.submissions else 0,
+                # review
+                "review_result": item.review_result,
+                "reviewer_id": str(item.reviewer_id) if item.reviewer_id else None,
+                "reviewer_name": user_name_cache.get(item.reviewer_id) if item.reviewer_id else None,
+                "reviewed_at": item.reviewed_at.isoformat() if item.reviewed_at else None,
             }
 
-            # 리뷰 데이터 — from inline fields on item
-            review_result = item.review_result
-            if review_result is not None:
-                reviewer_name = user_name_cache.get(item.reviewer_id) if item.reviewer_id else None
-
-                # 메시지 목록 (review contents 대체)
-                contents_list: list[dict] = []
-                for msg in (item.messages or []):
-                    # message files (context='chat')
-                    msg_files = [f for f in (item.files or []) if f.context == "chat" and f.context_id == msg.id]
-                    contents_list.append({
-                        "id": str(msg.id),
-                        "author_id": str(msg.author_id) if msg.author_id else None,
-                        "author_name": user_name_cache.get(msg.author_id) if msg.author_id else None,
-                        "content": msg.content,
-                        "files": [{"id": str(f.id), "file_url": _resolve(f.file_url), "file_type": f.file_type} for f in msg_files],
-                        "created_at": msg.created_at.isoformat(),
-                    })
-
-                # 리뷰 이력 목록
-                history_list: list[dict] = []
-                for log in (item.reviews_log or []):
-                    history_list.append({
-                        "id": str(log.id),
-                        "changed_by": str(log.changed_by),
-                        "changed_by_name": user_name_cache.get(log.changed_by) if log.changed_by else None,
-                        "old_result": log.old_result,
-                        "new_result": log.new_result,
-                        "created_at": log.created_at.isoformat(),
-                    })
-
-                item_data["review"] = {
-                    "id": str(item.id),
-                    "reviewer_id": str(item.reviewer_id),
-                    "reviewer_name": reviewer_name,
-                    "result": review_result,
-                    "contents": contents_list,
-                    "history": history_list,
-                    "created_at": item.created_at.isoformat(),
-                    "updated_at": item.updated_at.isoformat(),
+            # files — all files for this item, resolved URLs
+            item_data["files"] = [
+                {
+                    "id": str(f.id),
+                    "context": f.context,
+                    "context_id": str(f.context_id) if f.context_id else None,
+                    "file_url": _resolve(f.file_url),
+                    "file_type": f.file_type,
+                    "sort_order": f.sort_order,
                 }
-                item_data["review_status"] = review_result
+                for f in sorted(item.files or [], key=lambda f: f.created_at)
+            ]
 
-                # 반려 플랫 필드
-                is_rejected = review_result == "fail"
-                item_data["is_rejected"] = is_rejected
-                if is_rejected:
-                    # 마지막 fail 로그에서 코멘트/사진 추출
-                    fail_logs = [h for h in (item.reviews_log or []) if h.new_result == "fail"]
-                    if fail_logs:
-                        last_fail = sorted(fail_logs, key=lambda h: h.created_at)[-1]
-                        fail_time = last_fail.created_at
-                        fail_msgs = [m for m in (item.messages or []) if m.author_id == item.reviewer_id and m.created_at >= fail_time]
-                        rej_comment = next((m.content for m in fail_msgs if m.type == "text"), None)
-                        rej_photos = [_resolve(m.content) for m in fail_msgs if m.type in ("photo", "video")]
-                        item_data["rejection_comment"] = rej_comment
-                        item_data["rejection_photo_urls"] = rej_photos
-                        item_data["rejected_by"] = user_name_cache.get(last_fail.changed_by) if last_fail.changed_by else reviewer_name
-                        item_data["rejected_at"] = last_fail.created_at.isoformat()
-                    else:
-                        item_data["rejection_comment"] = None
-                        item_data["rejection_photo_urls"] = []
-                        item_data["rejected_by"] = reviewer_name
-                        item_data["rejected_at"] = item.reviewed_at.isoformat() if item.reviewed_at else None
-                else:
-                    item_data["rejection_comment"] = None
-                    item_data["rejection_photo_urls"] = []
-                    item_data["rejected_by"] = None
-                    item_data["rejected_at"] = None
-
-                # 승인 플랫 필드
-                is_approved = review_result == "pass"
-                item_data["is_approved"] = is_approved
-                if is_approved:
-                    pass_logs = [h for h in (item.reviews_log or []) if h.new_result == "pass"]
-                    if pass_logs:
-                        last_pass = sorted(pass_logs, key=lambda h: h.created_at)[-1]
-                        pass_time = last_pass.created_at
-                        pass_msgs = [m for m in (item.messages or []) if m.author_id == item.reviewer_id and m.created_at >= pass_time]
-                        app_comment = next((m.content for m in pass_msgs if m.type == "text"), None)
-                        app_photos = [_resolve(m.content) for m in pass_msgs if m.type in ("photo", "video")]
-                        item_data["approval_comment"] = app_comment
-                        item_data["approval_photo_urls"] = app_photos
-                        item_data["approved_by"] = user_name_cache.get(last_pass.changed_by) if last_pass.changed_by else reviewer_name
-                        item_data["approved_at"] = last_pass.created_at.isoformat()
-                    else:
-                        item_data["approval_comment"] = None
-                        item_data["approval_photo_urls"] = []
-                        item_data["approved_by"] = reviewer_name
-                        item_data["approved_at"] = item.reviewed_at.isoformat() if item.reviewed_at else None
-                else:
-                    item_data["approval_comment"] = None
-                    item_data["approval_photo_urls"] = []
-                    item_data["approved_by"] = None
-                    item_data["approved_at"] = None
-            else:
-                item_data["review"] = None
-                item_data["review_status"] = None
-                item_data["is_rejected"] = False
-                item_data["rejection_comment"] = None
-                item_data["rejection_photo_urls"] = []
-                item_data["rejected_by"] = None
-                item_data["rejected_at"] = None
-                item_data["is_approved"] = False
-                item_data["approval_comment"] = None
-                item_data["approval_photo_urls"] = []
-                item_data["approved_by"] = None
-                item_data["approved_at"] = None
-
-            # 제출 이력 (재제출 아카이브)
-            completion_history_list: list[dict] = []
-            for sub in (item.submissions or []):
-                sub_photos = [_resolve(f.file_url) for f in (sub.files or [])]
-                completion_history_list.append({
+            # submissions — version history
+            item_data["submissions"] = [
+                {
                     "id": str(sub.id),
-                    "photo_url": sub_photos[0] if sub_photos else None,
-                    "photo_urls": sub_photos,
+                    "version": sub.version,
                     "note": sub.note,
                     "location": sub.location,
+                    "submitted_by": str(sub.submitted_by) if sub.submitted_by else None,
+                    "submitted_by_name": user_name_cache.get(sub.submitted_by) if sub.submitted_by else None,
                     "submitted_at": sub.submitted_at.isoformat(),
-                    "created_at": sub.created_at.isoformat(),
-                })
-            item_data["completion_history"] = completion_history_list
+                }
+                for sub in sorted(item.submissions or [], key=lambda s: s.version)
+            ]
 
-            # 앱용 재제출 응답 필드
-            is_currently_rejected = item_data.get("is_rejected", False)
-            sub_count = len(item.submissions) if item.submissions else 0
-            if not is_currently_rejected and sub_count > 1:
-                latest_sub = sorted(item.submissions, key=lambda s: s.version)[-1] if item.submissions else None
-                item_data["response_comment"] = latest_sub.note if latest_sub else None
-                item_data["responded_by"] = user_name_cache.get(item.completed_by) if item.completed_by else None
-                item_data["responded_at"] = (
-                    completion_history_list[-1]["created_at"] if completion_history_list
-                    else (item.completed_at.isoformat() if item.completed_at else None)
-                )
-            else:
-                item_data["response_comment"] = None
-                item_data["responded_at"] = None
-                item_data["responded_by"] = None
+            # reviews_log — review result changes
+            item_data["reviews_log"] = [
+                {
+                    "id": str(log.id),
+                    "old_result": log.old_result,
+                    "new_result": log.new_result,
+                    "comment": log.comment,
+                    "changed_by": str(log.changed_by) if log.changed_by else None,
+                    "changed_by_name": user_name_cache.get(log.changed_by) if log.changed_by else None,
+                    "created_at": log.created_at.isoformat(),
+                }
+                for log in sorted(item.reviews_log or [], key=lambda l: l.created_at)
+            ]
 
-            # 타임라인 이벤트 구성 (시간순)
-            timeline_events: list[dict] = []
+            # messages — chat thread
+            item_data["messages"] = [
+                {
+                    "id": str(msg.id),
+                    "author_id": str(msg.author_id) if msg.author_id else None,
+                    "author_name": user_name_cache.get(msg.author_id) if msg.author_id else None,
+                    "content": msg.content,
+                    "created_at": msg.created_at.isoformat(),
+                }
+                for msg in sorted(item.messages or [], key=lambda m: m.created_at)
+            ]
 
-            # 1) 최초 완료 이벤트
-            if item.is_completed:
-                if item.submissions:
-                    first_sub = sorted(item.submissions, key=lambda s: s.submitted_at)[0]
-                    sub_photos = [_resolve(f.file_url) for f in (first_sub.files or [])]
-                    timeline_events.append({
-                        "type": "completed",
-                        "comment": first_sub.note,
-                        "photo_urls": sub_photos,
-                        "by": user_name_cache.get(item.completed_by) if item.completed_by else None,
-                        "at": first_sub.submitted_at.isoformat(),
-                    })
-                else:
-                    timeline_events.append({
-                        "type": "completed",
-                        "comment": item.note,
-                        "photo_urls": [current_photo_url] if current_photo_url else [],
-                        "by": user_name_cache.get(item.completed_by) if item.completed_by else None,
-                        "at": item.completed_at.isoformat() if item.completed_at else None,
-                    })
+            items_list.append(item_data)
 
-            # 2) 리뷰 이력 이벤트
-            sorted_logs = sorted(item.reviews_log or [], key=lambda h: h.created_at)
-            sorted_msgs = sorted(item.messages or [], key=lambda m: m.created_at)
-            for idx, log in enumerate(sorted_logs):
-                log_time = log.created_at
-                next_time = sorted_logs[idx + 1].created_at if idx + 1 < len(sorted_logs) else None
-                rh_comment = None
-                rh_photos: list[str] = []
-                for m in sorted_msgs:
-                    if m.created_at < log_time:
-                        continue
-                    if next_time is not None and m.created_at >= next_time:
-                        break
-                    if m.author_id == item.reviewer_id:
-                        if m.type == "text":
-                            rh_comment = m.content
-                        elif m.type in ("photo", "video"):
-                            rh_photos.append(_resolve(m.content))
-
-                if log.new_result == "fail":
-                    timeline_events.append({
-                        "type": "rejected",
-                        "comment": rh_comment,
-                        "photo_urls": rh_photos,
-                        "by": user_name_cache.get(log.changed_by) if log.changed_by else None,
-                        "at": log.created_at.isoformat(),
-                    })
-                elif log.new_result == "pass":
-                    timeline_events.append({
-                        "type": "approved",
-                        "comment": rh_comment,
-                        "photo_urls": rh_photos,
-                        "by": user_name_cache.get(log.changed_by) if log.changed_by else None,
-                        "at": log.created_at.isoformat(),
-                    })
-                elif log.new_result == "pending_re_review":
-                    timeline_events.append({
-                        "type": "pending",
-                        "comment": None,
-                        "photo_urls": [],
-                        "by": user_name_cache.get(log.changed_by) if log.changed_by else None,
-                        "at": log.created_at.isoformat(),
-                    })
-
-            # 3) 재제출 이벤트 (submission 아카이브 순서)
-            sorted_subs = sorted(item.submissions or [], key=lambda s: s.submitted_at)
-            for i, sub in enumerate(sorted_subs):
-                if i + 1 < len(sorted_subs):
-                    next_sub = sorted_subs[i + 1]
-                    next_photos = [_resolve(f.file_url) for f in (next_sub.files or [])]
-                    resp_note = next_sub.note
-                    resp_photos = next_photos
-                else:
-                    resp_note = item.note
-                    resp_photos = [_resolve(f.file_url) for f in (current_files or [])]
-                timeline_events.append({
-                    "type": "responded",
-                    "comment": resp_note,
-                    "photo_urls": resp_photos,
-                    "by": user_name_cache.get(item.completed_by) if item.completed_by else None,
-                    "at": sub.created_at.isoformat(),
-                })
-
-            timeline_events.sort(key=lambda e: e.get("at") or "")
-            item_data["history"] = timeline_events
-
-            merged_items.append(item_data)
-
-        response["snapshot"] = merged_items
+        response["items"] = items_list
         return response
 
 

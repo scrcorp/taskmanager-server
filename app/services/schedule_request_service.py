@@ -960,7 +960,7 @@ class ScheduleRequestService:
                         break_end = wr.break_end_time
 
             if start_time is None or end_time is None:
-                errors.append(f"Request {req.id}: 시간 정보 없음")
+                errors.append(f"Request {req.id}: missing time information")
                 continue
 
             # Calculate net minutes

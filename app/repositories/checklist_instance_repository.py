@@ -85,8 +85,7 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
                 selectinload(ChecklistInstance.items)
                 .selectinload(ChecklistInstanceItem.files),
                 selectinload(ChecklistInstance.items)
-                .selectinload(ChecklistInstanceItem.submissions)
-                .selectinload(ChecklistItemSubmission.files),
+                .selectinload(ChecklistInstanceItem.submissions),
                 selectinload(ChecklistInstance.items)
                 .selectinload(ChecklistInstanceItem.reviews_log),
                 selectinload(ChecklistInstance.items)
@@ -113,8 +112,7 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
                 selectinload(ChecklistInstance.items)
                 .selectinload(ChecklistInstanceItem.files),
                 selectinload(ChecklistInstance.items)
-                .selectinload(ChecklistInstanceItem.submissions)
-                .selectinload(ChecklistItemSubmission.files),
+                .selectinload(ChecklistInstanceItem.submissions),
                 selectinload(ChecklistInstance.items)
                 .selectinload(ChecklistInstanceItem.reviews_log),
                 selectinload(ChecklistInstance.items)
@@ -162,7 +160,7 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
             )
             .options(
                 selectinload(ChecklistInstanceItem.files),
-                selectinload(ChecklistInstanceItem.submissions).selectinload(ChecklistItemSubmission.files),
+                selectinload(ChecklistInstanceItem.submissions),
                 selectinload(ChecklistInstanceItem.reviews_log),
                 selectinload(ChecklistInstanceItem.messages),
             )

@@ -148,13 +148,35 @@ def upgrade() -> None:
           AND cii.item_index  = cc.item_index
     """)
 
-    # 3. Migrate current completion photo → cl_item_files (no submission_id = current)
+    # 2.5. Create initial submission (version=0) for all completed items
+    #      so that chat timeline shows "Submitted" event with photo+text
     op.execute("""
-        INSERT INTO cl_item_files (id, item_id, file_url, file_type, sort_order, uploaded_by, created_at)
-        SELECT gen_random_uuid(), cii.id, cc.photo_url, 'photo', 0, cc.user_id, cc.completed_at
+        INSERT INTO cl_item_submissions (
+            id, item_id, version, note, location, submitted_by, submitted_at, created_at
+        )
+        SELECT
+            gen_random_uuid(),
+            cii.id,
+            0,
+            cc.note,
+            cc.location,
+            cc.user_id,
+            cc.completed_at,
+            cc.completed_at
         FROM cl_completions cc
         JOIN cl_instance_items cii
           ON cii.instance_id = cc.instance_id AND cii.item_index = cc.item_index
+    """)
+
+    # 3. Migrate current completion photo → cl_item_files (linked to initial submission)
+    op.execute("""
+        INSERT INTO cl_item_files (id, item_id, submission_id, file_url, file_type, sort_order, uploaded_by, created_at)
+        SELECT gen_random_uuid(), cii.id, cis.id, cc.photo_url, 'photo', 0, cc.user_id, cc.completed_at
+        FROM cl_completions cc
+        JOIN cl_instance_items cii
+          ON cii.instance_id = cc.instance_id AND cii.item_index = cc.item_index
+        JOIN cl_item_submissions cis
+          ON cis.item_id = cii.id AND cis.version = 0
         WHERE cc.photo_url IS NOT NULL
     """)
 

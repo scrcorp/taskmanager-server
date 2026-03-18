@@ -178,7 +178,7 @@ class SchedulePeriodService:
         period = await self._get_period_or_404(db, period_id, organization_id)
         if period.status not in ("closed", "sv_draft"):
             raise BadRequestError(
-                f"현재 상태({period.status})에서는 다시 열 수 없습니다. 'closed' 또는 'sv_draft' 상태여야 합니다."
+                f"Cannot reopen from status '{period.status}'. Only 'closed' or 'sv_draft' can be reopened."
             )
         try:
             period.status = "open"

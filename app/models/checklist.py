@@ -183,6 +183,15 @@ class ChecklistInstance(Base):
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
+    # 보고 제출 시점 — NULL이면 미제출 (Report submission timestamp, NULL=not submitted)
+    reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # 점수 데이터 — Score fields (set by reviewer after all items are reviewed)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scored_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    scored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # 관계 — Instance items ordered by item_index
     items = relationship(
         "ChecklistInstanceItem",
@@ -343,3 +352,25 @@ class ChecklistItemMessage(Base):
     )
 
     item = relationship("ChecklistInstanceItem", back_populates="messages")
+
+
+class ClScoreHistory(Base):
+    """체크리스트 인스턴스 점수 변경 이력 — 점수 부여/수정 추적.
+
+    One row per score update on a checklist instance.
+    """
+
+    __tablename__ = "cl_score_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instances.id", ondelete="CASCADE"), nullable=False)
+    old_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    old_score_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_score_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_cl_score_history_instance_id", "instance_id"),
+    )

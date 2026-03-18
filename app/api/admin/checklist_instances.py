@@ -20,7 +20,7 @@ from app.schemas.common import (
     MessageResponse,
     PaginatedResponse,
 )
-from app.schemas.checklist_review import ItemReviewResponse, ItemReviewUpsert, ReviewContentCreate, ReviewContentResponse
+from app.schemas.checklist_review import BulkReviewRequest, ItemReviewResponse, ItemReviewUpsert, ReviewContentCreate, ReviewContentResponse, ScoreUpdate
 from app.services.checklist_instance_service import checklist_instance_service
 
 router: APIRouter = APIRouter()
@@ -165,6 +165,63 @@ async def get_review_summary(
         date_from=date_from,
         date_to=date_to,
     )
+
+
+@router.patch("/{instance_id}/score")
+async def update_score(
+    instance_id: UUID,
+    data: ScoreUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+) -> dict:
+    """인스턴스에 점수를 부여하거나 수정합니다."""
+    instance = await checklist_instance_service.update_score(
+        db,
+        instance_id=instance_id,
+        organization_id=current_user.organization_id,
+        scorer_id=current_user.id,
+        score=data.score,
+        score_note=data.score_note,
+    )
+    return {
+        "id": str(instance.id),
+        "score": instance.score,
+        "score_note": instance.score_note,
+        "scored_by": str(instance.scored_by) if instance.scored_by else None,
+        "scored_at": instance.scored_at,
+    }
+
+
+@router.post("/{instance_id}/items/bulk-review")
+async def bulk_review(
+    instance_id: UUID,
+    data: BulkReviewRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+) -> dict:
+    """여러 항목에 리뷰 결과를 일괄 적용합니다."""
+    reviewed = await checklist_instance_service.bulk_review(
+        db,
+        instance_id=instance_id,
+        organization_id=current_user.organization_id,
+        reviewer_id=current_user.id,
+        item_indexes=data.item_indexes,
+        result=data.result,
+    )
+    return {
+        "reviewed_count": len(reviewed),
+        "item_indexes": [item.item_index for item in reviewed],
+    }
+
+
+@router.post("/{instance_id}/report")
+async def send_report(
+    instance_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+) -> dict:
+    """체크리스트 인스턴스 리포트를 전송합니다 (stub)."""
+    return {"message": "Report sent"}
 
 
 @router.get("/{instance_id}", response_model=ChecklistInstanceDetailResponse)

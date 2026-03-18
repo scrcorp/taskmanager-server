@@ -27,6 +27,7 @@ class ScheduleRepository(BaseRepository[Schedule]):
         status: str | None = None,
         page: int = 1,
         per_page: int = 100,
+        sort_desc: bool = False,
     ) -> tuple[Sequence[Schedule], int]:
         query: Select = select(Schedule).where(
             Schedule.organization_id == organization_id
@@ -41,7 +42,10 @@ class ScheduleRepository(BaseRepository[Schedule]):
             query = query.where(Schedule.work_date <= date_to)
         if status is not None:
             query = query.where(Schedule.status == status)
-        query = query.order_by(Schedule.work_date, Schedule.start_time)
+        if sort_desc:
+            query = query.order_by(Schedule.work_date.desc(), Schedule.start_time.desc())
+        else:
+            query = query.order_by(Schedule.work_date, Schedule.start_time)
         return await self.get_paginated(db, query, page, per_page)
 
     async def check_time_overlap(

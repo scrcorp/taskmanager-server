@@ -396,8 +396,7 @@ class AttendanceService:
         allowed_fields: set[str] = {"clock_in", "clock_out", "break_start", "break_end"}
         if field_name not in allowed_fields:
             raise BadRequestError(
-                f"수정할 수 없는 필드입니다: {field_name} "
-                f"(Cannot correct field: {field_name}. Allowed: {', '.join(allowed_fields)})"
+                f"Cannot correct field: {field_name}. Allowed: {', '.join(allowed_fields)}"
             )
 
         # 근태 기록 조회 — Fetch attendance record

@@ -137,18 +137,18 @@ class ScheduleService:
             max_daily = break_rule.max_daily_work_minutes if break_rule else MAX_DAILY_MINUTES
             existing_daily = await schedule_repository.get_daily_minutes(db, user_id, work_date, exclude_id)
             if existing_daily + net > max_daily:
-                warnings.append(f"하루 총 근무시간 초과: {(existing_daily + net) // 60}h > {max_daily // 60}h")
+                warnings.append(f"Daily work hours exceeded: {(existing_daily + net) // 60}h > {max_daily // 60}h")
 
         # 3. Weekly total check
         if not force:
             existing_weekly = await schedule_repository.get_weekly_minutes(db, user_id, work_date, exclude_id)
             if existing_weekly + net > MAX_WEEKLY_MINUTES:
-                warnings.append(f"주간 총 근무시간 초과: {(existing_weekly + net) // 60}h > {MAX_WEEKLY_MINUTES // 60}h")
+                warnings.append(f"Weekly work hours exceeded: {(existing_weekly + net) // 60}h > {MAX_WEEKLY_MINUTES // 60}h")
 
         # 4. Break suggestion
         if not force and break_rule:
             if net > break_rule.max_continuous_minutes and break_start is None:
-                warnings.append(f"연속 {break_rule.max_continuous_minutes}분 초과 근무 — 휴게시간 설정을 권장합니다")
+                warnings.append(f"Continuous work exceeds {break_rule.max_continuous_minutes}min — a break is recommended")
 
         valid = len(errors) == 0 and (force or len(warnings) == 0)
         return ScheduleValidation(valid=valid, warnings=warnings, errors=errors)
@@ -164,10 +164,12 @@ class ScheduleService:
         status: str | None = None,
         page: int = 1,
         per_page: int = 100,
+        sort_desc: bool = False,
     ) -> tuple[list[ScheduleResponse], int]:
         entries, total = await schedule_repository.get_by_filters(
             db, organization_id, store_id, user_id,
             date_from, date_to, status, page, per_page,
+            sort_desc=sort_desc,
         )
         responses = [await self._to_response(db, e) for e in entries]
         return responses, total
