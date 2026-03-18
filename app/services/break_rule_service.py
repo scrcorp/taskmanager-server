@@ -51,23 +51,30 @@ class BreakRuleService:
         organization_id: UUID,
         data: BreakRuleUpsert,
     ) -> BreakRuleResponse:
-        await self._verify_store(db, store_id, organization_id)
-        existing = await break_rule_repository.get_by_store(db, store_id)
+        try:
+            await self._verify_store(db, store_id, organization_id)
+            existing = await break_rule_repository.get_by_store(db, store_id)
 
-        if existing is not None:
-            updated = await break_rule_repository.update(
-                db, existing.id, data.model_dump()
-            )
-            return self._to_response(updated)  # type: ignore[arg-type]
-        else:
-            created = await break_rule_repository.create(
-                db,
-                {
-                    "store_id": store_id,
-                    **data.model_dump(),
-                },
-            )
-            return self._to_response(created)
+            if existing is not None:
+                updated = await break_rule_repository.update(
+                    db, existing.id, data.model_dump()
+                )
+                result = self._to_response(updated)  # type: ignore[arg-type]
+            else:
+                created = await break_rule_repository.create(
+                    db,
+                    {
+                        "store_id": store_id,
+                        **data.model_dump(),
+                    },
+                )
+                result = self._to_response(created)
+
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
 
 break_rule_service: BreakRuleService = BreakRuleService()

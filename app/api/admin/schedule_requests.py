@@ -52,9 +52,7 @@ async def admin_create_request(
     current_user: Annotated[User, Depends(require_permission("schedules:create"))],
 ) -> ScheduleRequestResponse:
     """관리자가 직접 스케줄 신청 생성 (staff에게 안 보임, confirm 시 entry로 변환)."""
-    result = await schedule_request_service.admin_create_request(db, data, created_by=current_user.id)
-    await db.commit()
-    return result
+    return await schedule_request_service.admin_create_request(db, data, created_by=current_user.id)
 
 
 @router.patch("/{request_id}", response_model=ScheduleRequestResponse)
@@ -65,9 +63,7 @@ async def admin_update_request(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleRequestResponse:
     """관리자가 스케줄 신청 수정 — 원본 추적 + auto-unmodify."""
-    result = await schedule_request_service.admin_update_request(db, request_id, data)
-    await db.commit()
-    return result
+    return await schedule_request_service.admin_update_request(db, request_id, data)
 
 
 @router.patch("/{request_id}/status", response_model=ScheduleRequestResponse)
@@ -78,9 +74,7 @@ async def update_request_status(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleRequestResponse:
     """직원 스케줄 신청 상태 변경."""
-    result = await schedule_request_service.update_request_status(db, request_id, data.status)
-    await db.commit()
-    return result
+    return await schedule_request_service.update_request_status(db, request_id, data.status)
 
 
 @router.post("/{request_id}/revert", response_model=ScheduleRequestResponse)
@@ -90,9 +84,7 @@ async def admin_revert_request(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleRequestResponse:
     """Modified/rejected 신청을 원래 값으로 복원."""
-    result = await schedule_request_service.admin_revert_request(db, request_id)
-    await db.commit()
-    return result
+    return await schedule_request_service.admin_revert_request(db, request_id)
 
 
 @router.delete("/{request_id}")
@@ -109,9 +101,13 @@ async def admin_delete_request(
     if req is None:
         raise NotFoundError("Request not found")
     if req.created_by is None:
-        raise BadRequestError("직원이 제출한 신청은 삭제할 수 없습니다. Reject를 사용하세요.")
-    await schedule_request_repository.delete(db, request_id)
-    await db.commit()
+        raise BadRequestError("Staff-submitted requests cannot be deleted. Use reject instead.")
+    try:
+        await schedule_request_repository.delete(db, request_id)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     return {"ok": True}
 
 
@@ -137,7 +133,7 @@ async def confirm_requests(
     current_user: Annotated[User, Depends(require_permission("schedules:create"))],
 ) -> ScheduleConfirmResult:
     """비거절 신청을 schedule로 일괄 변환 (GM confirm)."""
-    result = await schedule_request_service.confirm_requests(
+    return await schedule_request_service.confirm_requests(
         db,
         organization_id=current_user.organization_id,
         store_id=UUID(data.store_id),
@@ -145,5 +141,3 @@ async def confirm_requests(
         date_to=data.date_to,
         confirmed_by=current_user.id,
     )
-    await db.commit()
-    return result

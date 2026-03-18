@@ -15,11 +15,11 @@ class RoleCreate(BaseModel):
     """역할 생성 요청 스키마.
 
     Role creation request schema.
-    Creates a new role with a unique name and permission level within the org.
+    Creates a new role with a unique name and permission priority within the org.
 
     Attributes:
         name: 역할 이름 (Role name, e.g. "general_manager", unique per org)
-        level: 권한 레벨 (Permission level, 1=highest, unique per org)
+        priority: 권한 우선순위 (Permission priority, 10=owner/highest, unique per org)
     """
 
     name: str

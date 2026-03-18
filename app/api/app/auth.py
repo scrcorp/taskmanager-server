@@ -29,11 +29,7 @@ async def app_register(
     Organization is identified via company_code in request body.
     """
     organization_id = await auth_service.resolve_company_code(db, data.company_code)
-    result: TokenResponse = await auth_service.app_register(
-        db, data, organization_id
-    )
-    await db.commit()
-    return result
+    return await auth_service.app_register(db, data, organization_id)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -47,8 +43,4 @@ async def app_login(
     Optionally accepts company_code in body to scope login to a specific org.
     """
     organization_id = await auth_service.resolve_company_code(db, data.company_code)
-    result: TokenResponse = await auth_service.app_login(
-        db, data, organization_id
-    )
-    await db.commit()
-    return result
+    return await auth_service.app_login(db, data, organization_id)

@@ -19,19 +19,8 @@ from app.utils.exceptions import NotFoundError
 
 class VoiceService:
 
-    async def build_response(self, db: AsyncSession, voice: Voice) -> dict:
-        creator_result = await db.execute(
-            select(User.full_name).where(User.id == voice.created_by)
-        )
-        created_by_name: str = creator_result.scalar() or "Unknown"
-
-        resolved_by_name: str | None = None
-        if voice.resolved_by:
-            r = await db.execute(
-                select(User.full_name).where(User.id == voice.resolved_by)
-            )
-            resolved_by_name = r.scalar()
-
+    def _to_response_dict(self, voice: Voice, names_map: dict[UUID, str]) -> dict:
+        """Build a voice response dict using a pre-fetched names map."""
         return {
             "id": str(voice.id),
             "title": voice.title,
@@ -41,13 +30,40 @@ class VoiceService:
             "priority": voice.priority,
             "store_id": str(voice.store_id) if voice.store_id else None,
             "created_by": str(voice.created_by),
-            "created_by_name": created_by_name,
+            "created_by_name": names_map.get(voice.created_by) or "Unknown",
             "resolved_by": str(voice.resolved_by) if voice.resolved_by else None,
-            "resolved_by_name": resolved_by_name,
+            "resolved_by_name": names_map.get(voice.resolved_by) if voice.resolved_by else None,
             "resolved_at": voice.resolved_at,
             "created_at": voice.created_at,
             "updated_at": voice.updated_at,
         }
+
+    async def build_response(self, db: AsyncSession, voice: Voice) -> dict:
+        user_ids: set[UUID] = {voice.created_by}
+        if voice.resolved_by:
+            user_ids.add(voice.resolved_by)
+        names_result = await db.execute(
+            select(User.id, User.full_name).where(User.id.in_(user_ids))
+        )
+        names_map: dict[UUID, str] = {row.id: row.full_name for row in names_result}
+        return self._to_response_dict(voice, names_map)
+
+    async def build_responses_batch(self, db: AsyncSession, voices: Sequence[Voice]) -> list[dict]:
+        """Build response dicts for a list of voices using a single batch query."""
+        user_ids: set[UUID] = set()
+        for v in voices:
+            user_ids.add(v.created_by)
+            if v.resolved_by:
+                user_ids.add(v.resolved_by)
+
+        names_map: dict[UUID, str] = {}
+        if user_ids:
+            names_result = await db.execute(
+                select(User.id, User.full_name).where(User.id.in_(user_ids))
+            )
+            names_map = {row.id: row.full_name for row in names_result}
+
+        return [self._to_response_dict(v, names_map) for v in voices]
 
     # --- Admin ---
 
@@ -71,7 +87,7 @@ class VoiceService:
     ) -> Voice:
         voice = await voice_repository.get_by_id(db, voice_id, organization_id)
         if voice is None:
-            raise NotFoundError("Voice를 찾을 수 없습니다 (Voice not found)")
+            raise NotFoundError("Voice not found")
         return voice
 
     async def create_voice(
@@ -83,18 +99,24 @@ class VoiceService:
     ) -> Voice:
         store_id = UUID(data.store_id) if data.store_id else None
         title = data.title or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        return await voice_repository.create(
-            db,
-            {
-                "organization_id": organization_id,
-                "store_id": store_id,
-                "title": title,
-                "content": data.content,
-                "category": data.category,
-                "priority": data.priority,
-                "created_by": created_by,
-            },
-        )
+        try:
+            voice = await voice_repository.create(
+                db,
+                {
+                    "organization_id": organization_id,
+                    "store_id": store_id,
+                    "title": title,
+                    "content": data.content,
+                    "category": data.category,
+                    "priority": data.priority,
+                    "created_by": created_by,
+                },
+            )
+            await db.commit()
+            return voice
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_voice(
         self,
@@ -115,12 +137,17 @@ class VoiceService:
             val = update_data["store_id"]
             update_data["store_id"] = UUID(val) if val else None
 
-        updated = await voice_repository.update(
-            db, voice_id, update_data, organization_id
-        )
-        if updated is None:
-            raise NotFoundError("Voice를 찾을 수 없습니다 (Voice not found)")
-        return updated
+        try:
+            updated = await voice_repository.update(
+                db, voice_id, update_data, organization_id
+            )
+            if updated is None:
+                raise NotFoundError("Voice not found")
+            await db.commit()
+            return updated
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_voice(
         self,
@@ -128,10 +155,15 @@ class VoiceService:
         voice_id: UUID,
         organization_id: UUID,
     ) -> bool:
-        deleted = await voice_repository.delete(db, voice_id, organization_id)
-        if not deleted:
-            raise NotFoundError("Voice를 찾을 수 없습니다 (Voice not found)")
-        return deleted
+        try:
+            deleted = await voice_repository.delete(db, voice_id, organization_id)
+            if not deleted:
+                raise NotFoundError("Voice not found")
+            await db.commit()
+            return deleted
+        except Exception:
+            await db.rollback()
+            raise
 
     # --- App (사용자용) ---
 

@@ -76,21 +76,27 @@ class OrganizationService:
         Raises:
             NotFoundError: 조직을 찾을 수 없을 때 (Organization not found)
         """
-        update_data: dict[str, str | bool | None] = data.model_dump(exclude_unset=True)
-        org: Organization | None = await organization_repository.update(
-            db, organization_id, update_data
-        )
-        if org is None:
-            raise NotFoundError("Organization not found")
+        try:
+            update_data: dict[str, str | bool | None] = data.model_dump(exclude_unset=True)
+            org: Organization | None = await organization_repository.update(
+                db, organization_id, update_data
+            )
+            if org is None:
+                raise NotFoundError("Organization not found")
 
-        return OrganizationResponse(
-            id=str(org.id),
-            name=org.name,
-            code=org.code,
-            timezone=org.timezone,
-            is_active=org.is_active,
-            created_at=org.created_at,
-        )
+            result = OrganizationResponse(
+                id=str(org.id),
+                name=org.name,
+                code=org.code,
+                timezone=org.timezone,
+                is_active=org.is_active,
+                created_at=org.created_at,
+            )
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # 싱글턴 인스턴스 — Singleton instance

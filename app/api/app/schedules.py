@@ -32,11 +32,15 @@ async def list_my_schedules(
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
     status: Annotated[str | None, Query()] = None,
-) -> list[dict]:
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=100)] = 20,
+    sort: Annotated[str | None, Query()] = None,
+) -> dict:
     """내 확정 스케줄 목록을 조회합니다 (체크리스트 진행 정보 포함).
 
     List my confirmed schedules with checklist progress info.
     Default: only 'confirmed' status. Returns schedules with cl_instance data.
+    Returns paginated response: { items, total, page, per_page }
     """
     effective_status = status or "confirmed"
 
@@ -47,14 +51,18 @@ async def list_my_schedules(
         effective_date_from = work_date
         effective_date_to = work_date
 
-    entries, _ = await schedule_service.list_entries(
+    sort_desc = sort == "desc"
+
+    entries, total = await schedule_service.list_entries(
         db,
         current_user.organization_id,
         user_id=current_user.id,
         date_from=effective_date_from,
         date_to=effective_date_to,
         status=effective_status,
-        per_page=200,
+        page=page,
+        per_page=per_page,
+        sort_desc=sort_desc,
     )
 
     # 각 스케줄에 cl_instance 진행 정보 병합
@@ -88,10 +96,34 @@ async def list_my_schedules(
             "total_items": cl_instance.total_items if cl_instance else 0,
             "completed_items": cl_instance.completed_items if cl_instance else 0,
             "checklist_status": cl_instance.status if cl_instance else None,
+            "reported_at": cl_instance.reported_at if cl_instance else None,
         }
+        # 아이템 리뷰 상태 요약 (목록에서 rejected/pending 표시용)
+        if cl_instance and cl_instance.items:
+            has_rejected = any(
+                it.review_result == "fail" for it in cl_instance.items
+            )
+            has_pending_re_review = any(
+                it.review_result == "pending_re_review" for it in cl_instance.items
+            )
+            all_passed = all(
+                it.review_result == "pass" for it in cl_instance.items
+            ) if cl_instance.items else False
+            item["has_rejected"] = has_rejected
+            item["has_pending_re_review"] = has_pending_re_review
+            item["all_passed"] = all_passed
+        else:
+            item["has_rejected"] = False
+            item["has_pending_re_review"] = False
+            item["all_passed"] = False
         items.append(item)
 
-    return items
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }
 
 
 @router.get("/schedules/{schedule_id}")
@@ -110,9 +142,9 @@ async def get_my_schedule(
         db, schedule_id, current_user.organization_id
     )
     if entry is None:
-        raise NotFoundError("스케줄을 찾을 수 없습니다 (Schedule not found)")
+        raise NotFoundError("Schedule not found")
     if entry.user_id != current_user.id:
-        raise ForbiddenError("본인의 스케줄만 조회할 수 있습니다 (Can only view your own schedule)")
+        raise ForbiddenError("Can only view your own schedule")
 
     # 스케줄 기본 응답 생성
     response_entry = await schedule_service._to_response(db, entry)
@@ -147,9 +179,11 @@ async def get_my_schedule(
 
     if cl_instance:
         detail = await checklist_instance_service.build_detail_response(db, cl_instance)
-        result["checklist_snapshot"] = detail.get("snapshot")
+        result["checklist_snapshot"] = detail.get("items")
+        result["reported_at"] = cl_instance.reported_at
     else:
         result["checklist_snapshot"] = None
+        result["reported_at"] = None
 
     return result
 
@@ -170,22 +204,26 @@ async def complete_checklist_item(
         db, schedule_id
     )
     if cl_instance is None:
-        raise NotFoundError("해당 스케줄의 체크리스트를 찾을 수 없습니다 (Checklist not found for this schedule)")
+        raise NotFoundError("Checklist not found for this schedule")
     if cl_instance.user_id != current_user.id:
-        raise ForbiddenError("본인의 체크리스트만 수정할 수 있습니다 (Can only modify your own checklist)")
+        raise ForbiddenError("Can only modify your own checklist")
 
     # 매장 타임존 해석
     store_tz = await get_store_timezone(db, cl_instance.store_id)
     effective_tz = resolve_timezone(data.timezone, store_tz)
 
     if data.is_completed:
+        # photo_urls 우선, 없으면 photo_url 하위 호환
+        photo_urls = data.photo_urls
+        if not photo_urls and data.photo_url:
+            photo_urls = [data.photo_url]
         # 완료 처리
         await checklist_instance_service.complete_item(
             db,
             instance_id=cl_instance.id,
             item_index=item_index,
             user_id=current_user.id,
-            photo_url=data.photo_url,
+            photo_urls=photo_urls,
             note=data.note,
             client_timezone=effective_tz,
         )
@@ -197,8 +235,6 @@ async def complete_checklist_item(
             item_index=item_index,
             user_id=current_user.id,
         )
-
-    await db.commit()
 
     # 업데이트된 스케줄 상세 반환
     return await get_my_schedule(schedule_id, db, current_user)
@@ -220,24 +256,26 @@ async def respond_to_rejection(
         db, schedule_id
     )
     if cl_instance is None:
-        raise NotFoundError("해당 스케줄의 체크리스트를 찾을 수 없습니다 (Checklist not found for this schedule)")
+        raise NotFoundError("Checklist not found for this schedule")
     if cl_instance.user_id != current_user.id:
-        raise ForbiddenError("본인의 체크리스트만 재제출할 수 있습니다 (Can only respond to your own checklist)")
+        raise ForbiddenError("Can only resubmit your own checklist")
 
     # 매장 타임존 해석
     store_tz = await get_store_timezone(db, cl_instance.store_id)
     effective_tz = resolve_timezone(data.timezone, store_tz)
 
+    photo_urls = data.photo_urls
+    if not photo_urls and data.photo_url:
+        photo_urls = [data.photo_url]
     await checklist_instance_service.resubmit_completion(
         db,
         instance_id=cl_instance.id,
         item_index=item_index,
         user_id=current_user.id,
-        photo_url=data.photo_url,
+        photo_urls=photo_urls,
         note=data.response_comment,
         client_timezone=effective_tz,
     )
-    await db.commit()
 
     # 업데이트된 스케줄 상세 반환
     return await get_my_schedule(schedule_id, db, current_user)

@@ -76,15 +76,20 @@ class RoleService:
         if is_duplicate:
             raise DuplicateError("A role with this name or priority already exists")
 
-        role: Role = await role_repository.create(
-            db,
-            {
-                "organization_id": organization_id,
-                "name": data.name,
-                "priority": data.priority,
-            },
-        )
-        return self._to_response(role)
+        try:
+            role: Role = await role_repository.create(
+                db,
+                {
+                    "organization_id": organization_id,
+                    "name": data.name,
+                    "priority": data.priority,
+                },
+            )
+            await db.commit()
+            return self._to_response(role)
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_role(
         self,
@@ -117,13 +122,17 @@ class RoleService:
             raise DuplicateError("A role with this name or priority already exists")
 
         update_data: dict = data.model_dump(exclude_unset=True)
-        role: Role | None = await role_repository.update(
-            db, role_id, update_data, organization_id
-        )
-        if role is None:
-            raise NotFoundError("Role not found")
-
-        return self._to_response(role)
+        try:
+            role: Role | None = await role_repository.update(
+                db, role_id, update_data, organization_id
+            )
+            if role is None:
+                raise NotFoundError("Role not found")
+            await db.commit()
+            return self._to_response(role)
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_role(
         self,
@@ -142,9 +151,14 @@ class RoleService:
         if existing.priority <= caller_priority:
             raise ForbiddenError("Cannot delete a role at or above your priority")
 
-        deleted: bool = await role_repository.delete(db, role_id, organization_id)
-        if not deleted:
-            raise NotFoundError("Role not found")
+        try:
+            deleted: bool = await role_repository.delete(db, role_id, organization_id)
+            if not deleted:
+                raise NotFoundError("Role not found")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # 싱글턴 인스턴스 — Singleton instance

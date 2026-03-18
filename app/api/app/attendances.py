@@ -50,7 +50,6 @@ async def scan_attendance(
         client_timezone=data.timezone,
         location=data.location,
     )
-    await db.commit()
 
     return await attendance_service.build_response(db, attendance)
 

@@ -62,7 +62,7 @@ async def list_my_reports(
         page=page,
         per_page=per_page,
     )
-    items = [await daily_report_service.build_response(db, r) for r in reports]
+    items = await daily_report_service.build_responses_batch(db, reports)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
@@ -85,7 +85,6 @@ async def create_report(
     report = await daily_report_service.create_report(
         db, current_user.organization_id, current_user.id, data
     )
-    await db.commit()
     # Re-fetch with details for response
     report = await daily_report_service.get_report(db, report.id, current_user.organization_id)
     return await daily_report_service.build_response(db, report, include_details=True)
@@ -101,7 +100,6 @@ async def update_report(
     report = await daily_report_service.update_report(
         db, report_id, current_user.organization_id, current_user.id, data
     )
-    await db.commit()
     report = await daily_report_service.get_report(db, report.id, current_user.organization_id)
     return await daily_report_service.build_response(db, report, include_details=True)
 
@@ -115,7 +113,6 @@ async def delete_my_report(
     await daily_report_service.delete_report(
         db, report_id, current_user.organization_id, author_id=current_user.id
     )
-    await db.commit()
 
 
 @router.post("/{report_id}/submit", response_model=DailyReportResponse)
@@ -128,7 +125,6 @@ async def submit_report(
     report = await daily_report_service.submit_report(
         db, report_id, current_user.organization_id, current_user.id
     )
-    await db.commit()
     report = await daily_report_service.get_report(db, report.id, current_user.organization_id)
     resp = await daily_report_service.build_response(db, report, include_details=True)
 

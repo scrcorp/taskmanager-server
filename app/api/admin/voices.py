@@ -32,7 +32,7 @@ async def list_voices(
     voices, total = await voice_service.list_voices(
         db, current_user.organization_id, status, page, per_page
     )
-    items = [await voice_service.build_response(db, v) for v in voices]
+    items = await voice_service.build_responses_batch(db, voices)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
@@ -57,7 +57,6 @@ async def create_voice(
     voice = await voice_service.create_voice(
         db, current_user.organization_id, data, current_user.id
     )
-    await db.commit()
     return await voice_service.build_response(db, voice)
 
 
@@ -72,7 +71,6 @@ async def update_voice(
     voice = await voice_service.update_voice(
         db, voice_id, current_user.organization_id, data, current_user.id
     )
-    await db.commit()
     return await voice_service.build_response(db, voice)
 
 
@@ -84,5 +82,4 @@ async def delete_voice(
 ) -> dict:
     """Voice 삭제. GM+ 가능."""
     await voice_service.delete_voice(db, voice_id, current_user.organization_id)
-    await db.commit()
-    return {"message": "Voice가 삭제되었습니다 (Voice deleted)"}
+    return {"message": "Voice deleted"}

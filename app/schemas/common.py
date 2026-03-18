@@ -224,7 +224,8 @@ class ChecklistItemComplete(BaseModel):
 
     is_completed: bool  # 완료 여부 — True이면 completed_at 자동 설정 (Completion flag)
     timezone: str | None = None  # 클라이언트 타임존 — None이면 매장/조직 타임존 사용 (Client timezone, falls back to store/org)
-    photo_url: str | None = None  # 사진 URL — verification_type이 photo일 때 필수 (Photo URL, optional)
+    photo_url: str | None = None  # 사진 URL (하위 호환)
+    photo_urls: list[str] | None = None  # 사진 URL 배열
     note: str | None = None  # 메모 — verification_type이 text일 때 필수 (Note, optional)
 
 
@@ -236,7 +237,8 @@ class ChecklistItemRespond(BaseModel):
 
     timezone: str | None = None  # 클라이언트 타임존 — None이면 매장/조직 타임존 사용
     response_comment: str | None = None
-    photo_url: str | None = None
+    photo_url: str | None = None  # 하위 호환
+    photo_urls: list[str] | None = None  # 사진 URL 배열
 
 
 # === 공지사항 (Announcement) 스키마 ===
@@ -495,7 +497,8 @@ class ChecklistCompletionCreate(BaseModel):
         location: GPS 위치 (lat/lng location data, optional)
     """
 
-    photo_url: str | None = None  # 사진 URL — Supabase Storage (Photo URL, optional)
+    photo_url: str | None = None  # 사진 URL (단일, 하위 호환) — Single photo URL (backward compat)
+    photo_urls: list[str] | None = None  # 사진 URL 배열 — Multiple photo URLs (preferred)
     note: str | None = None  # 메모 (Text note, optional)
     location: dict | None = None  # GPS 위치 — {lat, lng} (Location data, optional)
     timezone: str | None = None  # IANA 타임존 — None이면 매장/조직 타임존 사용 (Client IANA timezone)
@@ -562,16 +565,13 @@ class ChecklistInstanceResponse(BaseModel):
 
 
 class ChecklistInstanceDetailResponse(ChecklistInstanceResponse):
-    """체크리스트 인스턴스 상세 응답 스키마 — 스냅샷 + 완료 기록 병합.
-
-    Checklist instance detail response with snapshot items merged with completions.
-    Each snapshot item includes its completion data if completed.
+    """체크리스트 인스턴스 상세 응답 스키마 — items + files + submissions + reviews_log + messages.
 
     Attributes:
-        snapshot: 병합된 스냅샷 (Snapshot items with completion data merged)
+        items: 인스턴스 항목 목록 (Instance items with completion/review/files data)
     """
 
-    snapshot: list[dict] | None = None  # 병합된 스냅샷 — 각 항목에 completion 정보 포함
+    items: list[dict] | None = None
 
 
 # === 스케줄 (Schedule) 스키마 ===

@@ -75,11 +75,7 @@ async def create_user(
     Supervisor can create Staff; GM can create Supervisor+Staff; Owner can create all.
     """
     org_id: UUID = current_user.organization_id
-    result: UserResponse = await user_service.create_user(
-        db, org_id, data, caller=current_user
-    )
-    await db.commit()
-    return result
+    return await user_service.create_user(db, org_id, data, caller=current_user)
 
 
 @router.put("/{user_id}", response_model=UserResponse)
@@ -94,11 +90,7 @@ async def update_user(
     Update an existing user's information.
     """
     org_id: UUID = current_user.organization_id
-    result: UserResponse = await user_service.update_user(
-        db, user_id, org_id, data, caller=current_user
-    )
-    await db.commit()
-    return result
+    return await user_service.update_user(db, user_id, org_id, data, caller=current_user)
 
 
 @router.patch("/{user_id}/active", response_model=UserResponse)
@@ -112,9 +104,7 @@ async def toggle_user_active(
     Toggle a user's active/inactive status.
     """
     org_id: UUID = current_user.organization_id
-    result: UserResponse = await user_service.toggle_active(db, user_id, org_id)
-    await db.commit()
-    return result
+    return await user_service.toggle_active(db, user_id, org_id)
 
 
 @router.delete("/{user_id}", response_model=MessageResponse)
@@ -138,8 +128,7 @@ async def delete_user(
     """
     org_id: UUID = current_user.organization_id
     await user_service.delete_user(db, user_id, org_id)
-    await db.commit()
-    return {"message": "사용자가 삭제되었습니다 (User deleted successfully)"}
+    return {"message": "User deleted successfully"}
 
 
 @router.get("/{user_id}/stores", response_model=list[UserStoreResponse])
@@ -167,7 +156,6 @@ async def sync_user_stores(
         for a in data.assignments
     ]
     await user_service.sync_user_stores(db, user_id, org_id, assignments)
-    await db.commit()
     return await user_service.get_user_stores(db, user_id, org_id)
 
 
@@ -180,10 +168,7 @@ async def add_user_store(
 ) -> dict[str, str]:
     """사용자에게 매장을 배정합니다 (개별, 하위호환)."""
     org_id: UUID = current_user.organization_id
-    await user_service.add_user_store(
-        db, user_id, store_id, org_id, caller=current_user
-    )
-    await db.commit()
+    await user_service.add_user_store(db, user_id, store_id, org_id, caller=current_user)
     return {"message": "Store assigned successfully"}
 
 
@@ -197,4 +182,3 @@ async def remove_user_store(
     """사용자에게서 매장 배정을 해제합니다 (개별, 하위호환)."""
     org_id: UUID = current_user.organization_id
     await user_service.remove_user_store(db, user_id, store_id, org_id)
-    await db.commit()

@@ -56,8 +56,4 @@ async def update_my_profile(
     Returns:
         ProfileResponse: 업데이트된 프로필 정보 (Updated profile information)
     """
-    result: ProfileResponse = await profile_service.update_profile(
-        db, current_user, data
-    )
-    await db.commit()
-    return result
+    return await profile_service.update_profile(db, current_user, data)

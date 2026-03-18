@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
-from app.models.checklist import ChecklistInstance, ChecklistItemReview
+from app.models.checklist import ChecklistInstance, ChecklistInstanceItem
 from app.models.communication import AdditionalTask, Announcement
 from app.models.notification import Notification
 from app.models.schedule import Schedule
@@ -90,7 +90,13 @@ class NotificationService:
         Returns:
             bool: 처리 성공 여부 (Whether the operation was successful)
         """
-        return await notification_repository.mark_read(db, notification_id, user_id)
+        try:
+            result = await notification_repository.mark_read(db, notification_id, user_id)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def mark_all_read(
         self,
@@ -108,7 +114,13 @@ class NotificationService:
         Returns:
             int: 읽음 처리된 알림 수 (Count of notifications marked as read)
         """
-        return await notification_repository.mark_all_read(db, user_id)
+        try:
+            count = await notification_repository.mark_all_read(db, user_id)
+            await db.commit()
+            return count
+        except Exception:
+            await db.rollback()
+            raise
 
     # --- 자동 생성 (Auto-creation) ---
 
@@ -130,7 +142,7 @@ class NotificationService:
         Returns:
             list[Notification]: 생성된 알림 목록 (List of created notifications)
         """
-        message: str = f"새 추가 업무가 배정되었습니다: {task.title} (New additional task: {task.title})"
+        message: str = f"New additional task: {task.title}"
         notifications: list[Notification] = []
 
         for uid in assignee_ids:
@@ -163,10 +175,7 @@ class NotificationService:
         Returns:
             list[Notification]: 생성된 알림 목록 (List of created notifications)
         """
-        message: str = (
-            f"스케줄 승인 요청: {schedule.work_date} "
-            f"(Schedule pending approval for {schedule.work_date})"
-        )
+        message: str = f"Schedule pending approval for {schedule.work_date}"
 
         # GM 이상 사용자 조회 (level <= 20) — Find GM+ users in organization
         gm_result = await db.execute(
@@ -209,10 +218,7 @@ class NotificationService:
         Returns:
             Notification: 생성된 알림 (Created notification)
         """
-        message: str = (
-            f"스케줄이 승인되었습니다: {schedule.work_date} "
-            f"(Your schedule for {schedule.work_date} has been approved)"
-        )
+        message: str = f"Your schedule for {schedule.work_date} has been approved"
         return await notification_repository.create_notification(
             db,
             organization_id=schedule.organization_id,
@@ -241,7 +247,7 @@ class NotificationService:
         Returns:
             list[Notification]: 생성된 알림 목록 (List of created notifications)
         """
-        message: str = f"새 공지사항: {announcement.title} (New announcement: {announcement.title})"
+        message: str = f"New announcement: {announcement.title}"
         notifications: list[Notification] = []
 
         for uid in user_ids:
@@ -258,25 +264,72 @@ class NotificationService:
 
         return notifications
 
-    async def create_for_checklist_re_review(
+    async def create_for_checklist_submitted(
+        self,
+        db: AsyncSession,
+        instance: "ChecklistInstance",
+        staff_name: str,
+        store_name: str,
+    ) -> list["Notification"]:
+        """체크리스트 완료 보고 시 해당 store의 SV/GM에게 알림을 생성합니다.
+
+        Owner 제외, SV/GM만 대상.
+        """
+        from app.models.user import User
+        from app.models.user_store import UserStore
+
+        # SV/GM: priority <= 30 (SV=30, GM=20), is_manager=True, same store
+        from app.models.user import Role
+        managers_q = (
+            select(User)
+            .join(UserStore, User.id == UserStore.user_id)
+            .join(Role, User.role_id == Role.id)
+            .where(
+                UserStore.store_id == instance.store_id,
+                UserStore.is_manager.is_(True),
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+                Role.priority <= 30,  # SV(30) + GM(20), exclude Owner(10)
+                Role.priority > 10,
+            )
+        )
+        result = await db.execute(managers_q)
+        managers = result.scalars().all()
+
+        message = f"Checklist completed: {store_name} — {staff_name}"
+        notifications = []
+        for manager in managers:
+            notif = await notification_repository.create_notification(
+                db,
+                organization_id=instance.organization_id,
+                user_id=manager.id,
+                notification_type="checklist_submitted",
+                message=message,
+                reference_type="cl_instances",
+                reference_id=instance.id,
+            )
+            notifications.append(notif)
+        return notifications, managers
+
+    async def create_for_checklist_re_review_item(
         self,
         db: AsyncSession,
         instance: ChecklistInstance,
-        review: ChecklistItemReview,
+        item: ChecklistInstanceItem,
     ) -> Notification:
         """체크리스트 재제출 시 reviewer에게 알림을 생성합니다.
 
         Auto-create a notification for the reviewer when staff resubmits.
         """
-        message = f"체크리스트 항목이 재제출되었습니다 (Checklist item resubmitted for re-review)"
+        message = "Checklist item resubmitted for re-review"
         return await notification_repository.create_notification(
             db,
             organization_id=instance.organization_id,
-            user_id=review.reviewer_id,
+            user_id=item.reviewer_id,
             notification_type="checklist_re_review",
             message=message,
-            reference_type="cl_item_reviews",
-            reference_id=review.id,
+            reference_type="cl_instance_items",
+            reference_id=item.id,
         )
 
     async def create_for_attendance_correction(
@@ -291,7 +344,7 @@ class NotificationService:
 
         Auto-create notifications for GM+ users when an attendance record is corrected.
         """
-        message: str = f"근태 기록이 수정되었습니다: {field_name} (Attendance corrected: {field_name})"
+        message: str = f"Attendance record corrected: {field_name}"
 
         gm_result = await db.execute(
             select(User.id)
@@ -330,7 +383,7 @@ class NotificationService:
         """
         notifications: list[Notification] = []
 
-        old_msg = f"대타 처리됨: {schedule.work_date} 스케줄 변경 (Substituted out: {schedule.work_date})"
+        old_msg = f"Substituted out: schedule for {schedule.work_date} has been reassigned"
         notifications.append(await notification_repository.create_notification(
             db,
             organization_id=schedule.organization_id,
@@ -341,7 +394,7 @@ class NotificationService:
             reference_id=schedule.id,
         ))
 
-        new_msg = f"대타 배정됨: {schedule.work_date} 스케줄 배정 (Substituted in: {schedule.work_date})"
+        new_msg = f"Substituted in: you have been assigned to schedule for {schedule.work_date}"
         notifications.append(await notification_repository.create_notification(
             db,
             organization_id=schedule.organization_id,

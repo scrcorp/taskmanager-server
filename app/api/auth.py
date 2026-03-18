@@ -27,9 +27,7 @@ async def refresh_token(
 
     Refresh token endpoint. Issues a new token pair using a refresh token.
     """
-    result: TokenResponse = await auth_service.refresh_tokens(db, data)
-    await db.commit()
-    return result
+    return await auth_service.refresh_tokens(db, data)
 
 
 @router.post("/logout", status_code=204)
@@ -42,7 +40,6 @@ async def logout(
     Logout endpoint. Revokes the given refresh token.
     """
     await auth_service.logout(db, data.refresh_token)
-    await db.commit()
 
 
 @router.get("/me", response_model=UserMeResponse)

@@ -34,9 +34,7 @@ async def create_template(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> RequestTemplateResponse:
     """신청 템플릿 생성."""
-    result = await schedule_request_service.create_template(db, current_user.id, data)
-    await db.commit()
-    return result
+    return await schedule_request_service.create_template(db, current_user.id, data)
 
 
 @router.put("/schedule-templates/{template_id}", response_model=RequestTemplateResponse)
@@ -47,9 +45,7 @@ async def update_template(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> RequestTemplateResponse:
     """신청 템플릿 수정."""
-    result = await schedule_request_service.update_template(db, template_id, current_user.id, data)
-    await db.commit()
-    return result
+    return await schedule_request_service.update_template(db, template_id, current_user.id, data)
 
 
 @router.delete("/schedule-templates/{template_id}", status_code=204)
@@ -60,4 +56,3 @@ async def delete_template(
 ) -> None:
     """신청 템플릿 삭제."""
     await schedule_request_service.delete_template(db, template_id, current_user.id)
-    await db.commit()

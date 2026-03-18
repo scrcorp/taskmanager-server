@@ -110,14 +110,13 @@ async def mark_read(
         notification_id=notification_id,
         user_id=current_user.id,
     )
-    await db.commit()
 
     if not success:
         from app.utils.exceptions import NotFoundError
 
-        raise NotFoundError("알림을 찾을 수 없습니다 (Notification not found)")
+        raise NotFoundError("Notification not found")
 
-    return {"message": "알림이 읽음 처리되었습니다 (Notification marked as read)"}
+    return {"message": "Notification marked as read"}
 
 
 @router.patch("/read-all", response_model=MessageResponse)
@@ -137,6 +136,5 @@ async def mark_all_read(
         dict: 처리 결과 메시지 (Result message with count)
     """
     count: int = await notification_service.mark_all_read(db, user_id=current_user.id)
-    await db.commit()
 
-    return {"message": f"{count}개의 알림이 읽음 처리되었습니다 ({count} notifications marked as read)"}
+    return {"message": f"{count} notifications marked as read"}

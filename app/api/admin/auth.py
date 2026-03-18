@@ -1,7 +1,7 @@
 """관리자 인증 라우터 — 관리자 로그인, 초기 설정.
 
 Admin Auth Router — Admin login and initial setup endpoints.
-Staff-level accounts (role level >= 4) are rejected from admin login.
+Staff-level accounts (role priority >= 40) are rejected from admin login.
 Common endpoints (refresh, logout, me) are in app.api.auth.
 """
 
@@ -33,9 +33,7 @@ async def admin_login(
     Optionally accepts company_code in body to scope login to a specific org.
     """
     organization_id = await auth_service.resolve_company_code(db, data.company_code)
-    result: TokenResponse = await auth_service.admin_login(db, data, organization_id)
-    await db.commit()
-    return result
+    return await auth_service.admin_login(db, data, organization_id)
 
 
 @router.post("/setup", response_class=HTMLResponse)
@@ -114,7 +112,11 @@ async def admin_setup(
         password_hash=hash_password(password),
     )
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
     return _render(
         f'<div class="msg ok">Done! Organization "{organization_name}" and admin "{username}" created.<br>'

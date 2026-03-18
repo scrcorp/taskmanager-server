@@ -99,12 +99,17 @@ class ProfileService:
         """
         # None이 아닌 필드만 업데이트 — Only update non-None (provided) fields
         update_data: dict = data.model_dump(exclude_unset=True)
-        for field, value in update_data.items():
-            if hasattr(current_user, field):
-                setattr(current_user, field, value)
+        try:
+            for field, value in update_data.items():
+                if hasattr(current_user, field):
+                    setattr(current_user, field, value)
 
-        await db.flush()
-        await db.refresh(current_user)
+            await db.flush()
+            await db.refresh(current_user)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
         role_name: str = await self._resolve_role_name(db, current_user.role_id)
         return self._to_response(current_user, role_name)

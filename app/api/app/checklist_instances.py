@@ -21,6 +21,7 @@ from app.schemas.common import (
 )
 from app.schemas.checklist_review import ResubmitRequest, ReviewContentCreate, ReviewContentResponse
 from app.services.checklist_instance_service import checklist_instance_service
+from app.schemas.common import MessageResponse
 from app.utils.exceptions import ForbiddenError
 from app.utils.timezone import get_store_timezone, resolve_timezone
 
@@ -64,7 +65,7 @@ async def get_my_checklist_instance(
     )
 
     if instance.user_id != current_user.id:
-        raise ForbiddenError("본인의 체크리스트만 조회할 수 있습니다 (Can only view your own checklist)")
+        raise ForbiddenError("Can only view your own checklist")
 
     return await checklist_instance_service.build_detail_response(db, instance)
 
@@ -87,17 +88,21 @@ async def complete_checklist_item(
     store_tz = await get_store_timezone(db, inst.store_id)
     effective_tz = resolve_timezone(data.timezone, store_tz)
 
+    # Resolve photo list: photo_urls preferred, fall back to single photo_url
+    photo_urls = data.photo_urls
+    if not photo_urls and data.photo_url:
+        photo_urls = [data.photo_url]
+
     instance = await checklist_instance_service.complete_item(
         db,
         instance_id=instance_id,
         item_index=item_index,
         user_id=current_user.id,
-        photo_url=data.photo_url,
+        photo_urls=photo_urls,
         note=data.note,
         location=data.location,
         client_timezone=effective_tz,
     )
-    await db.commit()
 
     return await checklist_instance_service.build_detail_response(db, instance)
 
@@ -123,17 +128,19 @@ async def resubmit_checklist_item(
     store_tz = await get_store_timezone(db, inst.store_id)
     effective_tz = resolve_timezone(data.client_timezone, store_tz)
 
+    # photo_urls 우선, photo_url fallback (단일 → 리스트 변환)
+    effective_photo_urls = data.photo_urls or ([data.photo_url] if data.photo_url else [])
+
     instance = await checklist_instance_service.resubmit_completion(
         db,
         instance_id=instance_id,
         item_index=item_index,
         user_id=current_user.id,
-        photo_url=data.photo_url,
+        photo_urls=effective_photo_urls if effective_photo_urls else None,
         note=data.note,
         location=data.location,
         client_timezone=effective_tz,
     )
-    await db.commit()
 
     return await checklist_instance_service.build_detail_response(db, instance)
 
@@ -154,7 +161,7 @@ async def add_review_content_as_staff(
     # 본인 인스턴스 확인
     instance = await checklist_instance_service.get_instance(db, instance_id)
     if instance.user_id != current_user.id:
-        raise ForbiddenError("본인의 체크리스트에만 코멘트를 추가할 수 있습니다")
+        raise ForbiddenError("Can only add comments to your own checklist")
 
     rc = await checklist_instance_service.add_review_content(
         db,
@@ -164,14 +171,45 @@ async def add_review_content_as_staff(
         content_type=data.type,
         content=data.content,
     )
-    await db.commit()
 
+    review_id = getattr(rc, "review_id", rc.item_id)
     return {
         "id": str(rc.id),
-        "review_id": str(rc.review_id),
+        "review_id": str(review_id),
         "author_id": str(rc.author_id),
         "author_name": current_user.full_name,
         "type": rc.type,
         "content": rc.content,
         "created_at": rc.created_at,
     }
+
+
+@router.delete("/{instance_id}/items/{item_index}/uncomplete", response_model=MessageResponse)
+async def uncomplete_item(
+    instance_id: UUID,
+    item_index: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """체크리스트 항목 완료 해제."""
+    instance = await checklist_instance_service.get_instance(db, instance_id)
+    if instance.user_id != current_user.id:
+        raise ForbiddenError("Can only uncomplete your own checklist items")
+
+    await checklist_instance_service.uncomplete_item(db, instance_id, item_index)
+    return {"message": "Item uncompleted"}
+
+
+@router.post("/{instance_id}/report", response_model=MessageResponse)
+async def submit_report(
+    instance_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """체크리스트 완료 보고 — SV/GM에게 알림 + 이메일 발송."""
+    await checklist_instance_service.submit_report(
+        db,
+        instance_id=instance_id,
+        user_id=current_user.id,
+    )
+    return {"message": "Report submitted"}

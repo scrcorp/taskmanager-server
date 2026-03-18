@@ -51,8 +51,6 @@ async def update_role_permissions(
 ) -> list[dict]:
     """역할의 permission 일괄 업데이트."""
     org_id: UUID = current_user.organization_id
-    result = await permission_service.update_role_permissions(
+    return await permission_service.update_role_permissions(
         db, role_id, data.permission_codes, org_id, caller=current_user
     )
-    await db.commit()
-    return result

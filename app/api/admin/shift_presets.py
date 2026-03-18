@@ -37,9 +37,7 @@ async def create_shift_preset(
     current_user: Annotated[User, Depends(require_permission("stores:create"))],
 ) -> ShiftPresetResponse:
     await check_store_access(db, current_user, store_id)
-    result = await shift_preset_service.create_preset(db, current_user.organization_id, store_id, data)
-    await db.commit()
-    return result
+    return await shift_preset_service.create_preset(db, current_user.organization_id, store_id, data)
 
 
 @router.put("/shift-presets/{preset_id}", response_model=ShiftPresetResponse)
@@ -49,9 +47,7 @@ async def update_shift_preset(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> ShiftPresetResponse:
-    result = await shift_preset_service.update_preset(db, preset_id, current_user.organization_id, data)
-    await db.commit()
-    return result
+    return await shift_preset_service.update_preset(db, preset_id, current_user.organization_id, data)
 
 
 @router.delete("/shift-presets/{preset_id}", status_code=204)
@@ -61,4 +57,3 @@ async def delete_shift_preset(
     current_user: Annotated[User, Depends(require_permission("stores:delete"))],
 ) -> None:
     await shift_preset_service.delete_preset(db, preset_id, current_user.organization_id)
-    await db.commit()

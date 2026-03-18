@@ -58,7 +58,7 @@ class Notification(Base):
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     # 알림 메시지 — Human-readable message displayed to the user
     message: Mapped[str] = mapped_column(String(1000), nullable=False)
-    # 참조 엔티티 유형 — Polymorphic reference: entity table name (schedule | additional_task | announcement)
+    # 참조 엔티티 유형 — Referenced entity table name (e.g. work_assignments, cl_instances, additional_tasks)
     reference_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # 참조 엔티티 ID — Polymorphic reference: UUID of the source entity
     reference_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)

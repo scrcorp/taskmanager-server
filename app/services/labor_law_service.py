@@ -37,20 +37,27 @@ class LaborLawService:
     async def upsert_setting(
         self, db: AsyncSession, store_id: UUID, organization_id: UUID, data: LaborLawSettingUpdate
     ) -> LaborLawSettingResponse:
-        existing = await labor_law_repository.get_by_store(db, store_id, organization_id)
-        if existing is not None:
-            for field, value in data.model_dump().items():
-                setattr(existing, field, value)
-            await db.flush()
-            await db.refresh(existing)
-            return self._to_response(existing)
-        else:
-            setting = await labor_law_repository.create(db, {
-                "organization_id": organization_id,
-                "store_id": store_id,
-                **data.model_dump(),
-            })
-            return self._to_response(setting)
+        try:
+            existing = await labor_law_repository.get_by_store(db, store_id, organization_id)
+            if existing is not None:
+                for field, value in data.model_dump().items():
+                    setattr(existing, field, value)
+                await db.flush()
+                await db.refresh(existing)
+                result = self._to_response(existing)
+            else:
+                setting = await labor_law_repository.create(db, {
+                    "organization_id": organization_id,
+                    "store_id": store_id,
+                    **data.model_dump(),
+                })
+                result = self._to_response(setting)
+
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
 
 labor_law_service: LaborLawService = LaborLawService()

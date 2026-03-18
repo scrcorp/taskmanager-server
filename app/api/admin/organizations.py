@@ -43,8 +43,4 @@ async def update_current_organization(
     Update the current organization's details.
     """
     org_id: UUID = current_user.organization_id
-    result: OrganizationResponse = await organization_service.update_current(
-        db, org_id, data
-    )
-    await db.commit()
-    return result
+    return await organization_service.update_current(db, org_id, data)

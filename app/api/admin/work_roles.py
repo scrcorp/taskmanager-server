@@ -41,11 +41,9 @@ async def create_work_role(
 ) -> WorkRoleResponse:
     """새 업무 역할을 생성합니다."""
     await check_store_access(db, current_user, store_id)
-    result = await work_role_service.create_work_role(
+    return await work_role_service.create_work_role(
         db, store_id, current_user.organization_id, data
     )
-    await db.commit()
-    return result
 
 
 @router.put("/work-roles/{work_role_id}", response_model=WorkRoleResponse)
@@ -56,11 +54,9 @@ async def update_work_role(
     current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> WorkRoleResponse:
     """업무 역할을 수정합니다."""
-    result = await work_role_service.update_work_role(
+    return await work_role_service.update_work_role(
         db, work_role_id, current_user.organization_id, data
     )
-    await db.commit()
-    return result
 
 
 @router.put(
@@ -75,12 +71,10 @@ async def reorder_work_roles(
 ) -> list[WorkRoleResponse]:
     """업무 역할 순서를 일괄 변경합니다."""
     await check_store_access(db, current_user, store_id)
-    result = await work_role_service.reorder_work_roles(
+    return await work_role_service.reorder_work_roles(
         db, store_id, current_user.organization_id,
         [{"id": item.id, "sort_order": item.sort_order} for item in data.items],
     )
-    await db.commit()
-    return result
 
 
 @router.delete("/work-roles/{work_role_id}", status_code=204)
@@ -93,4 +87,3 @@ async def delete_work_role(
     await work_role_service.delete_work_role(
         db, work_role_id, current_user.organization_id
     )
-    await db.commit()

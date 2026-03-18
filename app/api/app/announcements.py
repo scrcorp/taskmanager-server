@@ -97,7 +97,7 @@ async def get_my_announcement(
             )
         )
         if store_check.scalar_one_or_none() is None:
-            raise ForbiddenError("이 공지사항에 대한 접근 권한이 없습니다 (No access to this announcement)")
+            raise ForbiddenError("No access to this announcement")
 
     return await announcement_service.build_response(db, announcement)
 
@@ -125,6 +125,10 @@ async def mark_announcement_read(
             user_id=current_user.id,
         )
         db.add(read_record)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
-    return {"message": "읽음 처리 완료 (Marked as read)"}
+    return {"message": "Marked as read"}

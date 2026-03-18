@@ -35,7 +35,6 @@ async def create_template_link(
         organization_id=current_user.organization_id,
         data=data,
     )
-    await db.commit()
     return await template_link_service.build_response(db, link)
 
 
@@ -74,5 +73,4 @@ async def delete_template_link(
         link_id=link_id,
         organization_id=current_user.organization_id,
     )
-    await db.commit()
     return {"message": "Template link deleted"}

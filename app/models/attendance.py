@@ -12,6 +12,7 @@ Tables:
 
 import uuid
 from datetime import date, datetime, timezone
+from typing import Optional
 
 from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text, ForeignKey, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
@@ -93,10 +94,10 @@ class Attendance(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 소속 조직 FK — Organization scope for multi-tenant data isolation
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    # 매장 FK — Store where user clocked in via QR scan
-    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
-    # 사용자 FK — User who recorded attendance
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # 매장 FK — Store where user clocked in via QR scan (SET NULL: 매장 삭제 시 null)
+    store_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
+    # 사용자 FK — User who recorded attendance (SET NULL: 사용자 삭제 시 null)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # 근무 날짜 — Date of attendance (date only, no time)
     work_date: Mapped[date] = mapped_column(Date, nullable=False)
     # 출근 시각 — Clock-in timestamp with timezone

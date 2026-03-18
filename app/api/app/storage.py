@@ -51,7 +51,7 @@ async def create_presigned_url(
         logger.error("Presigned URL 생성 실패: %s", e)
         raise HTTPException(
             status_code=503,
-            detail="파일 업로드 서비스를 사용할 수 없습니다. AWS 자격증명을 확인해주세요. (Storage service unavailable. Check AWS credentials.)",
+            detail="Storage service unavailable. Check AWS credentials.",
         )
     return {"upload_url": result["upload_url"], "file_url": result["file_url"]}
 

@@ -151,7 +151,6 @@ async def correct_attendance(
         reason=data.reason,
         corrected_by=current_user.id,
     )
-    await db.commit()
 
     return await attendance_service.build_correction_response(db, correction)
 

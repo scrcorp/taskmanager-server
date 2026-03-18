@@ -244,8 +244,16 @@ class StorageService:
     def _build_url(self, key: str) -> str:
         """key → 현재 환경의 전체 URL."""
         if self.is_local:
-            return f"/bucket/{key}"
+            return f"{self._local_base_url}/bucket/{key}"
         return f"https://{settings.AWS_S3_BUCKET}.s3.{settings.AWS_S3_REGION}.amazonaws.com/{key}"
+
+    @property
+    def _local_base_url(self) -> str:
+        """로컬 서버 base URL. SERVER_BASE_URL 설정 우선, 없으면 localhost."""
+        if settings.SERVER_BASE_URL:
+            return settings.SERVER_BASE_URL.rstrip("/")
+        port = settings.SERVER_PORT if hasattr(settings, "SERVER_PORT") else 8000
+        return f"http://localhost:{port}"
 
     def _exists(self, key: str) -> bool:
         """현재 버킷에 파일이 존재하는지 확인."""

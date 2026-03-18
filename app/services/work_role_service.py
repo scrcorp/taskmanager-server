@@ -100,26 +100,32 @@ class WorkRoleService:
                 "이 매장에 동일한 shift+position 조합이 이미 존재합니다"
             )
 
-        wr = await work_role_repository.create(
-            db,
-            {
-                "store_id": store_id,
-                "shift_id": shift_id,
-                "position_id": position_id,
-                "name": data.name,
-                "default_start_time": self._parse_time(data.default_start_time),
-                "default_end_time": self._parse_time(data.default_end_time),
-                "break_start_time": self._parse_time(data.break_start_time),
-                "break_end_time": self._parse_time(data.break_end_time),
-                "required_headcount": data.required_headcount,
-                "default_checklist_id": UUID(data.default_checklist_id)
-                if data.default_checklist_id
-                else None,
-                "is_active": data.is_active,
-                "sort_order": data.sort_order,
-            },
-        )
-        return await self._to_response(db, wr)
+        try:
+            wr = await work_role_repository.create(
+                db,
+                {
+                    "store_id": store_id,
+                    "shift_id": shift_id,
+                    "position_id": position_id,
+                    "name": data.name,
+                    "default_start_time": self._parse_time(data.default_start_time),
+                    "default_end_time": self._parse_time(data.default_end_time),
+                    "break_start_time": self._parse_time(data.break_start_time),
+                    "break_end_time": self._parse_time(data.break_end_time),
+                    "required_headcount": data.required_headcount,
+                    "default_checklist_id": UUID(data.default_checklist_id)
+                    if data.default_checklist_id
+                    else None,
+                    "is_active": data.is_active,
+                    "sort_order": data.sort_order,
+                },
+            )
+            result = await self._to_response(db, wr)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_work_role(
         self,
@@ -160,10 +166,16 @@ class WorkRoleService:
         if not update_data:
             return await self._to_response(db, wr)
 
-        updated = await work_role_repository.update(db, work_role_id, update_data)
-        if updated is None:
-            raise NotFoundError("Work role not found")
-        return await self._to_response(db, updated)
+        try:
+            updated = await work_role_repository.update(db, work_role_id, update_data)
+            if updated is None:
+                raise NotFoundError("Work role not found")
+            result = await self._to_response(db, updated)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def reorder_work_roles(
         self,
@@ -174,14 +186,20 @@ class WorkRoleService:
     ) -> list[WorkRoleResponse]:
         """Bulk update sort_order for work roles."""
         await self._verify_store(db, store_id, organization_id)
-        for item in items:
-            wr_id = UUID(item["id"])
-            wr = await work_role_repository.get_by_id(db, wr_id)
-            if wr is None or wr.store_id != store_id:
-                continue
-            await work_role_repository.update(db, wr_id, {"sort_order": item["sort_order"]})
-        roles = await work_role_repository.get_by_store(db, store_id)
-        return [await self._to_response(db, r) for r in roles]
+        try:
+            for item in items:
+                wr_id = UUID(item["id"])
+                wr = await work_role_repository.get_by_id(db, wr_id)
+                if wr is None or wr.store_id != store_id:
+                    continue
+                await work_role_repository.update(db, wr_id, {"sort_order": item["sort_order"]})
+            roles = await work_role_repository.get_by_store(db, store_id)
+            result = [await self._to_response(db, r) for r in roles]
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_work_role(
         self,
@@ -193,7 +211,12 @@ class WorkRoleService:
         if wr is None:
             raise NotFoundError("Work role not found")
         await self._verify_store(db, wr.store_id, organization_id)
-        await work_role_repository.delete(db, work_role_id)
+        try:
+            await work_role_repository.delete(db, work_role_id)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 work_role_service: WorkRoleService = WorkRoleService()

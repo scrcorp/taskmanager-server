@@ -43,9 +43,7 @@ async def create_request(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ScheduleRequestResponse:
     """스케줄 신청 제출."""
-    result = await schedule_request_service.create_request(db, current_user.id, data)
-    await db.commit()
-    return result
+    return await schedule_request_service.create_request(db, current_user.id, data)
 
 
 @router.post("/schedule-requests/from-template", response_model=ScheduleRequestFromTemplateResult, status_code=201)
@@ -55,7 +53,7 @@ async def create_from_template(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ScheduleRequestFromTemplateResult:
     """템플릿으로 자동 제출. on_conflict=skip(기본)/replace."""
-    result = await schedule_request_service.create_requests_from_template(
+    return await schedule_request_service.create_requests_from_template(
         db, current_user.id,
         store_id=UUID(data.store_id),
         date_from=data.date_from,
@@ -63,8 +61,6 @@ async def create_from_template(
         template_id=UUID(data.template_id),
         on_conflict=data.on_conflict,
     )
-    await db.commit()
-    return result
 
 
 @router.post("/schedule-requests/copy-last-period", response_model=ScheduleRequestFromTemplateResult, status_code=201)
@@ -74,15 +70,13 @@ async def copy_last_period(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ScheduleRequestFromTemplateResult:
     """지난 주 신청 복사. on_conflict=skip(기본)/replace."""
-    result = await schedule_request_service.copy_last_period(
+    return await schedule_request_service.copy_last_period(
         db, current_user.id,
         store_id=UUID(data.store_id),
         date_from=data.date_from,
         date_to=data.date_to,
         on_conflict=data.on_conflict,
     )
-    await db.commit()
-    return result
 
 
 @router.post("/schedule-requests/batch", response_model=ScheduleRequestBatchResult)
@@ -92,9 +86,7 @@ async def batch_submit_requests(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ScheduleRequestBatchResult:
     """배치 제출 — 여러 신청을 한번에 생성/수정/삭제."""
-    result = await schedule_request_service.batch_submit(db, current_user.id, data)
-    await db.commit()
-    return result
+    return await schedule_request_service.batch_submit(db, current_user.id, data)
 
 
 @router.put("/schedule-requests/{request_id}", response_model=ScheduleRequestResponse)
@@ -105,9 +97,7 @@ async def update_request(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ScheduleRequestResponse:
     """스케줄 신청 수정 (submitted 상태만)."""
-    result = await schedule_request_service.update_request(db, request_id, current_user.id, data)
-    await db.commit()
-    return result
+    return await schedule_request_service.update_request(db, request_id, current_user.id, data)
 
 
 @router.delete("/schedule-requests/{request_id}", status_code=204)
@@ -118,4 +108,3 @@ async def delete_request(
 ) -> None:
     """신청 취소 (기간 open일때만)."""
     await schedule_request_service.delete_request(db, request_id, current_user.id)
-    await db.commit()

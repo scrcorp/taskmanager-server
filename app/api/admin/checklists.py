@@ -171,7 +171,6 @@ async def import_from_excel(
         )
     except ValueError as e:
         raise BadRequestError(str(e))
-    await db.commit()
     return result
 
 
@@ -245,7 +244,6 @@ async def create_template(
         organization_id=current_user.organization_id,
         data=data,
     )
-    await db.commit()
 
     return {
         "id": str(template.id),
@@ -277,7 +275,6 @@ async def update_template(
         organization_id=current_user.organization_id,
         data=data,
     )
-    await db.commit()
 
     # 업데이트 후 항목 포함 상세 조회 — Re-fetch with items for accurate item_count
     refreshed = await checklist_service.get_template_detail(
@@ -316,9 +313,8 @@ async def delete_template(
         template_id=template_id,
         organization_id=current_user.organization_id,
     )
-    await db.commit()
 
-    return {"message": "체크리스트 템플릿이 삭제되었습니다 (Checklist template deleted)"}
+    return {"message": "Checklist template deleted"}
 
 
 # === 항목 엔드포인트 (Item Endpoints) ===
@@ -378,7 +374,6 @@ async def create_item(
         organization_id=current_user.organization_id,
         data=data,
     )
-    await db.commit()
 
     return {
         "id": str(item.id),
@@ -412,7 +407,6 @@ async def create_items_bulk(
         organization_id=current_user.organization_id,
         data=data,
     )
-    await db.commit()
 
     return [
         {
@@ -448,7 +442,6 @@ async def update_item(
         organization_id=current_user.organization_id,
         data=data,
     )
-    await db.commit()
 
     return {
         "id": str(item.id),
@@ -481,9 +474,8 @@ async def reorder_items(
         organization_id=current_user.organization_id,
         item_ids=data.item_ids,
     )
-    await db.commit()
 
-    return {"message": "항목 순서가 변경되었습니다 (Item order updated)"}
+    return {"message": "Item order updated"}
 
 
 @router.delete(
@@ -504,6 +496,5 @@ async def delete_item(
         item_id=item_id,
         organization_id=current_user.organization_id,
     )
-    await db.commit()
 
-    return {"message": "체크리스트 항목이 삭제되었습니다 (Checklist item deleted)"}
+    return {"message": "Checklist item deleted"}
