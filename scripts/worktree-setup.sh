@@ -7,7 +7,7 @@
 # 수행 내용:
 #   1. git worktree 생성 (.claude/worktrees/{branch})
 #   2. 로컬 DB 복사 (pg_dump dev → taskmanager_{sanitized_branch})
-#   3. 로컬 버킷 디렉토리 생성 (~/.taskmanager/bucket/worktree/{branch}/)
+#   3. 로컬 버킷 디렉토리 생성 (프로젝트루트/bucket/worktree/{branch}/)
 #   4. worktree .env에 DATABASE_URL + LOCAL_BUCKET_DIR + LOCAL_FALLBACK_BUCKET_DIR 오버라이드
 set -euo pipefail
 
@@ -17,15 +17,22 @@ BASE_BRANCH="${2:-dev}"
 # ── 경로 계산 ──────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-WORKTREE_DIR="$SERVER_DIR/.claude/worktrees/$BRANCH"
-
-# DB명에 사용할 sanitized branch명 (슬래시 → 하이픈, 특수문자 제거)
+# sanitized branch명 (슬래시 → 하이픈, 특수문자 제거) — 디렉토리/DB명에 공통 사용
 SANITIZED="$(echo "$BRANCH" | tr '/' '-' | tr -cd 'a-zA-Z0-9_-')"
+WORKTREE_DIR="$SERVER_DIR/.claude/worktrees/$SANITIZED"
 DB_NAME="taskmanager_${SANITIZED}"
 
-# 로컬 버킷 경로
-BUCKET_DIR="$HOME/.taskmanager/bucket/worktree/$BRANCH"
-FALLBACK_BUCKET_DIR="$HOME/.taskmanager/bucket/dev"
+# 로컬 버킷 경로 — 프로젝트 루트(server/../) 아래에 통일
+PROJECT_ROOT="$(cd "$SERVER_DIR/.." && pwd)"
+
+# dev .env에서 LOCAL_BUCKET_DIR 읽기 (dev 버킷 = fallback)
+DEV_BUCKET_DIR="$(grep '^LOCAL_BUCKET_DIR=' "$SERVER_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+if [ -z "$DEV_BUCKET_DIR" ]; then
+    DEV_BUCKET_DIR="$PROJECT_ROOT/bucket/dev"
+fi
+
+BUCKET_DIR="$PROJECT_ROOT/bucket/worktree/$SANITIZED"
+FALLBACK_BUCKET_DIR="$DEV_BUCKET_DIR"
 
 # ── .env에서 원본 DB 정보 추출 ─────────────────────────────
 ENV_FILE="$SERVER_DIR/.env"

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem
 from app.models.organization import Store
+from app.models.schedule import StoreWorkRole
 from app.models.work import Position, Shift
 from app.repositories.checklist_repository import checklist_repository
 from app.schemas.common import (
@@ -244,6 +245,8 @@ class ChecklistService:
                     "title": template_title,
                 },
             )
+            # 매칭되는 work_role에 자동 연결 — Auto-link to matching work_role
+            await self._auto_link_work_role(db, template)
             await db.commit()
             return template
         except Exception:
@@ -314,6 +317,9 @@ class ChecklistService:
             )
             if updated is None:
                 raise NotFoundError("Checklist template not found")
+            # shift/position 변경 시 새 조합에 매칭되는 work_role에 자동 연결
+            # Auto-link to matching work_role when shift/position changed
+            await self._auto_link_work_role(db, updated)
             await db.commit()
             return updated
         except Exception:
@@ -356,6 +362,36 @@ class ChecklistService:
         except Exception:
             await db.rollback()
             raise
+
+    # --- 내부 헬퍼 (Internal helpers) ---
+
+    @staticmethod
+    async def _auto_link_work_role(
+        db: AsyncSession,
+        template: ChecklistTemplate,
+    ) -> None:
+        """체크리스트 템플릿 생성/수정 시 매칭되는 work_role에 자동 연결합니다.
+
+        store_id+shift_id+position_id가 일치하는 work_role 중 default_checklist_id가
+        null인 것을 찾아 이 템플릿 ID로 설정합니다.
+        (이미 다른 템플릿이 연결된 경우는 변경하지 않음)
+
+        Auto-link this template to a matching work_role that has no default_checklist_id set.
+        Matching is by store_id + shift_id + position_id.
+        Does not overwrite existing links.
+        """
+        result = await db.execute(
+            select(StoreWorkRole).where(
+                StoreWorkRole.store_id == template.store_id,
+                StoreWorkRole.shift_id == template.shift_id,
+                StoreWorkRole.position_id == template.position_id,
+                StoreWorkRole.default_checklist_id.is_(None),
+            )
+        )
+        work_role: StoreWorkRole | None = result.scalar_one_or_none()
+        if work_role is not None:
+            work_role.default_checklist_id = template.id
+            await db.flush()
 
     # --- 항목 CRUD (Item CRUD) ---
 
