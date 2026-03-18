@@ -26,9 +26,11 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 로컬 버킷 디렉토리 — .env의 LOCAL_BUCKET_DIR 또는 ~/.taskmanager/bucket/dev/
-_DEFAULT_BUCKET_DIR: Path = Path.home() / ".taskmanager" / "bucket" / "dev"
-BUCKET_DIR: Path = Path(settings.LOCAL_BUCKET_DIR) if settings.LOCAL_BUCKET_DIR else _DEFAULT_BUCKET_DIR
+# 로컬 버킷 디렉토리 — .env의 LOCAL_BUCKET_DIR 필수
+# dev: 프로젝트루트/bucket/dev/, worktree: 프로젝트루트/bucket/worktree/{branch}/
+if settings.STORAGE_MODE != "s3" and not settings.LOCAL_BUCKET_DIR:
+    raise RuntimeError("LOCAL_BUCKET_DIR must be set in .env for local storage mode")
+BUCKET_DIR: Path = Path(settings.LOCAL_BUCKET_DIR) if settings.LOCAL_BUCKET_DIR else Path(".")
 FALLBACK_BUCKET_DIR: Path | None = (
     Path(settings.LOCAL_FALLBACK_BUCKET_DIR) if settings.LOCAL_FALLBACK_BUCKET_DIR else None
 )

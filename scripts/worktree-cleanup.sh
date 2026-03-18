@@ -7,7 +7,7 @@
 # 수행 내용:
 #   1. git worktree 삭제
 #   2. 로컬 DB 삭제 (dropdb taskmanager_{sanitized_branch})
-#   3. 로컬 버킷 디렉토리 삭제 (~/.taskmanager/bucket/worktree/{branch}/)
+#   3. 로컬 버킷 디렉토리 삭제 (프로젝트루트/bucket/worktree/{branch}/)
 #   4. git branch 삭제 (선택)
 set -euo pipefail
 
@@ -21,7 +21,8 @@ WORKTREE_DIR="$SERVER_DIR/.claude/worktrees/$BRANCH"
 SANITIZED="$(echo "$BRANCH" | tr '/' '-' | tr -cd 'a-zA-Z0-9_-')"
 DB_NAME="taskmanager_${SANITIZED}"
 
-BUCKET_DIR="$HOME/.taskmanager/bucket/worktree/$BRANCH"
+PROJECT_ROOT="$(cd "$SERVER_DIR/.." && pwd)"
+BUCKET_DIR="$PROJECT_ROOT/bucket/worktree/$BRANCH"
 
 # ── .env에서 DB 접속 정보 추출 ─────────────────────────────
 ENV_FILE="$SERVER_DIR/.env"
