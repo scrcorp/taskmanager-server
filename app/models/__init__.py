@@ -11,8 +11,7 @@ Modules:
     work: 근무 시간대 및 포지션 (Shift and Position)
     token: 리프레시 토큰 (Refresh tokens)
     user_store: 사용자-매장 매핑 (User-Store association)
-    checklist: 체크리스트 템플릿, 인스턴스, 완료, 코멘트 (Checklist templates, instances, completions, comments)
-    assignment: 근무 배정 (Work assignments with JSONB snapshots)
+    checklist: 체크리스트 템플릿, 인스턴스, 아이템 (Checklist templates, instances, items)
     communication: 공지사항, 추가 업무, 증빙, 읽음추적 (Announcements, tasks, evidences, read tracking)
     notification: 알림 (User notifications)
     schedule: 스케줄 및 승인 (Schedules and approvals)
@@ -26,28 +25,26 @@ from app.models.user import Role, User
 from app.models.work import Shift, Position
 from app.models.token import RefreshToken
 from app.models.user_store import UserStore
-from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistTemplateLink, ChecklistInstance, ChecklistCompletion, ChecklistItemReview, ChecklistReviewContent, ChecklistComment
-from app.models.assignment import WorkAssignment
+from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistInstance, ChecklistInstanceItem, ChecklistItemFile, ChecklistItemSubmission, ChecklistItemReviewLog, ChecklistItemMessage
 from app.models.communication import Announcement, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, AnnouncementRead, Voice
 from app.models.notification import Notification
-from app.models.schedule import Schedule, ScheduleApproval
+from app.models.schedule import Schedule, StoreWorkRole, StoreBreakRule, SchedulePeriod, ScheduleRequestTemplate, ScheduleRequestTemplateItem, ScheduleRequest
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
 from app.models.evaluation import EvalTemplate, EvalTemplateItem, Evaluation, EvalResponse
 from app.models.permission import Permission, RolePermission
-from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSection, DailyReport, DailyReportComment
+from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSection, DailyReport, DailyReportSection, DailyReportComment
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
     "Role", "User",
     "Shift", "Position",
     "RefreshToken", "UserStore",
-    "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistTemplateLink", "ChecklistInstance", "ChecklistCompletion", "ChecklistItemReview", "ChecklistReviewContent", "ChecklistComment",
-    "WorkAssignment",
+    "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistInstance", "ChecklistInstanceItem", "ChecklistItemFile", "ChecklistItemSubmission", "ChecklistItemReviewLog", "ChecklistItemMessage",
     "Announcement", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "AnnouncementRead", "Voice",
     "Notification",
-    "Schedule", "ScheduleApproval",
+    "Schedule", "StoreWorkRole", "StoreBreakRule", "SchedulePeriod", "ScheduleRequestTemplate", "ScheduleRequestTemplateItem", "ScheduleRequest",
     "QRCode", "Attendance", "AttendanceCorrection",
     "EvalTemplate", "EvalTemplateItem", "Evaluation", "EvalResponse",
     "Permission", "RolePermission",
-    "DailyReportTemplate", "DailyReportTemplateSection", "DailyReport", "DailyReportComment",
+    "DailyReportTemplate", "DailyReportTemplateSection", "DailyReport", "DailyReportSection", "DailyReportComment",
 ]

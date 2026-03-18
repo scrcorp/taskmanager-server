@@ -3,18 +3,23 @@
 Checklist SQLAlchemy ORM model definitions.
 Defines reusable checklist templates scoped to a specific
 store + shift + position combination, along with their items,
-and checklist instances/completions for actual work tracking.
+and checklist instances/items for actual work tracking.
 
 Tables:
     - checklist_templates: 체크리스트 템플릿 (Reusable checklist templates)
     - checklist_template_items: 체크리스트 항목 (Individual items within a template)
-    - cl_instances: 체크리스트 인스턴스 (One per work assignment, snapshot of template)
-    - cl_completions: 체크리스트 완료 기록 (One per completed item in an instance)
+    - cl_instances: 체크리스트 인스턴스 (One per schedule)
+    - cl_instance_items: 인스턴스 항목 (One per item per instance, snapshot + completion + review)
+    - cl_item_files: 첨부파일 (Photos per item, optionally linked to a submission)
+    - cl_item_submissions: 제출 이력 (Submission archive per resubmission)
+    - cl_item_reviews_log: 리뷰 변경 이력 (Review result change log)
+    - cl_item_messages: 메시지 스레드 (Chat-like review messages per item)
 """
 
 import uuid
 from datetime import date, datetime, timezone
-from sqlalchemy import Boolean, String, DateTime, Date, Integer, Text, ForeignKey, UniqueConstraint, Uuid
+from typing import Optional
+from sqlalchemy import Boolean, String, DateTime, Date, Integer, Text, ForeignKey, UniqueConstraint, Uuid, Index
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -128,32 +133,27 @@ class ChecklistTemplateItem(Base):
 
 
 class ChecklistInstance(Base):
-    """체크리스트 인스턴스 모델 — 배정 1건당 1개의 체크리스트 스냅샷.
+    """체크리스트 인스턴스 모델 — 배정 1건당 1개의 체크리스트.
 
-    Checklist instance model — One instance per work assignment.
-    Stores a frozen snapshot of template items at assignment creation time,
-    allowing templates to change without affecting existing assignments.
+    Checklist instance model — One instance per schedule.
+    Items are stored in cl_instance_items (no snapshot JSONB).
 
     Attributes:
         id: 고유 식별자 UUID (Unique identifier)
         organization_id: 소속 조직 FK (Organization scope for multi-tenant isolation)
         template_id: 원본 템플릿 FK (Source template, nullable — template may be deleted)
-        work_assignment_id: 근무 배정 FK (Work assignment, UNIQUE — one instance per assignment)
+        schedule_id: 스케줄 FK (Schedule, nullable — one instance per schedule)
         store_id: 매장 FK (Store where the work is performed)
         user_id: 배정 대상 사용자 FK (Assigned worker)
         work_date: 근무 날짜 (Date of the work assignment)
-        snapshot: JSONB 스냅샷 (Frozen copy of template items at creation time)
         total_items: 총 항목 수 (Total checklist items count)
         completed_items: 완료 항목 수 (Completed items count)
         status: 진행 상태 (Status: "pending" -> "in_progress" -> "completed")
         created_at: 생성 일시 UTC (Creation timestamp)
         updated_at: 수정 일시 UTC (Last update timestamp)
 
-    Relationships:
-        completions: 완료 기록 목록 (Completion records for this instance)
-
     Constraints:
-        work_assignment_id UNIQUE — one checklist instance per assignment
+        schedule_id UNIQUE — one checklist instance per schedule
     """
 
     __tablename__ = "cl_instances"
@@ -162,18 +162,16 @@ class ChecklistInstance(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 소속 조직 FK — Organization scope for multi-tenant data isolation
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    # 원본 템플릿 FK — Source template (SET NULL: 템플릿 삭제 시 null, 스냅샷은 유지)
+    # 원본 템플릿 FK — Source template (SET NULL: 템플릿 삭제 시 null, 아이템은 유지)
     template_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("checklist_templates.id", ondelete="SET NULL"), nullable=True)
-    # 근무 배정 FK — Work assignment (CASCADE: 배정 삭제 시 인스턴스도 삭제, UNIQUE)
-    work_assignment_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("work_assignments.id", ondelete="CASCADE"), nullable=False, unique=True)
-    # 매장 FK — Store where the work takes place
-    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
-    # 배정 대상 사용자 FK — Worker assigned to this checklist
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # 스케줄 FK — Schedule (SET NULL: 스케줄 삭제 시 null, nullable for migration)
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True, unique=True)
+    # 매장 FK — Store where the work takes place (SET NULL: 매장 삭제 시 null)
+    store_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
+    # 배정 대상 사용자 FK — Worker assigned to this checklist (SET NULL: 사용자 삭제 시 null)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # 근무 날짜 — Date of the work assignment (date only, no time)
     work_date: Mapped[date] = mapped_column(Date, nullable=False)
-    # JSONB 스냅샷 — Frozen copy of template items at instance creation time
-    snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
     # 총 항목 수 — Total number of checklist items (denormalized for quick progress display)
     total_items: Mapped[int] = mapped_column(Integer, default=0)
     # 완료 항목 수 — Number of completed items (denormalized, updated on item completion)
@@ -185,219 +183,194 @@ class ChecklistInstance(Base):
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    # 관계 — Completion records ordered by item_index
-    completions = relationship("ChecklistCompletion", back_populates="instance", cascade="all, delete-orphan", order_by="ChecklistCompletion.item_index")
-    # 관계 — Item reviews ordered by item_index
-    reviews = relationship("ChecklistItemReview", back_populates="instance", cascade="all, delete-orphan", order_by="ChecklistItemReview.item_index")
+    # 보고 제출 시점 — NULL이면 미제출 (Report submission timestamp, NULL=not submitted)
+    reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # 점수 데이터 — Score fields (set by reviewer after all items are reviewed)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scored_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    scored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # 관계 — Instance items ordered by item_index
+    items = relationship(
+        "ChecklistInstanceItem",
+        back_populates="instance",
+        cascade="all, delete-orphan",
+        order_by="ChecklistInstanceItem.item_index",
+    )
 
 
-class ChecklistCompletion(Base):
-    """체크리스트 완료 기록 모델 — 인스턴스 내 개별 항목 완료 기록.
+class ChecklistInstanceItem(Base):
+    """체크리스트 인스턴스 항목 — 인스턴스별 항목 1행. 템플릿 스냅샷 + 완료 + 리뷰 통합.
 
-    Checklist completion model — One row per completed item in an instance.
-    Records who completed an item, when, and optional evidence (photo, note, GPS).
-
-    Attributes:
-        id: 고유 식별자 UUID (Unique identifier)
-        instance_id: 소속 인스턴스 FK (Parent checklist instance)
-        item_index: 항목 인덱스 (Matches snapshot item_index)
-        user_id: 완료한 사용자 FK (User who completed the item)
-        completed_at: 완료 일시 (Completion timestamp)
-        photo_url: 사진 URL (Photo evidence URL, optional)
-        note: 메모 (Text note, optional)
-        location: GPS 위치 JSONB (lat/lng, optional)
-        resubmission_count: 재제출 횟수 (Number of times resubmitted)
-        created_at: 생성 일시 UTC (Creation timestamp)
-        updated_at: 수정 일시 UTC (Last update timestamp)
-
-    Constraints:
-        uq_cl_completion_instance_item: (instance_id, item_index) — one completion per item
+    One row per checklist item per instance.
+    Contains template snapshot data (copied at creation),
+    completion data, and current review result.
     """
 
-    __tablename__ = "cl_completions"
+    __tablename__ = "cl_instance_items"
 
-    # 완료 기록 고유 식별자 — Completion record unique identifier (UUID v4, auto-generated)
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    # 소속 인스턴스 FK — Parent instance (CASCADE: 인스턴스 삭제 시 완료 기록도 삭제)
+    # 소속 인스턴스 FK — Parent instance (CASCADE: 인스턴스 삭제 시 항목도 삭제)
     instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instances.id", ondelete="CASCADE"), nullable=False)
-    # 항목 인덱스 — Matches snapshot item_index (0-based)
+    # 항목 인덱스 — 0-based index within the instance (matches original snapshot order)
     item_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    # 완료한 사용자 FK — User who completed this item
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    # 완료 일시 — When the item was completed (UTC with timezone)
-    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    # IANA 타임존 — Timezone at completion (e.g. "America/Los_Angeles") for local time display
-    completed_timezone: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # 사진 URL — Optional photo evidence URL (Supabase Storage)
-    photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    # 메모 — Optional text note for the completion
-    note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # GPS 위치 — Optional location data as JSONB {lat, lng}
-    location: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    # 재제출 횟수 — Number of times this completion has been resubmitted
-    resubmission_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    # 생성 일시 — Record creation timestamp (UTC)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    # 수정 일시 — Last modification timestamp (UTC, auto-updated)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    __table_args__ = (
-        UniqueConstraint("instance_id", "item_index", name="uq_cl_completion_instance_item"),
-    )
+    # 템플릿 스냅샷 — Copied from template at instance creation time
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verification_type: Mapped[str] = mapped_column(String(20), default="none")
+    min_photos: Mapped[int] = mapped_column(Integer, default=0)
+    max_photos: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
-    # 관계 — Parent instance
-    instance = relationship("ChecklistInstance", back_populates="completions")
-    # 관계 — Completion history (resubmission archives)
-    history = relationship("ChecklistCompletionHistory", back_populates="completion", cascade="all, delete-orphan", order_by="ChecklistCompletionHistory.created_at")
+    # 완료 데이터 — Completion data (updated when staff completes the item)
+    is_completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_tz: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    completed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # note, location, resubmission_count는 cl_item_submissions에서 관리 (중복 제거)
 
+    # 리뷰 데이터 — Current review result (latest, stored inline for quick read)
+    review_result: Mapped[str | None] = mapped_column(String(20), nullable=True)  # pass/fail/caution/pending_re_review
+    reviewer_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-class ChecklistTemplateLink(Base):
-    """체크리스트 템플릿 연결 모델 — 템플릿을 여러 매장/시프트/포지션 조합에 연결.
-
-    Checklist template link model — Links a template to a store+shift+position
-    combination with a repeat schedule. Enables reusing one template across
-    multiple combinations.
-
-    Attributes:
-        id: 고유 식별자 UUID
-        template_id: 연결 대상 템플릿 FK
-        store_id: 매장 FK
-        shift_id: 시프트 FK
-        position_id: 포지션 FK
-        repeat_type: 반복 유형 ("daily" or "custom")
-        repeat_days: 반복 요일 JSONB (custom일 때 ["mon","wed","fri"] 등)
-        is_active: 활성 상태
-        created_at: 생성 일시 UTC
-        updated_at: 수정 일시 UTC
-
-    Constraints:
-        uq_cl_template_link: (template_id, store_id, shift_id, position_id) — 동일 조합 중복 불가
-    """
-
-    __tablename__ = "cl_template_links"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    template_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("checklist_templates.id", ondelete="CASCADE"), nullable=False)
-    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
-    shift_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("shifts.id", ondelete="CASCADE"), nullable=False)
-    position_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("positions.id", ondelete="CASCADE"), nullable=False)
-    repeat_type: Mapped[str] = mapped_column(String(10), default="daily", nullable=False)
-    repeat_days: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 생성/수정 일시
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
-        UniqueConstraint("template_id", "store_id", "shift_id", "position_id", name="uq_cl_template_link"),
+        UniqueConstraint("instance_id", "item_index", name="uq_cl_instance_item_index"),
+        Index("ix_cl_instance_items_instance_id", "instance_id"),
     )
 
-    template = relationship("ChecklistTemplate", foreign_keys=[template_id])
+    # 관계
+    instance = relationship("ChecklistInstance", back_populates="items")
+    files = relationship("ChecklistItemFile", back_populates="item", cascade="all, delete-orphan", order_by="ChecklistItemFile.sort_order")
+    submissions = relationship("ChecklistItemSubmission", back_populates="item", cascade="all, delete-orphan", order_by="ChecklistItemSubmission.version")
+    reviews_log = relationship("ChecklistItemReviewLog", back_populates="item", cascade="all, delete-orphan", order_by="ChecklistItemReviewLog.created_at")
+    messages = relationship("ChecklistItemMessage", back_populates="item", cascade="all, delete-orphan", order_by="ChecklistItemMessage.created_at")
 
 
-class ChecklistItemReview(Base):
-    """체크리스트 항목 리뷰 모델 — 관리자의 항목별 검수 결과.
+class ChecklistItemFile(Base):
+    """체크리스트 항목 첨부파일 — 항목별 사진/파일.
 
-    Per-item review by supervisor/manager.
-    One review per item per instance (UNIQUE constraint).
-    Stores pass/fail/caution result only. Contents (text/photo/video)
-    are stored in cl_review_contents.
+    One row per file per instance item.
+    Optionally linked to a specific submission (for per-submission photo tracking).
     """
 
-    __tablename__ = "cl_item_reviews"
+    __tablename__ = "cl_item_files"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instances.id", ondelete="CASCADE"), nullable=False)
-    item_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    reviewer_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    result: Mapped[str] = mapped_column(String(20), nullable=False)  # pass, fail, caution, pending_re_review
+    item_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instance_items.id", ondelete="CASCADE"), nullable=False)
+    # 어떤 맥락의 파일인지: context + context_id
+    context: Mapped[str] = mapped_column(String(20), nullable=False)  # submission | review | chat
+    context_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)  # 해당 submission/review_log/message의 id
+    file_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_type: Mapped[str] = mapped_column(String(20), default="photo")  # photo, video, document
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    uploaded_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
-        UniqueConstraint("instance_id", "item_index", name="uq_cl_item_review_instance_item"),
+        Index("ix_cl_item_files_item_id", "item_id"),
+        Index("ix_cl_item_files_context", "context", "context_id"),
     )
 
-    instance = relationship("ChecklistInstance", back_populates="reviews", foreign_keys=[instance_id])
-    contents = relationship("ChecklistReviewContent", back_populates="review", cascade="all, delete-orphan", order_by="ChecklistReviewContent.created_at")
-    review_history = relationship("ChecklistReviewHistory", back_populates="review", cascade="all, delete-orphan", order_by="ChecklistReviewHistory.created_at")
+    item = relationship("ChecklistInstanceItem", back_populates="files")
 
 
-class ChecklistReviewContent(Base):
-    """체크리스트 리뷰 콘텐츠 — 리뷰에 달리는 텍스트/사진/영상.
+class ChecklistItemSubmission(Base):
+    """체크리스트 항목 제출 이력 — 재제출 시 이전 증거 아카이빙.
 
-    Multiple contents per review. Any authorized user can add content
-    (not just the original reviewer). Displayed in chat-like format.
+    Each resubmission creates a new row with incremented version.
+    Version 1 = initial completion, 2+ = resubmissions.
     """
 
-    __tablename__ = "cl_review_contents"
+    __tablename__ = "cl_item_submissions"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    review_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_item_reviews.id", ondelete="CASCADE"), nullable=False)
-    author_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    type: Mapped[str] = mapped_column(String(10), nullable=False)  # text, photo, video
-    content: Mapped[str] = mapped_column(Text, nullable=False)  # text body or media URL
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-    review = relationship("ChecklistItemReview", back_populates="contents", foreign_keys=[review_id])
-
-
-class ChecklistReviewHistory(Base):
-    """체크리스트 리뷰 변경 히스토리 — 리뷰 결과 변경 추적.
-
-    Tracks review result changes. old_result is null for initial creation.
-    """
-
-    __tablename__ = "cl_review_history"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    review_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_item_reviews.id", ondelete="CASCADE"), nullable=False)
-    changed_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    old_result: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    new_result: Mapped[str] = mapped_column(String(20), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-    review = relationship("ChecklistItemReview", back_populates="review_history", foreign_keys=[review_id])
-
-
-class ChecklistCompletionHistory(Base):
-    """체크리스트 완료 히스토리 — 재제출 시 기존 evidence 아카이빙.
-
-    Archives previous completion evidence when staff resubmits.
-    """
-
-    __tablename__ = "cl_completion_history"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    completion_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_completions.id", ondelete="CASCADE"), nullable=False)
-    photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    item_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instance_items.id", ondelete="CASCADE"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     location: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    submitted_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    completion = relationship("ChecklistCompletion", back_populates="history", foreign_keys=[completion_id])
+    __table_args__ = (
+        Index("ix_cl_item_submissions_item_id", "item_id"),
+    )
+
+    item = relationship("ChecklistInstanceItem", back_populates="submissions")
 
 
-class ChecklistComment(Base):
-    """체크리스트 코멘트 모델 — 인스턴스에 대한 코멘트/메모.
+class ChecklistItemReviewLog(Base):
+    """체크리스트 항목 리뷰 변경 이력 — 리뷰 결과 변경 추적.
 
-    Checklist comment model — Comments on a checklist instance.
-    Allows managers and staff to leave notes on checklist progress.
-
-    Attributes:
-        id: 고유 식별자 UUID
-        instance_id: 소속 인스턴스 FK
-        user_id: 작성자 FK
-        text: 코멘트 내용
-        created_at: 생성 일시 UTC
+    One row per review result change. old_result is null for initial creation.
     """
 
-    __tablename__ = "cl_comments"
+    __tablename__ = "cl_item_reviews_log"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    item_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instance_items.id", ondelete="CASCADE"), nullable=False)
+    old_result: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    new_result: Mapped[str | None] = mapped_column(String(20), nullable=True)  # NULL = review cancelled
+    # 리뷰어 코멘트 (X 누르면서 "왼쪽 구석 다시 해" 등)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_cl_item_reviews_log_item_id", "item_id"),
+    )
+
+    item = relationship("ChecklistInstanceItem", back_populates="reviews_log")
+
+
+class ChecklistItemMessage(Base):
+    """체크리스트 항목 메시지 — 리뷰 스레드 채팅.
+
+    Chat-like messages per item. Any authorized user can add messages.
+    Displayed chronologically as a conversation thread.
+    """
+
+    __tablename__ = "cl_item_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    item_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instance_items.id", ondelete="CASCADE"), nullable=False)
+    author_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # 텍스트 본문 (사진만 보내는 경우 NULL)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_cl_item_messages_item_id", "item_id"),
+    )
+
+    item = relationship("ChecklistInstanceItem", back_populates="messages")
+
+
+class ClScoreHistory(Base):
+    """체크리스트 인스턴스 점수 변경 이력 — 점수 부여/수정 추적.
+
+    One row per score update on a checklist instance.
+    """
+
+    __tablename__ = "cl_score_history"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instances.id", ondelete="CASCADE"), nullable=False)
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    text: Mapped[str] = mapped_column(Text, nullable=False)
+    old_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    old_score_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_score_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    instance = relationship("ChecklistInstance", foreign_keys=[instance_id])
+    __table_args__ = (
+        Index("ix_cl_score_history_instance_id", "instance_id"),
+    )

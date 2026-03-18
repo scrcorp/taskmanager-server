@@ -58,11 +58,7 @@ async def create_shift(
     """
     await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
-    result: ShiftResponse = await shift_service.create_shift(
-        db, store_id, org_id, data
-    )
-    await db.commit()
-    return result
+    return await shift_service.create_shift(db, store_id, org_id, data)
 
 
 @router.put(
@@ -82,11 +78,7 @@ async def update_shift(
     """
     await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
-    result: ShiftResponse = await shift_service.update_shift(
-        db, shift_id, store_id, org_id, data
-    )
-    await db.commit()
-    return result
+    return await shift_service.update_shift(db, shift_id, store_id, org_id, data)
 
 
 @router.delete(
@@ -106,4 +98,3 @@ async def delete_shift(
     await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
     await shift_service.delete_shift(db, shift_id, store_id, org_id)
-    await db.commit()

@@ -30,7 +30,7 @@ class Notification(Base):
         - "task_completed": 업무 완료 알림 (Task completion notification)
 
     Reference Types (reference_type 필드 값):
-        - "work_assignment": WorkAssignment 참조 (Links to work_assignments table)
+        - "schedule": Schedule 참조 (Links to schedules table)
         - "additional_task": AdditionalTask 참조 (Links to additional_tasks table)
         - "announcement": Announcement 참조 (Links to announcements table)
 
@@ -58,7 +58,7 @@ class Notification(Base):
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     # 알림 메시지 — Human-readable message displayed to the user
     message: Mapped[str] = mapped_column(String(1000), nullable=False)
-    # 참조 엔티티 유형 — Polymorphic reference: entity table name (work_assignment | additional_task | announcement)
+    # 참조 엔티티 유형 — Referenced entity table name (e.g. work_assignments, cl_instances, additional_tasks)
     reference_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # 참조 엔티티 ID — Polymorphic reference: UUID of the source entity
     reference_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)

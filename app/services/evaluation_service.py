@@ -49,7 +49,7 @@ class EvaluationService:
     ) -> EvalTemplate:
         template = await eval_template_repository.get_with_items(db, template_id, organization_id)
         if template is None:
-            raise NotFoundError("평가 템플릿을 찾을 수 없습니다 (Evaluation template not found)")
+            raise NotFoundError("Evaluation template not found")
         return template
 
     async def create_template(
@@ -58,49 +58,14 @@ class EvaluationService:
         organization_id: UUID,
         data: EvalTemplateCreate,
     ) -> EvalTemplate:
-        template = await eval_template_repository.create(db, {
-            "organization_id": organization_id,
-            "name": data.name,
-            "target_role": data.target_role,
-            "eval_type": data.eval_type,
-            "cycle_weeks": data.cycle_weeks,
-        })
-
-        for item_data in data.items:
-            item = EvalTemplateItem(
-                template_id=template.id,
-                title=item_data.title,
-                type=item_data.type,
-                max_score=item_data.max_score,
-                sort_order=item_data.sort_order,
-            )
-            db.add(item)
-
-        await db.flush()
-        return await self.get_template(db, template.id, organization_id)
-
-    async def update_template(
-        self,
-        db: AsyncSession,
-        template_id: UUID,
-        organization_id: UUID,
-        data: EvalTemplateUpdate,
-    ) -> EvalTemplate:
-        template = await self.get_template(db, template_id, organization_id)
-
-        if data.name is not None:
-            template.name = data.name
-        if data.target_role is not None:
-            template.target_role = data.target_role
-        if data.eval_type is not None:
-            template.eval_type = data.eval_type
-        if data.cycle_weeks is not None:
-            template.cycle_weeks = data.cycle_weeks
-
-        # items가 제공되면 기존 삭제 후 재생성
-        if data.items is not None:
-            for existing_item in template.items:
-                await db.delete(existing_item)
+        try:
+            template = await eval_template_repository.create(db, {
+                "organization_id": organization_id,
+                "name": data.name,
+                "target_role": data.target_role,
+                "eval_type": data.eval_type,
+                "cycle_weeks": data.cycle_weeks,
+            })
 
             for item_data in data.items:
                 item = EvalTemplateItem(
@@ -112,9 +77,55 @@ class EvaluationService:
                 )
                 db.add(item)
 
-        template.updated_at = datetime.now(timezone.utc)
-        await db.flush()
-        return await self.get_template(db, template_id, organization_id)
+            await db.flush()
+            result = await self.get_template(db, template.id, organization_id)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def update_template(
+        self,
+        db: AsyncSession,
+        template_id: UUID,
+        organization_id: UUID,
+        data: EvalTemplateUpdate,
+    ) -> EvalTemplate:
+        template = await self.get_template(db, template_id, organization_id)
+        try:
+            if data.name is not None:
+                template.name = data.name
+            if data.target_role is not None:
+                template.target_role = data.target_role
+            if data.eval_type is not None:
+                template.eval_type = data.eval_type
+            if data.cycle_weeks is not None:
+                template.cycle_weeks = data.cycle_weeks
+
+            # items가 제공되면 기존 삭제 후 재생성
+            if data.items is not None:
+                for existing_item in template.items:
+                    await db.delete(existing_item)
+
+                for item_data in data.items:
+                    item = EvalTemplateItem(
+                        template_id=template.id,
+                        title=item_data.title,
+                        type=item_data.type,
+                        max_score=item_data.max_score,
+                        sort_order=item_data.sort_order,
+                    )
+                    db.add(item)
+
+            template.updated_at = datetime.now(timezone.utc)
+            await db.flush()
+            result = await self.get_template(db, template_id, organization_id)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_template(
         self,
@@ -122,10 +133,15 @@ class EvaluationService:
         template_id: UUID,
         organization_id: UUID,
     ) -> bool:
-        deleted = await eval_template_repository.delete(db, template_id, organization_id)
-        if not deleted:
-            raise NotFoundError("평가 템플릿을 찾을 수 없습니다 (Evaluation template not found)")
-        return deleted
+        try:
+            deleted = await eval_template_repository.delete(db, template_id, organization_id)
+            if not deleted:
+                raise NotFoundError("Evaluation template not found")
+            await db.commit()
+            return deleted
+        except Exception:
+            await db.rollback()
+            raise
 
     def build_template_response(self, template: EvalTemplate) -> dict:
         items = []
@@ -174,11 +190,10 @@ class EvaluationService:
         evaluatee_priority = evaluatee_result.scalar()
 
         if evaluator_priority is None or evaluatee_priority is None:
-            raise NotFoundError("평가자 또는 피평가자를 찾을 수 없습니다")
+            raise NotFoundError("Evaluator or evaluatee not found")
         if evaluator_priority >= evaluatee_priority:
             raise ForbiddenError(
-                "상위 역할만 하위 역할을 평가할 수 있습니다 "
-                "(Only higher-role users can evaluate lower-role users)"
+                "Only higher-role users can evaluate lower-role users"
             )
 
     async def list_evaluations(
@@ -203,7 +218,7 @@ class EvaluationService:
     ) -> Evaluation:
         evaluation = await evaluation_repository.get_with_responses(db, evaluation_id, organization_id)
         if evaluation is None:
-            raise NotFoundError("평가를 찾을 수 없습니다 (Evaluation not found)")
+            raise NotFoundError("Evaluation not found")
         return evaluation
 
     async def create_evaluation(
@@ -220,27 +235,33 @@ class EvaluationService:
         # 방향 검증
         await self._validate_direction(db, evaluator_id, evaluatee_id)
 
-        evaluation = await evaluation_repository.create(db, {
-            "organization_id": organization_id,
-            "evaluator_id": evaluator_id,
-            "evaluatee_id": evaluatee_id,
-            "template_id": template_id,
-            "store_id": store_id,
-            "status": "draft",
-        })
+        try:
+            evaluation = await evaluation_repository.create(db, {
+                "organization_id": organization_id,
+                "evaluator_id": evaluator_id,
+                "evaluatee_id": evaluatee_id,
+                "template_id": template_id,
+                "store_id": store_id,
+                "status": "draft",
+            })
 
-        # 응답 생성
-        for resp_data in data.responses:
-            response = EvalResponse(
-                evaluation_id=evaluation.id,
-                template_item_id=UUID(resp_data.template_item_id),
-                score=resp_data.score,
-                text=resp_data.text,
-            )
-            db.add(response)
+            # 응답 생성
+            for resp_data in data.responses:
+                response = EvalResponse(
+                    evaluation_id=evaluation.id,
+                    template_item_id=UUID(resp_data.template_item_id),
+                    score=resp_data.score,
+                    text=resp_data.text,
+                )
+                db.add(response)
 
-        await db.flush()
-        return await self.get_evaluation(db, evaluation.id, organization_id)
+            await db.flush()
+            result = await self.get_evaluation(db, evaluation.id, organization_id)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
     async def submit_evaluation(
         self,
@@ -251,13 +272,18 @@ class EvaluationService:
         evaluation = await self.get_evaluation(db, evaluation_id, organization_id)
 
         if evaluation.status != "draft":
-            raise BadRequestError("작성 중인 평가만 제출할 수 있습니다 (Only draft evaluations can be submitted)")
+            raise BadRequestError("Only draft evaluations can be submitted")
 
-        evaluation.status = "submitted"
-        evaluation.submitted_at = datetime.now(timezone.utc)
-        await db.flush()
-        await db.refresh(evaluation)
-        return evaluation
+        try:
+            evaluation.status = "submitted"
+            evaluation.submitted_at = datetime.now(timezone.utc)
+            await db.flush()
+            await db.refresh(evaluation)
+            await db.commit()
+            return evaluation
+        except Exception:
+            await db.rollback()
+            raise
 
     async def build_evaluation_response(self, db: AsyncSession, evaluation: Evaluation) -> dict:
         # 평가자 이름

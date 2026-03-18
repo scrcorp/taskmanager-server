@@ -70,7 +70,6 @@ async def create_template(
     template = await evaluation_service.create_template(
         db, organization_id=current_user.organization_id, data=data
     )
-    await db.commit()
     return evaluation_service.build_template_response(template)
 
 
@@ -85,7 +84,6 @@ async def update_template(
     template = await evaluation_service.update_template(
         db, template_id=template_id, organization_id=current_user.organization_id, data=data
     )
-    await db.commit()
     return evaluation_service.build_template_response(template)
 
 
@@ -99,8 +97,7 @@ async def delete_template(
     await evaluation_service.delete_template(
         db, template_id=template_id, organization_id=current_user.organization_id
     )
-    await db.commit()
-    return {"message": "평가 템플릿이 삭제되었습니다 (Evaluation template deleted)"}
+    return {"message": "Evaluation template deleted"}
 
 
 # === 평가 CRUD ===
@@ -157,7 +154,6 @@ async def create_evaluation(
         evaluator_id=current_user.id,
         data=data,
     )
-    await db.commit()
     return await evaluation_service.build_evaluation_response(db, evaluation)
 
 
@@ -171,5 +167,4 @@ async def submit_evaluation(
     evaluation = await evaluation_service.submit_evaluation(
         db, evaluation_id=evaluation_id, organization_id=current_user.organization_id
     )
-    await db.commit()
     return await evaluation_service.build_evaluation_response(db, evaluation)

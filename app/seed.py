@@ -45,7 +45,7 @@ async def seed() -> None:
         db.add(org)
         await db.flush()  # flush로 org.id 생성 (Flush to generate org.id)
 
-        # 역할 계층 생성 — Create role hierarchy (level 10=owner ~ 40=staff, 10-unit intervals)
+        # 역할 계층 생성 — Create role hierarchy (priority 10=owner ~ 40=staff, 10-unit intervals)
         roles_data: list[tuple[str, int]] = [
             ("owner", 10),
             ("general_manager", 20),
@@ -53,8 +53,8 @@ async def seed() -> None:
             ("staff", 40),
         ]
         roles: dict[str, Role] = {}
-        for name, level in roles_data:
-            role: Role = Role(organization_id=org.id, name=name, level=level)
+        for name, priority in roles_data:
+            role: Role = Role(organization_id=org.id, name=name, priority=priority)
             db.add(role)
             await db.flush()  # flush로 role.id 생성 (Flush to generate role.id)
             roles[name] = role

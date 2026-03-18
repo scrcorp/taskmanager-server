@@ -137,15 +137,20 @@ class ShiftService:
         existing_shifts: list[Shift] = await shift_repository.get_by_store(db, store_id)
         next_order: int = max((s.sort_order for s in existing_shifts), default=-1) + 1
 
-        shift: Shift = await shift_repository.create(
-            db,
-            {
-                "store_id": store_id,
-                "name": data.name,
-                "sort_order": next_order,
-            },
-        )
-        return self._to_response(shift)
+        try:
+            shift: Shift = await shift_repository.create(
+                db,
+                {
+                    "store_id": store_id,
+                    "name": data.name,
+                    "sort_order": next_order,
+                },
+            )
+            await db.commit()
+            return self._to_response(shift)
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_shift(
         self,
@@ -195,18 +200,23 @@ class ShiftService:
                 )
 
         update_data: dict = data.model_dump(exclude_unset=True)
-        shift: Shift | None = await shift_repository.update(db, shift_id, update_data)
-        if shift is None:
-            raise NotFoundError("Shift not found")
+        try:
+            shift: Shift | None = await shift_repository.update(db, shift_id, update_data)
+            if shift is None:
+                raise NotFoundError("Shift not found")
 
-        # 이름 변경 시 체크리스트 템플릿 제목 자동 업데이트
-        # Cascade shift name change to checklist template titles
-        if name_changed:
-            await self._cascade_shift_name_to_templates(
-                db, shift_id, store.name, data.name  # type: ignore[arg-type]
-            )
+            # 이름 변경 시 체크리스트 템플릿 제목 자동 업데이트
+            # Cascade shift name change to checklist template titles
+            if name_changed:
+                await self._cascade_shift_name_to_templates(
+                    db, shift_id, store.name, data.name  # type: ignore[arg-type]
+                )
 
-        return self._to_response(shift)
+            await db.commit()
+            return self._to_response(shift)
+        except Exception:
+            await db.rollback()
+            raise
 
     async def _cascade_shift_name_to_templates(
         self,
@@ -270,9 +280,14 @@ class ShiftService:
         if existing is None or existing.store_id != store_id:
             raise NotFoundError("Shift not found in this store")
 
-        deleted: bool = await shift_repository.delete(db, shift_id)
-        if not deleted:
-            raise NotFoundError("Shift not found")
+        try:
+            deleted: bool = await shift_repository.delete(db, shift_id)
+            if not deleted:
+                raise NotFoundError("Shift not found")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # 싱글턴 인스턴스 — Singleton instance

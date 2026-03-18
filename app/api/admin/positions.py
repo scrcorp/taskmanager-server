@@ -58,11 +58,7 @@ async def create_position(
     """
     await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
-    result: PositionResponse = await position_service.create_position(
-        db, store_id, org_id, data
-    )
-    await db.commit()
-    return result
+    return await position_service.create_position(db, store_id, org_id, data)
 
 
 @router.put(
@@ -82,11 +78,7 @@ async def update_position(
     """
     await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
-    result: PositionResponse = await position_service.update_position(
-        db, position_id, store_id, org_id, data
-    )
-    await db.commit()
-    return result
+    return await position_service.update_position(db, position_id, store_id, org_id, data)
 
 
 @router.delete(
@@ -106,4 +98,3 @@ async def delete_position(
     await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
     await position_service.delete_position(db, position_id, store_id, org_id)
-    await db.commit()

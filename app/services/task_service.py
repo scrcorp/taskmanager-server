@@ -51,9 +51,9 @@ class TaskService:
         store: Store | None = result.scalar_one_or_none()
 
         if store is None:
-            raise NotFoundError("매장을 찾을 수 없습니다 (Store not found)")
+            raise NotFoundError("Store not found")
         if store.organization_id != organization_id:
-            raise ForbiddenError("해당 매장에 대한 권한이 없습니다 (No permission for this store)")
+            raise ForbiddenError("No permission for this store")
         return store
 
     async def build_response(
@@ -85,16 +85,15 @@ class TaskService:
         )
         created_by_name: str = creator_result.scalar() or "Unknown"
 
-        # 담당자 이름 목록 조회 — Fetch assignee names
+        # 담당자 이름 목록 일괄 조회 — Batch fetch assignee names
         assignee_names: list[str] = []
         if hasattr(task, "assignees") and task.assignees:
-            for assignee in task.assignees:
-                name_result = await db.execute(
-                    select(User.full_name).where(User.id == assignee.user_id)
-                )
-                name: str | None = name_result.scalar()
-                if name:
-                    assignee_names.append(name)
+            user_ids = [a.user_id for a in task.assignees]
+            names_result = await db.execute(
+                select(User.id, User.full_name).where(User.id.in_(user_ids))
+            )
+            names_map = {row.id: row.full_name for row in names_result}
+            assignee_names = [names_map[uid] for uid in user_ids if names_map.get(uid)]
 
         return {
             "id": str(task.id),
@@ -182,7 +181,7 @@ class TaskService:
             db, task_id, organization_id
         )
         if task is None:
-            raise NotFoundError("추가 업무를 찾을 수 없습니다 (Additional task not found)")
+            raise NotFoundError("Additional task not found")
         return task
 
     async def create_task(
@@ -209,35 +208,40 @@ class TaskService:
             NotFoundError: 매장이 없을 때 (When store not found)
             ForbiddenError: 다른 조직 매장일 때 (When store belongs to another org)
         """
-        store_id: UUID | None = UUID(data.store_id) if data.store_id else None
+        try:
+            store_id: UUID | None = UUID(data.store_id) if data.store_id else None
 
-        if store_id is not None:
-            await self._validate_store_ownership(db, store_id, organization_id)
+            if store_id is not None:
+                await self._validate_store_ownership(db, store_id, organization_id)
 
-        task: AdditionalTask = await task_repository.create(
-            db,
-            {
-                "organization_id": organization_id,
-                "store_id": store_id,
-                "title": data.title,
-                "description": data.description,
-                "priority": data.priority,
-                "due_date": data.due_date,
-                "created_by": created_by,
-            },
-        )
+            task: AdditionalTask = await task_repository.create(
+                db,
+                {
+                    "organization_id": organization_id,
+                    "store_id": store_id,
+                    "title": data.title,
+                    "description": data.description,
+                    "priority": data.priority,
+                    "due_date": data.due_date,
+                    "created_by": created_by,
+                },
+            )
 
-        # 담당자 배정 — Assign users
-        assignee_uuids: list[UUID] = [UUID(uid) for uid in data.assignee_ids]
-        if assignee_uuids:
-            await task_repository.add_assignees(db, task.id, assignee_uuids)
+            # 담당자 배정 — Assign users
+            assignee_uuids: list[UUID] = [UUID(uid) for uid in data.assignee_ids]
+            if assignee_uuids:
+                await task_repository.add_assignees(db, task.id, assignee_uuids)
 
-            # 알림 자동 생성 — Auto-create notifications
-            from app.services.notification_service import notification_service
+                # 알림 자동 생성 — Auto-create notifications
+                from app.services.notification_service import notification_service
 
-            await notification_service.create_for_task(db, task, assignee_uuids)
+                await notification_service.create_for_task(db, task, assignee_uuids)
 
-        return task
+            await db.commit()
+            return task
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_task(
         self,
@@ -262,13 +266,18 @@ class TaskService:
         Raises:
             NotFoundError: 업무가 없을 때 (When task not found)
         """
-        update_data: dict = data.model_dump(exclude_unset=True)
-        updated: AdditionalTask | None = await task_repository.update(
-            db, task_id, update_data, organization_id
-        )
-        if updated is None:
-            raise NotFoundError("추가 업무를 찾을 수 없습니다 (Additional task not found)")
-        return updated
+        try:
+            update_data: dict = data.model_dump(exclude_unset=True)
+            updated: AdditionalTask | None = await task_repository.update(
+                db, task_id, update_data, organization_id
+            )
+            if updated is None:
+                raise NotFoundError("Additional task not found")
+            await db.commit()
+            return updated
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_task(
         self,
@@ -291,10 +300,15 @@ class TaskService:
         Raises:
             NotFoundError: 업무가 없을 때 (When task not found)
         """
-        deleted: bool = await task_repository.delete(db, task_id, organization_id)
-        if not deleted:
-            raise NotFoundError("추가 업무를 찾을 수 없습니다 (Additional task not found)")
-        return deleted
+        try:
+            deleted: bool = await task_repository.delete(db, task_id, organization_id)
+            if not deleted:
+                raise NotFoundError("Additional task not found")
+            await db.commit()
+            return deleted
+        except Exception:
+            await db.rollback()
+            raise
 
     # --- App (사용자용) ---
 
@@ -345,28 +359,31 @@ class TaskService:
             NotFoundError: 업무가 없거나 담당자가 아닐 때
                            (When task not found or user is not an assignee)
         """
-        task: AdditionalTask | None = await task_repository.get_detail_with_assignees(
-            db, task_id, organization_id
-        )
-        if task is None:
-            raise NotFoundError("추가 업무를 찾을 수 없습니다 (Additional task not found)")
-
-        # 담당자 확인 — Verify user is an assignee
-        assignee: AdditionalTaskAssignee | None = await task_repository.get_assignee(
-            db, task_id, user_id
-        )
-        if assignee is None:
-            raise ForbiddenError(
-                "이 업무의 담당자가 아닙니다 (You are not an assignee of this task)"
+        try:
+            task: AdditionalTask | None = await task_repository.get_detail_with_assignees(
+                db, task_id, organization_id
             )
+            if task is None:
+                raise NotFoundError("Additional task not found")
 
-        # 업무 상태를 completed로 변경 — Update task status to completed
-        updated: AdditionalTask | None = await task_repository.update(
-            db, task_id, {"status": "completed"}, organization_id
-        )
-        if updated is None:
-            raise NotFoundError("추가 업무를 찾을 수 없습니다 (Additional task not found)")
-        return updated
+            # 담당자 확인 — Verify user is an assignee
+            assignee: AdditionalTaskAssignee | None = await task_repository.get_assignee(
+                db, task_id, user_id
+            )
+            if assignee is None:
+                raise ForbiddenError("You are not an assignee of this task")
+
+            # 업무 상태를 completed로 변경 — Update task status to completed
+            updated: AdditionalTask | None = await task_repository.update(
+                db, task_id, {"status": "completed"}, organization_id
+            )
+            if updated is None:
+                raise NotFoundError("Additional task not found")
+            await db.commit()
+            return updated
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # 싱글턴 인스턴스 — Singleton instance

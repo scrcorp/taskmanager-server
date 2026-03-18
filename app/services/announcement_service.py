@@ -51,9 +51,9 @@ class AnnouncementService:
         store: Store | None = result.scalar_one_or_none()
 
         if store is None:
-            raise NotFoundError("매장을 찾을 수 없습니다 (Store not found)")
+            raise NotFoundError("Store not found")
         if store.organization_id != organization_id:
-            raise ForbiddenError("해당 매장에 대한 권한이 없습니다 (No permission for this store)")
+            raise ForbiddenError("No permission for this store")
         return store
 
     async def build_response(
@@ -147,7 +147,7 @@ class AnnouncementService:
             db, announcement_id, organization_id
         )
         if announcement is None:
-            raise NotFoundError("공지사항을 찾을 수 없습니다 (Announcement not found)")
+            raise NotFoundError("Announcement not found")
         return announcement
 
     async def create_announcement(
@@ -174,32 +174,37 @@ class AnnouncementService:
             NotFoundError: 매장이 없을 때 (When store not found)
             ForbiddenError: 다른 조직 매장일 때 (When store belongs to another org)
         """
-        store_id: UUID | None = UUID(data.store_id) if data.store_id else None
+        try:
+            store_id: UUID | None = UUID(data.store_id) if data.store_id else None
 
-        if store_id is not None:
-            await self._validate_store_ownership(db, store_id, organization_id)
+            if store_id is not None:
+                await self._validate_store_ownership(db, store_id, organization_id)
 
-        announcement: Announcement = await announcement_repository.create(
-            db,
-            {
-                "organization_id": organization_id,
-                "store_id": store_id,
-                "title": data.title,
-                "content": data.content,
-                "created_by": created_by,
-            },
-        )
+            announcement: Announcement = await announcement_repository.create(
+                db,
+                {
+                    "organization_id": organization_id,
+                    "store_id": store_id,
+                    "title": data.title,
+                    "content": data.content,
+                    "created_by": created_by,
+                },
+            )
 
-        # 알림 자동 생성 — Auto-create notifications for affected users
-        from app.services.notification_service import notification_service
+            # 알림 자동 생성 — Auto-create notifications for affected users
+            from app.services.notification_service import notification_service
 
-        # 대상 사용자 조회 — Find target users
-        user_ids: list[UUID] = await self._get_target_user_ids(
-            db, organization_id, store_id
-        )
-        await notification_service.create_for_announcement(db, announcement, user_ids)
+            # 대상 사용자 조회 — Find target users
+            user_ids: list[UUID] = await self._get_target_user_ids(
+                db, organization_id, store_id
+            )
+            await notification_service.create_for_announcement(db, announcement, user_ids)
 
-        return announcement
+            await db.commit()
+            return announcement
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_announcement(
         self,
@@ -224,13 +229,18 @@ class AnnouncementService:
         Raises:
             NotFoundError: 공지가 없을 때 (When announcement not found)
         """
-        update_data: dict = data.model_dump(exclude_unset=True)
-        updated: Announcement | None = await announcement_repository.update(
-            db, announcement_id, update_data, organization_id
-        )
-        if updated is None:
-            raise NotFoundError("공지사항을 찾을 수 없습니다 (Announcement not found)")
-        return updated
+        try:
+            update_data: dict = data.model_dump(exclude_unset=True)
+            updated: Announcement | None = await announcement_repository.update(
+                db, announcement_id, update_data, organization_id
+            )
+            if updated is None:
+                raise NotFoundError("Announcement not found")
+            await db.commit()
+            return updated
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_announcement(
         self,
@@ -253,12 +263,17 @@ class AnnouncementService:
         Raises:
             NotFoundError: 공지가 없을 때 (When announcement not found)
         """
-        deleted: bool = await announcement_repository.delete(
-            db, announcement_id, organization_id
-        )
-        if not deleted:
-            raise NotFoundError("공지사항을 찾을 수 없습니다 (Announcement not found)")
-        return deleted
+        try:
+            deleted: bool = await announcement_repository.delete(
+                db, announcement_id, organization_id
+            )
+            if not deleted:
+                raise NotFoundError("Announcement not found")
+            await db.commit()
+            return deleted
+        except Exception:
+            await db.rollback()
+            raise
 
     # --- App (사용자용 조회) ---
 

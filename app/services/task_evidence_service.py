@@ -57,30 +57,33 @@ class TaskEvidenceService:
         # 업무 존재 확인 — Verify task exists
         task = await task_repository.get_by_id(db, task_id)
         if task is None:
-            raise NotFoundError("추가 업무를 찾을 수 없습니다 (Additional task not found)")
+            raise NotFoundError("Additional task not found")
 
         # 담당자 확인 — Verify user is an assignee
         assignee = await task_repository.get_assignee(db, task_id, user_id)
         if assignee is None:
-            raise ForbiddenError(
-                "이 업무의 담당자만 증빙을 추가할 수 있습니다 (Only assignees can add evidence)"
-            )
+            raise ForbiddenError("Only assignees can add evidence")
 
         # temp → 최종 위치로 이동 — Finalize upload from temp/ to final path
         finalized_url = storage_service.finalize_upload(file_url)
 
         # 증빙 생성 — Create evidence record
-        evidence: TaskEvidence = await task_evidence_repository.create(
-            db,
-            {
-                "task_id": task_id,
-                "user_id": user_id,
-                "file_url": finalized_url,
-                "file_type": file_type,
-                "note": note,
-            },
-        )
-        return evidence
+        try:
+            evidence: TaskEvidence = await task_evidence_repository.create(
+                db,
+                {
+                    "task_id": task_id,
+                    "user_id": user_id,
+                    "file_url": finalized_url,
+                    "file_type": file_type,
+                    "note": note,
+                },
+            )
+            await db.commit()
+            return evidence
+        except Exception:
+            await db.rollback()
+            raise
 
     async def get_evidences(
         self,
@@ -130,18 +133,21 @@ class TaskEvidenceService:
             db, evidence_id
         )
         if evidence is None:
-            raise NotFoundError("증빙을 찾을 수 없습니다 (Evidence not found)")
+            raise NotFoundError("Evidence not found")
 
         # 본인 확인 — Verify ownership
         if evidence.user_id != user_id:
-            raise ForbiddenError(
-                "본인의 증빙만 삭제할 수 있습니다 (Can only delete your own evidence)"
-            )
+            raise ForbiddenError("Can only delete your own evidence")
 
         # S3/로컬 파일 삭제 — Delete file from storage
         storage_service.delete_file(evidence.file_url)
 
-        await task_evidence_repository.delete(db, evidence)
+        try:
+            await task_evidence_repository.delete(db, evidence)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     async def build_response(
         self,
@@ -171,7 +177,7 @@ class TaskEvidenceService:
             "task_id": str(evidence.task_id),
             "user_id": str(evidence.user_id),
             "user_name": user_name,
-            "file_url": evidence.file_url,
+            "file_url": storage_service.resolve_url(evidence.file_url),
             "file_type": evidence.file_type,
             "note": evidence.note,
             "created_at": evidence.created_at,

@@ -59,9 +59,13 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: str = ""
     AWS_S3_BUCKET: str = ""
     AWS_S3_REGION: str = "ap-northeast-2"
+    # S3 fallback 버킷 — staging용: 현재 버킷에 없으면 여기서 복사 (비어있으면 fallback 없음)
+    STORAGE_FALLBACK_BUCKET: str = ""
 
-    # 로컬 파일 저장 경로 — 비어있으면 server/uploads/ 사용
-    LOCAL_UPLOADS_DIR: str = ""
+    # 로컬 버킷 디렉토리 — local 모드에서 필수 (비어있으면 에러)
+    LOCAL_BUCKET_DIR: str = ""
+    # 로컬 fallback 버킷 — worktree용: 현재 버킷에 없으면 여기서 복사 (비어있으면 fallback 없음)
+    LOCAL_FALLBACK_BUCKET_DIR: str = ""
 
     # 폴더별 저장 경로 (S3 key prefix / 로컬 하위 폴더명)
     STORAGE_FOLDER_REVIEWS: str = "reviews"
@@ -83,6 +87,12 @@ class Settings(BaseSettings):
 
     # 보고서 제출 알림 수신 이메일 — Daily Report submit 시 알림 발송
     REPORT_NOTIFICATION_EMAIL: str = ""
+
+    # Server 베이스 URL — 로컬 이미지 URL 등에서 사용 (비어있으면 http://localhost:{port})
+    SERVER_BASE_URL: str = ""
+
+    # Admin 콘솔 베이스 URL — 이메일 링크 등에서 사용
+    ADMIN_BASE_URL: str = "https://taskmanager-admin.vercel.app"
 
     model_config = {"env_file": _ENV_FILE, "env_file_encoding": "utf-8"}
 

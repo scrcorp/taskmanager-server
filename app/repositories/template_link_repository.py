@@ -1,65 +1,33 @@
-"""체크리스트 템플릿 연결 레포지토리.
+"""체크리스트 템플릿 연결 레포지토리 — DEPRECATED.
 
-Checklist Template Link Repository — DB queries for cl_template_links.
+cl_template_links 테이블은 Phase 1A에서 삭제되었습니다.
 """
 
-from typing import Sequence
 from uuid import UUID
 
-from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.checklist import ChecklistTemplateLink
-from app.repositories.base import BaseRepository
 
+class TemplateLinkRepository:
+    """DEPRECATED — cl_template_links table was dropped in Phase 1A."""
 
-class TemplateLinkRepository(BaseRepository[ChecklistTemplateLink]):
+    async def get_by_id(self, *args, **kwargs):
+        return None
 
-    def __init__(self) -> None:
-        super().__init__(ChecklistTemplateLink)
+    async def get_by_template(self, *args, **kwargs):
+        return []
 
-    async def get_by_template(
-        self, db: AsyncSession, template_id: UUID
-    ) -> Sequence[ChecklistTemplateLink]:
-        query: Select = (
-            select(ChecklistTemplateLink)
-            .where(ChecklistTemplateLink.template_id == template_id)
-            .order_by(ChecklistTemplateLink.created_at.desc())
-        )
-        result = await db.execute(query)
-        return result.scalars().all()
+    async def get_by_store(self, *args, **kwargs):
+        return []
 
-    async def get_by_store(
-        self, db: AsyncSession, store_id: UUID
-    ) -> Sequence[ChecklistTemplateLink]:
-        query: Select = (
-            select(ChecklistTemplateLink)
-            .where(ChecklistTemplateLink.store_id == store_id)
-            .order_by(ChecklistTemplateLink.created_at.desc())
-        )
-        result = await db.execute(query)
-        return result.scalars().all()
+    async def check_duplicate(self, *args, **kwargs):
+        return False
 
-    async def check_duplicate(
-        self,
-        db: AsyncSession,
-        template_id: UUID,
-        store_id: UUID,
-        shift_id: UUID,
-        position_id: UUID,
-    ) -> bool:
-        query: Select = (
-            select(func.count())
-            .select_from(ChecklistTemplateLink)
-            .where(
-                ChecklistTemplateLink.template_id == template_id,
-                ChecklistTemplateLink.store_id == store_id,
-                ChecklistTemplateLink.shift_id == shift_id,
-                ChecklistTemplateLink.position_id == position_id,
-            )
-        )
-        count: int = (await db.execute(query)).scalar() or 0
-        return count > 0
+    async def create(self, *args, **kwargs):
+        return None
+
+    async def delete(self, *args, **kwargs):
+        return False
 
 
 # 싱글턴 인스턴스

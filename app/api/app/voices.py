@@ -31,7 +31,7 @@ async def list_my_voices(
     voices, total = await voice_service.list_for_user(
         db, current_user.organization_id, current_user.id, page, per_page
     )
-    items = [await voice_service.build_response(db, v) for v in voices]
+    items = await voice_service.build_responses_batch(db, voices)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
@@ -56,5 +56,4 @@ async def create_voice(
     voice = await voice_service.create_voice(
         db, current_user.organization_id, data, current_user.id
     )
-    await db.commit()
     return await voice_service.build_response(db, voice)

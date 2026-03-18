@@ -16,7 +16,8 @@ Tables:
 
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, Text, ForeignKey, TIMESTAMP, Uuid
+from typing import Optional
+from sqlalchemy import String, DateTime, Text, ForeignKey, TIMESTAMP, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -52,8 +53,10 @@ class Announcement(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     # 공지 내용 — Announcement body (full text)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    # 작성자 FK — User who created the announcement
-    created_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    # 작성자 FK — User who created the announcement (SET NULL: 사용자 삭제 시 null)
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # 소프트 삭제 일시 — Timestamp when announcement was soft-deleted (NULL = active)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
@@ -102,8 +105,10 @@ class AdditionalTask(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, in_progress, completed
     # 마감일시 — Optional deadline with timezone (TIMESTAMPTZ)
     due_date: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    # 생성자 FK — Manager/supervisor who created this task
-    created_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    # 생성자 FK — Manager/supervisor who created this task (SET NULL: 사용자 삭제 시 null)
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # 소프트 삭제 일시 — Timestamp when task was soft-deleted (NULL = active)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
@@ -138,10 +143,14 @@ class AdditionalTaskAssignee(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 업무 FK — Parent task (CASCADE: 업무 삭제 시 담당자 매핑도 삭제)
     task_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("additional_tasks.id", ondelete="CASCADE"), nullable=False)
-    # 담당자 FK — Assigned user (CASCADE: 사용자 삭제 시 매핑도 삭제)
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # 담당자 FK — Assigned user (SET NULL: 사용자 삭제 시 null)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # 배정 일시 — When the user was assigned to this task (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "user_id", name="uq_additional_task_assignee"),
+    )
 
     # 관계 — Relationships
     task = relationship("AdditionalTask", back_populates="assignees")
@@ -172,8 +181,8 @@ class TaskEvidence(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 업무 FK — Parent task (CASCADE: 업무 삭제 시 증빙도 삭제)
     task_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("additional_tasks.id", ondelete="CASCADE"), nullable=False)
-    # 제출자 FK — User who submitted the evidence (CASCADE: 사용자 삭제 시 증빙도 삭제)
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # 제출자 FK — User who submitted the evidence (SET NULL: 사용자 삭제 시 null)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # 파일 URL — File URL in Supabase Storage (or S3)
     file_url: Mapped[str] = mapped_column(String(500), nullable=False)
     # 파일 유형 — "photo" 또는 "document" (File type: photo or document)
@@ -206,6 +215,10 @@ class AnnouncementRead(Base):
     announcement_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("announcements.id", ondelete="CASCADE"), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("announcement_id", "user_id", name="uq_announcement_read"),
+    )
 
 
 class Voice(Base):
@@ -240,8 +253,10 @@ class Voice(Base):
     category: Mapped[str] = mapped_column(String(30), default="other")  # idea, facility, equipment, safety, hr, other
     status: Mapped[str] = mapped_column(String(20), default="open")  # open, in_progress, resolved
     priority: Mapped[str] = mapped_column(String(20), default="normal")  # low, normal, high, urgent
-    created_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
-    resolved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id"), nullable=True)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    resolved_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 소프트 삭제 일시 — Timestamp when voice was soft-deleted (NULL = active)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

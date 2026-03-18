@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.models.daily_report import (
     DailyReport,
     DailyReportComment,
+    DailyReportSection,
     DailyReportTemplate,
 )
 from app.repositories.base import BaseRepository
@@ -24,6 +25,7 @@ class DailyReportRepository(BaseRepository[DailyReport]):
         query: Select = (
             select(DailyReport)
             .options(
+                selectinload(DailyReport.sections),
                 selectinload(DailyReport.comments),
             )
             .where(
@@ -68,7 +70,10 @@ class DailyReportRepository(BaseRepository[DailyReport]):
         total: int = count_result.scalar() or 0
 
         query = (
-            base.options(selectinload(DailyReport.comments))
+            base.options(
+                selectinload(DailyReport.sections),
+                selectinload(DailyReport.comments),
+            )
             .order_by(DailyReport.report_date.desc(), DailyReport.created_at.desc())
             .offset((page - 1) * per_page)
             .limit(per_page)

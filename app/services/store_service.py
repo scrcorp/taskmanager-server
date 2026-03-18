@@ -163,8 +163,13 @@ class StoreService:
         }
         if data.timezone is not None:
             create_data["timezone"] = data.timezone
-        store: Store = await store_repository.create(db, create_data)
-        return self._to_response(store)
+        try:
+            store: Store = await store_repository.create(db, create_data)
+            await db.commit()
+            return self._to_response(store)
+        except Exception:
+            await db.rollback()
+            raise
 
     async def update_store(
         self,
@@ -204,13 +209,17 @@ class StoreService:
                     raise DuplicateError("A store with this name already exists")
 
         update_data: dict = data.model_dump(exclude_unset=True)
-        store: Store | None = await store_repository.update(
-            db, store_id, update_data, organization_id
-        )
-        if store is None:
-            raise NotFoundError("Store not found")
-
-        return self._to_response(store)
+        try:
+            store: Store | None = await store_repository.update(
+                db, store_id, update_data, organization_id
+            )
+            if store is None:
+                raise NotFoundError("Store not found")
+            await db.commit()
+            return self._to_response(store)
+        except Exception:
+            await db.rollback()
+            raise
 
     async def delete_store(
         self,
@@ -230,9 +239,14 @@ class StoreService:
         Raises:
             NotFoundError: 매장을 찾을 수 없을 때 (Store not found)
         """
-        deleted: bool = await store_repository.delete(db, store_id, organization_id)
-        if not deleted:
-            raise NotFoundError("Store not found")
+        try:
+            deleted: bool = await store_repository.delete(db, store_id, organization_id)
+            if not deleted:
+                raise NotFoundError("Store not found")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # 싱글턴 인스턴스 — Singleton instance

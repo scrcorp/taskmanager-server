@@ -44,7 +44,6 @@ async def create_qr_code(
         store_id=store_id,
         created_by=current_user.id,
     )
-    await db.commit()
 
     return await attendance_service.build_qr_response(db, qr)
 
@@ -72,7 +71,7 @@ async def get_store_qr_code(
     """
     qr = await attendance_service.get_store_qr(db, store_id)
     if qr is None:
-        raise NotFoundError("활성 QR 코드가 없습니다 (No active QR code found for this store)")
+        raise NotFoundError("No active QR code found for this store")
 
     return await attendance_service.build_qr_response(db, qr)
 
@@ -100,6 +99,5 @@ async def regenerate_qr_code(
         qr_id=qr_id,
         created_by=current_user.id,
     )
-    await db.commit()
 
     return await attendance_service.build_qr_response(db, qr)

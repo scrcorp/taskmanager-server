@@ -6,7 +6,6 @@ on:
     paths-ignore:
       - '*.md'
       - 'docs/**'
-      - '.github/**'
       - '.gitignore'
       - 'LICENSE'
 
@@ -24,14 +23,21 @@ jobs:
             cd ~/taskmanager-server-staging
             git pull origin staging
 
+            # 기존 컨테이너 중지 (DB 연결 해제)
+            docker compose -f docker-compose.staging.yml down
+
             # 컨테이너 빌드
             docker compose -f docker-compose.staging.yml build
 
-            # prod DB → staging DB 복사 (GitHub Secrets 사용)
+            # staging DB 초기화 후 prod DB 복사
             docker compose -f docker-compose.staging.yml run --rm \
               -e PGPASSWORD='${{ secrets.RDS_PASSWORD }}' \
-              api sh -c 'pg_dump -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} -d postgres --clean --if-exists | psql -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} -d taskmanager_staging'
+              api sh -c '
+                psql -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='"'"'taskmanager_staging'"'"' AND pid <> pg_backend_pid();" 2>/dev/null || true
+                dropdb -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} --if-exists taskmanager_staging
+                createdb -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} taskmanager_staging
+                pg_dump -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} -d postgres | psql -h ${{ secrets.RDS_HOST }} -U ${{ secrets.RDS_USER }} -d taskmanager_staging
+              '
 
             # 서버 시작
-            docker compose -f docker-compose.staging.yml down
             docker compose -f docker-compose.staging.yml up -d

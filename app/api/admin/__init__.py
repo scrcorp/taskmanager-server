@@ -42,7 +42,7 @@ from app.api.admin.positions import router as positions_router
 
 # Phase 2 — Core Workflow 라우터 임포트
 from app.api.admin.checklists import router as checklists_router
-from app.api.admin.assignments import router as assignments_router
+# assignments 라우터 제거됨 — schedule 시스템으로 대체
 from app.api.admin.checklist_instances import router as checklist_instances_router
 
 # Phase 3 — Communication 라우터 임포트
@@ -50,8 +50,7 @@ from app.api.admin.announcements import router as announcements_router
 from app.api.admin.tasks import router as tasks_router
 from app.api.admin.notifications import router as notifications_router
 
-# Phase 4 — Schedule 라우터 임포트
-from app.api.admin.schedules import router as schedules_router
+# Phase 4 — Schedule (구 schedules 라우터 삭제됨, schedule_entries가 /schedules로 이동)
 
 # Phase 5 — Attendance 라우터 임포트
 from app.api.admin.attendances import router as attendances_router
@@ -72,6 +71,13 @@ from app.api.admin.template_links import router as template_links_router
 
 # Phase 10 — Voices 라우터 임포트
 from app.api.admin.voices import router as voices_router
+
+# Schedule System — Work Roles + Break Rules + Schedule Periods 라우터 임포트
+from app.api.admin.work_roles import router as work_roles_router
+from app.api.admin.break_rules import router as break_rules_router
+from app.api.admin.schedule_periods import router as schedule_periods_router
+from app.api.admin.schedule_requests import router as schedule_requests_router
+from app.api.admin.schedules import router as schedule_entries_router
 
 # Daily Reports 라우터 임포트
 from app.api.admin.daily_reports import router as daily_reports_router
@@ -101,8 +107,7 @@ admin_router.include_router(positions_router, tags=["Positions"])
 # ---------------------------------------------------------------------------
 # 체크리스트: /stores/{store_id}/checklist-templates 형태 (nested under stores)
 admin_router.include_router(checklists_router, tags=["Checklists"])
-# 업무 배정: /work-assignments 하위 (Work assignments)
-admin_router.include_router(assignments_router, prefix="/work-assignments", tags=["Assignments"])
+# 업무 배정 라우터 제거됨 — schedule 시스템으로 대체 (/admin/schedules 사용)
 # 체크리스트 인스턴스: /checklist-instances 하위 (Checklist instances)
 admin_router.include_router(checklist_instances_router, prefix="/checklist-instances", tags=["Checklist Instances"])
 
@@ -116,8 +121,7 @@ admin_router.include_router(notifications_router, prefix="/notifications", tags=
 # ---------------------------------------------------------------------------
 # Phase 4 라우터 등록 — Register Phase 4 (Schedule) routers
 # ---------------------------------------------------------------------------
-# 스케줄: /schedules 하위 (Schedule drafts & approvals)
-admin_router.include_router(schedules_router, prefix="/schedules", tags=["Schedules"])
+# (구 schedules 라우터 삭제됨 — schedule_entries가 /schedules로 이동)
 
 # ---------------------------------------------------------------------------
 # Phase 5 라우터 등록 — Register Phase 5 (Attendance) routers
@@ -168,6 +172,15 @@ admin_router.include_router(permissions_router, prefix="/permissions", tags=["Pe
 # ---------------------------------------------------------------------------
 admin_router.include_router(daily_reports_router, prefix="/daily-reports", tags=["Daily Reports"])
 admin_router.include_router(daily_report_templates_router, prefix="/daily-report-templates", tags=["Daily Report Templates"])
+
+# ---------------------------------------------------------------------------
+# Schedule System 라우터 등록 — Work Roles + Break Rules
+# ---------------------------------------------------------------------------
+admin_router.include_router(work_roles_router, tags=["Work Roles"])
+admin_router.include_router(break_rules_router, tags=["Break Rules"])
+admin_router.include_router(schedule_periods_router, prefix="/schedule-periods", tags=["Schedule Periods"])
+admin_router.include_router(schedule_requests_router, prefix="/schedule-requests", tags=["Schedule Requests"])
+admin_router.include_router(schedule_entries_router, prefix="/schedules", tags=["Schedules"])
 
 # ---------------------------------------------------------------------------
 # Storage 라우터 등록 — S3 presigned URL

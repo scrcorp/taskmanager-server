@@ -179,6 +179,23 @@ checklist_snapshot = [
 ### Organization Scoping
 Every query MUST filter by organization_id from JWT. Never return cross-org data.
 
+### File Storage (상대경로 패턴)
+- **DB에는 상대경로(key)만 저장**: `completions/2026/03/17/{uuid}.jpg`
+- **절대 URL을 DB에 저장하지 않는다** (S3 URL, localhost URL 모두 금지)
+- **저장 시**: `storage_service.finalize_upload(file_url)` → 상대경로(key) 반환 → DB에 저장
+- **응답 시**: `storage_service.resolve_url(key)` → 환경별 전체 URL 반환
+- **fallback 동작**: staging/worktree에서 파일이 없으면 prod/dev에서 자동 복사
+- **로컬 버킷**: `taskmanager/bucket/dev/` (프로젝트 루트 내, `.env`에 `LOCAL_BUCKET_DIR` 필수 명시)
+
+```python
+# 저장 (DB에 key 저장)
+key = storage_service.finalize_upload(file_url_from_client)
+completion.photo_url = key  # "completions/2026/03/17/abc.jpg"
+
+# 응답 (key → URL 변환)
+response["photo_url"] = storage_service.resolve_url(completion.photo_url)
+```
+
 ## Environment Variables
 
 ```env
@@ -187,6 +204,13 @@ JWT_SECRET_KEY=your-secret-key
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
 JWT_REFRESH_TOKEN_EXPIRE_DAYS=7
 CORS_ORIGINS=["http://localhost:3000","http://localhost:8080"]
+
+# Storage
+STORAGE_MODE=local                                    # "local" 또는 "s3"
+AWS_S3_BUCKET=taskmanager-storage-prod                # S3 버킷
+STORAGE_FALLBACK_BUCKET=                              # staging용: prod 버킷명
+LOCAL_BUCKET_DIR=/path/to/taskmanager/bucket/dev       # local 모드에서 필수
+LOCAL_FALLBACK_BUCKET_DIR=                            # worktree용: dev 버킷 경로
 ```
 
 ## Commands
