@@ -185,7 +185,7 @@ Every query MUST filter by organization_id from JWT. Never return cross-org data
 - **저장 시**: `storage_service.finalize_upload(file_url)` → 상대경로(key) 반환 → DB에 저장
 - **응답 시**: `storage_service.resolve_url(key)` → 환경별 전체 URL 반환
 - **fallback 동작**: staging/worktree에서 파일이 없으면 prod/dev에서 자동 복사
-- **로컬 버킷**: `~/.taskmanager/bucket/dev/` (서버 repo 안에 저장하지 않음)
+- **로컬 버킷**: `taskmanager/bucket/dev/` (프로젝트 루트 내, `.env`에 `LOCAL_BUCKET_DIR` 필수 명시)
 
 ```python
 # 저장 (DB에 key 저장)
@@ -209,7 +209,7 @@ CORS_ORIGINS=["http://localhost:3000","http://localhost:8080"]
 STORAGE_MODE=local                                    # "local" 또는 "s3"
 AWS_S3_BUCKET=taskmanager-storage-prod                # S3 버킷
 STORAGE_FALLBACK_BUCKET=                              # staging용: prod 버킷명
-LOCAL_BUCKET_DIR=                                     # 비어있으면 ~/.taskmanager/bucket/dev/
+LOCAL_BUCKET_DIR=/path/to/taskmanager/bucket/dev       # local 모드에서 필수
 LOCAL_FALLBACK_BUCKET_DIR=                            # worktree용: dev 버킷 경로
 ```
 
