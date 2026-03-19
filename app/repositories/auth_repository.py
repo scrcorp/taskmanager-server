@@ -8,7 +8,7 @@ token lifecycle management and credential-based user retrieval.
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, delete, select
+from sqlalchemy import Select, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -59,6 +59,9 @@ class AuthRepository:
         user_id: UUID,
         token: str,
         expires_at: datetime,
+        client_type: str = "unknown",
+        user_agent: str | None = None,
+        ip_address: str | None = None,
     ) -> RefreshToken:
         """새 리프레시 토큰을 생성합니다.
 
@@ -69,6 +72,9 @@ class AuthRepository:
             user_id: 토큰 소유자 사용자 ID (Token owner user UUID)
             token: JWT 리프레시 토큰 문자열 (JWT refresh token string)
             expires_at: 토큰 만료 일시 (Token expiration timestamp)
+            client_type: 클라이언트 유형 "admin" | "app" (Client type)
+            user_agent: User-Agent 원본 (Raw User-Agent string)
+            ip_address: 접속 IP (Client IP address)
 
         Returns:
             RefreshToken: 생성된 리프레시 토큰 레코드 (Created refresh token record)
@@ -77,6 +83,9 @@ class AuthRepository:
             user_id=user_id,
             token=token,
             expires_at=expires_at,
+            client_type=client_type,
+            user_agent=user_agent,
+            ip_address=ip_address,
         )
         db.add(db_token)
         await db.flush()
@@ -141,6 +150,117 @@ class AuthRepository:
             user_id: 대상 사용자 ID (Target user UUID)
         """
         stmt = delete(RefreshToken).where(RefreshToken.user_id == user_id)
+        await db.execute(stmt)
+        await db.flush()
+
+    async def count_user_sessions(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        client_type: str,
+    ) -> int:
+        """특정 사용자의 client_type별 세션 수를 조회합니다.
+
+        Count the number of active sessions for a user by client_type.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            user_id: 사용자 ID (User UUID)
+            client_type: 클라이언트 유형 (Client type: "admin" | "app")
+
+        Returns:
+            int: 세션 수 (Number of active sessions)
+        """
+        result = await db.execute(
+            select(func.count()).select_from(RefreshToken).where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.client_type == client_type,
+            )
+        )
+        return result.scalar() or 0
+
+    async def delete_oldest_sessions(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        client_type: str,
+        keep_count: int,
+    ) -> None:
+        """가장 오래된 세션을 삭제하여 keep_count개만 남깁니다.
+
+        Delete oldest sessions to keep only keep_count sessions.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            user_id: 사용자 ID (User UUID)
+            client_type: 클라이언트 유형 (Client type)
+            keep_count: 유지할 세션 수 (Number of sessions to keep)
+        """
+        # Get IDs to keep (most recently used)
+        keep_subq = (
+            select(RefreshToken.id)
+            .where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.client_type == client_type,
+            )
+            .order_by(RefreshToken.last_used_at.desc())
+            .limit(keep_count)
+        )
+        # Delete the rest
+        stmt = delete(RefreshToken).where(
+            RefreshToken.user_id == user_id,
+            RefreshToken.client_type == client_type,
+            RefreshToken.id.notin_(keep_subq),
+        )
+        await db.execute(stmt)
+        await db.flush()
+
+    async def update_session_activity(
+        self,
+        db: AsyncSession,
+        token_id: UUID,
+        ip_address: str | None = None,
+    ) -> None:
+        """세션의 last_used_at과 ip_address를 갱신합니다.
+
+        Update session activity timestamp and IP address.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            token_id: 토큰 레코드 ID (Token record UUID)
+            ip_address: 접속 IP (Client IP address)
+        """
+        from datetime import timezone as tz
+
+        result = await db.execute(
+            select(RefreshToken).where(RefreshToken.id == token_id)
+        )
+        db_token = result.scalar_one_or_none()
+        if db_token:
+            db_token.last_used_at = datetime.now(tz.utc)
+            if ip_address:
+                db_token.ip_address = ip_address
+            await db.flush()
+
+    async def delete_expired_tokens(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+    ) -> None:
+        """만료된 리프레시 토큰을 정리합니다.
+
+        Clean up expired refresh tokens for a user.
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            user_id: 사용자 ID (User UUID)
+        """
+        from datetime import timezone as tz
+
+        stmt = delete(RefreshToken).where(
+            RefreshToken.user_id == user_id,
+            RefreshToken.expires_at < datetime.now(tz.utc),
+        )
         await db.execute(stmt)
         await db.flush()
 
