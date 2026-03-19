@@ -35,6 +35,9 @@ from app.utils.jwt import create_access_token, create_refresh_token, decode_toke
 from app.utils.password import hash_password, verify_password
 
 
+MAX_SESSIONS_PER_CLIENT = 5
+
+
 class AuthService:
     """인증 관련 비즈니스 로직을 처리하는 서비스.
 
@@ -98,15 +101,22 @@ class AuthService:
         db: AsyncSession,
         user: User,
         role: Role,
+        client_type: str = "unknown",
+        user_agent: str | None = None,
+        ip_address: str | None = None,
     ) -> TokenResponse:
         """액세스 토큰과 리프레시 토큰을 생성합니다.
 
         Generate access and refresh token pair for a user.
+        Enforces max sessions per client_type, removing oldest if exceeded.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             user: 사용자 모델 (User model instance)
             role: 역할 모델 (Role model instance)
+            client_type: 클라이언트 유형 "admin" | "app" (Client type)
+            user_agent: User-Agent 원본 (Raw User-Agent string)
+            ip_address: 접속 IP (Client IP address)
 
         Returns:
             TokenResponse: 토큰 응답 (Token response with access and refresh tokens)
@@ -115,15 +125,30 @@ class AuthService:
         access_token: str = create_access_token(payload)
         refresh_token: str = create_refresh_token(payload)
 
-        # 기존 리프레시 토큰 정리 — Clean up old refresh tokens to prevent accumulation
-        await auth_repository.delete_user_refresh_tokens(db, user.id)
+        # 만료된 토큰 정리 — Clean up expired tokens
+        await auth_repository.delete_expired_tokens(db, user.id)
+
+        # 세션 수 제한 — Enforce max sessions per client_type
+        session_count = await auth_repository.count_user_sessions(
+            db, user.id, client_type
+        )
+        if session_count >= MAX_SESSIONS_PER_CLIENT:
+            await auth_repository.delete_oldest_sessions(
+                db, user.id, client_type, MAX_SESSIONS_PER_CLIENT - 1
+            )
 
         # 리프레시 토큰을 DB에 저장 — Persist refresh token to database
         expires_at: datetime = datetime.now(timezone.utc) + timedelta(
             days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS
         )
         await auth_repository.create_refresh_token(
-            db, user_id=user.id, token=refresh_token, expires_at=expires_at
+            db,
+            user_id=user.id,
+            token=refresh_token,
+            expires_at=expires_at,
+            client_type=client_type,
+            user_agent=user_agent,
+            ip_address=ip_address,
         )
 
         return TokenResponse(
@@ -136,6 +161,8 @@ class AuthService:
         db: AsyncSession,
         data: LoginRequest,
         organization_id: UUID | None = None,
+        user_agent: str | None = None,
+        ip_address: str | None = None,
     ) -> TokenResponse:
         """관리자 로그인을 처리합니다.
 
@@ -145,6 +172,8 @@ class AuthService:
             db: 비동기 데이터베이스 세션 (Async database session)
             data: 로그인 요청 데이터 (Login request data)
             organization_id: 조직 ID 필터 (Organization ID filter)
+            device_name: 기기명 (Device name from User-Agent)
+            ip_address: 접속 IP (Client IP address)
 
         Returns:
             TokenResponse: 토큰 응답 (Token response)
@@ -172,7 +201,12 @@ class AuthService:
             raise ForbiddenError("No admin permissions assigned to this role")
 
         try:
-            result = await self._generate_tokens(db, user, role)
+            result = await self._generate_tokens(
+                db, user, role,
+                client_type="admin",
+                user_agent=user_agent,
+                ip_address=ip_address,
+            )
             await db.commit()
             return result
         except Exception:
@@ -184,6 +218,8 @@ class AuthService:
         db: AsyncSession,
         data: LoginRequest,
         organization_id: UUID | None = None,
+        user_agent: str | None = None,
+        ip_address: str | None = None,
     ) -> TokenResponse:
         """앱 로그인을 처리합니다.
 
@@ -193,6 +229,8 @@ class AuthService:
             db: 비동기 데이터베이스 세션 (Async database session)
             data: 로그인 요청 데이터 (Login request data)
             organization_id: 조직 ID 필터 (Organization ID filter)
+            device_name: 기기명 (Device name from User-Agent)
+            ip_address: 접속 IP (Client IP address)
 
         Returns:
             TokenResponse: 토큰 응답 (Token response)
@@ -211,7 +249,12 @@ class AuthService:
 
         role: Role = user.role
         try:
-            result = await self._generate_tokens(db, user, role)
+            result = await self._generate_tokens(
+                db, user, role,
+                client_type="app",
+                user_agent=user_agent,
+                ip_address=ip_address,
+            )
             await db.commit()
             return result
         except Exception:
@@ -285,7 +328,12 @@ class AuthService:
         await db.refresh(user)
 
         try:
-            result = await self._generate_tokens(db, user, staff_role)
+            result = await self._generate_tokens(
+                db, user, staff_role,
+                client_type="app",
+                device_name=None,
+                ip_address=None,
+            )
             await db.commit()
             return result
         except Exception:
@@ -296,14 +344,18 @@ class AuthService:
         self,
         db: AsyncSession,
         data: RefreshRequest,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
     ) -> TokenResponse:
         """리프레시 토큰으로 새 토큰 쌍을 발급합니다.
 
         Issue a new token pair using a refresh token.
+        Preserves client_type and device_name from the old session.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             data: 리프레시 요청 데이터 (Refresh request data)
+            ip_address: 접속 IP (Client IP address)
 
         Returns:
             TokenResponse: 새 토큰 응답 (New token response)
@@ -342,10 +394,20 @@ class AuthService:
         if user is None or not user.is_active:
             raise UnauthorizedError("User not found or inactive")
 
+        # 기존 세션 정보 보존, 없으면 현재 요청에서 채움 — Preserve or fill session info
+        old_client_type = db_token.client_type
+        # user_agent는 매번 현재 값으로 갱신 (브라우저 업데이트 반영)
+        current_user_agent = user_agent or db_token.user_agent
+
         # 기존 리프레시 토큰 삭제 후 새 토큰 발급 — Delete old token and issue new pair
         await auth_repository.delete_refresh_token(db, data.refresh_token)
         try:
-            result = await self._generate_tokens(db, user, user.role)
+            result = await self._generate_tokens(
+                db, user, user.role,
+                client_type=old_client_type,
+                user_agent=current_user_agent,
+                ip_address=ip_address,
+            )
             await db.commit()
             return result
         except Exception:

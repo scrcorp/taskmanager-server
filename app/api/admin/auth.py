@@ -8,7 +8,7 @@ Common endpoints (refresh, logout, me) are in app.api.auth.
 from typing import Annotated
 
 from sqlalchemy import select, func
-from fastapi import APIRouter, Depends, Form
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,7 @@ router: APIRouter = APIRouter()
 @router.post("/login", response_model=TokenResponse)
 async def admin_login(
     data: LoginRequest,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TokenResponse:
     """관리자 로그인 — 스태프 계정 접근 불가.
@@ -32,8 +33,13 @@ async def admin_login(
     Admin login endpoint. Rejects staff-level accounts (level >= 4).
     Optionally accepts company_code in body to scope login to a specific org.
     """
+    from app.api.utils import get_session_info
+
     organization_id = await auth_service.resolve_company_code(db, data.company_code)
-    return await auth_service.admin_login(db, data, organization_id)
+    return await auth_service.admin_login(
+        db, data, organization_id,
+        **get_session_info(request),
+    )
 
 
 @router.post("/setup", response_class=HTMLResponse)

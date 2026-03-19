@@ -8,7 +8,7 @@ Common endpoints (refresh, logout, me) are in app.api.auth.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -35,6 +35,7 @@ async def app_register(
 @router.post("/login", response_model=TokenResponse)
 async def app_login(
     data: LoginRequest,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TokenResponse:
     """앱 로그인 — 스태프 및 슈퍼바이저 허용.
@@ -42,5 +43,10 @@ async def app_login(
     App login endpoint. Allows staff and supervisor accounts.
     Optionally accepts company_code in body to scope login to a specific org.
     """
+    from app.api.utils import get_session_info
+
     organization_id = await auth_service.resolve_company_code(db, data.company_code)
-    return await auth_service.app_login(db, data, organization_id)
+    return await auth_service.app_login(
+        db, data, organization_id,
+        **get_session_info(request),
+    )
