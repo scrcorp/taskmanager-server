@@ -15,6 +15,7 @@ from sqlalchemy import select
 from app.models.checklist import ChecklistInstance, ChecklistInstanceItem
 from app.models.communication import AdditionalTask, Announcement
 from app.models.notification import Notification
+from app.models.permission import Permission, RolePermission
 from app.models.schedule import Schedule
 from app.models.user import Role, User
 from app.repositories.notification_repository import notification_repository
@@ -177,13 +178,15 @@ class NotificationService:
         """
         message: str = f"Schedule pending approval for {schedule.work_date}"
 
-        # GM 이상 사용자 조회 (level <= 20) — Find GM+ users in organization
+        # schedules:update 권한 보유 사용자 조회 — Find users with schedule approval permission
         gm_result = await db.execute(
             select(User.id)
             .join(Role, User.role_id == Role.id)
+            .join(RolePermission, Role.id == RolePermission.role_id)
+            .join(Permission, RolePermission.permission_id == Permission.id)
             .where(User.organization_id == schedule.organization_id)
             .where(User.is_active.is_(True))
-            .where(Role.priority <= 20)
+            .where(Permission.code == "schedules:update")
         )
         gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
 
@@ -278,19 +281,20 @@ class NotificationService:
         from app.models.user import User
         from app.models.user_store import UserStore
 
-        # SV/GM: priority <= 30 (SV=30, GM=20), is_manager=True, same store
-        from app.models.user import Role
+        # checklists:update 권한 + is_manager + same store (Owner 제외)
         managers_q = (
             select(User)
             .join(UserStore, User.id == UserStore.user_id)
             .join(Role, User.role_id == Role.id)
+            .join(RolePermission, Role.id == RolePermission.role_id)
+            .join(Permission, RolePermission.permission_id == Permission.id)
             .where(
                 UserStore.store_id == instance.store_id,
                 UserStore.is_manager.is_(True),
                 User.is_active.is_(True),
                 User.deleted_at.is_(None),
-                Role.priority <= 30,  # SV(30) + GM(20), exclude Owner(10)
-                Role.priority > 10,
+                Permission.code == "checklists:update",
+                Role.priority > 10,  # Owner 제외 (비즈니스 규칙)
             )
         )
         result = await db.execute(managers_q)
@@ -346,12 +350,15 @@ class NotificationService:
         """
         message: str = f"Attendance record corrected: {field_name}"
 
+        # schedules:update 권한 보유 사용자 조회 — Find users with schedule management permission
         gm_result = await db.execute(
             select(User.id)
             .join(Role, User.role_id == Role.id)
+            .join(RolePermission, Role.id == RolePermission.role_id)
+            .join(Permission, RolePermission.permission_id == Permission.id)
             .where(User.organization_id == organization_id)
             .where(User.is_active.is_(True))
-            .where(Role.priority <= 20)
+            .where(Permission.code == "schedules:update")
             .where(User.id != corrected_by)
         )
         gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
