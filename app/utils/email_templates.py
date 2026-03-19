@@ -3,6 +3,50 @@
 from html import escape
 
 
+def build_verification_code_email(code: str) -> tuple[str, str]:
+    """Build email verification code email.
+
+    Returns:
+        (subject, html_body) tuple
+    """
+    subject = "[TaskManager] Email Verification Code"
+
+    html = f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background-color:#F8FAFC;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F8FAFC;">
+    <tr><td align="center" style="padding:32px 16px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+        <tr>
+          <td style="background-color:#3B8DD9;padding:24px 28px;">
+            <div style="font-size:22px;font-weight:700;color:#FFFFFF;">TaskManager</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px 24px;text-align:center;">
+            <div style="font-size:20px;font-weight:700;color:#1E293B;margin-bottom:8px;">Email Verification Code</div>
+            <div style="font-size:14px;color:#64748B;margin-bottom:28px;">Enter this code to verify your email address.</div>
+            <div style="display:inline-block;padding:16px 40px;background-color:#F1F5F9;border-radius:8px;font-size:32px;font-weight:800;letter-spacing:8px;color:#1E293B;">{escape(code)}</div>
+            <div style="font-size:13px;color:#94A3B8;margin-top:24px;">This code expires in 5 minutes.</div>
+            <div style="font-size:13px;color:#94A3B8;margin-top:4px;">If you didn't request this, please ignore this email.</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;">
+            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated notification from TaskManager</div>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    return subject, html
+
+
 def build_daily_report_email(
     store_name: str,
     report_date: str,

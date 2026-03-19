@@ -86,3 +86,20 @@ class BadRequestError(HTTPException):
 
     def __init__(self, detail: str = "Bad request") -> None:
         super().__init__(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+
+class ConflictError(HTTPException):
+    """409 Conflict 예외 — 리소스 충돌 시 사용.
+
+    409 Conflict exception.
+    Raised when the request conflicts with existing data
+    (e.g. email already registered).
+
+    Args:
+        detail: 오류 메시지 (Error message, default: "Conflict")
+        detail: 추가 정보 딕셔너리 (Additional detail dict, optional)
+    """
+
+    def __init__(self, detail: str = "Conflict", **kwargs) -> None:
+        error_detail = {"message": detail, **kwargs}
+        super().__init__(status_code=status.HTTP_409_CONFLICT, detail=error_detail)

@@ -33,6 +33,7 @@ from app.models.attendance import QRCode, Attendance, AttendanceCorrection
 from app.models.evaluation import EvalTemplate, EvalTemplateItem, Evaluation, EvalResponse
 from app.models.permission import Permission, RolePermission
 from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSection, DailyReport, DailyReportSection, DailyReportComment
+from app.models.email_verification import EmailVerificationCode
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -47,4 +48,5 @@ __all__ = [
     "EvalTemplate", "EvalTemplateItem", "Evaluation", "EvalResponse",
     "Permission", "RolePermission",
     "DailyReportTemplate", "DailyReportTemplateSection", "DailyReport", "DailyReportSection", "DailyReportComment",
+    "EmailVerificationCode",
 ]

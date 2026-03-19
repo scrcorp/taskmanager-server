@@ -41,8 +41,9 @@ class RegisterRequest(BaseModel):
     username: str  # 사용자 아이디 — 조직 내 고유 (Login ID, unique within org)
     password: str  # 비밀번호 — 평문, 서버에서 bcrypt 해싱 (Plain text, server hashes with bcrypt)
     full_name: str  # 실명 (Full display name)
-    email: str | None = None  # 이메일 (Optional email address)
+    email: str  # 이메일 — 필수 (Email address, required for verification)
     company_code: str  # 회사 코드 — 필수 (Company code, required for registration)
+    verification_token: str  # 이메일 인증 토큰 — 코드 검증 성공 시 발급 (Issued after code verification)
 
 
 class TokenResponse(BaseModel):
@@ -97,6 +98,7 @@ class UserMeResponse(BaseModel):
     username: str
     full_name: str
     email: str | None
+    email_verified: bool
     role_name: str
     role_priority: int  # 역할 우선순위 — 10=owner, 40=staff (낮을수록 높은 권한)
     organization_id: str

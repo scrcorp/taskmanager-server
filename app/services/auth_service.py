@@ -313,7 +313,13 @@ class AuthService:
         if staff_role is None:
             raise BadRequestError("Staff role not configured for this organization")
 
-        # 사용자 생성 — Create user
+        # 이메일 인증 토큰 검증 — Validate email verification token
+        from app.services.email_verification_service import email_verification_service
+        await email_verification_service.validate_verification_token(
+            db, data.verification_token, data.email
+        )
+
+        # 사용자 생성 — Create user (email_verified=True since token was validated)
         password_hash: str = hash_password(data.password)
         user: User = User(
             organization_id=organization_id,
@@ -322,6 +328,7 @@ class AuthService:
             full_name=data.full_name,
             email=data.email,
             password_hash=password_hash,
+            email_verified=True,
         )
         db.add(user)
         await db.flush()
@@ -472,6 +479,7 @@ class AuthService:
             username=loaded_user.username,
             full_name=loaded_user.full_name,
             email=loaded_user.email,
+            email_verified=loaded_user.email_verified,
             role_name=role.name,
             role_priority=role.priority,
             organization_id=str(loaded_user.organization_id),
