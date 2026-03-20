@@ -75,14 +75,11 @@ else
     echo "SKIP: bucket dir not found"
 fi
 
-# ── 4. Git branch 삭제 (선택) ─────────────────────────────
-echo ""
-read -p "Delete branch '$BRANCH'? (y/N) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+# ── 4. Git branch 삭제 ────────────────────────────────────
+# --delete-branch 플래그가 있으면 자동 삭제 (AI agent용)
+if [ "${2:-}" = "--delete-branch" ]; then
     cd "$SERVER_DIR"
-    git branch -d "$BRANCH" 2>/dev/null || git branch -D "$BRANCH"
-    echo "OK: branch deleted"
+    git branch -D "$BRANCH" 2>/dev/null && echo "OK: branch deleted" || echo "SKIP: branch not found"
 fi
 
 echo ""
