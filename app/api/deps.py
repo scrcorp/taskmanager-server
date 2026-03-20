@@ -5,6 +5,7 @@ Provides reusable dependencies for extracting the current user from JWT
 and enforcing permission-based access control on API endpoints.
 """
 
+from datetime import datetime, timezone
 from typing import Annotated, Callable, Awaitable
 from uuid import UUID
 
@@ -47,6 +48,16 @@ async def get_current_user(
 
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+
+    # 비밀번호 변경 후 발급된 토큰인지 확인 — Reject tokens issued before password change
+    # 2초 여유: 비밀번호 변경 시 password_changed_at과 새 토큰 iat이 같은 초에 생성될 수 있음
+    if user.password_changed_at:
+        iat = payload.get("iat")
+        if iat:
+            from datetime import timedelta
+            issued_at = datetime.fromtimestamp(iat, tz=timezone.utc)
+            if issued_at < user.password_changed_at - timedelta(seconds=2):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Password changed, please re-login")
 
     return user
 

@@ -106,7 +106,20 @@ grep -q '^LOCAL_FALLBACK_BUCKET_DIR=' "$WT_ENV" && \
     echo "LOCAL_FALLBACK_BUCKET_DIR=${FALLBACK_BUCKET_DIR}" >> "$WT_ENV"
 
 echo "OK: .env configured"
+
+# ── 5. venv 생성 + 패키지 설치 ──────────────────────────────
+if [ -d "$WORKTREE_DIR/.venv" ]; then
+    echo "SKIP: .venv already exists"
+else
+    echo "Creating .venv..."
+    python3 -m venv "$WORKTREE_DIR/.venv"
+    echo "Installing requirements..."
+    "$WORKTREE_DIR/.venv/bin/pip" install -q -r "$WORKTREE_DIR/requirements.txt"
+    echo "OK: .venv created + packages installed"
+fi
+
 echo ""
 echo "=== Done ==="
 echo "cd $WORKTREE_DIR"
+echo "source .venv/bin/activate"
 echo "alembic upgrade head  # if you have new migrations"
