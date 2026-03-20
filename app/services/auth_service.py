@@ -338,7 +338,7 @@ class AuthService:
             result = await self._generate_tokens(
                 db, user, staff_role,
                 client_type="app",
-                device_name=None,
+                user_agent=None,
                 ip_address=None,
             )
             await db.commit()
@@ -487,6 +487,7 @@ class AuthService:
             company_code=org.code,
             organization_timezone=org.timezone,
             is_active=loaded_user.is_active,
+            must_change_password=loaded_user.must_change_password,
             permissions=sorted(permissions),
         )
 

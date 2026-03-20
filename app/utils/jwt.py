@@ -12,6 +12,7 @@ JWT Payload Structure:
         "role": "owner",            # 역할 이름 (Role name)
         "priority": 10,             # 역할 우선순위 (Role priority: Owner=10, GM=20, SV=30, Staff=40)
         "exp": 1234567890,          # 만료 시간 UNIX timestamp (Expiration)
+        "iat": 1234567890,          # 발급 시간 UNIX timestamp (Issued at, for password_changed_at check)
         "type": "access"|"refresh"  # 토큰 유형 (Token type discriminator)
     }
 """
@@ -41,8 +42,9 @@ def create_access_token(data: dict[str, Any]) -> str:
     """
     to_encode: dict[str, Any] = data.copy()
     # 만료 시간 설정 — 현재 UTC 시간 + 설정된 분 수 (Set expiration from current UTC + configured minutes)
-    expire: datetime = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire, "type": "access"})
+    now: datetime = datetime.now(timezone.utc)
+    expire: datetime = now + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire, "iat": now, "type": "access"})
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
@@ -61,8 +63,9 @@ def create_refresh_token(data: dict[str, Any]) -> str:
     """
     to_encode: dict[str, Any] = data.copy()
     # 만료 시간 설정 — 현재 UTC 시간 + 설정된 일 수 (Set expiration from current UTC + configured days)
-    expire: datetime = datetime.now(timezone.utc) + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire, "type": "refresh"})
+    now: datetime = datetime.now(timezone.utc)
+    expire: datetime = now + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire, "iat": now, "type": "refresh"})
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 

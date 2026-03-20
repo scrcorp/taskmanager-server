@@ -182,3 +182,21 @@ async def remove_user_store(
     """사용자에게서 매장 배정을 해제합니다 (개별, 하위호환)."""
     org_id: UUID = current_user.organization_id
     await user_service.remove_user_store(db, user_id, store_id, org_id)
+
+
+@router.post("/{user_id}/reset-password")
+async def admin_reset_password(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> dict:
+    """관리자 비밀번호 초기화 — 임시 비밀번호 생성 + 이메일 발송."""
+    from app.services.password_service import password_service
+
+    temp_password = await password_service.admin_reset_password(
+        db, current_user, str(user_id)
+    )
+    return {
+        "temporary_password": temp_password,
+        "message": "Password reset successfully",
+    }
