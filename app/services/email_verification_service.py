@@ -47,15 +47,17 @@ class EmailVerificationService:
         """
         email = email.strip().lower()
 
-        # 이메일 중복 체크 — 이미 인증 완료된 이메일인지
-        result = await db.execute(
-            select(User).where(
-                User.email == email,
-                User.email_verified == True,
+        # 이메일 중복 체크 — registration/login_verify에만 적용
+        # find_username, reset_password는 기존 이메일이 있어야 하므로 skip
+        if purpose in ("registration", "login_verify"):
+            result = await db.execute(
+                select(User).where(
+                    User.email == email,
+                    User.email_verified == True,
+                )
             )
-        )
-        if result.scalars().first() is not None:
-            raise ConflictError("This email is already registered")
+            if result.scalars().first() is not None:
+                raise ConflictError("This email is already registered")
 
         # 재발송 쿨다운 체크
         cooldown_cutoff = datetime.now(timezone.utc) - timedelta(seconds=RESEND_COOLDOWN_SECONDS)

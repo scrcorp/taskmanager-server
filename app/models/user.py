@@ -122,6 +122,10 @@ class User(Base):
     failed_login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     # 잠금 일시 — Timestamp when account was locked due to too many failed logins
     locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 비밀번호 변경 일시 — Last password change timestamp (for JWT invalidation)
+    password_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 비밀번호 변경 권장 — Suggest password change on next login (not enforced)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # 소프트 삭제 일시 — Timestamp when user was soft-deleted (NULL = active)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)

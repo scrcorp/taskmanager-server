@@ -106,4 +106,61 @@ class UserMeResponse(BaseModel):
     company_code: str
     organization_timezone: str  # 조직 IANA 타임존 (Organization timezone)
     is_active: bool
+    must_change_password: bool = False  # 비밀번호 변경 권장 여부
     permissions: list[str] = []  # 역할에 할당된 permission code 목록
+
+
+# ── Find Username ──
+
+class FindUsernameRequest(BaseModel):
+    email: str
+
+class FindUsernameResponse(BaseModel):
+    masked_username: str
+
+class FindUsernameSendCodeRequest(BaseModel):
+    email: str
+
+class FindUsernameVerifyCodeRequest(BaseModel):
+    email: str
+    code: str
+
+class FindUsernameVerifyResponse(BaseModel):
+    username: str
+
+
+# ── Reset Password ──
+
+class ResetPasswordSendCodeRequest(BaseModel):
+    username: str
+    email: str
+
+class ResetPasswordVerifyCodeRequest(BaseModel):
+    email: str
+    code: str
+
+class ResetPasswordVerifyResponse(BaseModel):
+    reset_token: str
+
+class ResetPasswordConfirmRequest(BaseModel):
+    reset_token: str
+    new_password: str
+
+
+# ── Change Password ──
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class ChangePasswordResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    message: str
+
+
+# ── Admin Reset Password ──
+
+class AdminResetPasswordResponse(BaseModel):
+    temporary_password: str
+    message: str
