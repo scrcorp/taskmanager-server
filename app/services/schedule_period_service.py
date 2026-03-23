@@ -91,9 +91,12 @@ class SchedulePeriodService:
         if data.period_start >= data.period_end:
             raise BadRequestError("period_start must be before period_end")
 
-        # Overlap check
-        if await schedule_period_repository.check_overlap(db, store_id, data.period_start, data.period_end):
-            raise BadRequestError("A schedule period overlapping this date range already exists for this store")
+        # Overlap check — 겹치는 기간이 있으면 구체적 정보 포함
+        existing = await schedule_period_repository.find_overlapping(db, store_id, data.period_start, data.period_end)
+        if existing is not None:
+            raise BadRequestError(
+                f"Overlapping period exists: {existing.period_start} ~ {existing.period_end} (id: {existing.id})"
+            )
 
         try:
             period = await schedule_period_repository.create(db, {
