@@ -388,6 +388,15 @@ class ScheduleResponse(BaseModel):
 
 class ScheduleBulkCreate(BaseModel):
     entries: list[ScheduleCreate]
+    skip_on_conflict: bool = False
+
+
+class ScheduleBulkResult(BaseModel):
+    created: int = 0
+    skipped: int = 0
+    failed: int = 0
+    errors: list[str] = []
+    items: list["ScheduleResponse"] = []
 
 
 class ScheduleValidation(BaseModel):

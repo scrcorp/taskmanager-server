@@ -244,12 +244,34 @@ class ScheduleService:
         organization_id: UUID,
         entries_data: list[ScheduleCreate],
         created_by: UUID,
-    ) -> list[ScheduleResponse]:
-        results = []
-        for data in entries_data:
-            result = await self.create_entry(db, organization_id, data, created_by)
-            results.append(result)
-        return results
+        skip_on_conflict: bool = False,
+    ) -> dict:
+        """벌크 스케줄 생성. skip_on_conflict=True면 겹치는 건은 건너뛰고 나머지 생성."""
+        from app.schemas.schedule import ScheduleBulkResult
+
+        created = 0
+        skipped = 0
+        failed = 0
+        errors: list[str] = []
+        items: list = []
+
+        for i, data in enumerate(entries_data):
+            try:
+                result = await self.create_entry(db, organization_id, data, created_by)
+                items.append(result)
+                created += 1
+            except BadRequestError as e:
+                if skip_on_conflict:
+                    skipped += 1
+                    errors.append(f"[{i}] skipped: {e.detail}")
+                else:
+                    failed += 1
+                    errors.append(f"[{i}] failed: {e.detail}")
+
+        return ScheduleBulkResult(
+            created=created, skipped=skipped, failed=failed,
+            errors=errors, items=items,
+        )
 
     async def generate_from_requests(
         self,

@@ -57,5 +57,28 @@ class SchedulePeriodRepository(BaseRepository[SchedulePeriod]):
         count: int = (await db.execute(query)).scalar() or 0
         return count > 0
 
+    async def find_overlapping(
+        self,
+        db: AsyncSession,
+        store_id: UUID,
+        period_start: date,
+        period_end: date,
+        exclude_id: UUID | None = None,
+    ) -> "SchedulePeriod | None":
+        """겹치는 기간을 반환 (첫 번째 1건)."""
+        query = (
+            select(SchedulePeriod)
+            .where(
+                SchedulePeriod.store_id == store_id,
+                SchedulePeriod.period_start <= period_end,
+                SchedulePeriod.period_end >= period_start,
+            )
+            .limit(1)
+        )
+        if exclude_id is not None:
+            query = query.where(SchedulePeriod.id != exclude_id)
+        result = await db.execute(query)
+        return result.scalar_one_or_none()
+
 
 schedule_period_repository: SchedulePeriodRepository = SchedulePeriodRepository()
