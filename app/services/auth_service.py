@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -371,8 +372,8 @@ class AuthService:
             UnauthorizedError: 유효하지 않거나 만료된 리프레시 토큰일 때
                                (Invalid or expired refresh token)
         """
-        # DB에서 리프레시 토큰 확인 — Verify refresh token in database
-        db_token = await auth_repository.get_refresh_token(db, data.refresh_token)
+        # DB에서 리프레시 토큰 확인 (행 잠금으로 동시 요청 방지)
+        db_token = await auth_repository.get_refresh_token_for_update(db, data.refresh_token)
         if db_token is None:
             raise UnauthorizedError("Invalid refresh token")
 
@@ -417,6 +418,9 @@ class AuthService:
             )
             await db.commit()
             return result
+        except IntegrityError:
+            await db.rollback()
+            raise UnauthorizedError("Token already refreshed, please re-authenticate")
         except Exception:
             await db.rollback()
             raise

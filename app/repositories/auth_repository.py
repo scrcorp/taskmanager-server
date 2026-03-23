@@ -112,6 +112,19 @@ class AuthRepository:
         result = await db.execute(query)
         return result.scalar_one_or_none()
 
+    async def get_refresh_token_for_update(
+        self,
+        db: AsyncSession,
+        token: str,
+    ) -> RefreshToken | None:
+        """리프레시 토큰을 행 잠금으로 조회합니다 (동시 요청 방지).
+
+        Retrieve a refresh token with FOR UPDATE row lock to prevent concurrent refresh.
+        """
+        query: Select = select(RefreshToken).where(RefreshToken.token == token).with_for_update()
+        result = await db.execute(query)
+        return result.scalar_one_or_none()
+
     async def delete_refresh_token(
         self,
         db: AsyncSession,

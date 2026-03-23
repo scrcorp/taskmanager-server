@@ -196,9 +196,8 @@ class ChecklistInstanceService:
             )
 
         if target_item.is_completed:
-            raise BadRequestError(
-                f"Item {item_index} is already completed"
-            )
+            # 멱등성: 이미 완료된 항목이면 에러 대신 현재 상태 반환
+            return await self.get_instance(db, instance_id)
 
         # Resolve effective photo list: photo_urls takes priority over single photo_url
         effective_photo_urls: list[str] = []
@@ -347,16 +346,34 @@ class ChecklistInstanceService:
         target_item: ChecklistInstanceItem | None = next(
             (it for it in instance.items if it.item_index == item_index), None
         )
-        if target_item is None or not target_item.is_completed:
+        if target_item is None:
+            raise BadRequestError("Item not found")
+        # fail 리뷰를 받은 항목은 미완료여도 재제출 허용 (GM이 미완료 항목에 fail 줄 수 있음)
+        if not target_item.is_completed and target_item.review_result != "fail":
             raise BadRequestError("Cannot resubmit an uncompleted item")
 
         try:
+            now = datetime.now(timezone.utc)
+
+            # 미완료 상태였으면 완료 처리
+            was_uncompleted = not target_item.is_completed
+            if was_uncompleted:
+                target_item.is_completed = True
+                target_item.completed_at = now
+                target_item.completed_by = user_id
+                instance.completed_items = min(
+                    (instance.completed_items or 0) + 1, instance.total_items
+                )
+                if instance.completed_items >= instance.total_items:
+                    instance.status = "completed"
+                elif instance.completed_items > 0:
+                    instance.status = "in_progress"
+
             # 기존 submission 개수로 새 version 계산
             existing_version_count = len(target_item.submissions) if target_item.submissions else 0
             new_version = existing_version_count + 1
 
             # 새 제출 이력 생성
-            now = datetime.now(timezone.utc)
             new_submission = ChecklistItemSubmission(
                 item_id=target_item.id,
                 version=new_version,
@@ -742,7 +759,11 @@ class ChecklistInstanceService:
 
         data_query = (
             base_filter
-            .options(selectinload(ChecklistInstanceItem.instance))
+            .options(
+                selectinload(ChecklistInstanceItem.instance),
+                selectinload(ChecklistInstanceItem.submissions),
+                selectinload(ChecklistInstanceItem.files),
+            )
             .order_by(ChecklistInstanceItem.completed_at.desc())
             .offset((page - 1) * per_page)
             .limit(per_page)
@@ -750,15 +771,35 @@ class ChecklistInstanceService:
         result = await db.execute(data_query)
         items_orm: list[ChecklistInstanceItem] = list(result.scalars().all())
 
+        # Batch lookup: collect unique user_ids and store_ids to avoid N+1
+        user_ids: set[UUID] = set()
+        store_ids: set[UUID] = set()
+        for item in items_orm:
+            if item.completed_by:
+                user_ids.add(item.completed_by)
+            if item.instance and item.instance.store_id:
+                store_ids.add(item.instance.store_id)
+
+        user_name_map: dict[UUID, str] = {}
+        if user_ids:
+            user_rows = await db.execute(
+                select(User.id, User.full_name).where(User.id.in_(user_ids))
+            )
+            user_name_map = {row.id: row.full_name or "Unknown" for row in user_rows}
+
+        store_name_map: dict[UUID, str] = {}
+        if store_ids:
+            store_rows = await db.execute(
+                select(Store.id, Store.name).where(Store.id.in_(store_ids))
+            )
+            store_name_map = {row.id: row.name or "Unknown" for row in store_rows}
+
         items: list[dict] = []
         for item in items_orm:
             inst: ChecklistInstance = item.instance
 
-            user_result = await db.execute(select(User.full_name).where(User.id == item.completed_by))
-            user_name: str = user_result.scalar() or "Unknown"
-
-            store_result = await db.execute(select(Store.name).where(Store.id == inst.store_id))
-            store_name: str = store_result.scalar() or "Unknown"
+            user_name = user_name_map.get(item.completed_by, "Unknown") if item.completed_by else "Unknown"
+            store_name = store_name_map.get(inst.store_id, "Unknown") if inst.store_id else "Unknown"
 
             # 최신 submission
             log_latest_sub = sorted(item.submissions, key=lambda s: s.version)[-1] if item.submissions else None

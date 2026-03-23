@@ -19,6 +19,7 @@ JWT Payload Structure:
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 import jwt
 
 from app.config import settings
@@ -65,7 +66,8 @@ def create_refresh_token(data: dict[str, Any]) -> str:
     # 만료 시간 설정 — 현재 UTC 시간 + 설정된 일 수 (Set expiration from current UTC + configured days)
     now: datetime = datetime.now(timezone.utc)
     expire: datetime = now + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire, "iat": now, "type": "refresh"})
+    # jti로 동시 요청 시에도 고유한 토큰 문자열 보장
+    to_encode.update({"exp": expire, "iat": now, "type": "refresh", "jti": str(uuid4())})
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 

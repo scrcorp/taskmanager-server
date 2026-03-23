@@ -12,7 +12,7 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.schedule import (
     BulkAssignChecklistRequest, BulkAssignChecklistResult,
-    FinalizeResult, ScheduleBulkCreate, ScheduleCreate,
+    FinalizeResult, ScheduleBulkCreate, ScheduleBulkResult, ScheduleCreate,
     ScheduleResponse, ScheduleUpdate, ScheduleValidation,
 )
 from app.services.schedule_service import schedule_service
@@ -55,15 +55,16 @@ async def create_entry(
     )
 
 
-@router.post("/bulk", response_model=list[ScheduleResponse], status_code=201)
+@router.post("/bulk", response_model=ScheduleBulkResult, status_code=200)
 async def bulk_create(
     data: ScheduleBulkCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("schedules:create"))],
-) -> list[ScheduleResponse]:
-    """벌크 스케줄 생성."""
+) -> ScheduleBulkResult:
+    """벌크 스케줄 생성. skip_on_conflict=true면 겹치는 건은 건너뛰고 나머지 생성."""
     return await schedule_service.bulk_create(
         db, current_user.organization_id, data.entries, current_user.id,
+        skip_on_conflict=data.skip_on_conflict,
     )
 
 
