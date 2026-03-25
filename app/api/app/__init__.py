@@ -111,3 +111,9 @@ app_router.include_router(request_templates_router, prefix="/my", tags=["My Sche
 app_router.include_router(schedule_requests_router, prefix="/my", tags=["My Schedule Requests"])
 app_router.include_router(schedule_entries_router, prefix="/my", tags=["My Schedules"])
 app_router.include_router(app_schedule_periods_router, prefix="/my", tags=["app-schedule-periods"])
+
+# ---------------------------------------------------------------------------
+# Inventory 라우터 등록 — Register Inventory routers
+# ---------------------------------------------------------------------------
+from app.api.app.inventory import router as app_inventory_router
+app_router.include_router(app_inventory_router, tags=["App Inventory"])
