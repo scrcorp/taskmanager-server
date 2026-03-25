@@ -105,6 +105,8 @@ class Store(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     # 매장 이름 — Store display name
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 매장 코드 — Short identifier for the store (unique within org, e.g. "DT", "GM")
+    code: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # 매장 주소 — Physical address of the store (optional)
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     # IANA 타임존 — Store-level timezone override (nullable, falls back to org timezone)
