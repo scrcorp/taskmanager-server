@@ -80,6 +80,22 @@ class ChecklistInstanceService:
 
         sorted_items = sorted(template.items, key=lambda x: x.sort_order)
 
+        # Filter items by recurrence (day of week)
+        # Python: Monday=0 ... Sunday=6
+        day_of_week = work_date.weekday()
+        applicable_items = [
+            item for item in sorted_items
+            if item.recurrence_type == "daily"
+            or (
+                item.recurrence_type == "weekly"
+                and item.recurrence_days
+                and day_of_week in item.recurrence_days
+            )
+        ]
+
+        if not applicable_items:
+            return None
+
         # 인스턴스 생성
         instance = await checklist_instance_repository.create(
             db,
@@ -90,21 +106,24 @@ class ChecklistInstanceService:
                 "store_id": store_id,
                 "user_id": user_id,
                 "work_date": work_date,
-                "total_items": len(sorted_items),
+                "total_items": len(applicable_items),
                 "completed_items": 0,
                 "status": "pending",
             },
         )
 
         # cl_instance_items 생성 (템플릿 스냅샷)
-        for idx, item in enumerate(sorted_items):
+        for idx, item in enumerate(applicable_items):
             ii = ChecklistInstanceItem(
                 instance_id=instance.id,
                 item_index=idx,
                 title=item.title,
                 description=item.description,
                 verification_type=item.verification_type,
+                min_photos=item.min_photos if "photo" in (item.verification_type or "") else 0,
                 sort_order=item.sort_order,
+                recurrence_type=item.recurrence_type,
+                recurrence_days=item.recurrence_days,
                 is_completed=False,
             )
             db.add(ii)
@@ -1062,8 +1081,11 @@ class ChecklistInstanceService:
                 "description": item.description,
                 "verification_type": item.verification_type,
                 "min_photos": item.min_photos,
-                "max_photos": item.max_photos,
+                "max_photos": settings.MAX_PHOTOS_PER_ITEM,
                 "sort_order": item.sort_order,
+                # recurrence snapshot
+                "recurrence_type": item.recurrence_type,
+                "recurrence_days": item.recurrence_days,
                 # completion
                 "is_completed": item.is_completed,
                 "completed_at": item.completed_at.isoformat() if item.completed_at else None,

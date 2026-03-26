@@ -801,10 +801,13 @@ class InventoryTransactionService:
         pid = UUID(product_id) if product_id else None
         txs, total = await transaction_repository.get_by_store(db, store_id, pid, tx_type, page, per_page)
         results = []
+        from app.repositories.user_repository import user_repository
         for tx in txs:
             si = await store_inventory_repository.get_by_id(db, tx.store_inventory_id)
             product = await product_repository.get_by_id(db, si.product_id) if si else None
-            results.append(self._to_response(tx, product.name if product else "", product.code if product else ""))
+            user = await user_repository.get_by_id(db, tx.created_by) if tx.created_by else None
+            user_name = user.full_name if user else None
+            results.append(self._to_response(tx, product.name if product else "", product.code if product else "", user_name))
         return results, total
 
 
@@ -862,57 +865,100 @@ transaction_service = InventoryTransactionService()
 
 class InventoryAuditService:
 
-    async def start_audit(
+    async def _get_user_name(self, db: AsyncSession, user_id: UUID | None) -> str | None:
+        if not user_id:
+            return None
+        from app.repositories.user_repository import user_repository
+        user = await user_repository.get_by_id(db, user_id)
+        return user.full_name if user else None
+
+    async def submit_audit(
         self, db: AsyncSession, store_id: UUID, organization_id: UUID,
-        data: AuditCreate, audited_by: UUID,
+        items_data: list[dict], audited_by: UUID, note: str | None = None,
     ) -> AuditDetailResponse:
+        """Submit a completed audit in one step.
+
+        Creates audit record + items + adjustment transactions for differences.
+        No in_progress state — audit is immediately completed.
+
+        items_data: [{ store_inventory_id: str, actual_quantity: int }, ...]
+        """
         store = await store_repository.get_by_id(db, store_id, organization_id)
         if not store:
             raise NotFoundError("Store not found")
 
+        now = datetime.now(timezone.utc)
         try:
+            # Create audit record (immediately completed)
             audit = InventoryAudit(
                 store_id=store_id, audited_by=audited_by,
-                status="in_progress", note=data.note,
+                status="completed", note=note,
+                completed_at=now,
             )
             db.add(audit)
             await db.flush()
             await db.refresh(audit)
 
-            # Snapshot all active store inventory items
-            items, _ = await store_inventory_repository.get_by_store(db, store_id, per_page=9999)
+            # Process each item
             audit_items = []
-            for si in items:
+            discrepancies = 0
+            for item in items_data:
+                si_id = UUID(item["store_inventory_id"])
+                actual_qty = int(item["actual_quantity"])
+                si = await store_inventory_repository.get_by_id(db, si_id)
+                if not si or si.store_id != store_id:
+                    continue
+
+                system_qty = si.current_quantity
+                difference = actual_qty - system_qty
+
+                # Create audit item
                 ai = InventoryAuditItem(
                     audit_id=audit.id,
-                    store_inventory_id=si.id,
-                    system_quantity=si.current_quantity,
-                    actual_quantity=si.current_quantity,  # pre-fill with system qty
-                    difference=0,
+                    store_inventory_id=si_id,
+                    system_quantity=system_qty,
+                    actual_quantity=actual_qty,
+                    difference=difference,
                 )
                 db.add(ai)
+
+                # Create transaction if difference exists
+                if difference != 0:
+                    discrepancies += 1
+                    tx = InventoryTransaction(
+                        store_inventory_id=si_id,
+                        type="audit", quantity=difference,
+                        before_quantity=system_qty, after_quantity=actual_qty,
+                        reason="Audit",
+                        audit_id=audit.id, created_by=audited_by,
+                    )
+                    db.add(tx)
+                    si.current_quantity = actual_qty
+
+                # Update last_audited_at
+                si.last_audited_at = now
+
+                product = await product_repository.get_by_id(db, si.product_id)
                 await db.flush()
                 await db.refresh(ai)
-
-                product = si.product if hasattr(si, 'product') and si.product else await product_repository.get_by_id(db, si.product_id)
                 audit_items.append(AuditItemResponse(
                     id=str(ai.id), store_inventory_id=str(ai.store_inventory_id),
                     product_name=product.name if product else "",
                     product_code=product.code if product else "",
-                    system_quantity=ai.system_quantity,
-                    actual_quantity=ai.actual_quantity,
-                    difference=ai.difference,
+                    system_quantity=system_qty,
+                    actual_quantity=actual_qty,
+                    difference=difference,
                     is_frequent=si.is_frequent,
                 ))
 
             await db.commit()
             return AuditDetailResponse(
                 id=str(audit.id), store_id=str(audit.store_id),
-                audited_by=str(audit.audited_by), auditor_name=None,
-                status=audit.status,
+                created_by=str(audit.audited_by), created_by_name=await self._get_user_name(db, audit.audited_by),
+                status="completed",
                 started_at=audit.started_at.isoformat(),
-                completed_at=None, note=audit.note,
-                items_count=len(audit_items), discrepancies=0,
+                completed_at=now.isoformat(), note=note,
+                items_count=len(audit_items), discrepancies=discrepancies,
                 items=audit_items,
             )
         except Exception:
@@ -972,9 +1018,9 @@ class InventoryAuditService:
                         si.current_quantity = ai.actual_quantity
                         tx = InventoryTransaction(
                             store_inventory_id=si.id,
-                            type="adjustment", quantity=ai.difference,
+                            type="audit", quantity=ai.difference,
                             before_quantity=before, after_quantity=ai.actual_quantity,
-                            reason="Audit adjustment",
+                            reason="Audit",
                             audit_id=audit_id, created_by=completed_by,
                         )
                         db.add(tx)
@@ -1019,7 +1065,7 @@ class InventoryAuditService:
 
         return AuditDetailResponse(
             id=str(audit.id), store_id=str(audit.store_id),
-            audited_by=str(audit.audited_by), auditor_name=None,
+            created_by=str(audit.audited_by), created_by_name=await self._get_user_name(db, audit.audited_by),
             status=audit.status,
             started_at=audit.started_at.isoformat(),
             completed_at=audit.completed_at.isoformat() if audit.completed_at else None,
@@ -1044,7 +1090,7 @@ class InventoryAuditService:
             item_count = len(audit_with_items.items) if audit_with_items else 0
             results.append(AuditResponse(
                 id=str(a.id), store_id=str(a.store_id),
-                audited_by=str(a.audited_by), auditor_name=None,
+                created_by=str(a.audited_by), created_by_name=await self._get_user_name(db, a.audited_by),
                 status=a.status,
                 started_at=a.started_at.isoformat(),
                 completed_at=a.completed_at.isoformat() if a.completed_at else None,
