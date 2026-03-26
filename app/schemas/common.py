@@ -90,6 +90,7 @@ class ChecklistItemCreate(BaseModel):
     title: str  # 항목 제목 (Task title)
     description: str | None = None  # 상세 설명 (Detailed instructions, optional)
     verification_type: str = "none"  # 확인 유형 — "none"|"photo"|"text"|"photo,text"
+    min_photos: int = 1  # photo required일 때 최소 장수
     recurrence_type: str = "daily"  # 반복 주기 — "daily"|"weekly"
     recurrence_days: list[int] | None = None  # weekly일 때 요일 목록 [0=Mon..6=Sun]
     sort_order: int = 0  # 정렬 순서 (Display order)
@@ -110,6 +111,7 @@ class ChecklistItemUpdate(BaseModel):
     title: str | None = None  # 변경할 항목 제목 (New title, optional)
     description: str | None = None  # 변경할 설명 (New description, optional)
     verification_type: str | None = None  # 변경할 확인 유형 (New verification type, optional)
+    min_photos: int | None = None  # 변경할 최소 사진 수 (New min photos, optional)
     recurrence_type: str | None = None  # 변경할 반복 주기 (New recurrence type, optional)
     recurrence_days: list[int] | None = None  # 변경할 반복 요일 (New recurrence days, optional)
     sort_order: int | None = None  # 변경할 정렬 순서 (New sort order, optional)
@@ -132,6 +134,7 @@ class ChecklistItemResponse(BaseModel):
     title: str  # 항목 제목 (Item title)
     description: str | None  # 상세 설명 (Description, may be null)
     verification_type: str  # 확인 유형 — "none"|"photo"|"text"|"photo,text"
+    min_photos: int = 1  # 최소 사진 수
     recurrence_type: str = "daily"  # 반복 주기 — "daily"|"weekly"
     recurrence_days: list[int] | None = None  # weekly일 때 요일 목록 [0=Mon..6=Sun]
     sort_order: int  # 정렬 순서 (Display order)

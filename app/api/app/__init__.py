@@ -56,7 +56,18 @@ from app.api.app.work_roles import router as app_work_roles_router
 from app.api.app.schedules import router as schedule_entries_router
 from app.api.app.schedule_periods import router as app_schedule_periods_router
 
+from app.config import settings
+
+
 app_router: APIRouter = APIRouter()
+
+
+@app_router.get("/config", tags=["App Config"])
+async def get_app_config() -> dict:
+    """Return platform-level configuration for the app client."""
+    return {
+        "max_photos_per_item": settings.MAX_PHOTOS_PER_ITEM,
+    }
 
 # ---------------------------------------------------------------------------
 # Phase 1 라우터 등록 — Register Phase 1 (Foundation) routers
