@@ -89,6 +89,9 @@ from app.api.admin.storage import router as storage_router
 # Permission 관리 라우터 임포트
 from app.api.admin.permissions import router as permissions_router
 
+# Inventory 라우터 임포트
+from app.api.admin.inventory import router as inventory_router
+
 admin_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -186,3 +189,8 @@ admin_router.include_router(schedule_entries_router, prefix="/schedules", tags=[
 # Storage 라우터 등록 — S3 presigned URL
 # ---------------------------------------------------------------------------
 admin_router.include_router(storage_router, prefix="/storage", tags=["Storage"])
+
+# ---------------------------------------------------------------------------
+# Inventory 라우터 등록 — Register Inventory routers
+# ---------------------------------------------------------------------------
+admin_router.include_router(inventory_router, tags=["Inventory"])

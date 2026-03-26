@@ -117,6 +117,8 @@ class ChecklistTemplateItem(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 확인 유형 — Verification method: "none"=체크만, "photo"=사진첨부, "text"=텍스트입력
     verification_type: Mapped[str] = mapped_column(String(20), default="none")  # none, photo, text
+    # 최소 사진 수 — photo required일 때 최소 장수 (0이면 optional)
+    min_photos: Mapped[int] = mapped_column(Integer, default=1)
     # 반복 주기 유형 — "daily"=매일, "weekly"=특정 요일만
     recurrence_type: Mapped[str] = mapped_column(String(10), default="daily", nullable=False)
     # 반복 요일 목록 — weekly일 때 요일 숫자 배열 [0=Mon..6=Sun]. daily이면 null
@@ -224,6 +226,11 @@ class ChecklistInstanceItem(Base):
     min_photos: Mapped[int] = mapped_column(Integer, default=0)
     max_photos: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    # 반복 스냅샷 — Recurrence snapshot (copied from template for client-side display/filtering)
+    # NULL = template/item deleted or legacy data (no badge shown)
+    recurrence_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    recurrence_days: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True)
 
     # 완료 데이터 — Completion data (updated when staff completes the item)
     is_completed: Mapped[bool] = mapped_column(Boolean, default=False)
