@@ -7,7 +7,7 @@ import io
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, UploadFile, File
+from fastapi import APIRouter, Depends, Form, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -179,37 +179,19 @@ async def download_excel_template(
     )
 
 
-@router.post("/inventory/products/import")
-async def import_products_from_excel(
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_permission("inventory:create")),
-) -> dict:
-    """Import products from uploaded Excel file.
-
-    Parses only rows AFTER the '--- DATA START ---' marker.
-    Everything before the marker is ignored (headers, instructions, examples).
-    """
-    try:
-        import openpyxl
-    except ImportError:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=500, detail="openpyxl not installed on server")
-
-    content = await file.read()
+def _parse_excel_file(content: bytes) -> dict:
+    """Parse Excel file and return parsed rows or error dict."""
+    import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(content))
     ws = wb.active
 
-    # Find header row (row 1) and DATA START marker
     all_rows = list(ws.iter_rows(values_only=True))
     if not all_rows:
         return {"error": "Empty file"}
 
-    # Row 1 = headers
     header_row = all_rows[0]
     headers = [str(h or "").strip().lower().replace(" *", "").replace("*", "") for h in header_row]
 
-    # Find DATA START and DATA END markers
     data_start_idx = None
     data_end_idx = None
     for i, row in enumerate(all_rows):
@@ -224,7 +206,6 @@ async def import_products_from_excel(
     if data_start_idx is None:
         return {"error": "Missing '--- DATA START ---' marker row. Please use the provided template."}
 
-    # Parse rows between START and END (or to end if no END marker)
     end = data_end_idx if data_end_idx is not None else len(all_rows)
     parsed_rows = []
     for row in all_rows[data_start_idx + 1 : end]:
@@ -236,32 +217,111 @@ async def import_products_from_excel(
                 if str_val in ("-", "", "None"):
                     str_val = ""
                 row_dict[key] = str_val
-        # Skip empty rows
         if not row_dict.get("name"):
             continue
-        # Validate: name must look like a product name (not instruction text)
         name_val = row_dict["name"]
         if len(name_val) > 100:
-            continue  # instruction text is usually long
+            continue
         if any(kw in name_val.lower() for kw in ["data start", "data end", "required", "optional", "comma-separated", "auto-generated", "product info", "store link"]):
-            continue  # skip template instruction text
+            continue
         parsed_rows.append(row_dict)
 
     if not parsed_rows:
-        # Debug: show what was found
-        raw_names = []
-        for row in all_rows[data_start_idx + 1 : end]:
-            name_val = str(row[0] or "").strip() if row and row[0] else "(empty)"
-            raw_names.append(name_val[:50])
-        return {
-            "error": "No data rows found between DATA START and DATA END markers.",
-            "debug_start_row": data_start_idx,
-            "debug_end_row": data_end_idx,
-            "debug_rows_in_range": len(all_rows[data_start_idx + 1 : end]),
-            "debug_raw_names": raw_names[:10],
-        }
+        return {"error": "No data rows found between DATA START and DATA END markers."}
 
-    # Dry-run validation before committing
+    return {"rows": parsed_rows}
+
+
+@router.post("/inventory/products/preview-import")
+async def preview_import(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory:create")),
+) -> dict:
+    """Preview Excel import — parse and check duplicates without creating anything."""
+    content = await file.read()
+    parse_result = _parse_excel_file(content)
+    if "error" in parse_result:
+        return parse_result
+
+    parsed_rows = parse_result["rows"]
+    preview_items = []
+    for i, row in enumerate(parsed_rows):
+        name = (row.get("name") or "").strip()
+        code = (row.get("code") or "").strip() or None
+        store_codes = (row.get("store_code") or "").strip()
+
+        # Check existing product by code
+        existing = None
+        if code:
+            from app.repositories.inventory_repository import product_repository
+            existing_check = await product_repository.exists(db, {
+                "organization_id": current_user.organization_id, "code": code,
+            })
+            if existing_check:
+                existing = code
+
+        # Check name duplicate
+        from app.models.inventory import InventoryProduct
+        from sqlalchemy import func as _func, select as _sel
+        name_check = _sel(InventoryProduct).where(
+            InventoryProduct.organization_id == current_user.organization_id,
+            _func.lower(InventoryProduct.name) == name.lower(),
+            InventoryProduct.is_active == True,
+        ).limit(1)
+        name_dup = (await db.execute(name_check)).scalar_one_or_none()
+
+        preview_items.append({
+            "row": i + 1,
+            "name": name,
+            "code": code,
+            "category": (row.get("category") or "").strip(),
+            "store_codes": store_codes,
+            "existing_code": existing,
+            "duplicate_name": name_dup.code if name_dup else None,
+            "action": "link" if existing else "create",
+        })
+
+    return {"items": preview_items, "total": len(preview_items)}
+
+
+@router.post("/inventory/products/import")
+async def import_products_from_excel(
+    file: UploadFile = File(...),
+    selected_rows: str = Form(default=""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory:create")),
+) -> dict:
+    """Import products from uploaded Excel file.
+
+    selected_rows: comma-separated 1-based row numbers from preview.
+    If empty, imports all rows.
+    """
+    content = await file.read()
+    parse_result = _parse_excel_file(content)
+    if "error" in parse_result:
+        return parse_result
+
+    all_parsed_rows = parse_result["rows"]
+    total_parsed = len(all_parsed_rows)
+
+    # Filter to selected rows only (1-based index from preview)
+    skipped_by_user = 0
+    parsed_rows = all_parsed_rows
+    if selected_rows.strip():
+        import json
+        try:
+            selected = set(json.loads(selected_rows))
+        except (json.JSONDecodeError, TypeError):
+            selected = set(int(x.strip()) for x in selected_rows.split(",") if x.strip().isdigit())
+        if selected:
+            parsed_rows = [row for i, row in enumerate(all_parsed_rows) if (i + 1) in selected]
+            skipped_by_user = total_parsed - len(parsed_rows)
+
+    if not parsed_rows:
+        return {"error": "No rows selected for import."}
+
+    # Dry-run validation
     validation_errors = []
     for i, row in enumerate(parsed_rows):
         name = row.get("name", "").strip()
@@ -276,7 +336,15 @@ async def import_products_from_excel(
     result = await product_service.import_from_excel(
         db, current_user.organization_id, parsed_rows, current_user.id
     )
-    result["rows_parsed"] = len(parsed_rows)
+    result["rows_parsed"] = total_parsed
+    # Add user-skipped count to existing skipped list
+    existing_skipped = result.get("skipped", [])
+    if isinstance(existing_skipped, list):
+        if skipped_by_user > 0:
+            existing_skipped.append(f"{skipped_by_user} item(s) unchecked in preview")
+        result["skipped"] = existing_skipped
+    else:
+        result["skipped"] = (existing_skipped or 0) + skipped_by_user
     return result
 
 

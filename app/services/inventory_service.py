@@ -562,6 +562,17 @@ class InventoryProductService:
                         except (ValueError, TypeError):
                             sub_unit_ratio = None
 
+                        # Auto-register sub_unit if not in inventory_sub_units table
+                        existing_unit = await sub_unit_repository.exists(db, {
+                            "organization_id": organization_id, "code": sub_unit,
+                        })
+                        if not existing_unit:
+                            await sub_unit_repository.create(db, {
+                                "organization_id": organization_id,
+                                "code": sub_unit,
+                                "name": sub_unit,
+                            })
+
                     product = await product_repository.create(db, {
                         "organization_id": organization_id,
                         "name": name,
