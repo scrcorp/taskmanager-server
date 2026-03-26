@@ -227,6 +227,30 @@ class InventoryProductService:
             store_count=store_count,
         )
 
+    async def _resolve_category_id(
+        self, db: AsyncSession, organization_id: UUID, value: str
+    ) -> UUID | None:
+        """Resolve category_id from UUID string or category name.
+        If value is a valid UUID, use it directly. If not, treat as name and find/create."""
+        if not value:
+            return None
+        try:
+            return UUID(value)
+        except ValueError:
+            # Not a UUID — treat as category name, find or create
+            cats = await category_repository.get_tree(db, organization_id)
+            for c in cats:
+                if c.name.lower() == value.lower():
+                    return c.id
+            # Auto-create
+            new_cat = await category_repository.create(db, {
+                "organization_id": organization_id,
+                "name": value.strip(),
+                "parent_id": None,
+                "sort_order": 0,
+            })
+            return new_cat.id
+
     async def _get_category_name(self, db: AsyncSession, cat_id: UUID | None) -> str | None:
         if not cat_id:
             return None
@@ -296,8 +320,8 @@ class InventoryProductService:
                 "organization_id": organization_id,
                 "name": data.name,
                 "code": code,
-                "category_id": UUID(data.category_id) if data.category_id else None,
-                "subcategory_id": UUID(data.subcategory_id) if data.subcategory_id else None,
+                "category_id": await self._resolve_category_id(db, organization_id, data.category_id) if data.category_id else None,
+                "subcategory_id": await self._resolve_category_id(db, organization_id, data.subcategory_id) if data.subcategory_id else None,
                 "sub_unit": data.sub_unit,
                 "sub_unit_ratio": data.sub_unit_ratio,
                 "image_url": data.image_url,
