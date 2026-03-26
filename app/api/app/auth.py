@@ -15,6 +15,7 @@ from app.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
+from app.repositories.store_repository import store_repository
 from app.schemas.email_verification import (
     SendVerificationCodeRequest,
     VerifyEmailCodeRequest,
@@ -24,6 +25,29 @@ from app.services.auth_service import auth_service
 from app.services.email_verification_service import email_verification_service
 
 router: APIRouter = APIRouter()
+
+
+@router.get("/stores")
+async def get_stores_by_company_code(
+    company_code: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[dict]:
+    """회사 코드로 매장 목록 조회 — 인증 불필요.
+
+    Get active stores for an organization by company code.
+    Used during registration for store selection. No auth required.
+    """
+    organization_id = await auth_service.resolve_company_code(db, company_code)
+    stores = await store_repository.get_by_org(db, organization_id)
+    return [
+        {
+            "id": str(s.id),
+            "name": s.name,
+            "address": s.address,
+        }
+        for s in stores
+        if s.is_active and s.deleted_at is None
+    ]
 
 
 @router.post("/register", response_model=TokenResponse, status_code=201)

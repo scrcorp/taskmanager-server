@@ -14,8 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
-from app.models.organization import Organization
+from app.models.organization import Organization, Store
 from app.models.user import Role, User
+from app.models.user_store import UserStore
 from app.repositories.auth_repository import auth_repository
 from app.repositories.role_repository import role_repository
 from app.schemas.auth import (
@@ -320,6 +321,20 @@ class AuthService:
             db, data.verification_token, data.email
         )
 
+        # store_ids 유효성 검증 — Validate store_ids belong to organization
+        if data.store_ids:
+            store_result = await db.execute(
+                select(Store).where(
+                    Store.id.in_([UUID(sid) for sid in data.store_ids]),
+                    Store.organization_id == organization_id,
+                    Store.is_active == True,
+                    Store.deleted_at == None,
+                )
+            )
+            valid_stores = list(store_result.scalars().all())
+            if len(valid_stores) != len(data.store_ids):
+                raise BadRequestError("One or more store IDs are invalid")
+
         # 사용자 생성 — Create user (email_verified=True since token was validated)
         password_hash: str = hash_password(data.password)
         user: User = User(
@@ -334,6 +349,12 @@ class AuthService:
         db.add(user)
         await db.flush()
         await db.refresh(user)
+
+        # 매장 배정 — Assign user to selected stores
+        for sid in data.store_ids:
+            db.add(UserStore(user_id=user.id, store_id=UUID(sid)))
+        if data.store_ids:
+            await db.flush()
 
         try:
             result = await self._generate_tokens(
