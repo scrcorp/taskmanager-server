@@ -379,6 +379,36 @@ class InventoryProductService:
             raise
 
 
+    async def activate_product(
+        self, db: AsyncSession, product_id: UUID, organization_id: UUID
+    ) -> ProductResponse:
+        p = await product_repository.get_by_id(db, product_id, organization_id)
+        if not p:
+            raise NotFoundError("Product not found")
+        try:
+            await product_repository.update(db, product_id, {"is_active": True})
+            await db.commit()
+            return await self._enrich_response(db, p)
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def hard_delete_product(
+        self, db: AsyncSession, product_id: UUID, organization_id: UUID
+    ) -> None:
+        """Permanently delete product + all related data via raw SQL CASCADE."""
+        p = await product_repository.get_by_id(db, product_id, organization_id)
+        if not p:
+            raise NotFoundError("Product not found")
+        try:
+            # Use raw SQL to trigger DB-level CASCADE (ORM delete can interfere)
+            from sqlalchemy import text
+            await db.execute(text("DELETE FROM inventory_products WHERE id = :id"), {"id": product_id})
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
     async def preview_code(self, db: AsyncSession, organization_id: UUID) -> str:
         """Generate a preview of what the auto-generated code would be."""
         return await product_repository.generate_unique_code(db, organization_id)
@@ -396,7 +426,7 @@ class InventoryProductService:
         from app.models.organization import Store
         from sqlalchemy import select as sa_select
 
-        result = {"created": 0, "linked": 0, "skipped": [], "errors": []}
+        result = {"created": 0, "linked": 0, "skipped": [], "errors": [], "warnings": []}
 
         try:
             for i, row in enumerate(rows):
@@ -407,21 +437,23 @@ class InventoryProductService:
                     continue
 
                 code = (row.get("code") or "").strip() or None
-                store_code = (row.get("store_code") or "").strip() or None
-
-                # Resolve store by code
-                store_id = None
-                if store_code:
-                    store_query = sa_select(Store).where(
-                        Store.organization_id == organization_id,
-                        Store.code == store_code,
-                    )
-                    store_result = await db.execute(store_query)
-                    store = store_result.scalar_one_or_none()
-                    if not store:
-                        result["errors"].append(f"Row {row_num}: store code '{store_code}' not found")
-                        continue
-                    store_id = store.id
+                store_codes_raw = (row.get("store_code") or "").strip()
+                store_ids: list[UUID] = []
+                if store_codes_raw:
+                    for sc in store_codes_raw.split(","):
+                        sc = sc.strip()
+                        if not sc:
+                            continue
+                        store_query = sa_select(Store).where(
+                            Store.organization_id == organization_id,
+                            func.lower(Store.code) == sc.lower(),
+                        )
+                        store_result = await db.execute(store_query)
+                        store = store_result.scalar_one_or_none()
+                        if not store:
+                            result["errors"].append(f"Row {row_num}: store code '{sc}' not found")
+                        else:
+                            store_ids.append(store.id)
 
                 # Resolve category
                 category_id = None
@@ -477,38 +509,48 @@ class InventoryProductService:
                         existing_product = er.scalar_one_or_none()
 
                 if existing_product:
-                    # Link existing product to store
-                    if store_id:
-                        existing_si = await store_inventory_repository.get_by_store_and_product(
-                            db, store_id, existing_product.id
-                        )
-                        if not existing_si:
-                            min_qty = int(row.get("min_quantity") or 0)
-                            init_qty = int(row.get("initial_quantity") or 0)
-                            is_freq = str(row.get("is_frequent") or "").lower() in ("true", "yes", "1", "y")
-                            si = StoreInventory(
-                                store_id=store_id, product_id=existing_product.id,
-                                current_quantity=init_qty, min_quantity=min_qty,
-                                is_frequent=is_freq,
+                    # Link existing product to stores
+                    if store_ids:
+                        for sid in store_ids:
+                            existing_si = await store_inventory_repository.get_by_store_and_product(
+                                db, sid, existing_product.id
                             )
-                            db.add(si)
-                            await db.flush()
-                            if init_qty > 0:
-                                tx = InventoryTransaction(
-                                    store_inventory_id=si.id, type="stock_in",
-                                    quantity=init_qty, before_quantity=0,
-                                    after_quantity=init_qty,
-                                    reason="Excel import initial stock",
-                                    created_by=created_by,
+                            if not existing_si:
+                                min_qty = int(row.get("min_quantity") or 0)
+                                init_qty = int(row.get("initial_quantity") or 0)
+                                is_freq = str(row.get("is_frequent") or "").lower() in ("true", "yes", "1", "y")
+                                si = StoreInventory(
+                                    store_id=sid, product_id=existing_product.id,
+                                    current_quantity=init_qty, min_quantity=min_qty,
+                                    is_frequent=is_freq,
                                 )
-                                db.add(tx)
-                            result["linked"] += 1
-                        else:
-                            result["skipped"].append(f"Row {row_num}: '{name}' already in store")
+                                db.add(si)
+                                await db.flush()
+                                if init_qty > 0:
+                                    tx = InventoryTransaction(
+                                        store_inventory_id=si.id, type="stock_in",
+                                        quantity=init_qty, before_quantity=0,
+                                        after_quantity=init_qty,
+                                        reason="Excel import initial stock",
+                                        created_by=created_by,
+                                    )
+                                    db.add(tx)
+                                result["linked"] += 1
+                            else:
+                                result["skipped"].append(f"Row {row_num}: '{name}' already in store")
                     else:
                         result["skipped"].append(f"Row {row_num}: product '{code}' exists, no store_code to link")
                 else:
-                    # Create new product
+                    # Create new product — check name duplicate first
+                    name_check = sa_select(InventoryProduct).where(
+                        InventoryProduct.organization_id == organization_id,
+                        func.lower(InventoryProduct.name) == name.lower(),
+                        InventoryProduct.is_active == True,
+                    )
+                    name_dup = (await db.execute(name_check.limit(1))).scalar_one_or_none()
+                    if name_dup:
+                        result["warnings"].append(f"Row {row_num}: '{name}' — similar product already exists (code: {name_dup.code})")
+
                     if not code:
                         code = await product_repository.generate_unique_code(db, organization_id)
 
@@ -532,13 +574,13 @@ class InventoryProductService:
                     })
                     result["created"] += 1
 
-                    # Link to store if store_code provided
-                    if store_id:
+                    # Link to stores if store_codes provided
+                    for sid in store_ids:
                         min_qty = int(row.get("min_quantity") or 0)
                         init_qty = int(row.get("initial_quantity") or 0)
                         is_freq = str(row.get("is_frequent") or "").lower() in ("true", "yes", "1", "y")
                         si = StoreInventory(
-                            store_id=store_id, product_id=product.id,
+                            store_id=sid, product_id=product.id,
                             current_quantity=init_qty, min_quantity=min_qty,
                             is_frequent=is_freq,
                         )
