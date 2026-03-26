@@ -38,12 +38,41 @@ async def list_categories(
     return await category_service.list_tree(db, current_user.organization_id)
 
 
+@router.post("/inventory/categories", status_code=201)
+async def create_category(
+    data: dict,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("inventory:create"))],
+) -> dict:
+    """Create a category (or subcategory if parent_id provided). Returns {id, name, ...}."""
+    from app.schemas.inventory import CategoryCreate
+    cat_data = CategoryCreate(
+        name=data.get("name", ""),
+        parent_id=data.get("parent_id"),
+        sort_order=data.get("sort_order", 0),
+    )
+    result = await category_service.create(db, current_user.organization_id, cat_data)
+    return result.model_dump() if hasattr(result, 'model_dump') else result
+
+
 @router.get("/inventory/sub-units")
 async def list_sub_units(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("inventory:read"))],
 ) -> list:
     return await sub_unit_service.list_sub_units(db, current_user.organization_id)
+
+
+@router.post("/inventory/sub-units", status_code=201)
+async def create_sub_unit(
+    data: dict,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("inventory:create"))],
+) -> dict:
+    """Create a sub unit. Returns {id, name, code, ...}."""
+    return await sub_unit_service.create(
+        db, current_user.organization_id, data.get("name", ""), data.get("code"),
+    )
 
 
 # ═══════════════════════════════════════════════════

@@ -136,6 +136,15 @@ async def list_products(
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
+@router.post("/inventory/products", response_model=ProductResponse, status_code=201)
+async def create_product(
+    data: ProductCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("inventory:create"))],
+) -> ProductResponse:
+    return await product_service.create_product(db, current_user.organization_id, data, current_user.id)
+
+
 @router.get("/inventory/products/generate-code")
 async def preview_product_code(
     db: Annotated[AsyncSession, Depends(get_db)],
