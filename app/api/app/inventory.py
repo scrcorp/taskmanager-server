@@ -27,6 +27,45 @@ router = APIRouter()
 
 
 # ═══════════════════════════════════════════════════
+# Managed Stores (for inventory store selection)
+# ═══════════════════════════════════════════════════
+
+@router.get("/inventory/my-stores")
+async def list_managed_stores(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("inventory:read"))],
+) -> list[dict]:
+    """Return stores the user manages (is_manager=true). Owner gets all stores."""
+    from sqlalchemy import select as sa_select
+    from app.models.organization import Store
+    from app.models.user_store import UserStore
+
+    if current_user.role.priority <= 10:
+        # Owner: all active stores in org
+        query = sa_select(Store).where(
+            Store.organization_id == current_user.organization_id,
+            Store.is_active.is_(True),
+        )
+    else:
+        # Others: only managed stores
+        query = (
+            sa_select(Store)
+            .join(UserStore, UserStore.store_id == Store.id)
+            .where(
+                UserStore.user_id == current_user.id,
+                UserStore.is_manager.is_(True),
+                Store.is_active.is_(True),
+            )
+        )
+    result = await db.execute(query)
+    stores = result.scalars().all()
+    return [
+        {"id": str(s.id), "name": s.name, "address": s.address, "code": s.code}
+        for s in stores
+    ]
+
+
+# ═══════════════════════════════════════════════════
 # Categories + Sub Units (read-only for app)
 # ═══════════════════════════════════════════════════
 
@@ -233,15 +272,22 @@ async def bulk_stock_out(
 # ═══════════════════════════════════════════════════
 
 @router.post("/stores/{store_id}/inventory/audits", response_model=AuditDetailResponse, status_code=201)
-async def start_audit(
+async def submit_audit(
     store_id: UUID,
-    data: AuditCreate,
+    data: dict,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("inventory:create"))],
 ) -> AuditDetailResponse:
+    """Submit a completed audit in one step. No in_progress state.
+
+    Body: { items: [{ store_inventory_id, actual_quantity }], note?: string }
+    """
     await check_store_access(db, current_user, store_id)
-    return await audit_service.start_audit(
-        db, store_id, current_user.organization_id, data, current_user.id
+    return await audit_service.submit_audit(
+        db, store_id, current_user.organization_id,
+        items_data=data.get("items", []),
+        audited_by=current_user.id,
+        note=data.get("note"),
     )
 
 
@@ -253,28 +299,3 @@ async def get_audit(
 ) -> AuditDetailResponse:
     await check_store_access(db, current_user, store_id)
     return await audit_service.get_audit_detail(db, audit_id, store_id, current_user.organization_id)
-
-
-@router.put("/stores/{store_id}/inventory/audits/{audit_id}/items", response_model=AuditDetailResponse)
-async def update_audit_items(
-    store_id: UUID, audit_id: UUID,
-    data: AuditItemsBulkUpdate,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("inventory:create"))],
-) -> AuditDetailResponse:
-    await check_store_access(db, current_user, store_id)
-    return await audit_service.update_audit_items(
-        db, audit_id, store_id, current_user.organization_id, data
-    )
-
-
-@router.post("/stores/{store_id}/inventory/audits/{audit_id}/complete", response_model=AuditDetailResponse)
-async def complete_audit(
-    store_id: UUID, audit_id: UUID,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("inventory:create"))],
-) -> AuditDetailResponse:
-    await check_store_access(db, current_user, store_id)
-    return await audit_service.complete_audit(
-        db, audit_id, store_id, current_user.organization_id, current_user.id
-    )

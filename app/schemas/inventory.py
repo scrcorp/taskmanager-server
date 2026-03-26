@@ -196,8 +196,8 @@ class AuditItemsBulkUpdate(BaseModel):
 class AuditResponse(BaseModel):
     id: str
     store_id: str
-    audited_by: str
-    auditor_name: str | None = None
+    created_by: str
+    created_by_name: str | None = None
     status: str
     started_at: str
     completed_at: str | None = None
