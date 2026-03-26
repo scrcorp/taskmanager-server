@@ -44,6 +44,7 @@ class RegisterRequest(BaseModel):
     email: str  # 이메일 — 필수 (Email address, required for verification)
     company_code: str  # 회사 코드 — 필수 (Company code, required for registration)
     verification_token: str  # 이메일 인증 토큰 — 코드 검증 성공 시 발급 (Issued after code verification)
+    store_ids: list[str] = []  # 배정할 매장 ID 목록 (Store UUIDs to assign user to)
 
 
 class TokenResponse(BaseModel):
