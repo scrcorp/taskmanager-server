@@ -7,7 +7,7 @@ import io
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, UploadFile, File
+from fastapi import APIRouter, Depends, Form, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -155,125 +155,196 @@ async def preview_product_code(
     return {"code": code}
 
 
+from pathlib import Path
+from fastapi.responses import FileResponse as _FileResponse
+from app.config import settings
+
+_STATIC_DIR = Path(__file__).resolve().parents[3] / "static"
+
+
 @router.get("/inventory/products/excel-template")
 async def download_excel_template(
     current_user: Annotated[User, Depends(require_permission("inventory:read"))],
-) -> StreamingResponse:
-    """Download Excel template for bulk product import."""
-    try:
-        import openpyxl
-    except ImportError:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=500, detail="openpyxl not installed on server")
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Products"
-
-    # Headers
-    headers = [
-        "name *", "code", "category", "subcategory", "sub_unit", "sub_unit_ratio **",
-        "description", "store_code **", "min_quantity", "initial_quantity", "is_frequent",
-    ]
-    for col, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.font = openpyxl.styles.Font(bold=True)
-
-    # Instructions row
-    instructions = [
-        "Product name (required)",
-        "Leave empty for auto-generate (P-XXXXXXXX)",
-        "Category name (auto-created if new)",
-        "Subcategory name (optional)",
-        "e.g. box, pack, case (optional)",
-        "** required if sub_unit is set (ea per sub_unit)",
-        "Product description (optional)",
-        "** required to link product to store (set store code in admin first)",
-        "Min stock alert threshold (default 0)",
-        "Starting stock quantity (default 0)",
-        "yes/no (default no)",
-    ]
-    for col, inst in enumerate(instructions, 1):
-        cell = ws.cell(row=2, column=col, value=inst)
-        cell.font = openpyxl.styles.Font(italic=True, color="888888")
-
-    # Example rows
-    examples = [
-        ["Whole Milk (1L)", "", "Beverages", "Dairy", "case", 12, "Fresh pasteurized milk", "DT", 10, 24, "yes"],
-        ["Paper Cups (12oz)", "", "Supplies", "Packaging", "sleeve", 50, "Double-wall insulated", "DT", 100, 200, "no"],
-        ["Croissant", "", "Food", "", "", "", "Butter croissant, baked daily", "DT", 10, 8, "yes"],
-        ["Dish Soap (1L)", "P-CUSTOM01", "Supplies", "Cleaning", "", "", "", "WS", 3, 5, "no"],
-    ]
-    for row_idx, example in enumerate(examples, 3):
-        for col_idx, val in enumerate(example, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=val)
-            cell.font = openpyxl.styles.Font(color="4472C4")
-
-    # Note row
-    note_row = len(examples) + 4
-    ws.cell(row=note_row, column=1, value="DELETE EXAMPLE ROWS ABOVE BEFORE UPLOADING").font = openpyxl.styles.Font(bold=True, color="FF0000")
-    ws.cell(row=note_row + 1, column=1, value="* = always required. ** = conditionally required (see instruction row). Leave optional fields empty or use '-' to skip.").font = openpyxl.styles.Font(italic=True, color="888888")
-    ws.cell(row=note_row + 2, column=1, value="If product code already exists, it will not create a new product — you can choose to link it to a store instead.").font = openpyxl.styles.Font(italic=True, color="888888")
-
-    # Auto-width
-    for col in ws.columns:
-        max_length = max(len(str(cell.value or "")) for cell in col)
-        ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 40)
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-
-    return StreamingResponse(
-        buf,
+) -> _FileResponse:
+    """Download static Excel template for bulk product import."""
+    from fastapi import HTTPException
+    filename = settings.INVENTORY_TEMPLATE_EXCEL
+    template_path = _STATIC_DIR / filename
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail=f"Template file not found: {filename}")
+    return _FileResponse(
+        path=template_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=inventory_import_template.xlsx"},
+        filename=filename,
     )
 
 
-@router.post("/inventory/products/import")
-async def import_products_from_excel(
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_permission("inventory:create")),
-) -> dict:
-    """Import products from uploaded Excel file."""
-    try:
-        import openpyxl
-    except ImportError:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=500, detail="openpyxl not installed on server")
-
-    content = await file.read()
-    wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+def _parse_excel_file(content: bytes) -> dict:
+    """Parse Excel file and return parsed rows or error dict."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(content))
     ws = wb.active
 
-    rows_iter = ws.iter_rows(values_only=True)
-    header_row = next(rows_iter, None)
-    if not header_row:
+    all_rows = list(ws.iter_rows(values_only=True))
+    if not all_rows:
         return {"error": "Empty file"}
 
-    # Normalize headers
+    header_row = all_rows[0]
     headers = [str(h or "").strip().lower().replace(" *", "").replace("*", "") for h in header_row]
 
+    data_start_idx = None
+    data_end_idx = None
+    for i, row in enumerate(all_rows):
+        first_cell = str(row[0] or "").strip().upper() if row and row[0] else ""
+        if first_cell == "--- DATA START ---":
+            if data_start_idx is None:
+                data_start_idx = i
+        elif first_cell == "--- DATA END ---":
+            if data_end_idx is None:
+                data_end_idx = i
+
+    if data_start_idx is None:
+        return {"error": "Missing '--- DATA START ---' marker row. Please use the provided template."}
+
+    end = data_end_idx if data_end_idx is not None else len(all_rows)
     parsed_rows = []
-    for row in rows_iter:
+    for row in all_rows[data_start_idx + 1 : end]:
         row_dict = {}
         for i, val in enumerate(row):
             if i < len(headers):
                 key = headers[i]
                 str_val = str(val).strip() if val is not None else ""
-                if str_val in ("-", ""):
+                if str_val in ("-", "", "None"):
                     str_val = ""
                 row_dict[key] = str_val
-        # Skip instruction/empty rows
-        if not row_dict.get("name") or row_dict["name"].startswith("Product name") or row_dict["name"].startswith("DELETE"):
+        if not row_dict.get("name"):
+            continue
+        name_val = row_dict["name"]
+        if len(name_val) > 100:
+            continue
+        if any(kw in name_val.lower() for kw in ["data start", "data end", "required", "optional", "comma-separated", "auto-generated", "product info", "store link"]):
             continue
         parsed_rows.append(row_dict)
+
+    if not parsed_rows:
+        return {"error": "No data rows found between DATA START and DATA END markers."}
+
+    return {"rows": parsed_rows}
+
+
+@router.post("/inventory/products/preview-import")
+async def preview_import(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory:create")),
+) -> dict:
+    """Preview Excel import — parse and check duplicates without creating anything."""
+    content = await file.read()
+    parse_result = _parse_excel_file(content)
+    if "error" in parse_result:
+        return parse_result
+
+    parsed_rows = parse_result["rows"]
+    preview_items = []
+    for i, row in enumerate(parsed_rows):
+        name = (row.get("name") or "").strip()
+        code = (row.get("code") or "").strip() or None
+        store_codes = (row.get("store_code") or "").strip()
+
+        # Check existing product by code
+        existing = None
+        if code:
+            from app.repositories.inventory_repository import product_repository
+            existing_check = await product_repository.exists(db, {
+                "organization_id": current_user.organization_id, "code": code,
+            })
+            if existing_check:
+                existing = code
+
+        # Check name duplicate
+        from app.models.inventory import InventoryProduct
+        from sqlalchemy import func as _func, select as _sel
+        name_check = _sel(InventoryProduct).where(
+            InventoryProduct.organization_id == current_user.organization_id,
+            _func.lower(InventoryProduct.name) == name.lower(),
+            InventoryProduct.is_active == True,
+        ).limit(1)
+        name_dup = (await db.execute(name_check)).scalar_one_or_none()
+
+        preview_items.append({
+            "row": i + 1,
+            "name": name,
+            "code": code,
+            "category": (row.get("category") or "").strip(),
+            "store_codes": store_codes,
+            "existing_code": existing,
+            "duplicate_name": name_dup.code if name_dup else None,
+            "action": "link" if existing else "create",
+        })
+
+    return {"items": preview_items, "total": len(preview_items)}
+
+
+@router.post("/inventory/products/import")
+async def import_products_from_excel(
+    file: UploadFile = File(...),
+    selected_rows: str = Form(default=""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory:create")),
+) -> dict:
+    """Import products from uploaded Excel file.
+
+    selected_rows: comma-separated 1-based row numbers from preview.
+    If empty, imports all rows.
+    """
+    content = await file.read()
+    parse_result = _parse_excel_file(content)
+    if "error" in parse_result:
+        return parse_result
+
+    all_parsed_rows = parse_result["rows"]
+    total_parsed = len(all_parsed_rows)
+
+    # Filter to selected rows only (1-based index from preview)
+    skipped_by_user = 0
+    parsed_rows = all_parsed_rows
+    if selected_rows.strip():
+        import json
+        try:
+            selected = set(json.loads(selected_rows))
+        except (json.JSONDecodeError, TypeError):
+            selected = set(int(x.strip()) for x in selected_rows.split(",") if x.strip().isdigit())
+        if selected:
+            parsed_rows = [row for i, row in enumerate(all_parsed_rows) if (i + 1) in selected]
+            skipped_by_user = total_parsed - len(parsed_rows)
+
+    if not parsed_rows:
+        return {"error": "No rows selected for import."}
+
+    # Dry-run validation
+    validation_errors = []
+    for i, row in enumerate(parsed_rows):
+        name = row.get("name", "").strip()
+        if not name:
+            validation_errors.append(f"Row {i+1}: name is empty")
+        if len(name) < 2:
+            validation_errors.append(f"Row {i+1}: name too short ('{name}')")
+
+    if validation_errors:
+        return {"error": "Validation failed. Nothing was imported.", "validation_errors": validation_errors, "rows_parsed": len(parsed_rows)}
 
     result = await product_service.import_from_excel(
         db, current_user.organization_id, parsed_rows, current_user.id
     )
+    result["rows_parsed"] = total_parsed
+    # Add user-skipped count to existing skipped list
+    existing_skipped = result.get("skipped", [])
+    if isinstance(existing_skipped, list):
+        if skipped_by_user > 0:
+            existing_skipped.append(f"{skipped_by_user} item(s) unchecked in preview")
+        result["skipped"] = existing_skipped
+    else:
+        result["skipped"] = (existing_skipped or 0) + skipped_by_user
     return result
 
 
@@ -305,6 +376,27 @@ async def deactivate_product(
     current_user: Annotated[User, Depends(require_permission("inventory:delete"))],
 ) -> None:
     await product_service.deactivate_product(db, product_id, current_user.organization_id)
+
+
+@router.post("/inventory/products/{product_id}/activate", response_model=ProductResponse)
+async def activate_product(
+    product_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("inventory:update"))],
+) -> ProductResponse:
+    """Reactivate a deactivated product."""
+    return await product_service.activate_product(db, product_id, current_user.organization_id)
+
+
+@router.post("/inventory/products/{product_id}/delete", status_code=204)
+async def permanently_delete_product(
+    product_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("inventory:delete"))],
+) -> None:
+    """Permanently delete a product and ALL related data (store inventory, transactions, audits).
+    This action cannot be undone. POST instead of DELETE to avoid accidental calls."""
+    await product_service.hard_delete_product(db, product_id, current_user.organization_id)
 
 
 # ═══════════════════════════════════════════════════

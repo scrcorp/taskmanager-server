@@ -118,7 +118,7 @@ class InventoryProductRepository(BaseRepository[InventoryProduct]):
         if is_active is not None:
             query = query.where(InventoryProduct.is_active == is_active)
 
-        query = query.order_by(InventoryProduct.name)
+        query = query.order_by(InventoryProduct.is_active.desc(), InventoryProduct.name)
         return await self.get_paginated(db, query, page, per_page)
 
     async def generate_unique_code(

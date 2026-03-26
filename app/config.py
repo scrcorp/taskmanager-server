@@ -79,6 +79,8 @@ class Settings(BaseSettings):
 
     # 체크리스트 샘플 Excel 경로 — 비어있으면 server/static/checklist_template_sample.xlsx 사용
     CHECKLIST_SAMPLE_EXCEL_PATH: str = ""
+    # 인벤토리 Import 템플릿 Excel 파일명 — static/ 폴더 내 파일명
+    INVENTORY_TEMPLATE_EXCEL: str = "inventory_import_template.xlsx"
 
     # SMTP 이메일 설정 — Brevo (smtp-relay.brevo.com)
     SMTP_HOST: str = "smtp-relay.brevo.com"
