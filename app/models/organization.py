@@ -14,7 +14,7 @@ import string
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, Integer, Text, Time, ForeignKey, Uuid
+from sqlalchemy import String, Boolean, DateTime, Integer, Numeric, Text, Time, ForeignKey, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -59,6 +59,12 @@ class Organization(Base):
     code: Mapped[str] = mapped_column(String(6), unique=True, nullable=False, default=generate_company_code)
     # IANA 타임존 — Organization default timezone (e.g. "America/Los_Angeles")
     timezone: Mapped[str] = mapped_column(String(50), default="America/Los_Angeles")
+    # 하루 기준 시작 시각 — Day boundary start time for timeline/reports (default 08:00)
+    day_start_time: Mapped[Optional[datetime]] = mapped_column(Time(), nullable=True, default=None)
+    # 주간 OT 기준 시간 — Weekly overtime threshold in hours (default 40, store can override)
+    weekly_overtime_limit: Mapped[int] = mapped_column(Integer, default=40)
+    # 기본 시급 — Organization default hourly rate (fallback, default 0)
+    default_hourly_rate: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
     # 활성 상태 — Whether the organization is active (soft-delete pattern)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # 소프트 삭제 일시 — Timestamp when organization was soft-deleted (NULL = active)
@@ -125,6 +131,8 @@ class Store(Base):
     max_work_hours_weekly: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 주(State) 코드 — US state code for labor law compliance (e.g. "CA", "NY")
     state_code: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # 매장 기본 시급 — Store default hourly rate (overrides org rate, null = use org rate)
+    default_hourly_rate: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)

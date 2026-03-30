@@ -12,7 +12,7 @@ Tables:
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, Integer, ForeignKey, UniqueConstraint, Uuid
+from sqlalchemy import String, Boolean, DateTime, Integer, Numeric, ForeignKey, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -126,6 +126,8 @@ class User(Base):
     password_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 비밀번호 변경 권장 — Suggest password change on next login (not enforced)
     must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # 기본 시급 — Default hourly rate for labor cost calculation (nullable)
+    hourly_rate: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
     # 소프트 삭제 일시 — Timestamp when user was soft-deleted (NULL = active)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)

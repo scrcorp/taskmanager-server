@@ -37,6 +37,7 @@ async def list_requests(
     """직원 스케줄 신청 목록 조회."""
     items, total = await schedule_request_service.list_requests_admin(
         db,
+        organization_id=current_user.organization_id,
         store_id=UUID(store_id) if store_id else None,
         date_from=date_from,
         date_to=date_to,
@@ -94,16 +95,16 @@ async def admin_delete_request(
     current_user: Annotated[User, Depends(require_permission("schedules:delete"))],
 ) -> dict:
     """관리자가 생성한 신청 삭제 (admin-created만)."""
-    from app.repositories.schedule_request_repository import schedule_request_repository
+    from app.repositories.schedule_repository import schedule_repository
     from app.utils.exceptions import BadRequestError, NotFoundError
 
-    req = await schedule_request_repository.get_by_id(db, request_id)
-    if req is None:
+    schedule = await schedule_repository.get_by_id(db, request_id)
+    if schedule is None:
         raise NotFoundError("Request not found")
-    if req.created_by is None:
+    if schedule.created_by is None:
         raise BadRequestError("Staff-submitted requests cannot be deleted. Use reject instead.")
     try:
-        await schedule_request_repository.delete(db, request_id)
+        await schedule_repository.delete(db, request_id)
         await db.commit()
     except Exception:
         await db.rollback()

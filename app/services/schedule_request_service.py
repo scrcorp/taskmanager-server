@@ -6,12 +6,12 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.organization import Store
-from app.models.schedule import SchedulePeriod, ScheduleRequest, ScheduleRequestTemplate, ScheduleRequestTemplateItem, StoreWorkRole
+from app.models.organization import Organization, Store
+from app.models.schedule import Schedule, SchedulePeriod, ScheduleRequestTemplate, ScheduleRequestTemplateItem, StoreWorkRole
 from app.models.user import User
 from app.models.work import Shift, Position
 from app.repositories.request_template_repository import request_template_repository
-from app.repositories.schedule_request_repository import schedule_request_repository
+from app.repositories.schedule_repository import schedule_repository
 from app.schemas.schedule import (
     RequestTemplateCreate, RequestTemplateItemResponse, RequestTemplateResponse, RequestTemplateUpdate,
     ScheduleRequestAdminCreate, ScheduleRequestAdminUpdate, ScheduleRequestCreate,
@@ -38,6 +38,28 @@ class ScheduleRequestService:
             return None
         return t.strftime("%H:%M")
 
+    async def _resolve_hourly_rate(
+        self, db: AsyncSession, user_id: UUID, store_id: UUID,
+        override: float | None = None,
+    ) -> float:
+        """시급 cascade 결정: override > user.hourly_rate > store.default_hourly_rate > org.default_hourly_rate."""
+        if override is not None:
+            return override
+        user_row = await db.execute(select(User.hourly_rate).where(User.id == user_id))
+        user_hr = user_row.scalar()
+        if user_hr is not None:
+            return float(user_hr)
+        store_row = await db.execute(select(Store.default_hourly_rate, Store.organization_id).where(Store.id == store_id))
+        store_record = store_row.one_or_none()
+        if store_record and store_record[0] is not None:
+            return float(store_record[0])
+        if store_record and store_record[1] is not None:
+            org_row = await db.execute(select(Organization.default_hourly_rate).where(Organization.id == store_record[1]))
+            org_hr = org_row.scalar()
+            if org_hr is not None:
+                return float(org_hr)
+        return 0.0
+
     async def _resolve_work_role_name(self, db: AsyncSession, work_role_id) -> str | None:
         """WorkRole 이름 조회 — name이 없으면 shift·position 이름으로 fallback."""
         wr_result = await db.execute(select(StoreWorkRole).where(StoreWorkRole.id == work_role_id))
@@ -52,48 +74,62 @@ class ScheduleRequestService:
         pn = p.scalar() or ""
         return f"{sn} - {pn}" if sn or pn else None
 
-    async def _to_request_response(self, db: AsyncSession, req: ScheduleRequest) -> ScheduleRequestResponse:
-        user_result = await db.execute(select(User.full_name).where(User.id == req.user_id))
+    @staticmethod
+    def _get_original(modifications: list | None, field: str) -> str | None:
+        """Extract the first (original) value for a field from modifications JSONB."""
+        if not modifications:
+            return None
+        for mod in modifications:
+            if mod.get("field") == field:
+                return mod.get("old_value")
+        return None
+
+    async def _schedule_to_request_response(self, db: AsyncSession, schedule: Schedule) -> ScheduleRequestResponse:
+        """schedules 테이블의 Schedule 객체를 ScheduleRequestResponse로 변환."""
+        user_result = await db.execute(select(User.full_name).where(User.id == schedule.user_id))
         user_name: str | None = user_result.scalar()
 
-        store_result = await db.execute(select(Store.name).where(Store.id == req.store_id))
+        store_result = await db.execute(select(Store.name).where(Store.id == schedule.store_id))
         store_name: str | None = store_result.scalar()
 
         work_role_name: str | None = None
-        if req.work_role_id:
-            work_role_name = await self._resolve_work_role_name(db, req.work_role_id)
+        if schedule.work_role_id:
+            work_role_name = await self._resolve_work_role_name(db, schedule.work_role_id)
 
-        # Original user name (for modified display)
-        original_user_name: str | None = None
-        if req.original_user_id:
-            ou_result = await db.execute(select(User.full_name).where(User.id == req.original_user_id))
-            original_user_name = ou_result.scalar()
+        # Map schedules.status to app-expected status values
+        if schedule.status == "requested" and schedule.is_modified:
+            mapped_status = "modified"
+        elif schedule.status == "requested":
+            mapped_status = "submitted"
+        else:
+            mapped_status = schedule.status
 
         return ScheduleRequestResponse(
-            id=str(req.id),
-            user_id=str(req.user_id),
+            id=str(schedule.id),
+            user_id=str(schedule.user_id),
             user_name=user_name,
-            store_id=str(req.store_id),
+            store_id=str(schedule.store_id),
             store_name=store_name,
-            work_role_id=str(req.work_role_id) if req.work_role_id else None,
+            work_role_id=str(schedule.work_role_id) if schedule.work_role_id else None,
             work_role_name=work_role_name,
-            work_date=req.work_date,
-            preferred_start_time=self._format_time(req.preferred_start_time),
-            preferred_end_time=self._format_time(req.preferred_end_time),
-            break_start_time=self._format_time(req.break_start_time),
-            break_end_time=self._format_time(req.break_end_time),
-            note=req.note,
-            status=req.status,
-            submitted_at=req.submitted_at,
-            created_at=req.created_at,
-            original_preferred_start_time=self._format_time(req.original_preferred_start_time),
-            original_preferred_end_time=self._format_time(req.original_preferred_end_time),
-            original_work_role_id=str(req.original_work_role_id) if req.original_work_role_id else None,
-            original_user_id=str(req.original_user_id) if req.original_user_id else None,
-            original_user_name=original_user_name,
-            original_work_date=req.original_work_date,
-            created_by=str(req.created_by) if req.created_by else None,
-            rejection_reason=req.rejection_reason,
+            work_date=schedule.work_date,
+            preferred_start_time=self._format_time(schedule.start_time),
+            preferred_end_time=self._format_time(schedule.end_time),
+            break_start_time=self._format_time(schedule.break_start_time),
+            break_end_time=self._format_time(schedule.break_end_time),
+            note=schedule.note,
+            status=mapped_status,
+            submitted_at=schedule.submitted_at or schedule.created_at,
+            created_at=schedule.created_at,
+            original_preferred_start_time=self._get_original(schedule.modifications, "start_time"),
+            original_preferred_end_time=self._get_original(schedule.modifications, "end_time"),
+            original_work_role_id=self._get_original(schedule.modifications, "work_role_id"),
+            original_user_id=self._get_original(schedule.modifications, "user_id"),
+            original_user_name=None,
+            original_work_date=self._get_original(schedule.modifications, "work_date"),
+            created_by=str(schedule.created_by) if schedule.created_by else None,
+            rejection_reason=schedule.rejection_reason,
+            hourly_rate=float(schedule.hourly_rate),
         )
 
     async def _to_template_response(
@@ -268,72 +304,50 @@ class ScheduleRequestService:
         date_from: date_type | None = None,
         date_to: date_type | None = None,
     ) -> list[ScheduleRequestResponse]:
-        requests, _ = await schedule_request_repository.get_by_filters(
-            db, user_id=user_id,
-            date_from=date_from, date_to=date_to, per_page=200,
+        # schedules 테이블에서 requested/rejected 상태의 스케줄 조회
+        # (confirmed는 /schedules 엔드포인트에서 별도 조회)
+        query = select(Schedule).where(
+            Schedule.user_id == user_id,
+            Schedule.status.in_(["requested", "rejected"]),
         )
-        # Staff 에게는 admin 수정 내역 숨김:
-        # admin이 생성한 request (created_by != null)는 제외
+        if date_from is not None:
+            query = query.where(Schedule.work_date >= date_from)
+        if date_to is not None:
+            query = query.where(Schedule.work_date <= date_to)
+        query = query.order_by(Schedule.work_date, Schedule.start_time)
+        db_result = await db.execute(query)
+        schedules = db_result.scalars().all()
+
         result = []
-        for r in requests:
-            if r.created_by is not None:
-                continue  # admin-created 제외
-            resp = await self._to_staff_request_response(db, r)
+        for s in schedules:
+            resp = await self._schedule_to_request_response(db, s)
             result.append(resp)
         return result
-
-    async def _to_staff_request_response(self, db: AsyncSession, req: ScheduleRequest) -> ScheduleRequestResponse:
-        """Staff용 response — 실제 상태와 변경 내역을 표시."""
-        user_result = await db.execute(select(User.full_name).where(User.id == req.user_id))
-        user_name: str | None = user_result.scalar()
-
-        store_result = await db.execute(select(Store.name).where(Store.id == req.store_id))
-        store_name: str | None = store_result.scalar()
-
-        work_role_name: str | None = None
-        if req.work_role_id:
-            work_role_name = await self._resolve_work_role_name(db, req.work_role_id)
-
-        return ScheduleRequestResponse(
-            id=str(req.id),
-            user_id=str(req.user_id),
-            user_name=user_name,
-            store_id=str(req.store_id),
-            store_name=store_name,
-            work_role_id=str(req.work_role_id) if req.work_role_id else None,
-            work_role_name=work_role_name,
-            work_date=req.work_date,
-            preferred_start_time=self._format_time(req.preferred_start_time),
-            preferred_end_time=self._format_time(req.preferred_end_time),
-            note=req.note,
-            status=req.status,
-            submitted_at=req.submitted_at,
-            created_at=req.created_at,
-            original_preferred_start_time=self._format_time(req.original_preferred_start_time) if req.original_preferred_start_time else None,
-            original_preferred_end_time=self._format_time(req.original_preferred_end_time) if req.original_preferred_end_time else None,
-            original_work_role_id=str(req.original_work_role_id) if req.original_work_role_id else None,
-            original_user_id=None,
-            original_user_name=None,
-            original_work_date=str(req.original_work_date) if req.original_work_date else None,
-            created_by=None,
-            rejection_reason=req.rejection_reason,
-        )
 
     async def list_requests_admin(
         self,
         db: AsyncSession,
+        organization_id: UUID,
         store_id: UUID | None = None,
         date_from: date_type | None = None,
         date_to: date_type | None = None,
         page: int = 1,
         per_page: int = 50,
     ) -> tuple[list[ScheduleRequestResponse], int]:
-        requests, total = await schedule_request_repository.get_by_filters(
-            db, store_id=store_id,
-            date_from=date_from, date_to=date_to,
-            page=page, per_page=per_page,
+        # schedules 테이블에서 requested/rejected 상태의 항목을 admin용으로 조회
+        query = select(Schedule).where(
+            Schedule.organization_id == organization_id,
+            Schedule.status.in_(["requested", "rejected"]),
         )
-        responses = [await self._to_request_response(db, r) for r in requests]
+        if store_id is not None:
+            query = query.where(Schedule.store_id == store_id)
+        if date_from is not None:
+            query = query.where(Schedule.work_date >= date_from)
+        if date_to is not None:
+            query = query.where(Schedule.work_date <= date_to)
+        query = query.order_by(Schedule.work_date, Schedule.start_time)
+        schedules, total = await schedule_repository.get_paginated(db, query, page, per_page)
+        responses = [await self._schedule_to_request_response(db, s) for s in schedules]
         return responses, total
 
     @staticmethod
@@ -368,26 +382,59 @@ class ScheduleRequestService:
             # Period 없으면 날짜 기반 검증
             self._validate_work_date_week(data.work_date)
 
-        # 중복 신청 체크 (rejected 제외)
         work_role_id = UUID(data.work_role_id) if data.work_role_id else None
-        duplicate = await schedule_request_repository.find_active_duplicate(
-            db, user_id, data.work_date, work_role_id
+
+        # schedules 테이블에서 중복 신청 체크 (requested/confirmed 상태, 같은 날짜+역할)
+        dup_query = select(Schedule).where(
+            Schedule.user_id == user_id,
+            Schedule.work_date == data.work_date,
+            Schedule.status.in_(["requested", "confirmed"]),
         )
-        if duplicate is not None:
+        if work_role_id is not None:
+            dup_query = dup_query.where(Schedule.work_role_id == work_role_id)
+        dup_result = await db.execute(dup_query)
+        if dup_result.scalar_one_or_none() is not None:
             raise BadRequestError("A request with the same role already exists for this date")
 
+        # user의 organization_id 조회 — schedules 테이블 필수 필드
+        user_org_result = await db.execute(select(User.organization_id).where(User.id == user_id))
+        organization_id: UUID | None = user_org_result.scalar()
+        if organization_id is None:
+            raise BadRequestError("User organization not found")
+
+        # 시급 cascade 결정: user > store > org
+        hourly_rate = await self._resolve_hourly_rate(db, user_id, store_id)
+
+        start_time = self._parse_time(data.preferred_start_time)
+        end_time = self._parse_time(data.preferred_end_time)
+
+        # net_work_minutes 계산 (시간 정보가 있을 경우)
+        net_minutes = 0
+        if start_time is not None and end_time is not None:
+            start_m = start_time.hour * 60 + start_time.minute
+            end_m = end_time.hour * 60 + end_time.minute
+            if end_m <= start_m:
+                end_m += 24 * 60
+            net_minutes = max(end_m - start_m, 0)
+
         try:
-            req = await schedule_request_repository.create(db, {
+            schedule = await schedule_repository.create(db, {
+                "organization_id": organization_id,
                 "user_id": user_id,
                 "store_id": store_id,
-                "work_role_id": UUID(data.work_role_id) if data.work_role_id else None,
+                "work_role_id": work_role_id,
                 "work_date": data.work_date,
-                "preferred_start_time": self._parse_time(data.preferred_start_time),
-                "preferred_end_time": self._parse_time(data.preferred_end_time),
+                "start_time": start_time,
+                "end_time": end_time,
+                "break_start_time": None,
+                "break_end_time": None,
+                "net_work_minutes": net_minutes,
                 "note": data.note,
-                "status": "submitted",
+                "status": "requested",
+                "hourly_rate": hourly_rate,
+                "submitted_at": datetime.now(timezone.utc),
             })
-            result = await self._to_request_response(db, req)
+            result = await self._schedule_to_request_response(db, schedule)
             await db.commit()
             return result
         except Exception:
@@ -404,7 +451,7 @@ class ScheduleRequestService:
         template_id: UUID,
         on_conflict: str = "skip",
     ) -> ScheduleRequestFromTemplateResult:
-        # Period 상태 체크
+        # schedules 테이블에 status='requested'로 생성
         period = await self._find_period_for_date(db, store_id, date_from)
         if period is not None and period.status != "open":
             raise BadRequestError("Request period is closed")
@@ -412,6 +459,12 @@ class ScheduleRequestService:
         template = await request_template_repository.get_by_id(db, template_id)
         if template is None or template.user_id != user_id:
             raise NotFoundError("Template not found")
+
+        # user의 organization_id 조회
+        user_org_result = await db.execute(select(User.organization_id).where(User.id == user_id))
+        organization_id: UUID | None = user_org_result.scalar()
+        if organization_id is None:
+            raise BadRequestError("User organization not found")
 
         items = await request_template_repository.get_items(db, template_id)
         try:
@@ -422,36 +475,64 @@ class ScheduleRequestService:
                 for item in items:
                     if item.day_of_week != weekday:
                         continue
-                    duplicate = await schedule_request_repository.find_active_duplicate(
-                        db, user_id, current, item.work_role_id
+                    # 중복 체크: schedules 테이블에서 requested/confirmed 상태
+                    dup_query = select(Schedule).where(
+                        Schedule.user_id == user_id,
+                        Schedule.work_date == current,
+                        Schedule.status.in_(["requested", "confirmed"]),
                     )
+                    if item.work_role_id is not None:
+                        dup_query = dup_query.where(Schedule.work_role_id == item.work_role_id)
+                    dup_result = await db.execute(dup_query)
+                    duplicate = dup_result.scalar_one_or_none()
+
                     if duplicate is not None:
-                        if on_conflict == "replace" and duplicate.status == "submitted":
-                            # 기존 submitted request 업데이트
-                            updated = await schedule_request_repository.update(db, duplicate.id, {
-                                "preferred_start_time": item.preferred_start_time,
-                                "preferred_end_time": item.preferred_end_time,
+                        if on_conflict == "replace" and duplicate.status == "requested":
+                            # 기존 requested 스케줄 시간 업데이트
+                            net_minutes = 0
+                            if item.preferred_start_time is not None and item.preferred_end_time is not None:
+                                s_m = item.preferred_start_time.hour * 60 + item.preferred_start_time.minute
+                                e_m = item.preferred_end_time.hour * 60 + item.preferred_end_time.minute
+                                if e_m <= s_m:
+                                    e_m += 24 * 60
+                                net_minutes = max(e_m - s_m, 0)
+                            updated = await schedule_repository.update(db, duplicate.id, {
+                                "start_time": item.preferred_start_time,
+                                "end_time": item.preferred_end_time,
+                                "net_work_minutes": net_minutes,
                             })
-                            result.replaced.append(await self._to_request_response(db, updated))  # type: ignore[arg-type]
+                            result.replaced.append(await self._schedule_to_request_response(db, updated))  # type: ignore[arg-type]
                         else:
                             work_role_name = await self._resolve_work_role_name(db, item.work_role_id) if item.work_role_id else None
                             result.skipped.append(ScheduleRequestSkippedItem(
                                 work_date=current,
                                 work_role_id=str(item.work_role_id) if item.work_role_id else None,
                                 work_role_name=work_role_name,
-                                reason="이미 신청이 존재합니다" if duplicate.status != "submitted" else "중복 신청",
+                                reason="이미 신청이 존재합니다" if duplicate.status != "requested" else "중복 신청",
                             ))
                     else:
-                        req = await schedule_request_repository.create(db, {
+                        hourly_rate = await self._resolve_hourly_rate(db, user_id, store_id)
+                        net_minutes = 0
+                        if item.preferred_start_time is not None and item.preferred_end_time is not None:
+                            s_m = item.preferred_start_time.hour * 60 + item.preferred_start_time.minute
+                            e_m = item.preferred_end_time.hour * 60 + item.preferred_end_time.minute
+                            if e_m <= s_m:
+                                e_m += 24 * 60
+                            net_minutes = max(e_m - s_m, 0)
+                        schedule = await schedule_repository.create(db, {
+                            "organization_id": organization_id,
                             "user_id": user_id,
                             "store_id": store_id,
                             "work_role_id": item.work_role_id,
                             "work_date": current,
-                            "preferred_start_time": item.preferred_start_time,
-                            "preferred_end_time": item.preferred_end_time,
-                            "status": "submitted",
+                            "start_time": item.preferred_start_time,
+                            "end_time": item.preferred_end_time,
+                            "net_work_minutes": net_minutes,
+                            "status": "requested",
+                            "hourly_rate": hourly_rate,
+                            "submitted_at": datetime.now(timezone.utc),
                         })
-                        result.created.append(await self._to_request_response(db, req))
+                        result.created.append(await self._schedule_to_request_response(db, schedule))
                 current += timedelta(days=1)
             await db.commit()
             return result
@@ -468,19 +549,33 @@ class ScheduleRequestService:
         date_to: date_type,
         on_conflict: str = "skip",
     ) -> ScheduleRequestFromTemplateResult:
-        # 대상 기간 상태 체크
+        # schedules 테이블 기반으로 이전 기간 복사
         period = await self._find_period_for_date(db, store_id, date_from)
         if period is not None and period.status != "open":
             raise BadRequestError("Request period is closed")
+
+        # user의 organization_id 조회
+        user_org_result = await db.execute(select(User.organization_id).where(User.id == user_id))
+        organization_id: UUID | None = user_org_result.scalar()
+        if organization_id is None:
+            raise BadRequestError("User organization not found")
 
         # 이전 주 날짜 범위 (7일 전)
         prev_date_from = date_from - timedelta(days=7)
         prev_date_to = date_to - timedelta(days=7)
 
-        prev_requests = await schedule_request_repository.get_by_store_date_range_user(
-            db, store_id, user_id, prev_date_from, prev_date_to
+        # 이전 기간 schedules 조회 (requested 상태)
+        prev_result = await db.execute(
+            select(Schedule).where(
+                Schedule.store_id == store_id,
+                Schedule.user_id == user_id,
+                Schedule.work_date >= prev_date_from,
+                Schedule.work_date <= prev_date_to,
+                Schedule.status == "requested",
+            ).order_by(Schedule.work_date)
         )
-        if not prev_requests:
+        prev_schedules = list(prev_result.scalars().all())
+        if not prev_schedules:
             raise NotFoundError("No requests found in the previous period")
 
         # 날짜 오프셋 계산
@@ -488,41 +583,69 @@ class ScheduleRequestService:
 
         try:
             result = ScheduleRequestFromTemplateResult()
-            for prev_req in prev_requests:
-                new_date = prev_req.work_date + timedelta(days=day_offset)
+            for prev_s in prev_schedules:
+                new_date = prev_s.work_date + timedelta(days=day_offset)
                 if new_date < date_from or new_date > date_to:
                     continue
-                duplicate = await schedule_request_repository.find_active_duplicate(
-                    db, user_id, new_date, prev_req.work_role_id
+                # 중복 체크
+                dup_query = select(Schedule).where(
+                    Schedule.user_id == user_id,
+                    Schedule.work_date == new_date,
+                    Schedule.status.in_(["requested", "confirmed"]),
                 )
+                if prev_s.work_role_id is not None:
+                    dup_query = dup_query.where(Schedule.work_role_id == prev_s.work_role_id)
+                dup_result = await db.execute(dup_query)
+                duplicate = dup_result.scalar_one_or_none()
+
                 if duplicate is not None:
-                    if on_conflict == "replace" and duplicate.status == "submitted":
-                        updated = await schedule_request_repository.update(db, duplicate.id, {
-                            "preferred_start_time": prev_req.preferred_start_time,
-                            "preferred_end_time": prev_req.preferred_end_time,
-                            "note": prev_req.note,
+                    if on_conflict == "replace" and duplicate.status == "requested":
+                        net_minutes = 0
+                        if prev_s.start_time is not None and prev_s.end_time is not None:
+                            s_m = prev_s.start_time.hour * 60 + prev_s.start_time.minute
+                            e_m = prev_s.end_time.hour * 60 + prev_s.end_time.minute
+                            if e_m <= s_m:
+                                e_m += 24 * 60
+                            net_minutes = max(e_m - s_m, 0)
+                        updated = await schedule_repository.update(db, duplicate.id, {
+                            "start_time": prev_s.start_time,
+                            "end_time": prev_s.end_time,
+                            "net_work_minutes": net_minutes,
+                            "note": prev_s.note,
                         })
-                        result.replaced.append(await self._to_request_response(db, updated))  # type: ignore[arg-type]
+                        result.replaced.append(await self._schedule_to_request_response(db, updated))  # type: ignore[arg-type]
                     else:
-                        work_role_name = await self._resolve_work_role_name(db, prev_req.work_role_id) if prev_req.work_role_id else None
+                        work_role_name = await self._resolve_work_role_name(db, prev_s.work_role_id) if prev_s.work_role_id else None
                         result.skipped.append(ScheduleRequestSkippedItem(
                             work_date=new_date,
-                            work_role_id=str(prev_req.work_role_id) if prev_req.work_role_id else None,
+                            work_role_id=str(prev_s.work_role_id) if prev_s.work_role_id else None,
                             work_role_name=work_role_name,
-                            reason="이미 신청이 존재합니다" if duplicate.status != "submitted" else "중복 신청",
+                            reason="이미 신청이 존재합니다" if duplicate.status != "requested" else "중복 신청",
                         ))
                 else:
-                    req = await schedule_request_repository.create(db, {
+                    hourly_rate = await self._resolve_hourly_rate(db, user_id, store_id)
+                    net_minutes = 0
+                    if prev_s.start_time is not None and prev_s.end_time is not None:
+                        s_m = prev_s.start_time.hour * 60 + prev_s.start_time.minute
+                        e_m = prev_s.end_time.hour * 60 + prev_s.end_time.minute
+                        if e_m <= s_m:
+                            e_m += 24 * 60
+                        net_minutes = max(e_m - s_m, 0)
+                    schedule = await schedule_repository.create(db, {
+                        "organization_id": organization_id,
                         "user_id": user_id,
                         "store_id": store_id,
-                        "work_role_id": prev_req.work_role_id,
+                        "work_role_id": prev_s.work_role_id,
                         "work_date": new_date,
-                        "preferred_start_time": prev_req.preferred_start_time,
-                        "preferred_end_time": prev_req.preferred_end_time,
-                        "note": prev_req.note,
-                        "status": "submitted",
+                        "start_time": prev_s.start_time,
+                        "end_time": prev_s.end_time,
+                        "net_work_minutes": net_minutes,
+                        "note": prev_s.note,
+                        "status": "requested",
+                        "hourly_rate": hourly_rate,
+                        "submitted_at": datetime.now(timezone.utc),
                     })
-                    result.created.append(await self._to_request_response(db, req))
+                    result.created.append(await self._schedule_to_request_response(db, schedule))
             await db.commit()
             return result
         except Exception:
@@ -532,15 +655,19 @@ class ScheduleRequestService:
     async def update_request(
         self, db: AsyncSession, request_id: UUID, user_id: UUID, data: ScheduleRequestUpdate,
     ) -> ScheduleRequestResponse:
-        req = await schedule_request_repository.get_by_id(db, request_id)
-        if req is None or req.user_id != user_id:
+        # schedules 테이블에서 조회 — requested 상태이고 해당 user 소유인 경우만 수정 허용
+        schedule_result = await db.execute(
+            select(Schedule).where(Schedule.id == request_id, Schedule.user_id == user_id)
+        )
+        schedule = schedule_result.scalar_one_or_none()
+        if schedule is None:
             raise NotFoundError("Request not found")
-        if req.status not in ("submitted",):
-            raise BadRequestError("Approved or rejected requests cannot be updated")
+        if schedule.status != "requested":
+            raise BadRequestError("Only pending requests can be updated")
 
-        # Period 상태 체크: store_id + work_date로 lookup
-        work_date = data.work_date or req.work_date
-        period = await self._find_period_for_date(db, req.store_id, work_date)
+        # Period 상태 체크
+        work_date = data.work_date or schedule.work_date
+        period = await self._find_period_for_date(db, schedule.store_id, work_date)  # type: ignore[arg-type]
         if period is not None:
             if period.status != "open":
                 raise BadRequestError("Requests in a closed period cannot be updated")
@@ -555,18 +682,29 @@ class ScheduleRequestService:
         if data.work_date is not None:
             update_data["work_date"] = data.work_date
         if data.preferred_start_time is not None:
-            update_data["preferred_start_time"] = self._parse_time(data.preferred_start_time)
+            update_data["start_time"] = self._parse_time(data.preferred_start_time)
         if data.preferred_end_time is not None:
-            update_data["preferred_end_time"] = self._parse_time(data.preferred_end_time)
+            update_data["end_time"] = self._parse_time(data.preferred_end_time)
         if data.note is not None:
             update_data["note"] = data.note
 
+        # start_time/end_time 변경 시 net_work_minutes 재계산
+        if "start_time" in update_data or "end_time" in update_data:
+            new_start = update_data.get("start_time") or schedule.start_time
+            new_end = update_data.get("end_time") or schedule.end_time
+            if new_start is not None and new_end is not None:
+                s_m = new_start.hour * 60 + new_start.minute
+                e_m = new_end.hour * 60 + new_end.minute
+                if e_m <= s_m:
+                    e_m += 24 * 60
+                update_data["net_work_minutes"] = max(e_m - s_m, 0)
+
         try:
             if update_data:
-                updated = await schedule_request_repository.update(db, request_id, update_data)
+                updated = await schedule_repository.update(db, request_id, update_data)
             else:
-                updated = req
-            result = await self._to_request_response(db, updated)  # type: ignore[arg-type]
+                updated = schedule
+            result = await self._schedule_to_request_response(db, updated)  # type: ignore[arg-type]
             await db.commit()
             return result
         except Exception:
@@ -576,20 +714,26 @@ class ScheduleRequestService:
     async def delete_request(
         self, db: AsyncSession, request_id: UUID, user_id: UUID,
     ) -> None:
-        req = await schedule_request_repository.get_by_id(db, request_id)
-        if req is None or req.user_id != user_id:
+        # schedules 테이블에서 조회 — requested 상태이고 해당 user 소유인 경우만 삭제 허용
+        schedule_result = await db.execute(
+            select(Schedule).where(Schedule.id == request_id, Schedule.user_id == user_id)
+        )
+        schedule = schedule_result.scalar_one_or_none()
+        if schedule is None:
             raise NotFoundError("Request not found")
+        if schedule.status != "requested":
+            raise BadRequestError("Only pending requests can be deleted")
 
-        # Period 상태 체크: store_id + work_date로 lookup
-        period = await self._find_period_for_date(db, req.store_id, req.work_date)
+        # Period 상태 체크
+        period = await self._find_period_for_date(db, schedule.store_id, schedule.work_date)  # type: ignore[arg-type]
         if period is not None:
             if period.status != "open":
                 raise BadRequestError("Requests in a closed period cannot be deleted")
         else:
-            self._validate_work_date_week(req.work_date)
+            self._validate_work_date_week(schedule.work_date)
 
         try:
-            await schedule_request_repository.delete(db, request_id)
+            await schedule_repository.delete(db, request_id)
             await db.commit()
         except Exception:
             await db.rollback()
@@ -651,19 +795,20 @@ class ScheduleRequestService:
         self, db: AsyncSession, request_id: UUID, status: str,
         rejection_reason: str | None = None,
     ) -> ScheduleRequestResponse:
-        if status not in ("accepted", "modified", "rejected"):
-            raise BadRequestError("Invalid status. Use: accepted, modified, rejected")
-        req = await schedule_request_repository.get_by_id(db, request_id)
-        if req is None:
+        # schedules 테이블에서 유효 상태값: requested/rejected (confirmed는 별도 confirm 흐름)
+        if status not in ("requested", "rejected"):
+            raise BadRequestError("Invalid status. Use: requested, rejected")
+        schedule = await schedule_repository.get_by_id(db, request_id)
+        if schedule is None:
             raise NotFoundError("Request not found")
         update_data: dict = {"status": status}
         if status == "rejected" and rejection_reason is not None:
             update_data["rejection_reason"] = rejection_reason
         try:
-            updated = await schedule_request_repository.update(db, request_id, update_data)
+            updated = await schedule_repository.update(db, request_id, update_data)
             if updated is None:
                 raise NotFoundError("Request not found")
-            result = await self._to_request_response(db, updated)
+            result = await self._schedule_to_request_response(db, updated)
             await db.commit()
             return result
         except Exception:
@@ -675,98 +820,131 @@ class ScheduleRequestService:
     async def admin_create_request(
         self, db: AsyncSession, data: ScheduleRequestAdminCreate, created_by: UUID,
     ) -> ScheduleRequestResponse:
-        """Admin이 직접 request 생성 (staff에게 안 보임, confirm 시 entry로 변환)."""
-        # 중복 신청 체크 (rejected 제외)
+        """Admin이 직접 request 생성 (schedules 테이블, status='requested')."""
+        user_id = UUID(data.user_id)
+        store_id = UUID(data.store_id)
         work_role_id = UUID(data.work_role_id) if data.work_role_id else None
-        duplicate = await schedule_request_repository.find_active_duplicate(
-            db, UUID(data.user_id), data.work_date, work_role_id
+
+        # 중복 신청 체크: schedules 테이블에서 requested/confirmed 상태
+        dup_query = select(Schedule).where(
+            Schedule.user_id == user_id,
+            Schedule.work_date == data.work_date,
+            Schedule.status.in_(["requested", "confirmed"]),
         )
-        if duplicate is not None:
+        if work_role_id is not None:
+            dup_query = dup_query.where(Schedule.work_role_id == work_role_id)
+        dup_result = await db.execute(dup_query)
+        if dup_result.scalar_one_or_none() is not None:
             raise BadRequestError("A request with the same role already exists for this date")
 
+        # user의 organization_id 조회
+        user_org_result = await db.execute(select(User.organization_id).where(User.id == user_id))
+        organization_id: UUID | None = user_org_result.scalar()
+        if organization_id is None:
+            raise BadRequestError("User organization not found")
+
+        # 시급 cascade 결정: override > user > store > org
+        hourly_rate = await self._resolve_hourly_rate(db, user_id, store_id, data.hourly_rate)
+
+        start_time = self._parse_time(data.preferred_start_time)
+        end_time = self._parse_time(data.preferred_end_time)
+        net_minutes = 0
+        if start_time is not None and end_time is not None:
+            s_m = start_time.hour * 60 + start_time.minute
+            e_m = end_time.hour * 60 + end_time.minute
+            if e_m <= s_m:
+                e_m += 24 * 60
+            net_minutes = max(e_m - s_m, 0)
+
         try:
-            req = await schedule_request_repository.create(db, {
-                "user_id": UUID(data.user_id),
-                "store_id": UUID(data.store_id),
-                "work_role_id": UUID(data.work_role_id) if data.work_role_id else None,
+            schedule = await schedule_repository.create(db, {
+                "organization_id": organization_id,
+                "user_id": user_id,
+                "store_id": store_id,
+                "work_role_id": work_role_id,
                 "work_date": data.work_date,
-                "preferred_start_time": self._parse_time(data.preferred_start_time),
-                "preferred_end_time": self._parse_time(data.preferred_end_time),
+                "start_time": start_time,
+                "end_time": end_time,
                 "break_start_time": self._parse_time(data.break_start_time),
                 "break_end_time": self._parse_time(data.break_end_time),
+                "net_work_minutes": net_minutes,
                 "note": data.note,
-                "status": "submitted",
+                "status": "requested",
                 "created_by": created_by,
+                "hourly_rate": hourly_rate,
+                "submitted_at": datetime.now(timezone.utc),
             })
-            result = await self._to_request_response(db, req)
+            result = await self._schedule_to_request_response(db, schedule)
             await db.commit()
             return result
         except Exception:
             await db.rollback()
             raise
 
-    # ─── Admin: Modify request (tracks originals) ───
+    # ─── Admin: Modify request (tracks originals via modifications JSONB) ───
 
     async def admin_update_request(
         self, db: AsyncSession, request_id: UUID, data: ScheduleRequestAdminUpdate,
     ) -> ScheduleRequestResponse:
-        """SV/GM이 request 수정 — 원본 저장 + status=modified 자동 설정."""
-        req = await schedule_request_repository.get_by_id(db, request_id)
-        if req is None:
+        """SV/GM이 request 수정 — modifications JSONB에 원본 기록 + is_modified=True 설정."""
+        schedule = await schedule_repository.get_by_id(db, request_id)
+        if schedule is None:
             raise NotFoundError("Request not found")
-        if req.status == "rejected":
+        if schedule.status == "rejected":
             raise BadRequestError("Rejected requests cannot be updated. Revert the request first.")
 
         update_data: dict = {}
         has_value_change = False
+        modifications: list = list(schedule.modifications or [])
+        now_str = datetime.now(timezone.utc).isoformat()
 
-        # Track originals on first change per field (regardless of current status)
+        def _record_modification(field: str, old_value, new_value) -> None:
+            modifications.append({
+                "field": field,
+                "old_value": str(old_value) if old_value is not None else None,
+                "new_value": str(new_value) if new_value is not None else None,
+                "modified_at": now_str,
+            })
+
         if data.preferred_start_time is not None:
             new_time = self._parse_time(data.preferred_start_time)
-            if new_time != req.preferred_start_time:
-                if req.original_preferred_start_time is None:
-                    update_data["original_preferred_start_time"] = req.preferred_start_time
-                    update_data["original_preferred_end_time"] = req.preferred_end_time
-                update_data["preferred_start_time"] = new_time
+            if new_time != schedule.start_time:
+                _record_modification("start_time", schedule.start_time, new_time)
+                update_data["start_time"] = new_time
                 has_value_change = True
 
         if data.preferred_end_time is not None:
             new_time = self._parse_time(data.preferred_end_time)
-            if new_time != req.preferred_end_time:
-                if req.original_preferred_start_time is None:
-                    update_data.setdefault("original_preferred_start_time", req.preferred_start_time)
-                    update_data.setdefault("original_preferred_end_time", req.preferred_end_time)
-                update_data["preferred_end_time"] = new_time
+            if new_time != schedule.end_time:
+                _record_modification("end_time", schedule.end_time, new_time)
+                update_data["end_time"] = new_time
                 has_value_change = True
 
         if data.work_role_id is not None:
             new_role = UUID(data.work_role_id)
-            if new_role != req.work_role_id:
-                if req.original_work_role_id is None:
-                    update_data["original_work_role_id"] = req.work_role_id
+            if new_role != schedule.work_role_id:
+                _record_modification("work_role_id", schedule.work_role_id, new_role)
                 update_data["work_role_id"] = new_role
                 has_value_change = True
 
         if data.user_id is not None:
             new_user = UUID(data.user_id)
-            if new_user != req.user_id:
-                if req.original_user_id is None:
-                    update_data["original_user_id"] = req.user_id
+            if new_user != schedule.user_id:
+                _record_modification("user_id", schedule.user_id, new_user)
                 update_data["user_id"] = new_user
                 has_value_change = True
 
         if data.work_date is not None:
-            if data.work_date != req.work_date:
-                if req.original_work_date is None:
-                    update_data["original_work_date"] = req.work_date
+            if data.work_date != schedule.work_date:
+                _record_modification("work_date", schedule.work_date, data.work_date)
                 update_data["work_date"] = data.work_date
                 has_value_change = True
 
-        # Break time — silent update, no modify trigger
-        if data.break_start_time is not None:
-            update_data["break_start_time"] = self._parse_time(data.break_start_time)
-        if data.break_end_time is not None:
-            update_data["break_end_time"] = self._parse_time(data.break_end_time)
+        # Break time — silent update, no modify trigger. Explicit null = clear break.
+        if "break_start_time" in data.model_fields_set:
+            update_data["break_start_time"] = self._parse_time(data.break_start_time) if data.break_start_time else None
+        if "break_end_time" in data.model_fields_set:
+            update_data["break_end_time"] = self._parse_time(data.break_end_time) if data.break_end_time else None
 
         if data.note is not None:
             update_data["note"] = data.note
@@ -774,86 +952,121 @@ class ScheduleRequestService:
         if data.rejection_reason is not None:
             update_data["rejection_reason"] = data.rejection_reason
 
+        # Recalculate net_work_minutes whenever start/end/break changes
+        new_start = update_data.get("start_time", schedule.start_time)
+        new_end = update_data.get("end_time", schedule.end_time)
+        new_break_start = update_data.get("break_start_time", schedule.break_start_time)
+        new_break_end = update_data.get("break_end_time", schedule.break_end_time)
+        if new_start is not None and new_end is not None:
+            s_m = new_start.hour * 60 + new_start.minute
+            e_m = new_end.hour * 60 + new_end.minute
+            if e_m <= s_m:
+                e_m += 24 * 60
+            net = e_m - s_m
+            if new_break_start and new_break_end:
+                bs = new_break_start.hour * 60 + new_break_start.minute
+                be = new_break_end.hour * 60 + new_break_end.minute
+                if be <= bs:
+                    be += 24 * 60
+                net -= (be - bs)
+            update_data["net_work_minutes"] = max(net, 0)
+
         if has_value_change:
-            update_data["status"] = "modified"
+            update_data["modifications"] = modifications
+
+            # Check if current values match ALL originals → auto-revert is_modified
+            all_reverted = True
+            if modifications:
+                seen: dict[str, str | None] = {}
+                for mod in modifications:
+                    f = mod.get("field")
+                    if f and f not in seen:
+                        seen[f] = mod.get("old_value")
+                for field, orig_val in seen.items():
+                    current = update_data.get(field, getattr(schedule, field, None))
+                    current_str = str(current) if current is not None else None
+                    if current_str != orig_val:
+                        all_reverted = False
+                        break
+            else:
+                all_reverted = False
+
+            if all_reverted:
+                update_data["is_modified"] = False
+                update_data["modifications"] = None
+            else:
+                update_data["is_modified"] = True
 
         if not update_data:
-            return await self._to_request_response(db, req)
+            return await self._schedule_to_request_response(db, schedule)
 
         try:
-            # Auto-unmodify: if all values match originals, revert status
-            updated = await schedule_request_repository.update(db, request_id, update_data)
+            updated = await schedule_repository.update(db, request_id, update_data)
             if updated is None:
                 raise NotFoundError("Request not found")
-
-            # Check auto-unmodify after update
-            await self._auto_unmodify(db, updated)
-            # Re-fetch after potential unmodify
-            final = await schedule_request_repository.get_by_id(db, request_id)
-            result = await self._to_request_response(db, final)  # type: ignore[arg-type]
+            result = await self._schedule_to_request_response(db, updated)
             await db.commit()
             return result
         except Exception:
             await db.rollback()
             raise
 
-    async def _auto_unmodify(self, db: AsyncSession, req: ScheduleRequest) -> None:
-        """수정된 값이 모두 원래 값과 일치하면 자동으로 submitted로 복원."""
-        if req.status != "modified":
-            return
-        time_match = (
-            req.original_preferred_start_time is None
-            or (req.preferred_start_time == req.original_preferred_start_time
-                and req.preferred_end_time == req.original_preferred_end_time)
-        )
-        role_match = req.original_work_role_id is None or req.work_role_id == req.original_work_role_id
-        user_match = req.original_user_id is None or req.user_id == req.original_user_id
-        date_match = req.original_work_date is None or req.work_date == req.original_work_date
-
-        if time_match and role_match and user_match and date_match:
-            await schedule_request_repository.update(db, req.id, {
-                "status": "submitted",
-                "original_preferred_start_time": None,
-                "original_preferred_end_time": None,
-                "original_work_role_id": None,
-                "original_user_id": None,
-                "original_work_date": None,
-            })
-
     # ─── Admin: Revert request to original ───
 
     async def admin_revert_request(
         self, db: AsyncSession, request_id: UUID,
     ) -> ScheduleRequestResponse:
-        """Modified/rejected request를 원래 값으로 복원."""
-        req = await schedule_request_repository.get_by_id(db, request_id)
-        if req is None:
+        """Modified/rejected schedule을 modifications JSONB의 최초 원본값으로 복원."""
+        schedule = await schedule_repository.get_by_id(db, request_id)
+        if schedule is None:
             raise NotFoundError("Request not found")
-        if req.status not in ("modified", "rejected"):
+        if schedule.status not in ("requested", "rejected") and not schedule.is_modified:
             raise BadRequestError("Only modified or rejected requests can be reverted")
 
-        revert_data: dict = {"status": "submitted", "rejection_reason": None}
-        if req.original_preferred_start_time is not None:
-            revert_data["preferred_start_time"] = req.original_preferred_start_time
-            revert_data["preferred_end_time"] = req.original_preferred_end_time
-        if req.original_work_role_id is not None:
-            revert_data["work_role_id"] = req.original_work_role_id
-        if req.original_user_id is not None:
-            revert_data["user_id"] = req.original_user_id
-        if req.original_work_date is not None:
-            revert_data["work_date"] = req.original_work_date
-        # Clear originals
-        revert_data["original_preferred_start_time"] = None
-        revert_data["original_preferred_end_time"] = None
-        revert_data["original_work_role_id"] = None
-        revert_data["original_user_id"] = None
-        revert_data["original_work_date"] = None
+        revert_data: dict = {
+            "status": "requested",
+            "rejection_reason": None,
+            "is_modified": False,
+            "modifications": None,
+        }
+
+        # modifications JSONB에서 각 필드의 최초 원본값(첫 번째 기록) 복원
+        if schedule.modifications:
+            # 필드별 첫 번째 수정 기록만 사용 (최초 원본값)
+            seen_fields: set = set()
+            for mod in schedule.modifications:
+                field = mod.get("field")
+                if field and field not in seen_fields:
+                    seen_fields.add(field)
+                    old_val = mod.get("old_value")
+                    if field == "start_time":
+                        from datetime import time as time_type
+                        revert_data["start_time"] = self._parse_time(old_val) if old_val else None
+                    elif field == "end_time":
+                        revert_data["end_time"] = self._parse_time(old_val) if old_val else None
+                    elif field == "work_role_id":
+                        revert_data["work_role_id"] = UUID(old_val) if old_val else None
+                    elif field == "user_id":
+                        revert_data["user_id"] = UUID(old_val) if old_val else None
+                    elif field == "work_date":
+                        from datetime import date as date_cls
+                        revert_data["work_date"] = date_cls.fromisoformat(old_val) if old_val else None
+
+        # net_work_minutes 재계산
+        new_start = revert_data.get("start_time") or schedule.start_time
+        new_end = revert_data.get("end_time") or schedule.end_time
+        if new_start is not None and new_end is not None:
+            s_m = new_start.hour * 60 + new_start.minute
+            e_m = new_end.hour * 60 + new_end.minute
+            if e_m <= s_m:
+                e_m += 24 * 60
+            revert_data["net_work_minutes"] = max(e_m - s_m, 0)
 
         try:
-            updated = await schedule_request_repository.update(db, request_id, revert_data)
+            updated = await schedule_repository.update(db, request_id, revert_data)
             if updated is None:
                 raise NotFoundError("Request not found")
-            result = await self._to_request_response(db, updated)
+            result = await self._schedule_to_request_response(db, updated)
             await db.commit()
             return result
         except Exception:
@@ -868,33 +1081,39 @@ class ScheduleRequestService:
         store_id: UUID,
         date_from: date_type,
         date_to: date_type,
-    ) -> tuple[list[ScheduleRequest], list[ScheduleRequest], list[tuple[ScheduleRequest, str]]]:
+    ) -> tuple[list[Schedule], list[Schedule], list[tuple[Schedule, str]]]:
         """
-        Confirm 대상 분류.
+        Confirm 대상 분류 (schedules 테이블에서 requested/rejected 조회).
         Returns: (to_confirm, rejected, will_fail_with_reason)
         """
         from app.models.schedule import StoreWorkRole
 
-        requests, _ = await schedule_request_repository.get_by_filters(
-            db, store_id=store_id, date_from=date_from, date_to=date_to, per_page=500,
+        db_result = await db.execute(
+            select(Schedule).where(
+                Schedule.store_id == store_id,
+                Schedule.work_date >= date_from,
+                Schedule.work_date <= date_to,
+                Schedule.status.in_(["requested", "rejected"]),
+            ).order_by(Schedule.work_date, Schedule.start_time)
         )
+        schedules = list(db_result.scalars().all())
 
-        to_confirm: list[ScheduleRequest] = []
-        rejected: list[ScheduleRequest] = []
-        will_fail: list[tuple[ScheduleRequest, str]] = []
+        to_confirm: list[Schedule] = []
+        rejected: list[Schedule] = []
+        will_fail: list[tuple[Schedule, str]] = []
 
-        for req in requests:
-            if req.status == "rejected":
-                rejected.append(req)
+        for s in schedules:
+            if s.status == "rejected":
+                rejected.append(s)
                 continue
 
-            # 시간 정보 유효성 체크
-            start_time = req.preferred_start_time
-            end_time = req.preferred_end_time
+            # 시간 정보 유효성 체크 (work_role defaults로 fallback)
+            start_time = s.start_time
+            end_time = s.end_time
 
-            if req.work_role_id:
+            if s.work_role_id:
                 wr_result = await db.execute(
-                    select(StoreWorkRole).where(StoreWorkRole.id == req.work_role_id)
+                    select(StoreWorkRole).where(StoreWorkRole.id == s.work_role_id)
                 )
                 wr = wr_result.scalar_one_or_none()
                 if wr:
@@ -904,9 +1123,9 @@ class ScheduleRequestService:
                         end_time = wr.default_end_time
 
             if start_time is None or end_time is None:
-                will_fail.append((req, "시간 정보 없음"))
+                will_fail.append((s, "시간 정보 없음"))
             else:
-                to_confirm.append(req)
+                to_confirm.append(s)
 
         return to_confirm, rejected, will_fail
 
@@ -919,34 +1138,42 @@ class ScheduleRequestService:
         date_to: date_type,
         confirmed_by: UUID,
     ) -> ScheduleConfirmResult:
-        """Non-rejected request를 schedule로 일괄 변환 + 체크리스트 인스턴스 자동 생성."""
+        """requested 상태의 schedule을 confirmed로 일괄 전환 + 체크리스트 인스턴스 자동 생성.
+
+        schedules 테이블에서 status='requested' 항목의 status만 'confirmed'으로 변경.
+        새로운 schedule 행을 생성하지 않음.
+        """
         from app.models.schedule import StoreWorkRole
-        from app.repositories.schedule_repository import schedule_repository
         from app.services.checklist_instance_service import checklist_instance_service
 
-        requests, _ = await schedule_request_repository.get_by_filters(
-            db, store_id=store_id, date_from=date_from, date_to=date_to, per_page=500,
+        db_result = await db.execute(
+            select(Schedule).where(
+                Schedule.store_id == store_id,
+                Schedule.work_date >= date_from,
+                Schedule.work_date <= date_to,
+                Schedule.status.in_(["requested", "rejected"]),
+            ).order_by(Schedule.work_date, Schedule.start_time)
         )
+        schedules = list(db_result.scalars().all())
 
-        entries_created = 0
-        requests_confirmed = 0
+        entries_confirmed = 0
         requests_rejected = 0
         errors: list[str] = []
 
-        for req in requests:
-            if req.status == "rejected":
+        for s in schedules:
+            if s.status == "rejected":
                 requests_rejected += 1
                 continue
 
-            # Get time from request, then fall back to work role defaults
-            start_time = req.preferred_start_time
-            end_time = req.preferred_end_time
-            break_start = req.break_start_time
-            break_end = req.break_end_time
+            # Get time, fall back to work role defaults
+            start_time = s.start_time
+            end_time = s.end_time
+            break_start = s.break_start_time
+            break_end = s.break_end_time
 
-            if req.work_role_id:
+            if s.work_role_id:
                 wr_result = await db.execute(
-                    select(StoreWorkRole).where(StoreWorkRole.id == req.work_role_id)
+                    select(StoreWorkRole).where(StoreWorkRole.id == s.work_role_id)
                 )
                 wr = wr_result.scalar_one_or_none()
                 if wr:
@@ -960,10 +1187,10 @@ class ScheduleRequestService:
                         break_end = wr.break_end_time
 
             if start_time is None or end_time is None:
-                errors.append(f"Request {req.id}: missing time information")
+                errors.append(f"Schedule {s.id}: missing time information")
                 continue
 
-            # Calculate net minutes
+            # net_work_minutes 재계산 (work_role defaults 반영)
             start_m = start_time.hour * 60 + start_time.minute
             end_m = end_time.hour * 60 + end_time.minute
             if end_m <= start_m:
@@ -978,41 +1205,32 @@ class ScheduleRequestService:
             net = max(net, 0)
 
             try:
-                schedule = await schedule_repository.create(db, {
-                    "organization_id": organization_id,
-                    "request_id": req.id,
-                    "user_id": req.user_id,
-                    "store_id": req.store_id,
-                    "work_role_id": req.work_role_id,
-                    "work_date": req.work_date,
+                # status만 confirmed로 변경 (새 행 생성 X)
+                await schedule_repository.update(db, s.id, {
+                    "status": "confirmed",
                     "start_time": start_time,
                     "end_time": end_time,
                     "break_start_time": break_start,
                     "break_end_time": break_end,
                     "net_work_minutes": net,
-                    "status": "confirmed",
-                    "created_by": confirmed_by,
                     "approved_by": confirmed_by,
                 })
 
                 # 체크리스트 인스턴스 자동 생성 (work_role에 default_checklist가 있으면)
                 await checklist_instance_service.create_for_schedule(
                     db,
-                    schedule_id=schedule.id,
+                    schedule_id=s.id,
                     organization_id=organization_id,
-                    store_id=req.store_id,
-                    user_id=req.user_id,
-                    work_date=req.work_date,
-                    work_role_id=req.work_role_id,
+                    store_id=s.store_id,
+                    user_id=s.user_id,
+                    work_date=s.work_date,
+                    work_role_id=s.work_role_id,
                 )
 
-                # Update request status to accepted
-                await schedule_request_repository.update(db, req.id, {"status": "accepted"})
-                entries_created += 1
-                requests_confirmed += 1
+                entries_confirmed += 1
             except Exception as e:
                 detail = e.detail if hasattr(e, "detail") else str(e)
-                errors.append(f"Request {req.id}: {detail}")
+                errors.append(f"Schedule {s.id}: {detail}")
 
         try:
             await db.commit()
@@ -1020,8 +1238,8 @@ class ScheduleRequestService:
             await db.rollback()
             raise
         return ScheduleConfirmResult(
-            entries_created=entries_created,
-            requests_confirmed=requests_confirmed,
+            entries_created=entries_confirmed,
+            requests_confirmed=entries_confirmed,
             requests_rejected=requests_rejected,
             errors=errors,
         )
@@ -1033,28 +1251,37 @@ class ScheduleRequestService:
         date_from: date_type,
         date_to: date_type,
     ) -> ScheduleConfirmPreview:
-        """Confirm dry-run — DB 변경 없이 결과 예측만 반환 (S1)."""
+        """Confirm dry-run — DB 변경 없이 결과 예측만 반환.
+
+        schedules 테이블의 requested/rejected 항목을 기준으로 예측.
+        """
         from app.models.schedule import StoreWorkRole
 
-        requests, _ = await schedule_request_repository.get_by_filters(
-            db, store_id=store_id, date_from=date_from, date_to=date_to, per_page=500,
+        db_result = await db.execute(
+            select(Schedule).where(
+                Schedule.store_id == store_id,
+                Schedule.work_date >= date_from,
+                Schedule.work_date <= date_to,
+                Schedule.status.in_(["requested", "rejected"]),
+            ).order_by(Schedule.work_date, Schedule.start_time)
         )
+        schedules = list(db_result.scalars().all())
 
         will_confirm = 0
         will_skip_rejected = 0
         will_fail: list[ScheduleConfirmPreviewFail] = []
 
-        for req in requests:
-            if req.status == "rejected":
+        for s in schedules:
+            if s.status == "rejected":
                 will_skip_rejected += 1
                 continue
 
-            start_time = req.preferred_start_time
-            end_time = req.preferred_end_time
+            start_time = s.start_time
+            end_time = s.end_time
 
-            if req.work_role_id:
+            if s.work_role_id:
                 wr_result = await db.execute(
-                    select(StoreWorkRole).where(StoreWorkRole.id == req.work_role_id)
+                    select(StoreWorkRole).where(StoreWorkRole.id == s.work_role_id)
                 )
                 wr = wr_result.scalar_one_or_none()
                 if wr:
@@ -1064,12 +1291,12 @@ class ScheduleRequestService:
                         end_time = wr.default_end_time
 
             if start_time is None or end_time is None:
-                user_result = await db.execute(select(User.full_name).where(User.id == req.user_id))
+                user_result = await db.execute(select(User.full_name).where(User.id == s.user_id))
                 user_name: str | None = user_result.scalar()
                 will_fail.append(ScheduleConfirmPreviewFail(
-                    request_id=str(req.id),
+                    request_id=str(s.id),
                     user_name=user_name,
-                    work_date=req.work_date,
+                    work_date=s.work_date,
                     reason="시간 정보 없음",
                 ))
             else:

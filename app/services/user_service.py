@@ -7,6 +7,7 @@ and user-store association management.
 
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.organization import Store
@@ -53,6 +54,7 @@ class UserService:
             email=user.email,
             role_name=role.name,
             role_priority=role.priority,
+            hourly_rate=float(user.hourly_rate) if user.hourly_rate is not None else None,
             is_active=user.is_active,
             created_at=user.created_at,
         )
@@ -75,6 +77,7 @@ class UserService:
             full_name=user.full_name,
             role_name=role.name,
             role_priority=role.priority,
+            hourly_rate=float(user.hourly_rate) if user.hourly_rate is not None else None,
             is_active=user.is_active,
             created_at=user.created_at,
         )
@@ -179,17 +182,32 @@ class UserService:
             raise ForbiddenError("Cannot create a user with a role at or above your priority")
 
         password_hash: str = hash_password(data.password)
+
+        # Auto-fill hourly_rate from org default if not provided
+        hourly_rate = getattr(data, "hourly_rate", None)
+        if hourly_rate is None:
+            from app.models.organization import Organization as OrgModel
+            org_row = await db.execute(
+                select(OrgModel.default_hourly_rate).where(OrgModel.id == organization_id)
+            )
+            org_rate = org_row.scalar()
+            hourly_rate = float(org_rate) if org_rate else None
+
         try:
+            create_data: dict = {
+                "organization_id": organization_id,
+                "role_id": UUID(data.role_id),
+                "username": data.username,
+                "full_name": data.full_name,
+                "email": data.email,
+                "password_hash": password_hash,
+            }
+            if hourly_rate is not None:
+                create_data["hourly_rate"] = hourly_rate
+
             user: User = await user_repository.create(
                 db,
-                {
-                    "organization_id": organization_id,
-                    "role_id": UUID(data.role_id),
-                    "username": data.username,
-                    "full_name": data.full_name,
-                    "email": data.email,
-                    "password_hash": password_hash,
-                },
+                create_data,
             )
 
             # 역할 관계 로드를 위해 다시 조회 — Re-fetch with role loaded
