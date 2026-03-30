@@ -14,6 +14,7 @@ from app.schemas.schedule import (
     BulkAssignChecklistRequest, BulkAssignChecklistResult,
     FinalizeResult, ScheduleBulkCreate, ScheduleBulkResult, ScheduleCreate,
     ScheduleResponse, ScheduleUpdate, ScheduleValidation,
+    ScheduleConfirm, ScheduleReject, ScheduleBulkConfirm, ScheduleBulkConfirmResult,
 )
 from app.services.schedule_service import schedule_service
 
@@ -85,6 +86,23 @@ async def generate_from_requests(
     )
 
 
+@router.post("/bulk-confirm", response_model=ScheduleBulkConfirmResult, status_code=200)
+async def bulk_confirm(
+    data: ScheduleBulkConfirm,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> ScheduleBulkConfirmResult:
+    """기간 내 모든 requested 스케줄 일괄 확정."""
+    return await schedule_service.bulk_confirm(
+        db,
+        organization_id=current_user.organization_id,
+        store_id=UUID(data.store_id),
+        date_from=data.date_from,
+        date_to=data.date_to,
+        approved_by=current_user.id,
+    )
+
+
 @router.get("/{entry_id}", response_model=ScheduleResponse)
 async def get_entry(
     entry_id: UUID,
@@ -116,6 +134,31 @@ async def delete_entry(
 ) -> None:
     """스케줄 삭제."""
     await schedule_service.delete_entry(db, entry_id, current_user.organization_id)
+
+
+@router.post("/{entry_id}/confirm", response_model=ScheduleResponse)
+async def confirm_schedule(
+    entry_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> ScheduleResponse:
+    """requested 스케줄 확정 (requested → confirmed)."""
+    return await schedule_service.confirm_schedule(
+        db, entry_id, current_user.organization_id, current_user.id,
+    )
+
+
+@router.post("/{entry_id}/reject", response_model=ScheduleResponse)
+async def reject_schedule(
+    entry_id: UUID,
+    data: ScheduleReject,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> ScheduleResponse:
+    """requested 스케줄 거절 (requested → rejected)."""
+    return await schedule_service.reject_schedule(
+        db, entry_id, current_user.organization_id, data,
+    )
 
 
 @router.post("/validate", response_model=ScheduleValidation)

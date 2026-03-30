@@ -6,7 +6,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.organization import Store
+from app.models.organization import Organization, Store
 from app.models.schedule import Schedule, StoreWorkRole
 from app.models.user import User
 from app.models.work import Shift, Position
@@ -16,6 +16,7 @@ from app.repositories.work_role_repository import work_role_repository
 from app.schemas.schedule import (
     ScheduleCreate, ScheduleResponse, ScheduleUpdate,
     ScheduleValidation, FinalizeResult,
+    ScheduleReject, ScheduleBulkConfirmResult,
 )
 from app.utils.exceptions import BadRequestError, NotFoundError
 
@@ -100,6 +101,10 @@ class ScheduleService:
             created_by=str(entry.created_by) if entry.created_by else None,
             approved_by=str(entry.approved_by) if entry.approved_by else None,
             note=entry.note,
+            hourly_rate=float(entry.hourly_rate),
+            submitted_at=entry.submitted_at,
+            is_modified=entry.is_modified,
+            rejection_reason=entry.rejection_reason,
             created_at=entry.created_at,
             updated_at=entry.updated_at,
         )
@@ -166,10 +171,13 @@ class ScheduleService:
         per_page: int = 100,
         sort_desc: bool = False,
     ) -> tuple[list[ScheduleResponse], int]:
+        # status 미지정 시 cancelled 제외 (requested + confirmed 모두 반환)
+        # If status not specified: exclude cancelled (return requested + confirmed)
         entries, total = await schedule_repository.get_by_filters(
             db, organization_id, store_id, user_id,
             date_from, date_to, status, page, per_page,
             sort_desc=sort_desc,
+            exclude_cancelled=(status is None),
         )
         responses = [await self._to_response(db, e) for e in entries]
         return responses, total
@@ -191,6 +199,10 @@ class ScheduleService:
         if start_time is None or end_time is None:
             raise BadRequestError("start_time and end_time are required")
 
+        # status 유효성 확인 — Validate status value
+        allowed_statuses = {"confirmed", "requested"}
+        entry_status = data.status if data.status in allowed_statuses else "confirmed"
+
         # Validate
         validation = await self._validate_entry(
             db, user_id, store_id, data.work_date,
@@ -201,6 +213,26 @@ class ScheduleService:
             raise BadRequestError(f"Validation failed: {detail}")
 
         net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
+
+        # Resolve hourly rate: provided > user.hourly_rate > store.default_hourly_rate > org.default_hourly_rate
+        if data.hourly_rate is not None:
+            resolved_rate = data.hourly_rate
+        else:
+            user_row = await db.execute(select(User.hourly_rate).where(User.id == user_id))
+            user_hr = user_row.scalar()
+            if user_hr is not None:
+                resolved_rate = float(user_hr)
+            else:
+                store_row = await db.execute(select(Store.default_hourly_rate).where(Store.id == store_id))
+                store_hr = store_row.scalar()
+                if store_hr is not None:
+                    resolved_rate = float(store_hr)
+                else:
+                    org_row = await db.execute(select(Organization.default_hourly_rate).where(Organization.id == organization_id))
+                    org_hr = org_row.scalar()
+                    resolved_rate = float(org_hr) if org_hr is not None else 0.0
+
+        from datetime import datetime, timezone
 
         try:
             entry = await schedule_repository.create(db, {
@@ -215,21 +247,26 @@ class ScheduleService:
                 "break_start_time": break_start,
                 "break_end_time": break_end,
                 "net_work_minutes": net,
-                "status": "confirmed",
+                "hourly_rate": resolved_rate,
+                "status": entry_status,
                 "created_by": created_by,
+                # requested 상태면 submitted_at 기록
+                "submitted_at": datetime.now(timezone.utc) if entry_status == "requested" else None,
             })
 
-            # 체크리스트 인스턴스 자동 생성
-            from app.services.checklist_instance_service import checklist_instance_service
-            await checklist_instance_service.create_for_schedule(
-                db,
-                schedule_id=entry.id,
-                organization_id=organization_id,
-                store_id=store_id,
-                user_id=user_id,
-                work_date=data.work_date,
-                work_role_id=UUID(data.work_role_id) if data.work_role_id else None,
-            )
+            # confirmed 상태일 때만 체크리스트 인스턴스 자동 생성
+            # Only create checklist instance when status is confirmed
+            if entry_status == "confirmed":
+                from app.services.checklist_instance_service import checklist_instance_service
+                await checklist_instance_service.create_for_schedule(
+                    db,
+                    schedule_id=entry.id,
+                    organization_id=organization_id,
+                    store_id=store_id,
+                    user_id=user_id,
+                    work_date=data.work_date,
+                    work_role_id=UUID(data.work_role_id) if data.work_role_id else None,
+                )
 
             result = await self._to_response(db, entry)
             await db.commit()
@@ -282,66 +319,70 @@ class ScheduleService:
         date_to: date,
         created_by: UUID,
     ) -> list[ScheduleResponse]:
-        """신청(accepted) 기반으로 스케줄 자동 생성."""
-        from app.repositories.schedule_request_repository import schedule_request_repository as sr_repo
-        requests, _ = await sr_repo.get_by_filters(
-            db, store_id=store_id, date_from=date_from, date_to=date_to, per_page=500
+        """requested 상태 스케줄을 confirmed로 일괄 전환 (새 행 생성 X)."""
+        from sqlalchemy import select
+        from app.models.schedule import Schedule as ScheduleModel
+
+        db_result = await db.execute(
+            select(ScheduleModel).where(
+                ScheduleModel.store_id == store_id,
+                ScheduleModel.organization_id == organization_id,
+                ScheduleModel.work_date >= date_from,
+                ScheduleModel.work_date <= date_to,
+                ScheduleModel.status == "requested",
+            ).order_by(ScheduleModel.work_date, ScheduleModel.start_time)
         )
+        pending = list(db_result.scalars().all())
 
         results = []
         try:
-            for req in requests:
-                if req.status not in ("submitted", "accepted"):
-                    continue
-                # Get work role defaults
-                start_time = req.preferred_start_time
-                end_time = req.preferred_end_time
-                break_start = None
-                break_end = None
+            for s in pending:
+                # work_role defaults로 fallback
+                start_time = s.start_time
+                end_time = s.end_time
+                break_start = s.break_start_time
+                break_end = s.break_end_time
 
-                if req.work_role_id:
-                    wr = await work_role_repository.get_by_id(db, req.work_role_id)
+                if s.work_role_id:
+                    wr = await work_role_repository.get_by_id(db, s.work_role_id)
                     if wr:
                         if start_time is None:
                             start_time = wr.default_start_time
                         if end_time is None:
                             end_time = wr.default_end_time
-                        break_start = wr.break_start_time
-                        break_end = wr.break_end_time
+                        if break_start is None:
+                            break_start = wr.break_start_time
+                        if break_end is None:
+                            break_end = wr.break_end_time
 
                 if start_time is None or end_time is None:
-                    continue  # Skip if no time info
+                    continue  # 시간 정보 없으면 건너뜀
 
                 net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
-                entry = await schedule_repository.create(db, {
-                    "organization_id": organization_id,
-                    "request_id": req.id,
-                    "user_id": req.user_id,
-                    "store_id": req.store_id,
-                    "work_role_id": req.work_role_id,
-                    "work_date": req.work_date,
+                # status만 confirmed로 변경 (새 행 생성 X)
+                entry = await schedule_repository.update(db, s.id, {
+                    "status": "confirmed",
                     "start_time": start_time,
                     "end_time": end_time,
                     "break_start_time": break_start,
                     "break_end_time": break_end,
                     "net_work_minutes": net,
-                    "status": "confirmed",
-                    "created_by": created_by,
+                    "approved_by": created_by,
                 })
 
                 # 체크리스트 인스턴스 자동 생성
                 from app.services.checklist_instance_service import checklist_instance_service
                 await checklist_instance_service.create_for_schedule(
                     db,
-                    schedule_id=entry.id,
+                    schedule_id=s.id,
                     organization_id=organization_id,
-                    store_id=req.store_id,
-                    user_id=req.user_id,
-                    work_date=req.work_date,
-                    work_role_id=req.work_role_id,
+                    store_id=s.store_id,
+                    user_id=s.user_id,
+                    work_date=s.work_date,
+                    work_role_id=s.work_role_id,
                 )
 
-                results.append(await self._to_response(db, entry))
+                results.append(await self._to_response(db, entry))  # type: ignore[arg-type]
             await db.commit()
             return results
         except Exception:
@@ -363,13 +404,20 @@ class ScheduleService:
         organization_id: UUID,
         data: ScheduleUpdate,
     ) -> ScheduleResponse:
+        from datetime import datetime, timezone
+
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
             raise NotFoundError("Schedule not found")
-        if entry.status == "cancelled":
-            raise BadRequestError("Cancelled schedules cannot be updated")
+        if entry.status in ("cancelled", "rejected"):
+            raise BadRequestError("Cancelled or rejected schedules cannot be updated")
 
         update_data: dict = {}
+        # requested 스케줄 수정 시 변경 이력 기록용
+        # Track modifications when editing a requested schedule
+        modification_entries: list[dict] = []
+        now_ts = datetime.now(timezone.utc).isoformat()
+
         new_user_id = entry.user_id
         new_work_date = entry.work_date
         new_start = entry.start_time
@@ -379,26 +427,101 @@ class ScheduleService:
 
         if data.user_id is not None:
             new_user_id = UUID(data.user_id)
+            if entry.status == "requested" and str(entry.user_id) != data.user_id:
+                modification_entries.append({
+                    "field": "user_id",
+                    "old_value": str(entry.user_id),
+                    "new_value": data.user_id,
+                    "modified_at": now_ts,
+                })
             update_data["user_id"] = new_user_id
         if data.work_date is not None:
             new_work_date = data.work_date
+            if entry.status == "requested" and entry.work_date != data.work_date:
+                modification_entries.append({
+                    "field": "work_date",
+                    "old_value": str(entry.work_date),
+                    "new_value": str(data.work_date),
+                    "modified_at": now_ts,
+                })
             update_data["work_date"] = new_work_date
         if data.work_role_id is not None:
+            if entry.status == "requested" and str(entry.work_role_id or "") != data.work_role_id:
+                modification_entries.append({
+                    "field": "work_role_id",
+                    "old_value": str(entry.work_role_id) if entry.work_role_id else None,
+                    "new_value": data.work_role_id,
+                    "modified_at": now_ts,
+                })
             update_data["work_role_id"] = UUID(data.work_role_id) if data.work_role_id else None
         if data.start_time is not None:
             new_start = self._parse_time(data.start_time)  # type: ignore[assignment]
+            if entry.status == "requested" and self._format_time(entry.start_time) != data.start_time:
+                modification_entries.append({
+                    "field": "start_time",
+                    "old_value": self._format_time(entry.start_time),
+                    "new_value": data.start_time,
+                    "modified_at": now_ts,
+                })
             update_data["start_time"] = new_start
         if data.end_time is not None:
             new_end = self._parse_time(data.end_time)  # type: ignore[assignment]
+            if entry.status == "requested" and self._format_time(entry.end_time) != data.end_time:
+                modification_entries.append({
+                    "field": "end_time",
+                    "old_value": self._format_time(entry.end_time),
+                    "new_value": data.end_time,
+                    "modified_at": now_ts,
+                })
             update_data["end_time"] = new_end
-        if data.break_start_time is not None:
-            new_break_start = self._parse_time(data.break_start_time)
+        # Break fields: explicitly sent null = clear break, sent value = update
+        if "break_start_time" in data.model_fields_set:
+            new_break_start = self._parse_time(data.break_start_time) if data.break_start_time else None
+            if entry.status == "requested" and self._format_time(entry.break_start_time) != data.break_start_time:
+                modification_entries.append({
+                    "field": "break_start_time",
+                    "old_value": self._format_time(entry.break_start_time),
+                    "new_value": data.break_start_time,
+                    "modified_at": now_ts,
+                })
             update_data["break_start_time"] = new_break_start
-        if data.break_end_time is not None:
-            new_break_end = self._parse_time(data.break_end_time)
+        if "break_end_time" in data.model_fields_set:
+            new_break_end = self._parse_time(data.break_end_time) if data.break_end_time else None
+            if entry.status == "requested" and self._format_time(entry.break_end_time) != data.break_end_time:
+                modification_entries.append({
+                    "field": "break_end_time",
+                    "old_value": self._format_time(entry.break_end_time),
+                    "new_value": data.break_end_time,
+                    "modified_at": now_ts,
+                })
             update_data["break_end_time"] = new_break_end
         if data.note is not None:
             update_data["note"] = data.note
+        if data.hourly_rate is not None:
+            update_data["hourly_rate"] = data.hourly_rate
+
+        # requested 스케줄에 변경 사항이 있으면 is_modified + modifications 업데이트
+        if entry.status == "requested" and modification_entries:
+            all_mods: list = (entry.modifications or []) + modification_entries
+            update_data["modifications"] = all_mods
+
+            # Check if all modified fields reverted to original → auto-clear is_modified
+            seen: dict[str, str | None] = {}
+            for mod in all_mods:
+                f = mod.get("field")
+                if f and f not in seen:
+                    seen[f] = mod.get("old_value")
+            all_reverted = bool(seen)
+            for field, orig_val in seen.items():
+                current = update_data.get(field, getattr(entry, field, None))
+                if str(current) if current is not None else None != orig_val:
+                    all_reverted = False
+                    break
+            if all_reverted:
+                update_data["is_modified"] = False
+                update_data["modifications"] = None
+            else:
+                update_data["is_modified"] = True
 
         if not update_data:
             return await self._to_response(db, entry)
@@ -441,6 +564,166 @@ class ScheduleService:
         except Exception:
             await db.rollback()
             raise
+
+    async def confirm_schedule(
+        self,
+        db: AsyncSession,
+        entry_id: UUID,
+        organization_id: UUID,
+        approved_by: UUID,
+    ) -> ScheduleResponse:
+        """requested → confirmed 전환. 체크리스트 인스턴스 없으면 생성."""
+        entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
+        if entry is None:
+            raise NotFoundError("Schedule not found")
+        if entry.status != "requested":
+            raise BadRequestError(f"Only requested schedules can be confirmed (current status: {entry.status})")
+
+        try:
+            updated = await schedule_repository.update(
+                db, entry_id,
+                {"status": "confirmed", "approved_by": approved_by},
+                organization_id,
+            )
+            if updated is None:
+                raise NotFoundError("Schedule not found")
+
+            # 체크리스트 인스턴스 없으면 생성
+            # Create checklist instance if not already present
+            from app.models.checklist import ChecklistInstance
+            from sqlalchemy import select as sa_select
+            existing = await db.execute(
+                sa_select(ChecklistInstance).where(
+                    ChecklistInstance.schedule_id == entry_id
+                )
+            )
+            if existing.scalar_one_or_none() is None:
+                from app.services.checklist_instance_service import checklist_instance_service
+                await checklist_instance_service.create_for_schedule(
+                    db,
+                    schedule_id=entry_id,
+                    organization_id=organization_id,
+                    store_id=updated.store_id,  # type: ignore[arg-type]
+                    user_id=updated.user_id,  # type: ignore[arg-type]
+                    work_date=updated.work_date,
+                    work_role_id=updated.work_role_id,
+                )
+
+            result = await self._to_response(db, updated)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def reject_schedule(
+        self,
+        db: AsyncSession,
+        entry_id: UUID,
+        organization_id: UUID,
+        data: ScheduleReject,
+    ) -> ScheduleResponse:
+        """requested → rejected 전환."""
+        entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
+        if entry is None:
+            raise NotFoundError("Schedule not found")
+        if entry.status != "requested":
+            raise BadRequestError(f"Only requested schedules can be rejected (current status: {entry.status})")
+
+        try:
+            updated = await schedule_repository.update(
+                db, entry_id,
+                {"status": "rejected", "rejection_reason": data.rejection_reason},
+                organization_id,
+            )
+            if updated is None:
+                raise NotFoundError("Schedule not found")
+            result = await self._to_response(db, updated)
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def bulk_confirm(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID,
+        date_from: date,
+        date_to: date,
+        approved_by: UUID,
+    ) -> ScheduleBulkConfirmResult:
+        """기간 내 모든 requested 스케줄을 일괄 confirmed로 전환.
+
+        같은 user+date에 이미 confirmed 스케줄이 있으면 겹침 여부를 확인하고 건너뜀.
+        """
+        # 해당 기간의 모든 requested 스케줄 조회
+        # Fetch all requested schedules in the date range
+        entries_result = await db.execute(
+            select(Schedule).where(
+                Schedule.organization_id == organization_id,
+                Schedule.store_id == store_id,
+                Schedule.work_date >= date_from,
+                Schedule.work_date <= date_to,
+                Schedule.status == "requested",
+            )
+        )
+        entries = list(entries_result.scalars().all())
+
+        confirmed = 0
+        skipped = 0
+        errors: list[str] = []
+
+        try:
+            for entry in entries:
+                # 같은 user+date에 이미 confirmed 스케줄이 있으면 건너뜀 (시간 겹침 체크)
+                # Skip if there is already a confirmed schedule for same user+date with overlapping time
+                if entry.start_time and entry.end_time:
+                    start_m = self._time_to_minutes(entry.start_time)
+                    end_m = self._time_to_minutes(entry.end_time)
+                    overlap = await schedule_repository.check_time_overlap(
+                        db, entry.user_id, entry.work_date, start_m, end_m, exclude_id=entry.id  # type: ignore[arg-type]
+                    )
+                    if overlap:
+                        skipped += 1
+                        errors.append(
+                            f"Schedule {entry.id} skipped: time overlap with existing confirmed schedule"
+                        )
+                        continue
+
+                entry.status = "confirmed"
+                entry.approved_by = approved_by
+                await db.flush()
+
+                # 체크리스트 인스턴스 없으면 생성
+                # Create checklist instance if not already present
+                from app.models.checklist import ChecklistInstance
+                existing_ci = await db.execute(
+                    select(ChecklistInstance).where(
+                        ChecklistInstance.schedule_id == entry.id
+                    )
+                )
+                if existing_ci.scalar_one_or_none() is None:
+                    from app.services.checklist_instance_service import checklist_instance_service
+                    await checklist_instance_service.create_for_schedule(
+                        db,
+                        schedule_id=entry.id,
+                        organization_id=organization_id,
+                        store_id=entry.store_id,  # type: ignore[arg-type]
+                        user_id=entry.user_id,  # type: ignore[arg-type]
+                        work_date=entry.work_date,
+                        work_role_id=entry.work_role_id,
+                    )
+
+                confirmed += 1
+
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+        return ScheduleBulkConfirmResult(confirmed=confirmed, skipped=skipped, errors=errors)
 
     async def validate_entry(
         self, db: AsyncSession, organization_id: UUID, data: ScheduleCreate,

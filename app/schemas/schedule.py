@@ -19,7 +19,8 @@ class WorkRoleCreate(BaseModel):
     default_end_time: str | None = None
     break_start_time: str | None = None
     break_end_time: str | None = None
-    required_headcount: int = 1
+    headcount: dict | None = None  # {"all": 1, "sun": 1, "mon": 1, ...}
+    use_per_day_headcount: bool = False
     default_checklist_id: str | None = None
     is_active: bool = True
     sort_order: int = 0
@@ -31,7 +32,8 @@ class WorkRoleUpdate(BaseModel):
     default_end_time: str | None = None
     break_start_time: str | None = None
     break_end_time: str | None = None
-    required_headcount: int | None = None
+    headcount: dict | None = None  # {"all": 1, "sun": 1, "mon": 1, ...}
+    use_per_day_headcount: bool | None = None
     default_checklist_id: str | None = None
     is_active: bool | None = None
     sort_order: int | None = None
@@ -49,7 +51,8 @@ class WorkRoleResponse(BaseModel):
     default_end_time: str | None
     break_start_time: str | None
     break_end_time: str | None
-    required_headcount: int
+    headcount: dict  # {"all": 1, "sun": 1, "mon": 1, ...}
+    use_per_day_headcount: bool
     default_checklist_id: str | None
     is_active: bool
     sort_order: int
@@ -213,6 +216,7 @@ class ScheduleRequestResponse(BaseModel):
     original_work_date: date | None = None
     created_by: str | None = None
     rejection_reason: str | None = None
+    hourly_rate: float = 0  # 신청 시급 (Resolved: user > store > org)
 
 
 class ScheduleRequestFromTemplate(BaseModel):
@@ -290,6 +294,7 @@ class ScheduleRequestAdminCreate(BaseModel):
     break_start_time: str | None = None
     break_end_time: str | None = None
     note: str | None = None
+    hourly_rate: float | None = None  # 시급 override (optional — auto-calculated if not provided)
 
 
 class ScheduleRequestAdminUpdate(BaseModel):
@@ -347,6 +352,8 @@ class ScheduleCreate(BaseModel):
     break_start_time: str | None = None
     break_end_time: str | None = None
     note: str | None = None
+    hourly_rate: float | None = None  # 시급 override (optional — auto-calculated if not provided)
+    status: str = "confirmed"  # "requested" for app submissions, "confirmed" for direct admin creation
     force: bool = False  # Override warnings
 
 
@@ -359,6 +366,7 @@ class ScheduleUpdate(BaseModel):
     break_start_time: str | None = None
     break_end_time: str | None = None
     note: str | None = None
+    hourly_rate: float | None = None  # 시급 override (optional)
     force: bool = False
 
 
@@ -382,8 +390,35 @@ class ScheduleResponse(BaseModel):
     created_by: str | None
     approved_by: str | None
     note: str | None
+    hourly_rate: float = 0  # 확정 시급 (Resolved hourly rate: provided > user > store > org)
+    submitted_at: datetime | None = None
+    is_modified: bool = False
+    rejection_reason: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ScheduleConfirm(BaseModel):
+    """Confirm a requested schedule — changes status from requested to confirmed."""
+    pass
+
+
+class ScheduleReject(BaseModel):
+    """Reject a requested schedule."""
+    rejection_reason: str | None = None
+
+
+class ScheduleBulkConfirm(BaseModel):
+    """Bulk confirm all requested schedules in a date range."""
+    store_id: str
+    date_from: date
+    date_to: date
+
+
+class ScheduleBulkConfirmResult(BaseModel):
+    confirmed: int = 0
+    skipped: int = 0
+    errors: list[str] = []
 
 
 class ScheduleBulkCreate(BaseModel):

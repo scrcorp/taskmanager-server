@@ -28,6 +28,7 @@ class ScheduleRepository(BaseRepository[Schedule]):
         page: int = 1,
         per_page: int = 100,
         sort_desc: bool = False,
+        exclude_cancelled: bool = False,
     ) -> tuple[Sequence[Schedule], int]:
         query: Select = select(Schedule).where(
             Schedule.organization_id == organization_id
@@ -42,6 +43,10 @@ class ScheduleRepository(BaseRepository[Schedule]):
             query = query.where(Schedule.work_date <= date_to)
         if status is not None:
             query = query.where(Schedule.status == status)
+        elif exclude_cancelled:
+            # status 미지정 + exclude_cancelled: cancelled/rejected 제외
+            # Exclude cancelled and rejected when no specific status is requested
+            query = query.where(Schedule.status.notin_(["cancelled", "rejected"]))
         if sort_desc:
             query = query.order_by(Schedule.work_date.desc(), Schedule.start_time.desc())
         else:
