@@ -37,6 +37,9 @@ class OrganizationUpdate(BaseModel):
     name: str | None = None  # 변경할 조직 이름 (New name, optional)
     is_active: bool | None = None  # 활성 상태 변경 (Activate/deactivate, optional)
     timezone: str | None = None  # IANA 타임존 (New timezone, optional)
+    day_start_time: str | None = None  # 하루 기준 시작 시각 HH:MM (optional)
+    weekly_overtime_limit: int | None = None  # 주간 OT 기준 시간 (optional)
+    default_hourly_rate: float | None = None  # 기본 시급 (Default hourly rate, optional)
 
 
 class OrganizationResponse(BaseModel):
@@ -55,6 +58,9 @@ class OrganizationResponse(BaseModel):
     name: str  # 조직 이름 (Organization name)
     code: str  # 회사 코드 (Company code for staff app login)
     timezone: str  # IANA 타임존 (Organization timezone)
+    day_start_time: str | None = None  # 하루 기준 시작 시각 (HH:MM)
+    weekly_overtime_limit: int = 40  # 주간 OT 기준 시간
+    default_hourly_rate: float = 0  # 기본 시급 (Default hourly rate)
     is_active: bool  # 활성 상태 (Active flag)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
@@ -75,6 +81,7 @@ class StoreCreate(BaseModel):
     name: str  # 매장 이름 (Store name)
     address: str | None = None  # 매장 주소 (Physical address, optional)
     timezone: str | None = None  # IANA 타임존 (Store timezone override, optional)
+    default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate, optional)
 
 
 class StoreUpdate(BaseModel):
@@ -96,6 +103,7 @@ class StoreUpdate(BaseModel):
     max_work_hours_weekly: int | None = None  # 주간 최대 근무시간 (Max weekly hours, optional)
     state_code: str | None = None  # 주(State) 코드 (US state code, optional)
     timezone: str | None = None  # IANA 타임존 (Store timezone override, optional)
+    default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate, optional)
 
 
 class StoreResponse(BaseModel):
@@ -123,6 +131,7 @@ class StoreResponse(BaseModel):
     max_work_hours_weekly: int | None = None  # 주간 최대 근무시간 (Max weekly hours)
     state_code: str | None = None  # 주(State) 코드 (US state code)
     timezone: str | None = None  # IANA 타임존 (Store timezone override)
+    default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 

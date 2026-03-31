@@ -55,7 +55,8 @@ class WorkRoleService:
             default_end_time=self._format_time(wr.default_end_time),
             break_start_time=self._format_time(wr.break_start_time),
             break_end_time=self._format_time(wr.break_end_time),
-            required_headcount=wr.required_headcount,
+            headcount=wr.headcount,
+            use_per_day_headcount=wr.use_per_day_headcount,
             default_checklist_id=str(wr.default_checklist_id)
             if wr.default_checklist_id
             else None,
@@ -113,7 +114,8 @@ class WorkRoleService:
                     "default_end_time": self._parse_time(data.default_end_time),
                     "break_start_time": self._parse_time(data.break_start_time),
                     "break_end_time": self._parse_time(data.break_end_time),
-                    "required_headcount": data.required_headcount,
+                    "headcount": data.headcount or {"all": 1, "sun": 1, "mon": 1, "tue": 1, "wed": 1, "thu": 1, "fri": 1, "sat": 1},
+                    "use_per_day_headcount": data.use_per_day_headcount,
                     "default_checklist_id": UUID(data.default_checklist_id)
                     if data.default_checklist_id
                     else None,
@@ -157,8 +159,10 @@ class WorkRoleService:
             update_data["break_start_time"] = self._parse_time(data.break_start_time)
         if data.break_end_time is not None:
             update_data["break_end_time"] = self._parse_time(data.break_end_time)
-        if data.required_headcount is not None:
-            update_data["required_headcount"] = data.required_headcount
+        if data.headcount is not None:
+            update_data["headcount"] = data.headcount
+        if data.use_per_day_headcount is not None:
+            update_data["use_per_day_headcount"] = data.use_per_day_headcount
         if data.default_checklist_id is not None:
             update_data["default_checklist_id"] = (
                 UUID(data.default_checklist_id) if data.default_checklist_id else None

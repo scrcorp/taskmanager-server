@@ -52,6 +52,7 @@ class StoreService:
             max_work_hours_weekly=store.max_work_hours_weekly,
             state_code=store.state_code,
             timezone=store.timezone,
+            default_hourly_rate=float(store.default_hourly_rate) if store.default_hourly_rate is not None else None,
             created_at=store.created_at,
         )
 
@@ -118,6 +119,7 @@ class StoreService:
             max_work_hours_weekly=store.max_work_hours_weekly,
             state_code=store.state_code,
             timezone=store.timezone,
+            default_hourly_rate=float(store.default_hourly_rate) if store.default_hourly_rate is not None else None,
             created_at=store.created_at,
             shifts=[
                 ShiftResponse(id=str(s.id), name=s.name, sort_order=s.sort_order)
@@ -165,6 +167,8 @@ class StoreService:
         }
         if data.timezone is not None:
             create_data["timezone"] = data.timezone
+        if data.default_hourly_rate is not None:
+            create_data["default_hourly_rate"] = data.default_hourly_rate
         try:
             store: Store = await store_repository.create(db, create_data)
             await db.commit()

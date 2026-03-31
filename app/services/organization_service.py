@@ -51,6 +51,9 @@ class OrganizationService:
             name=org.name,
             code=org.code,
             timezone=org.timezone,
+            day_start_time=org.day_start_time.strftime("%H:%M") if org.day_start_time else None,
+            weekly_overtime_limit=org.weekly_overtime_limit,
+            default_hourly_rate=float(org.default_hourly_rate),
             is_active=org.is_active,
             created_at=org.created_at,
         )
@@ -89,6 +92,9 @@ class OrganizationService:
                 name=org.name,
                 code=org.code,
                 timezone=org.timezone,
+                day_start_time=org.day_start_time.strftime("%H:%M") if org.day_start_time else None,
+                weekly_overtime_limit=org.weekly_overtime_limit,
+                default_hourly_rate=float(org.default_hourly_rate),
                 is_active=org.is_active,
                 created_at=org.created_at,
             )

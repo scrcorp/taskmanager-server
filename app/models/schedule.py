@@ -9,7 +9,8 @@ Tables:
 import uuid
 from datetime import date, datetime, time, timezone
 from typing import Optional
-from sqlalchemy import String, DateTime, Date, Time, Text, Boolean, Integer, ForeignKey, UniqueConstraint, Index, Uuid
+from sqlalchemy import String, DateTime, Date, Time, Text, Boolean, Integer, Numeric, ForeignKey, UniqueConstraint, Index, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -29,7 +30,10 @@ class StoreWorkRole(Base):
     default_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
     break_start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
     break_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    required_headcount: Mapped[int] = mapped_column(Integer, default=1)
+    # Headcount config — always stores all 8 keys: {"all": 3, "sun": 3, "mon": 3, ...}
+    # use_per_day_headcount=false → use "all", true → use day keys
+    headcount: Mapped[dict] = mapped_column(JSONB, nullable=False, default=lambda: {"all": 1, "sun": 1, "mon": 1, "tue": 1, "wed": 1, "thu": 1, "fri": 1, "sat": 1})
+    use_per_day_headcount: Mapped[bool] = mapped_column(Boolean, default=False)
     default_checklist_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("checklist_templates.id", ondelete="SET NULL"), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
@@ -139,6 +143,8 @@ class ScheduleRequest(Base):
     original_work_role_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="SET NULL"), nullable=True)
     original_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     original_work_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 확정 시급 — Effective hourly rate at request creation (auto-filled from user > store > org)
+    hourly_rate: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
     # ─── Admin metadata ───
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -150,15 +156,20 @@ class ScheduleRequest(Base):
 
 
 class Schedule(Base):
-    """확정 스케줄 — 최종 확정된 근무 스케줄.
+    """통합 스케줄 — 신청/확정/거절 모든 상태를 포함.
 
-    Status: confirmed / cancelled
+    Status: requested / confirmed / rejected / cancelled
+    - requested: staff가 앱에서 신청하거나 admin이 pending으로 생성
+    - confirmed: 확정된 근무 스케줄
+    - rejected: 거절된 스케줄
+    - cancelled: 취소된 스케줄 (confirmed 이후 취소)
     """
 
     __tablename__ = "schedules"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    # Legacy FK — will be removed after full migration from schedule_requests
     request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("schedule_requests.id", ondelete="SET NULL"), nullable=True)
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     store_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
@@ -169,14 +180,24 @@ class Schedule(Base):
     break_start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     break_end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     net_work_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    status: Mapped[str] = mapped_column(String(20), default="confirmed")  # confirmed/cancelled
+    # Status: requested / confirmed / rejected / cancelled
+    status: Mapped[str] = mapped_column(String(20), default="confirmed")
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 시급 — auto-filled from user > store > org cascade
+    hourly_rate: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
+    # Request-specific fields (from merged schedule_requests)
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_modified: Mapped[bool] = mapped_column(Boolean, default=False)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Modification history — JSONB array of {field, old_value, new_value, modified_by, modified_at}
+    modifications: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("ix_schedules_org_store_date", "organization_id", "store_id", "work_date"),
         Index("ix_schedules_user_date", "user_id", "work_date"),
+        Index("ix_schedules_status", "status"),
     )
