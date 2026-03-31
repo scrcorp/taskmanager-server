@@ -19,7 +19,7 @@ from app.schemas.common import ChecklistItemComplete, ChecklistItemRespond
 from app.services.checklist_instance_service import checklist_instance_service
 from app.services.schedule_service import schedule_service
 from app.utils.exceptions import ForbiddenError, NotFoundError
-from app.utils.timezone import get_store_timezone, resolve_timezone
+from app.utils.timezone import get_store_timezone, get_work_date, resolve_timezone
 
 router: APIRouter = APIRouter()
 
@@ -31,6 +31,7 @@ async def list_my_schedules(
     work_date: Annotated[date | None, Query()] = None,
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
+    past: Annotated[bool, Query()] = False,
     status: Annotated[str | None, Query()] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -41,13 +42,48 @@ async def list_my_schedules(
     List my confirmed schedules with checklist progress info.
     Default: only 'confirmed' status. Returns schedules with cl_instance data.
     Returns paginated response: { items, total, page, per_page }
+
+    Special: work_date=today → 사용자 소속 매장별 timezone+day_start_time 기준으로 "오늘" 판단.
     """
     effective_status = status or "confirmed"
 
     # 날짜 필터 결정
     effective_date_from = date_from
     effective_date_to = date_to
-    if work_date and not date_from and not date_to:
+
+    # 소속 매장별 timezone 기준으로 "오늘" 계산 (today/past 모드 공용)
+    from app.utils.timezone import get_store_day_config
+    from app.models.user_store import UserStore
+    from sqlalchemy import select
+    from datetime import timedelta
+
+    store_today_dates: set[date] | None = None
+
+    async def _get_store_today_dates() -> set[date]:
+        store_rows = await db.execute(
+            select(UserStore.store_id).where(UserStore.user_id == current_user.id)
+        )
+        user_store_ids = [row[0] for row in store_rows.all()]
+        dates: set[date] = set()
+        for sid in user_store_ids:
+            tz, day_start = await get_store_day_config(db, sid)
+            dates.add(get_work_date(tz, day_start))
+        return dates
+
+    if past:
+        # Past 모드: 넉넉한 범위로 조회 후 매장별 today 기준으로 필터
+        store_today_dates = await _get_store_today_dates()
+        if store_today_dates:
+            latest_today = max(store_today_dates)
+            effective_date_to = latest_today - timedelta(days=1)
+            effective_date_from = effective_date_to - timedelta(days=29)
+    elif work_date is None and date_from is None and date_to is None:
+        # Today 모드: 매장별 timezone 기준 오늘
+        store_today_dates = await _get_store_today_dates()
+        if store_today_dates:
+            effective_date_from = min(store_today_dates)
+            effective_date_to = max(store_today_dates)
+    elif work_date and not date_from and not date_to:
         effective_date_from = work_date
         effective_date_to = work_date
 
@@ -64,6 +100,28 @@ async def list_my_schedules(
         per_page=per_page,
         sort_desc=sort_desc,
     )
+
+    # 매장별 정밀 필터: today/past 모드에서 각 entry의 store today 기준으로 판단
+    if store_today_dates is not None and len(store_today_dates) > 1:
+        filtered_entries = []
+        for entry in entries:
+            if entry.store_id:
+                from uuid import UUID as UUIDType
+                sid = UUIDType(entry.store_id) if isinstance(entry.store_id, str) else entry.store_id
+                tz, day_start = await get_store_day_config(db, sid)
+                entry_store_today = get_work_date(tz, day_start)
+                if past:
+                    # Past: entry의 work_date가 해당 매장 today 이전이면 포함
+                    if entry.work_date < entry_store_today:
+                        filtered_entries.append(entry)
+                else:
+                    # Today: entry의 work_date가 해당 매장 today와 같으면 포함
+                    if entry.work_date == entry_store_today:
+                        filtered_entries.append(entry)
+            else:
+                filtered_entries.append(entry)
+        entries = filtered_entries
+        total = len(entries)
 
     # 각 스케줄에 cl_instance 진행 정보 병합
     items: list[dict] = []

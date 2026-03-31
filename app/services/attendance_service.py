@@ -191,13 +191,12 @@ class AttendanceService:
         now: datetime = datetime.now(timezone.utc)
         store_id: UUID = qr.store_id
 
-        # 타임존 해석 — Resolve effective timezone from store/org
-        from zoneinfo import ZoneInfo
-        from app.utils.timezone import get_store_timezone, resolve_timezone
-        store_tz: str = await get_store_timezone(db, store_id)
+        # 타임존 + 경계 시각 해석 — Resolve timezone and day boundary
+        from app.utils.timezone import get_store_day_config, get_work_date, resolve_timezone
+        store_tz, store_day_start = await get_store_day_config(db, store_id)
         effective_tz: str = resolve_timezone(client_timezone, store_tz)
         client_timezone = effective_tz
-        today: date = datetime.now(ZoneInfo(effective_tz)).date()
+        today: date = get_work_date(effective_tz, store_day_start, now)
 
         # 오늘의 근태 기록 조회/생성 — Get or create today's attendance record
         attendance: Attendance | None = await attendance_repository.get_user_today(db, user_id, today)
