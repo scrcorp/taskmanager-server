@@ -373,14 +373,10 @@ class ScheduleRequestService:
     ) -> ScheduleRequestResponse:
         store_id = UUID(data.store_id)
 
-        # Period 상태 체크: store_id + work_date로 period lookup
+        # Period 상태 체크: period가 있고 closed면 차단, 그 외는 허용
         period = await self._find_period_for_date(db, store_id, data.work_date)
-        if period is not None:
-            if period.status != "open":
-                raise BadRequestError("Request period is closed")
-        else:
-            # Period 없으면 날짜 기반 검증
-            self._validate_work_date_week(data.work_date)
+        if period is not None and period.status == "closed":
+            raise BadRequestError("Request period is closed")
 
         work_role_id = UUID(data.work_role_id) if data.work_role_id else None
 
@@ -668,11 +664,8 @@ class ScheduleRequestService:
         # Period 상태 체크
         work_date = data.work_date or schedule.work_date
         period = await self._find_period_for_date(db, schedule.store_id, work_date)  # type: ignore[arg-type]
-        if period is not None:
-            if period.status != "open":
-                raise BadRequestError("Requests in a closed period cannot be updated")
-        else:
-            self._validate_work_date_week(work_date)
+        if period is not None and period.status == "closed":
+            raise BadRequestError("Requests in a closed period cannot be updated")
 
         update_data: dict = {}
         if data.store_id is not None:
@@ -726,11 +719,8 @@ class ScheduleRequestService:
 
         # Period 상태 체크
         period = await self._find_period_for_date(db, schedule.store_id, schedule.work_date)  # type: ignore[arg-type]
-        if period is not None:
-            if period.status != "open":
-                raise BadRequestError("Requests in a closed period cannot be deleted")
-        else:
-            self._validate_work_date_week(schedule.work_date)
+        if period is not None and period.status == "closed":
+            raise BadRequestError("Requests in a closed period cannot be deleted")
 
         try:
             await schedule_repository.delete(db, request_id)
