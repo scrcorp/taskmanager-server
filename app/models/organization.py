@@ -127,6 +127,10 @@ class Store(Base):
     require_approval: Mapped[bool] = mapped_column(Boolean, default=True)
     # 운영시간 — Store operating hours as JSONB (e.g. {"mon": {"open": "09:00", "close": "22:00"}, ...})
     operating_hours: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 영업일 경계 시각 — Day boundary start time per weekday (JSONB)
+    # Format: {"all": "06:00"} or {"mon": "06:00", "tue": "07:00", ...}
+    # NOT operating hours — defines when a work day starts for attendance/schedule purposes.
+    day_start_time: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # 주간 최대 근무시간 — Maximum weekly work hours for this store
     max_work_hours_weekly: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 주(State) 코드 — US state code for labor law compliance (e.g. "CA", "NY")
