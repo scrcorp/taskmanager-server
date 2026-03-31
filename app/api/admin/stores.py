@@ -8,6 +8,7 @@ Permission Matrix (역할별 권한 설계):
     - 매장 목록/상세 조회: Owner 전체, GM 담당 매장, SV 소속 매장
 """
 
+from datetime import date
 from typing import Annotated
 from uuid import UUID
 
@@ -102,3 +103,25 @@ async def delete_store(
     """
     org_id: UUID = current_user.organization_id
     await store_service.delete_store(db, store_id, org_id)
+
+
+@router.get("/{store_id}/work-date")
+async def get_store_work_date(
+    store_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("stores:read"))],
+) -> dict:
+    """매장의 현재 work_date를 경계 시각 기준으로 반환합니다.
+
+    Get the current work_date for a store based on its day boundary config.
+    """
+    await check_store_access(db, current_user, store_id)
+    from app.utils.timezone import get_store_day_config, get_work_date
+    store_tz, day_start = await get_store_day_config(db, store_id)
+    work_date: date = get_work_date(store_tz, day_start)
+    return {
+        "store_id": str(store_id),
+        "work_date": str(work_date),
+        "timezone": store_tz,
+        "day_start_time": day_start,
+    }
