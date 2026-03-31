@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.organization import Organization, Store
-from app.models.schedule import Schedule, SchedulePeriod, ScheduleRequestTemplate, ScheduleRequestTemplateItem, StoreWorkRole
+from app.models.schedule import Schedule, ScheduleRequestTemplate, ScheduleRequestTemplateItem, StoreWorkRole
 from app.models.user import User
 from app.models.work import Shift, Position
 from app.repositories.request_template_repository import request_template_repository
@@ -282,21 +282,6 @@ class ScheduleRequestService:
 
     # ─── Request CRUD ───
 
-    async def _find_period_for_date(
-        self, db: AsyncSession, store_id: UUID, work_date: date_type,
-    ) -> SchedulePeriod | None:
-        """store_id + work_date로 해당 날짜를 포함하는 period 조회."""
-        result = await db.execute(
-            select(SchedulePeriod)
-            .where(
-                SchedulePeriod.store_id == store_id,
-                SchedulePeriod.period_start <= work_date,
-                SchedulePeriod.period_end >= work_date,
-            )
-            .limit(1)
-        )
-        return result.scalar_one_or_none()
-
     async def list_requests_for_user(
         self,
         db: AsyncSession,
@@ -350,33 +335,10 @@ class ScheduleRequestService:
         responses = [await self._schedule_to_request_response(db, s) for s in schedules]
         return responses, total
 
-    @staticmethod
-    def _get_week_sunday(d: date_type) -> date_type:
-        """해당 날짜가 속한 주의 일요일(주 시작일)을 반환. Sun=0 기준."""
-        # isoweekday(): Mon=1 ... Sun=7
-        days_since_sunday = d.isoweekday() % 7  # Sun=0, Mon=1, ..., Sat=6
-        return d - timedelta(days=days_since_sunday)
-
-    def _validate_work_date_week(self, work_date: date_type) -> None:
-        """날짜 기반 주간 검증: 지난 주/이번 주 신청 불가."""
-        today = datetime.now(timezone.utc).date()
-        work_week_sunday = self._get_week_sunday(work_date)
-        current_week_sunday = self._get_week_sunday(today)
-
-        if work_week_sunday < current_week_sunday:
-            raise BadRequestError("Cannot submit a request for a past week")
-        if work_week_sunday == current_week_sunday:
-            raise BadRequestError("Cannot submit a request for the current week")
-
     async def create_request(
         self, db: AsyncSession, user_id: UUID, data: ScheduleRequestCreate,
     ) -> ScheduleRequestResponse:
         store_id = UUID(data.store_id)
-
-        # Period 상태 체크: period가 있고 closed면 차단, 그 외는 허용
-        period = await self._find_period_for_date(db, store_id, data.work_date)
-        if period is not None and period.status == "closed":
-            raise BadRequestError("Request period is closed")
 
         work_role_id = UUID(data.work_role_id) if data.work_role_id else None
 
@@ -448,10 +410,6 @@ class ScheduleRequestService:
         on_conflict: str = "skip",
     ) -> ScheduleRequestFromTemplateResult:
         # schedules 테이블에 status='requested'로 생성
-        period = await self._find_period_for_date(db, store_id, date_from)
-        if period is not None and period.status != "open":
-            raise BadRequestError("Request period is closed")
-
         template = await request_template_repository.get_by_id(db, template_id)
         if template is None or template.user_id != user_id:
             raise NotFoundError("Template not found")
@@ -546,10 +504,6 @@ class ScheduleRequestService:
         on_conflict: str = "skip",
     ) -> ScheduleRequestFromTemplateResult:
         # schedules 테이블 기반으로 이전 기간 복사
-        period = await self._find_period_for_date(db, store_id, date_from)
-        if period is not None and period.status != "open":
-            raise BadRequestError("Request period is closed")
-
         # user의 organization_id 조회
         user_org_result = await db.execute(select(User.organization_id).where(User.id == user_id))
         organization_id: UUID | None = user_org_result.scalar()
@@ -661,12 +615,6 @@ class ScheduleRequestService:
         if schedule.status != "requested":
             raise BadRequestError("Only pending requests can be updated")
 
-        # Period 상태 체크
-        work_date = data.work_date or schedule.work_date
-        period = await self._find_period_for_date(db, schedule.store_id, work_date)  # type: ignore[arg-type]
-        if period is not None and period.status == "closed":
-            raise BadRequestError("Requests in a closed period cannot be updated")
-
         update_data: dict = {}
         if data.store_id is not None:
             update_data["store_id"] = UUID(data.store_id)
@@ -716,11 +664,6 @@ class ScheduleRequestService:
             raise NotFoundError("Request not found")
         if schedule.status != "requested":
             raise BadRequestError("Only pending requests can be deleted")
-
-        # Period 상태 체크
-        period = await self._find_period_for_date(db, schedule.store_id, schedule.work_date)  # type: ignore[arg-type]
-        if period is not None and period.status == "closed":
-            raise BadRequestError("Requests in a closed period cannot be deleted")
 
         try:
             await schedule_repository.delete(db, request_id)
