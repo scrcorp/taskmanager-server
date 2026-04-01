@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     SERVER_BASE_URL: str = ""
 
     # Admin 콘솔 베이스 URL — 이메일 링크 등에서 사용
-    ADMIN_BASE_URL: str = "https://taskmanager-admin.vercel.app"
+    ADMIN_BASE_URL: str = "https://console.hermesops.site"
 
     model_config = {"env_file": _ENV_FILE, "env_file_encoding": "utf-8"}
 
