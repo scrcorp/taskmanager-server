@@ -14,7 +14,7 @@ import uuid
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text, ForeignKey, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, Date, DateTime, Index, Integer, String, Text, ForeignKey, UniqueConstraint, Uuid
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -133,6 +133,7 @@ class Attendance(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "work_date", name="uq_attendance_user_date"),
+        Index("ix_attendances_schedule_id", "schedule_id"),
     )
 
 
