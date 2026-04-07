@@ -15,6 +15,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text, ForeignKey, UniqueConstraint, Uuid
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -62,7 +63,8 @@ class Attendance(Base):
     One record per user per work date. Tracks clock-in, break, and clock-out times
     with timezone information and auto-calculated work/break durations.
 
-    Status flow: clocked_in -> on_break -> clocked_in -> clocked_out
+    Status flow: not_yet → working → on_break → working → clocked_out
+                 (late, no_show as alternates)
 
     Attributes:
         id: 고유 식별자 UUID (Unique identifier)
@@ -98,6 +100,8 @@ class Attendance(Base):
     store_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
     # 사용자 FK — User who recorded attendance (SET NULL: 사용자 삭제 시 null)
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # 연결된 스케줄 FK — Linked schedule (nullable: 스케줄 없이 출근한 edge case 허용)
+    schedule_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True)
     # 근무 날짜 — Date of attendance (date only, no time)
     work_date: Mapped[date] = mapped_column(Date, nullable=False)
     # 출근 시각 — Clock-in timestamp with timezone
@@ -112,8 +116,10 @@ class Attendance(Base):
     clock_out: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 퇴근 타임존 — IANA timezone at clock-out
     clock_out_timezone: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # 상태 — Status: "clocked_in" → "on_break" → "clocked_in" → "clocked_out"
-    status: Mapped[str] = mapped_column(String(20), default="clocked_in")
+    # 상태 — Status: not_yet/working/on_break/late/clocked_out/no_show
+    status: Mapped[str] = mapped_column(String(20), default="not_yet")
+    # 이상 항목 — anomaly flags: ['late', 'early_leave', 'no_break', 'overtime', 'no_show']
+    anomalies: Mapped[list[str] | None] = mapped_column(ARRAY(String(30)), nullable=True)
     # 총 근무 시간(분) — Auto-calculated on clock_out: (clock_out - clock_in) in minutes
     total_work_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 총 휴식 시간(분) — Auto-calculated: (break_end - break_start) in minutes
