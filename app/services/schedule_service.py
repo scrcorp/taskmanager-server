@@ -538,7 +538,12 @@ class ScheduleService:
                     "new_value": data.work_role_id,
                     "modified_at": now_ts,
                 })
-            update_data["work_role_id"] = UUID(data.work_role_id) if data.work_role_id else None
+            new_work_role_uuid = UUID(data.work_role_id) if data.work_role_id else None
+            update_data["work_role_id"] = new_work_role_uuid
+            # Snapshot 재계산 — work_role 변경 시 name/position을 새 값으로 갱신
+            wr_name_snap, pos_snap = await self._resolve_work_role_snapshot(db, new_work_role_uuid)
+            update_data["work_role_name_snapshot"] = wr_name_snap
+            update_data["position_snapshot"] = pos_snap
         if data.start_time is not None:
             new_start = self._parse_time(data.start_time)  # type: ignore[assignment]
             if entry.status == "requested" and self._format_time(entry.start_time) != data.start_time:
