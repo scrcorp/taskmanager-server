@@ -732,6 +732,7 @@ class AttendanceResponse(BaseModel):
     store_name: str | None = None  # 매장 이름 — 조인된 값 (Store name, resolved)
     user_id: str  # 사용자 UUID 문자열 (User UUID as string)
     user_name: str | None = None  # 사용자 이름 — 조인된 값 (User name, resolved)
+    schedule_id: str | None = None  # 연결된 스케줄 UUID (Linked schedule, nullable)
     work_date: date  # 근무 날짜 (Work date)
     clock_in: datetime | None  # 출근 시각 (Clock-in timestamp)
     clock_in_timezone: str | None  # 출근 타임존 (Clock-in timezone)
@@ -739,7 +740,8 @@ class AttendanceResponse(BaseModel):
     break_end: datetime | None  # 휴식 종료 (Break end)
     clock_out: datetime | None  # 퇴근 시각 (Clock-out timestamp)
     clock_out_timezone: str | None  # 퇴근 타임존 (Clock-out timezone)
-    status: str  # 상태 — "clocked_in"|"on_break"|"clocked_out" (Attendance status)
+    status: str  # 상태 — not_yet/working/on_break/late/clocked_out/no_show
+    anomalies: list[str] | None = None  # ['late', 'early_leave', 'no_break', 'overtime', 'no_show']
     total_work_minutes: int | None  # 총 근무 시간(분) (Total work minutes)
     total_break_minutes: int | None  # 총 휴식 시간(분) (Total break minutes)
     net_work_minutes: int | None = None  # 순 근무 시간(분) = total - break (Net work minutes)

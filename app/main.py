@@ -65,6 +65,42 @@ app.mount("/bucket", StaticFiles(directory=str(BUCKET_DIR)), name="bucket")
 
 
 # ---------------------------------------------------------------------------
+# Startup: APScheduler — attendance state cron (every 1 min)
+# ---------------------------------------------------------------------------
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # noqa: E402
+from apscheduler.triggers.interval import IntervalTrigger  # noqa: E402
+
+scheduler: AsyncIOScheduler = AsyncIOScheduler()
+
+
+@app.on_event("startup")
+async def start_scheduler() -> None:
+    """APScheduler 시작 — attendance 자동 상태 전환 cron."""
+    import logging
+    from app.services.attendance_cron_service import run_attendance_state_tick
+
+    logger = logging.getLogger("uvicorn.error")
+    if not scheduler.running:
+        scheduler.add_job(
+            run_attendance_state_tick,
+            trigger=IntervalTrigger(minutes=1),
+            id="attendance_state_tick",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.start()
+        logger.info("[scheduler] APScheduler started with attendance_state_tick job")
+
+
+@app.on_event("shutdown")
+async def stop_scheduler() -> None:
+    """APScheduler 종료."""
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
 # Startup: ensure all organizations have a default daily report template
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
