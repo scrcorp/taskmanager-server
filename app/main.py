@@ -101,6 +101,54 @@ async def stop_scheduler() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Startup: Settings Registry seed (upsert missing entries)
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def seed_settings_registry() -> None:
+    """SETTINGS_SEED 정의를 settings_registry 테이블에 upsert.
+
+    이미 존재하는 키는 건드리지 않는다 (사용자가 수정했을 수 있음).
+    새로 추가된 키만 INSERT.
+    """
+    import logging
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.settings import SettingsRegistry
+    from app.seeds.settings_seed import SETTINGS_SEED
+
+    logger = logging.getLogger("uvicorn.error")
+    try:
+        async with async_session() as db:
+            # 기존 키 목록
+            existing_result = await db.execute(select(SettingsRegistry.key))
+            existing_keys = {row[0] for row in existing_result.all()}
+
+            inserted = 0
+            for definition in SETTINGS_SEED:
+                if definition.key in existing_keys:
+                    continue
+                entry = SettingsRegistry(
+                    key=definition.key,
+                    label=definition.label,
+                    description=definition.description,
+                    value_type=definition.value_type,
+                    levels=definition.levels,
+                    default_priority=definition.default_priority,
+                    default_value=definition.default_value,
+                    validation_schema=definition.validation_schema,
+                    category=definition.category,
+                )
+                db.add(entry)
+                inserted += 1
+
+            if inserted > 0:
+                await db.commit()
+                logger.info(f"[settings_seed] Inserted {inserted} new registry entries")
+    except Exception as e:
+        logger.warning(f"Failed to seed settings registry: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Startup: ensure all organizations have a default daily report template
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
