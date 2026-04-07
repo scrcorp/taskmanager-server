@@ -382,13 +382,13 @@ class ScheduleConfirm(BaseModel):
 
 
 class ScheduleReject(BaseModel):
-    """Reject a requested schedule. Reason is required."""
-    rejection_reason: str
+    """Reject a requested schedule. Reason optional (nullable)."""
+    rejection_reason: str | None = None
 
 
 class ScheduleCancel(BaseModel):
-    """Cancel a confirmed schedule (GM+ only). Reason is required."""
-    cancellation_reason: str
+    """Cancel a confirmed schedule (GM+ only). Reason optional (nullable)."""
+    cancellation_reason: str | None = None
 
 
 class ScheduleSwap(BaseModel):

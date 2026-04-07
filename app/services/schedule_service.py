@@ -743,8 +743,6 @@ class ScheduleService:
             raise NotFoundError("Schedule not found")
         if entry.status != "requested":
             raise BadRequestError(f"Only requested schedules can be rejected (current status: {entry.status})")
-        if not data.rejection_reason or not data.rejection_reason.strip():
-            raise BadRequestError("rejection_reason is required")
 
         try:
             updated = await schedule_repository.update(
@@ -846,10 +844,8 @@ class ScheduleService:
         data: ScheduleCancel,
         actor: User,
     ) -> ScheduleResponse:
-        """confirmed → cancelled 전환 (GM+ only, 사유 필수)."""
+        """confirmed → cancelled 전환 (GM+ only). 사유는 권장(nullable)."""
         self._require_gm_or_above(actor, "cancel confirmed schedule")
-        if not data.cancellation_reason or not data.cancellation_reason.strip():
-            raise BadRequestError("cancellation_reason is required")
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
             raise NotFoundError("Schedule not found")
