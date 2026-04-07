@@ -349,6 +349,9 @@ class ScheduleResponse(BaseModel):
     store_name: str | None = None
     work_role_id: str | None
     work_role_name: str | None = None
+    # Snapshot — preserved at creation time, immune to later renames
+    work_role_name_snapshot: str | None = None
+    position_snapshot: str | None = None
     work_date: date
     start_time: str | None
     end_time: str | None
@@ -358,11 +361,17 @@ class ScheduleResponse(BaseModel):
     status: str
     created_by: str | None
     approved_by: str | None
+    confirmed_at: datetime | None = None
     note: str | None
     hourly_rate: float = 0  # 확정 시급 (Resolved hourly rate: provided > user > store > org)
     submitted_at: datetime | None = None
     is_modified: bool = False
+    rejected_by: str | None = None
+    rejected_at: datetime | None = None
     rejection_reason: str | None = None
+    cancelled_by: str | None = None
+    cancelled_at: datetime | None = None
+    cancellation_reason: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -373,8 +382,32 @@ class ScheduleConfirm(BaseModel):
 
 
 class ScheduleReject(BaseModel):
-    """Reject a requested schedule."""
-    rejection_reason: str | None = None
+    """Reject a requested schedule. Reason is required."""
+    rejection_reason: str
+
+
+class ScheduleCancel(BaseModel):
+    """Cancel a confirmed schedule (GM+ only). Reason is required."""
+    cancellation_reason: str
+
+
+class ScheduleSwap(BaseModel):
+    """Swap two confirmed schedules' assigned users (GM+ only)."""
+    other_schedule_id: str
+    reason: str | None = None
+
+
+class ScheduleAuditLogResponse(BaseModel):
+    id: str
+    schedule_id: str
+    event_type: str
+    actor_id: str | None = None
+    actor_name: str | None = None
+    actor_role: str | None = None
+    timestamp: datetime
+    description: str | None = None
+    reason: str | None = None
+    diff: dict | None = None
 
 
 class ScheduleBulkConfirm(BaseModel):
