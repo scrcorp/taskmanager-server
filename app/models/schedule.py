@@ -61,28 +61,6 @@ class StoreBreakRule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
-class SchedulePeriod(Base):
-    """스케줄 기간 — 신청/편성 기간 관리. Status: open → closed → sv_draft → gm_review → finalized"""
-
-    __tablename__ = "schedule_periods"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
-    period_start: Mapped[date] = mapped_column(Date, nullable=False)
-    period_end: Mapped[date] = mapped_column(Date, nullable=False)
-    request_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="open")
-    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-    __table_args__ = (
-        Index("ix_schedule_periods_org_store", "organization_id", "store_id"),
-        Index("ix_schedule_periods_dates", "store_id", "period_start", "period_end"),
-    )
-
-
 class ScheduleRequestTemplate(Base):
     """스케줄 신청 템플릿 — 직원의 주간 근무 선호도 저장."""
 

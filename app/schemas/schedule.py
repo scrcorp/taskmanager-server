@@ -90,37 +90,6 @@ class BreakRuleResponse(BaseModel):
     updated_at: datetime
 
 
-# ─── Schedule Period ─────────────────────────────────
-
-
-class SchedulePeriodCreate(BaseModel):
-    store_id: str
-    period_start: date
-    period_end: date
-    request_deadline: datetime | None = None
-
-
-class SchedulePeriodUpdate(BaseModel):
-    period_start: date | None = None
-    period_end: date | None = None
-    request_deadline: datetime | None = None
-
-
-class SchedulePeriodResponse(BaseModel):
-    id: str
-    organization_id: str
-    store_id: str
-    store_name: str | None = None
-    period_start: date
-    period_end: date
-    request_deadline: datetime | None
-    status: str
-    created_by: str | None
-    created_by_name: str | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
 # ─── Schedule Request Template ───────────────────────
 
 

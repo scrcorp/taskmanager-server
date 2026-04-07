@@ -72,10 +72,9 @@ from app.api.admin.template_links import router as template_links_router
 # Phase 10 — Voices 라우터 임포트
 from app.api.admin.voices import router as voices_router
 
-# Schedule System — Work Roles + Break Rules + Schedule Periods 라우터 임포트
+# Schedule System — Work Roles + Break Rules + Schedules 라우터 임포트
 from app.api.admin.work_roles import router as work_roles_router
 from app.api.admin.break_rules import router as break_rules_router
-from app.api.admin.schedule_periods import router as schedule_periods_router
 from app.api.admin.schedule_requests import router as schedule_requests_router
 from app.api.admin.schedules import router as schedule_entries_router
 
@@ -181,7 +180,6 @@ admin_router.include_router(daily_report_templates_router, prefix="/daily-report
 # ---------------------------------------------------------------------------
 admin_router.include_router(work_roles_router, tags=["Work Roles"])
 admin_router.include_router(break_rules_router, tags=["Break Rules"])
-admin_router.include_router(schedule_periods_router, prefix="/schedule-periods", tags=["Schedule Periods"])
 admin_router.include_router(schedule_requests_router, prefix="/schedule-requests", tags=["Schedule Requests"])
 admin_router.include_router(schedule_entries_router, prefix="/schedules", tags=["Schedules"])
 
