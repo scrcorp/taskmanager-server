@@ -183,6 +183,10 @@ admin_router.include_router(break_rules_router, tags=["Break Rules"])
 admin_router.include_router(schedule_requests_router, prefix="/schedule-requests", tags=["Schedule Requests"])
 admin_router.include_router(schedule_entries_router, prefix="/schedules", tags=["Schedules"])
 
+# Settings (Registry + Org/Store/Staff overrides)
+from app.api.admin.settings import router as settings_router  # noqa: E402
+admin_router.include_router(settings_router, prefix="/settings", tags=["Settings"])
+
 # ---------------------------------------------------------------------------
 # Storage 라우터 등록 — S3 presigned URL
 # ---------------------------------------------------------------------------
