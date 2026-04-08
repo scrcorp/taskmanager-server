@@ -87,6 +87,18 @@ def require_permission(*permission_codes: str) -> Callable[..., Awaitable[User]]
     return _check
 
 
+def hide_cost_for(user: User) -> bool:
+    """SV 이상(priority > 20)이면 cost(hourly_rate) 정보 숨김."""
+    return (user.role.priority if user.role else 999) > 20
+
+
+def scrub_cost_fields(obj: object, fields: tuple[str, ...] = ("hourly_rate", "default_hourly_rate", "effective_hourly_rate")) -> None:
+    """response 객체의 cost 관련 필드를 None으로 설정 (SV/Staff용)."""
+    for f in fields:
+        if hasattr(obj, f):
+            setattr(obj, f, None)
+
+
 async def get_accessible_store_ids(
     db: AsyncSession, user: User
 ) -> list[UUID] | None:

@@ -196,6 +196,10 @@ class AuthService:
 
         role: Role = user.role
 
+        # Staff(priority >= 40) 차단 — admin login은 SV 이상만
+        if role.priority >= 40:
+            raise ForbiddenError("Staff accounts cannot sign in to admin")
+
         # permission이 없으면 관리자 로그인 불가
         from app.repositories.permission_repository import permission_repository
         user_permissions = await permission_repository.get_permissions_by_role_id(db, user.role_id)

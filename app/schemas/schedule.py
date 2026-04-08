@@ -90,37 +90,6 @@ class BreakRuleResponse(BaseModel):
     updated_at: datetime
 
 
-# ─── Schedule Period ─────────────────────────────────
-
-
-class SchedulePeriodCreate(BaseModel):
-    store_id: str
-    period_start: date
-    period_end: date
-    request_deadline: datetime | None = None
-
-
-class SchedulePeriodUpdate(BaseModel):
-    period_start: date | None = None
-    period_end: date | None = None
-    request_deadline: datetime | None = None
-
-
-class SchedulePeriodResponse(BaseModel):
-    id: str
-    organization_id: str
-    store_id: str
-    store_name: str | None = None
-    period_start: date
-    period_end: date
-    request_deadline: datetime | None
-    status: str
-    created_by: str | None
-    created_by_name: str | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
 # ─── Schedule Request Template ───────────────────────
 
 
@@ -216,7 +185,7 @@ class ScheduleRequestResponse(BaseModel):
     original_work_date: date | None = None
     created_by: str | None = None
     rejection_reason: str | None = None
-    hourly_rate: float = 0  # 신청 시급 (Resolved: user > store > org)
+    hourly_rate: float | None = 0  # 신청 시급 (Resolved). SV/Staff에는 redact되어 None.
 
 
 class ScheduleRequestFromTemplate(BaseModel):
@@ -380,6 +349,9 @@ class ScheduleResponse(BaseModel):
     store_name: str | None = None
     work_role_id: str | None
     work_role_name: str | None = None
+    # Snapshot — preserved at creation time, immune to later renames
+    work_role_name_snapshot: str | None = None
+    position_snapshot: str | None = None
     work_date: date
     start_time: str | None
     end_time: str | None
@@ -389,11 +361,17 @@ class ScheduleResponse(BaseModel):
     status: str
     created_by: str | None
     approved_by: str | None
+    confirmed_at: datetime | None = None
     note: str | None
-    hourly_rate: float = 0  # 확정 시급 (Resolved hourly rate: provided > user > store > org)
+    hourly_rate: float | None = 0  # 확정 시급 (Resolved hourly rate). SV/Staff에는 redact되어 None.
     submitted_at: datetime | None = None
     is_modified: bool = False
+    rejected_by: str | None = None
+    rejected_at: datetime | None = None
     rejection_reason: str | None = None
+    cancelled_by: str | None = None
+    cancelled_at: datetime | None = None
+    cancellation_reason: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -404,8 +382,63 @@ class ScheduleConfirm(BaseModel):
 
 
 class ScheduleReject(BaseModel):
-    """Reject a requested schedule."""
+    """Reject a requested schedule. Reason optional (nullable)."""
     rejection_reason: str | None = None
+
+
+class ScheduleCancel(BaseModel):
+    """Cancel a confirmed schedule (GM+ only). Reason optional (nullable)."""
+    cancellation_reason: str | None = None
+
+
+class ScheduleSwap(BaseModel):
+    """Swap two confirmed schedules' assigned users (GM+ only)."""
+    other_schedule_id: str
+    reason: str | None = None
+
+
+class ScheduleAuditLogResponse(BaseModel):
+    id: str
+    schedule_id: str
+    event_type: str
+    actor_id: str | None = None
+    actor_name: str | None = None
+    actor_role: str | None = None
+    timestamp: datetime
+    description: str | None = None
+    reason: str | None = None
+    diff: dict | None = None
+
+
+class ScheduleHistoryItem(BaseModel):
+    """집계 history 응답 — audit log + schedule snapshot 일부."""
+    id: str
+    schedule_id: str
+    event_type: str
+    actor_id: str | None = None
+    actor_name: str | None = None
+    actor_role: str | None = None
+    timestamp: datetime
+    description: str | None = None
+    reason: str | None = None
+    diff: dict | None = None
+    # Schedule snapshot
+    work_date: date
+    start_time: str | None = None
+    end_time: str | None = None
+    user_id: str
+    user_name: str | None = None
+    store_id: str
+    store_name: str | None = None
+    schedule_status: str
+    work_role_name: str | None = None
+
+
+class ScheduleHistoryListResponse(BaseModel):
+    items: list[ScheduleHistoryItem]
+    total: int
+    page: int
+    per_page: int
 
 
 class ScheduleBulkConfirm(BaseModel):

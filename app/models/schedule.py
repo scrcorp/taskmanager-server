@@ -61,28 +61,6 @@ class StoreBreakRule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
-class SchedulePeriod(Base):
-    """스케줄 기간 — 신청/편성 기간 관리. Status: open → closed → sv_draft → gm_review → finalized"""
-
-    __tablename__ = "schedule_periods"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
-    period_start: Mapped[date] = mapped_column(Date, nullable=False)
-    period_end: Mapped[date] = mapped_column(Date, nullable=False)
-    request_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="open")
-    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-    __table_args__ = (
-        Index("ix_schedule_periods_org_store", "organization_id", "store_id"),
-        Index("ix_schedule_periods_dates", "store_id", "period_start", "period_end"),
-    )
-
-
 class ScheduleRequestTemplate(Base):
     """스케줄 신청 템플릿 — 직원의 주간 근무 선호도 저장."""
 
@@ -158,11 +136,12 @@ class ScheduleRequest(Base):
 class Schedule(Base):
     """통합 스케줄 — 신청/확정/거절 모든 상태를 포함.
 
-    Status: requested / confirmed / rejected / cancelled
+    Status: draft / requested / confirmed / rejected / cancelled
+    - draft: admin이 임시 저장한 스케줄 (제출 전)
     - requested: staff가 앱에서 신청하거나 admin이 pending으로 생성
     - confirmed: 확정된 근무 스케줄
-    - rejected: 거절된 스케줄
-    - cancelled: 취소된 스케줄 (confirmed 이후 취소)
+    - rejected: 거절된 스케줄 (final, read-only)
+    - cancelled: 취소된 스케줄 (confirmed 이후 취소, GM+ 만, final)
     """
 
     __tablename__ = "schedules"
@@ -174,24 +153,35 @@ class Schedule(Base):
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     store_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
     work_role_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="SET NULL"), nullable=True)
+    # Work Role snapshot — work role 이름/포지션이 변경/삭제되어도 스케줄 시점의 값을 보존
+    work_role_name_snapshot: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    position_snapshot: Mapped[str | None] = mapped_column(String(100), nullable=True)
     work_date: Mapped[date] = mapped_column(Date, nullable=False)
     start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     break_start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     break_end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     net_work_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    # Status: requested / confirmed / rejected / cancelled
+    # Status: draft / requested / confirmed / rejected / cancelled
     status: Mapped[str] = mapped_column(String(20), default="confirmed")
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 시급 — auto-filled from user > store > org cascade
     hourly_rate: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
     # Request-specific fields (from merged schedule_requests)
     submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     is_modified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Reject metadata
+    rejected_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Modification history — JSONB array of {field, old_value, new_value, modified_by, modified_at}
+    # Cancel metadata (GM+ 만, confirmed → cancelled)
+    cancelled_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Legacy modification history — 새 변경은 schedule_audit_logs를 사용. 데이터는 마이그레이션됨.
     modifications: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -200,4 +190,28 @@ class Schedule(Base):
         Index("ix_schedules_org_store_date", "organization_id", "store_id", "work_date"),
         Index("ix_schedules_user_date", "user_id", "work_date"),
         Index("ix_schedules_status", "status"),
+    )
+
+
+class ScheduleAuditLog(Base):
+    """스케줄 변경 이력 — Schedule의 모든 상태 변경/수정/취소 등을 audit trail로 기록.
+
+    Event types: created, requested, modified, confirmed, rejected, cancelled, reverted, swapped, deleted
+    """
+
+    __tablename__ = "schedule_audit_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    schedule_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("schedules.id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    actor_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # diff: {field: {old, new}} — modifications 용
+    diff: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    __table_args__ = (
+        Index("ix_schedule_audit_logs_schedule_ts", "schedule_id", "timestamp"),
     )

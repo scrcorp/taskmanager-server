@@ -18,7 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import (
     check_store_access,
     get_accessible_store_ids,
+    hide_cost_for,
     require_permission,
+    scrub_cost_fields,
 )
 from app.database import get_db
 from app.models.user import User
@@ -44,7 +46,11 @@ async def list_stores(
     """
     org_id: UUID = current_user.organization_id
     accessible = await get_accessible_store_ids(db, current_user)
-    return await store_service.list_stores(db, org_id, accessible_store_ids=accessible)
+    stores = await store_service.list_stores(db, org_id, accessible_store_ids=accessible)
+    if hide_cost_for(current_user):
+        for s in stores:
+            scrub_cost_fields(s)
+    return stores
 
 
 @router.get("/{store_id}", response_model=StoreDetailResponse)
@@ -59,7 +65,10 @@ async def get_store(
     """
     await check_store_access(db, current_user, store_id)
     org_id: UUID = current_user.organization_id
-    return await store_service.get_store(db, store_id, org_id)
+    store = await store_service.get_store(db, store_id, org_id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(store)
+    return store
 
 
 @router.post("", response_model=StoreResponse, status_code=201)
@@ -73,7 +82,10 @@ async def create_store(
     Create a new store in the current organization. Owner only.
     """
     org_id: UUID = current_user.organization_id
-    return await store_service.create_store(db, org_id, data)
+    store = await store_service.create_store(db, org_id, data)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(store)
+    return store
 
 
 @router.put("/{store_id}", response_model=StoreResponse)
@@ -88,7 +100,10 @@ async def update_store(
     Update an existing store. Owner only.
     """
     org_id: UUID = current_user.organization_id
-    return await store_service.update_store(db, store_id, org_id, data)
+    store = await store_service.update_store(db, store_id, org_id, data)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(store)
+    return store
 
 
 @router.delete("/{store_id}", status_code=204)
