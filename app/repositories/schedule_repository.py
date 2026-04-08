@@ -22,6 +22,7 @@ class ScheduleRepository(BaseRepository[Schedule]):
         organization_id: UUID,
         store_id: UUID | None = None,
         user_id: UUID | None = None,
+        user_ids: list[UUID] | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
         status: str | None = None,
@@ -37,6 +38,8 @@ class ScheduleRepository(BaseRepository[Schedule]):
             query = query.where(Schedule.store_id == store_id)
         if user_id is not None:
             query = query.where(Schedule.user_id == user_id)
+        if user_ids:
+            query = query.where(Schedule.user_id.in_(user_ids))
         if date_from is not None:
             query = query.where(Schedule.work_date >= date_from)
         if date_to is not None:

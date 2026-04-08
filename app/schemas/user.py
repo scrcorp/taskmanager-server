@@ -107,7 +107,8 @@ class UserResponse(BaseModel):
     email: str | None  # 이메일 (Email, may be null)
     role_name: str  # 역할 이름 — 조인된 값 (Role name, resolved from Role table)
     role_priority: int  # 역할 우선순위 — 조인된 값
-    hourly_rate: float | None = None  # 개인 시급 (Personal hourly rate)
+    hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속 (None = inherit from store/org)
+    effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
@@ -131,7 +132,8 @@ class UserListResponse(BaseModel):
     full_name: str  # 실명 (Full display name)
     role_name: str  # 역할 이름 — 조인된 값 (Role name, resolved from Role table)
     role_priority: int  # 역할 우선순위 — 조인된 값
-    hourly_rate: float | None = None  # 개인 시급 (Personal hourly rate)
+    hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속
+    effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 

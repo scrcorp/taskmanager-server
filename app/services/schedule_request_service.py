@@ -289,11 +289,12 @@ class ScheduleRequestService:
         date_from: date_type | None = None,
         date_to: date_type | None = None,
     ) -> list[ScheduleRequestResponse]:
-        # schedules 테이블에서 requested/rejected 상태의 스케줄 조회
-        # (confirmed는 /schedules 엔드포인트에서 별도 조회)
+        # schedules 테이블에서 requested 상태만 staff에게 노출.
+        # rejected/cancelled는 staff app에서 숨김 (history에만 남음).
+        # confirmed는 /schedules 엔드포인트에서 별도 조회.
         query = select(Schedule).where(
             Schedule.user_id == user_id,
-            Schedule.status.in_(["requested", "rejected"]),
+            Schedule.status == "requested",
         )
         if date_from is not None:
             query = query.where(Schedule.work_date >= date_from)

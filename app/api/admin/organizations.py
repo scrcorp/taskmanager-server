@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_permission
+from app.api.deps import hide_cost_for, require_permission, scrub_cost_fields
 from app.database import get_db
 from app.models.user import User
 from app.schemas.organization import OrganizationResponse, OrganizationUpdate
@@ -29,7 +29,10 @@ async def get_current_organization(
     Retrieve the current organization's details (from JWT).
     """
     org_id: UUID = current_user.organization_id
-    return await organization_service.get_current(db, org_id)
+    org = await organization_service.get_current(db, org_id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(org)
+    return org
 
 
 @router.put("/me", response_model=OrganizationResponse)
@@ -43,4 +46,7 @@ async def update_current_organization(
     Update the current organization's details.
     """
     org_id: UUID = current_user.organization_id
-    return await organization_service.update_current(db, org_id, data)
+    org = await organization_service.update_current(db, org_id, data)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(org)
+    return org

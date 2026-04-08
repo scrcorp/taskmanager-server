@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_permission
+from app.api.deps import hide_cost_for, require_permission, scrub_cost_fields
 from app.database import get_db
 from app.models.user import User
 from app.schemas.schedule import (
@@ -43,6 +43,9 @@ async def list_requests(
         date_to=date_to,
         page=page, per_page=per_page,
     )
+    if hide_cost_for(current_user):
+        for item in items:
+            scrub_cost_fields(item)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
@@ -53,7 +56,10 @@ async def admin_create_request(
     current_user: Annotated[User, Depends(require_permission("schedules:create"))],
 ) -> ScheduleRequestResponse:
     """관리자가 직접 스케줄 신청 생성 (staff에게 안 보임, confirm 시 entry로 변환)."""
-    return await schedule_request_service.admin_create_request(db, data, created_by=current_user.id)
+    req = await schedule_request_service.admin_create_request(db, data, created_by=current_user.id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(req)
+    return req
 
 
 @router.patch("/{request_id}", response_model=ScheduleRequestResponse)
@@ -64,7 +70,10 @@ async def admin_update_request(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleRequestResponse:
     """관리자가 스케줄 신청 수정 — 원본 추적 + auto-unmodify."""
-    return await schedule_request_service.admin_update_request(db, request_id, data)
+    req = await schedule_request_service.admin_update_request(db, request_id, data)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(req)
+    return req
 
 
 @router.patch("/{request_id}/status", response_model=ScheduleRequestResponse)
@@ -75,7 +84,10 @@ async def update_request_status(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleRequestResponse:
     """직원 스케줄 신청 상태 변경."""
-    return await schedule_request_service.update_request_status(db, request_id, data.status)
+    req = await schedule_request_service.update_request_status(db, request_id, data.status)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(req)
+    return req
 
 
 @router.post("/{request_id}/revert", response_model=ScheduleRequestResponse)
@@ -85,7 +97,10 @@ async def admin_revert_request(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleRequestResponse:
     """Modified/rejected 신청을 원래 값으로 복원."""
-    return await schedule_request_service.admin_revert_request(db, request_id)
+    req = await schedule_request_service.admin_revert_request(db, request_id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(req)
+    return req
 
 
 @router.delete("/{request_id}")

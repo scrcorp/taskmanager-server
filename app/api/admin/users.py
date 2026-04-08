@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_permission
+from app.api.deps import hide_cost_for, require_permission, scrub_cost_fields
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse
@@ -46,7 +46,11 @@ async def list_users(
         "role_id": role_id,
         "is_active": is_active,
     }
-    return await user_service.list_users(db, org_id, filters)
+    users = await user_service.list_users(db, org_id, filters)
+    if hide_cost_for(current_user):
+        for u in users:
+            scrub_cost_fields(u)
+    return users
 
 
 @router.get("/{user_id}", response_model=UserResponse)
@@ -60,7 +64,10 @@ async def get_user(
     Retrieve user detail with role information.
     """
     org_id: UUID = current_user.organization_id
-    return await user_service.get_user(db, user_id, org_id)
+    user = await user_service.get_user(db, user_id, org_id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(user)
+    return user
 
 
 @router.post("", response_model=UserResponse, status_code=201)
@@ -75,7 +82,10 @@ async def create_user(
     Supervisor can create Staff; GM can create Supervisor+Staff; Owner can create all.
     """
     org_id: UUID = current_user.organization_id
-    return await user_service.create_user(db, org_id, data, caller=current_user)
+    user = await user_service.create_user(db, org_id, data, caller=current_user)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(user)
+    return user
 
 
 @router.put("/{user_id}", response_model=UserResponse)
@@ -90,7 +100,10 @@ async def update_user(
     Update an existing user's information.
     """
     org_id: UUID = current_user.organization_id
-    return await user_service.update_user(db, user_id, org_id, data, caller=current_user)
+    user = await user_service.update_user(db, user_id, org_id, data, caller=current_user)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(user)
+    return user
 
 
 @router.patch("/{user_id}/active", response_model=UserResponse)
@@ -104,7 +117,10 @@ async def toggle_user_active(
     Toggle a user's active/inactive status.
     """
     org_id: UUID = current_user.organization_id
-    return await user_service.toggle_active(db, user_id, org_id)
+    user = await user_service.toggle_active(db, user_id, org_id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(user)
+    return user
 
 
 @router.delete("/{user_id}", response_model=MessageResponse)

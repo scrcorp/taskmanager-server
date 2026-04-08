@@ -65,6 +65,90 @@ app.mount("/bucket", StaticFiles(directory=str(BUCKET_DIR)), name="bucket")
 
 
 # ---------------------------------------------------------------------------
+# Startup: APScheduler — attendance state cron (every 1 min)
+# ---------------------------------------------------------------------------
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # noqa: E402
+from apscheduler.triggers.interval import IntervalTrigger  # noqa: E402
+
+scheduler: AsyncIOScheduler = AsyncIOScheduler()
+
+
+@app.on_event("startup")
+async def start_scheduler() -> None:
+    """APScheduler 시작 — attendance 자동 상태 전환 cron."""
+    import logging
+    from app.services.attendance_cron_service import run_attendance_state_tick
+
+    logger = logging.getLogger("uvicorn.error")
+    if not scheduler.running:
+        scheduler.add_job(
+            run_attendance_state_tick,
+            trigger=IntervalTrigger(minutes=1),
+            id="attendance_state_tick",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.start()
+        logger.info("[scheduler] APScheduler started with attendance_state_tick job")
+
+
+@app.on_event("shutdown")
+async def stop_scheduler() -> None:
+    """APScheduler 종료."""
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# Startup: Settings Registry seed (upsert missing entries)
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def seed_settings_registry() -> None:
+    """SETTINGS_SEED 정의를 settings_registry 테이블에 upsert.
+
+    이미 존재하는 키는 건드리지 않는다 (사용자가 수정했을 수 있음).
+    새로 추가된 키만 INSERT.
+    """
+    import logging
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.settings import SettingsRegistry
+    from app.seeds.settings_seed import SETTINGS_SEED
+
+    logger = logging.getLogger("uvicorn.error")
+    try:
+        async with async_session() as db:
+            # 기존 키 목록
+            existing_result = await db.execute(select(SettingsRegistry.key))
+            existing_keys = {row[0] for row in existing_result.all()}
+
+            inserted = 0
+            for definition in SETTINGS_SEED:
+                if definition.key in existing_keys:
+                    continue
+                entry = SettingsRegistry(
+                    key=definition.key,
+                    label=definition.label,
+                    description=definition.description,
+                    value_type=definition.value_type,
+                    levels=definition.levels,
+                    default_priority=definition.default_priority,
+                    default_value=definition.default_value,
+                    validation_schema=definition.validation_schema,
+                    category=definition.category,
+                )
+                db.add(entry)
+                inserted += 1
+
+            if inserted > 0:
+                await db.commit()
+                logger.info(f"[settings_seed] Inserted {inserted} new registry entries")
+    except Exception as e:
+        logger.warning(f"Failed to seed settings registry: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Startup: ensure all organizations have a default daily report template
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
