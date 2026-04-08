@@ -7,12 +7,9 @@ within an organization scope.
 
 from uuid import UUID
 
-from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.organization import Store
-from app.models.user import User
-from app.models.user_store import UserStore
 from app.repositories.store_repository import store_repository
 from app.schemas.organization import (
     StoreCreate,
@@ -218,43 +215,12 @@ class StoreService:
                     raise DuplicateError("A store with this name already exists")
 
         update_data: dict = data.model_dump(exclude_unset=True)
-
-        # default_hourly_rate 변경 감지 (cascade 대상)
-        prev_store = await store_repository.get_by_id(db, store_id, organization_id)
-        has_rate_change = False
-        new_store_rate: float | None = None
-        if prev_store is not None and "default_hourly_rate" in update_data:
-            new_val = update_data["default_hourly_rate"]
-            if new_val is not None:
-                prev_val = float(prev_store.default_hourly_rate) if prev_store.default_hourly_rate is not None else None
-                if prev_val is None or float(new_val) != prev_val:
-                    has_rate_change = True
-                    new_store_rate = float(new_val)
-
         try:
             store: Store | None = await store_repository.update(
                 db, store_id, update_data, organization_id
             )
             if store is None:
                 raise NotFoundError("Store not found")
-
-            # Cascade: 이 매장에 배정된 사용자 중 rate가 매장보다 낮거나 없는 경우 보정
-            if has_rate_change and new_store_rate is not None:
-                # user_stores 를 join해서 이 store에 속한 user 목록 조회
-                user_ids_result = await db.execute(
-                    select(UserStore.user_id).where(UserStore.store_id == store_id)
-                )
-                user_ids = [row[0] for row in user_ids_result.all()]
-                if user_ids:
-                    await db.execute(
-                        update(User)
-                        .where(
-                            User.id.in_(user_ids),
-                            (User.hourly_rate.is_(None)) | (User.hourly_rate < new_store_rate),
-                        )
-                        .values(hourly_rate=new_store_rate)
-                    )
-
             await db.commit()
             return self._to_response(store)
         except Exception:
