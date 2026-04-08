@@ -510,34 +510,32 @@ class ScheduleService:
         new_break_start = entry.break_start_time
         new_break_end = entry.break_end_time
 
+        # ─── 필드 변경 감지 (모든 status에서 audit diff 용) ───
+        # modification_entries는 audit_log.diff를 구성하는데 사용되며,
+        # requested 상태일 때 추가로 legacy modifications JSONB에도 쌓임 (아래 블록에서).
+        def _track(field: str, old_value, new_value) -> None:
+            modification_entries.append({
+                "field": field,
+                "old_value": old_value,
+                "new_value": new_value,
+                "modified_at": now_ts,
+            })
+
         if data.user_id is not None:
             new_user_id = UUID(data.user_id)
-            if entry.status == "requested" and str(entry.user_id) != data.user_id:
-                modification_entries.append({
-                    "field": "user_id",
-                    "old_value": str(entry.user_id),
-                    "new_value": data.user_id,
-                    "modified_at": now_ts,
-                })
+            if str(entry.user_id) != data.user_id:
+                _track("user_id", str(entry.user_id), data.user_id)
             update_data["user_id"] = new_user_id
         if data.work_date is not None:
             new_work_date = data.work_date
-            if entry.status == "requested" and entry.work_date != data.work_date:
-                modification_entries.append({
-                    "field": "work_date",
-                    "old_value": str(entry.work_date),
-                    "new_value": str(data.work_date),
-                    "modified_at": now_ts,
-                })
+            if entry.work_date != data.work_date:
+                _track("work_date", str(entry.work_date), str(data.work_date))
             update_data["work_date"] = new_work_date
         if data.work_role_id is not None:
-            if entry.status == "requested" and str(entry.work_role_id or "") != data.work_role_id:
-                modification_entries.append({
-                    "field": "work_role_id",
-                    "old_value": str(entry.work_role_id) if entry.work_role_id else None,
-                    "new_value": data.work_role_id,
-                    "modified_at": now_ts,
-                })
+            if str(entry.work_role_id or "") != data.work_role_id:
+                _track("work_role_id",
+                       str(entry.work_role_id) if entry.work_role_id else None,
+                       data.work_role_id)
             new_work_role_uuid = UUID(data.work_role_id) if data.work_role_id else None
             update_data["work_role_id"] = new_work_role_uuid
             # Snapshot 재계산 — work_role 변경 시 name/position을 새 값으로 갱신
@@ -546,44 +544,24 @@ class ScheduleService:
             update_data["position_snapshot"] = pos_snap
         if data.start_time is not None:
             new_start = self._parse_time(data.start_time)  # type: ignore[assignment]
-            if entry.status == "requested" and self._format_time(entry.start_time) != data.start_time:
-                modification_entries.append({
-                    "field": "start_time",
-                    "old_value": self._format_time(entry.start_time),
-                    "new_value": data.start_time,
-                    "modified_at": now_ts,
-                })
+            if self._format_time(entry.start_time) != data.start_time:
+                _track("start_time", self._format_time(entry.start_time), data.start_time)
             update_data["start_time"] = new_start
         if data.end_time is not None:
             new_end = self._parse_time(data.end_time)  # type: ignore[assignment]
-            if entry.status == "requested" and self._format_time(entry.end_time) != data.end_time:
-                modification_entries.append({
-                    "field": "end_time",
-                    "old_value": self._format_time(entry.end_time),
-                    "new_value": data.end_time,
-                    "modified_at": now_ts,
-                })
+            if self._format_time(entry.end_time) != data.end_time:
+                _track("end_time", self._format_time(entry.end_time), data.end_time)
             update_data["end_time"] = new_end
         # Break fields: explicitly sent null = clear break, sent value = update
         if "break_start_time" in data.model_fields_set:
             new_break_start = self._parse_time(data.break_start_time) if data.break_start_time else None
-            if entry.status == "requested" and self._format_time(entry.break_start_time) != data.break_start_time:
-                modification_entries.append({
-                    "field": "break_start_time",
-                    "old_value": self._format_time(entry.break_start_time),
-                    "new_value": data.break_start_time,
-                    "modified_at": now_ts,
-                })
+            if self._format_time(entry.break_start_time) != data.break_start_time:
+                _track("break_start_time", self._format_time(entry.break_start_time), data.break_start_time)
             update_data["break_start_time"] = new_break_start
         if "break_end_time" in data.model_fields_set:
             new_break_end = self._parse_time(data.break_end_time) if data.break_end_time else None
-            if entry.status == "requested" and self._format_time(entry.break_end_time) != data.break_end_time:
-                modification_entries.append({
-                    "field": "break_end_time",
-                    "old_value": self._format_time(entry.break_end_time),
-                    "new_value": data.break_end_time,
-                    "modified_at": now_ts,
-                })
+            if self._format_time(entry.break_end_time) != data.break_end_time:
+                _track("break_end_time", self._format_time(entry.break_end_time), data.break_end_time)
             update_data["break_end_time"] = new_break_end
         if data.note is not None:
             update_data["note"] = data.note
@@ -631,6 +609,10 @@ class ScheduleService:
             new_start, new_end, new_break_start, new_break_end  # type: ignore[arg-type]
         )
 
+        # 실제로 변경된 필드가 없으면 update/audit 모두 skip (no-op)
+        if not modification_entries:
+            return await self._to_response(db, entry)
+
         try:
             updated = await schedule_repository.update(db, entry_id, update_data, organization_id)
             if updated is None:
@@ -640,9 +622,11 @@ class ScheduleService:
                 m["field"]: {"old": m.get("old_value"), "new": m.get("new_value")}
                 for m in modification_entries if m.get("field")
             }
+            # Description: 변경된 필드 목록을 간결하게
+            changed_fields = ", ".join(m["field"] for m in modification_entries if m.get("field"))
             await self._log_audit(
                 db, entry_id, "modified", actor,
-                description="Schedule modified",
+                description=f"Modified: {changed_fields}" if changed_fields else "Schedule modified",
                 diff=audit_diff or None,
             )
             result = await self._to_response(db, updated)
