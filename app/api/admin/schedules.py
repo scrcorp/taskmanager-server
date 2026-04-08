@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_permission
+from app.api.deps import hide_cost_for, require_permission, scrub_cost_fields
 from app.database import get_db
 from app.models.user import User
 from app.schemas.schedule import (
@@ -16,10 +16,18 @@ from app.schemas.schedule import (
     ScheduleCancel, ScheduleCreate,
     ScheduleResponse, ScheduleSwap, ScheduleUpdate, ScheduleValidation,
     ScheduleConfirm, ScheduleReject, ScheduleBulkConfirm, ScheduleBulkConfirmResult,
+    ScheduleHistoryListResponse,
 )
 from app.services.schedule_service import schedule_service
 
 router: APIRouter = APIRouter()
+
+
+def _scrub(resp, user: User):
+    """단일 ScheduleResponse cost redact (SV/Staff)."""
+    if hide_cost_for(user):
+        scrub_cost_fields(resp)
+    return resp
 
 
 @router.get("", response_model=dict)
@@ -28,20 +36,28 @@ async def list_entries(
     current_user: Annotated[User, Depends(require_permission("schedules:read"))],
     store_id: str | None = None,
     user_id: str | None = None,
+    user_ids: str | None = None,  # CSV — 여러 user 동시 조회 (calendar에서 다른 매장 schedule 까지 가져오기 위함)
     date_from: date | None = None,
     date_to: date | None = None,
     status: str | None = None,
     page: int = 1,
     per_page: int = 100,
 ) -> dict:
-    """스케줄 목록."""
+    """스케줄 목록. user_ids는 CSV로 여러 user를 한 번에 조회 가능."""
+    parsed_user_ids: list[UUID] | None = None
+    if user_ids:
+        parsed_user_ids = [UUID(x) for x in user_ids.split(",") if x.strip()]
     items, total = await schedule_service.list_entries(
         db, current_user.organization_id,
         store_id=UUID(store_id) if store_id else None,
         user_id=UUID(user_id) if user_id else None,
+        user_ids=parsed_user_ids,
         date_from=date_from, date_to=date_to,
         status=status, page=page, per_page=per_page,
     )
+    if hide_cost_for(current_user):
+        for item in items:
+            scrub_cost_fields(item)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
@@ -52,9 +68,9 @@ async def create_entry(
     current_user: Annotated[User, Depends(require_permission("schedules:create"))],
 ) -> ScheduleResponse:
     """단일 스케줄 생성."""
-    return await schedule_service.create_entry(
+    return _scrub(await schedule_service.create_entry(
         db, current_user.organization_id, data, current_user.id,
-    )
+    ), current_user)
 
 
 @router.post("/bulk", response_model=ScheduleBulkResult, status_code=200)
@@ -82,9 +98,13 @@ async def generate_from_requests(
     from app.utils.exceptions import BadRequestError
     if not store_id or date_from is None or date_to is None:
         raise BadRequestError("store_id, date_from, date_to are required")
-    return await schedule_service.generate_from_requests(
+    results = await schedule_service.generate_from_requests(
         db, current_user.organization_id, UUID(store_id), date_from, date_to, current_user.id,
     )
+    if hide_cost_for(current_user):
+        for r in results:
+            scrub_cost_fields(r)
+    return results
 
 
 @router.post("/bulk-confirm", response_model=ScheduleBulkConfirmResult, status_code=200)
@@ -104,6 +124,32 @@ async def bulk_confirm(
     )
 
 
+@router.get("/history", response_model=ScheduleHistoryListResponse)
+async def list_history(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
+    store_id: str | None = None,
+    user_id: str | None = None,
+    actor_id: str | None = None,
+    event_type: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    page: int = 1,
+    per_page: int = 50,
+) -> ScheduleHistoryListResponse:
+    """집계 schedule history. GM+ only. SV/Staff은 cost diff 항목 redact."""
+    return await schedule_service.list_history(
+        db, current_user.organization_id,
+        actor=current_user,
+        store_id=UUID(store_id) if store_id else None,
+        user_id=UUID(user_id) if user_id else None,
+        actor_id=UUID(actor_id) if actor_id else None,
+        event_type=event_type,
+        date_from=date_from, date_to=date_to,
+        page=page, per_page=per_page,
+    )
+
+
 @router.get("/{entry_id}", response_model=ScheduleResponse)
 async def get_entry(
     entry_id: UUID,
@@ -111,7 +157,7 @@ async def get_entry(
     current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> ScheduleResponse:
     """스케줄 상세."""
-    return await schedule_service.get_entry(db, entry_id, current_user.organization_id)
+    return _scrub(await schedule_service.get_entry(db, entry_id, current_user.organization_id), current_user)
 
 
 @router.patch("/{entry_id}", response_model=ScheduleResponse)
@@ -122,9 +168,9 @@ async def update_entry(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleResponse:
     """스케줄 수정. confirmed 스케줄은 GM+ 만 수정 가능."""
-    return await schedule_service.update_entry(
+    return _scrub(await schedule_service.update_entry(
         db, entry_id, current_user.organization_id, data, actor=current_user,
-    )
+    ), current_user)
 
 
 @router.delete("/{entry_id}", status_code=204)
@@ -146,9 +192,9 @@ async def submit_schedule(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleResponse:
     """draft → requested 전환 (제출)."""
-    return await schedule_service.submit_schedule(
+    return _scrub(await schedule_service.submit_schedule(
         db, entry_id, current_user.organization_id, current_user,
-    )
+    ), current_user)
 
 
 @router.post("/{entry_id}/confirm", response_model=ScheduleResponse)
@@ -158,9 +204,9 @@ async def confirm_schedule(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleResponse:
     """requested 스케줄 확정 (requested → confirmed)."""
-    return await schedule_service.confirm_schedule(
+    return _scrub(await schedule_service.confirm_schedule(
         db, entry_id, current_user.organization_id, current_user.id,
-    )
+    ), current_user)
 
 
 @router.post("/{entry_id}/approve", response_model=ScheduleResponse)
@@ -170,9 +216,9 @@ async def approve_schedule(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleResponse:
     """requested → confirmed (confirm의 alias, 목업 명명 호환)."""
-    return await schedule_service.confirm_schedule(
+    return _scrub(await schedule_service.confirm_schedule(
         db, entry_id, current_user.organization_id, current_user.id,
-    )
+    ), current_user)
 
 
 @router.post("/{entry_id}/reject", response_model=ScheduleResponse)
@@ -183,9 +229,9 @@ async def reject_schedule(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleResponse:
     """requested → rejected. 사유 필수."""
-    return await schedule_service.reject_schedule(
+    return _scrub(await schedule_service.reject_schedule(
         db, entry_id, current_user.organization_id, data, actor=current_user,
-    )
+    ), current_user)
 
 
 @router.post("/{entry_id}/revert", response_model=ScheduleResponse)
@@ -195,9 +241,9 @@ async def revert_schedule(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleResponse:
     """confirmed → requested (GM+ only)."""
-    return await schedule_service.revert_schedule(
+    return _scrub(await schedule_service.revert_schedule(
         db, entry_id, current_user.organization_id, current_user,
-    )
+    ), current_user)
 
 
 @router.post("/{entry_id}/cancel", response_model=ScheduleResponse)
@@ -208,9 +254,9 @@ async def cancel_schedule(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleResponse:
     """confirmed → cancelled (GM+ only). 사유 필수."""
-    return await schedule_service.cancel_schedule(
+    return _scrub(await schedule_service.cancel_schedule(
         db, entry_id, current_user.organization_id, data, actor=current_user,
-    )
+    ), current_user)
 
 
 @router.post("/{entry_id}/swap", response_model=dict)
@@ -224,7 +270,22 @@ async def swap_schedule(
     a, b = await schedule_service.swap_schedules(
         db, entry_id, current_user.organization_id, data, actor=current_user,
     )
+    if hide_cost_for(current_user):
+        scrub_cost_fields(a)
+        scrub_cost_fields(b)
     return {"a": a, "b": b}
+
+
+@router.delete("/history/{log_id}", status_code=204)
+async def delete_history_entry(
+    log_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
+) -> None:
+    """History entry 삭제. Owner only (priority <= 10)."""
+    await schedule_service.delete_history_entry(
+        db, log_id, current_user.organization_id, actor=current_user,
+    )
 
 
 @router.get("/{entry_id}/audit", response_model=list[ScheduleAuditLogResponse])
@@ -233,9 +294,9 @@ async def get_audit_log(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("schedules:read"))],
 ) -> list[ScheduleAuditLogResponse]:
-    """스케줄 audit log 조회 (timestamp DESC)."""
+    """스케줄 audit log 조회 (timestamp DESC). SV/Staff는 cost diff 항목 숨김."""
     return await schedule_service.get_audit_log(
-        db, entry_id, current_user.organization_id,
+        db, entry_id, current_user.organization_id, actor=current_user,
     )
 
 

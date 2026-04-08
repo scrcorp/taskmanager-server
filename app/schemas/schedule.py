@@ -185,7 +185,7 @@ class ScheduleRequestResponse(BaseModel):
     original_work_date: date | None = None
     created_by: str | None = None
     rejection_reason: str | None = None
-    hourly_rate: float = 0  # 신청 시급 (Resolved: user > store > org)
+    hourly_rate: float | None = 0  # 신청 시급 (Resolved). SV/Staff에는 redact되어 None.
 
 
 class ScheduleRequestFromTemplate(BaseModel):
@@ -363,7 +363,7 @@ class ScheduleResponse(BaseModel):
     approved_by: str | None
     confirmed_at: datetime | None = None
     note: str | None
-    hourly_rate: float = 0  # 확정 시급 (Resolved hourly rate: provided > user > store > org)
+    hourly_rate: float | None = 0  # 확정 시급 (Resolved hourly rate). SV/Staff에는 redact되어 None.
     submitted_at: datetime | None = None
     is_modified: bool = False
     rejected_by: str | None = None
@@ -408,6 +408,37 @@ class ScheduleAuditLogResponse(BaseModel):
     description: str | None = None
     reason: str | None = None
     diff: dict | None = None
+
+
+class ScheduleHistoryItem(BaseModel):
+    """집계 history 응답 — audit log + schedule snapshot 일부."""
+    id: str
+    schedule_id: str
+    event_type: str
+    actor_id: str | None = None
+    actor_name: str | None = None
+    actor_role: str | None = None
+    timestamp: datetime
+    description: str | None = None
+    reason: str | None = None
+    diff: dict | None = None
+    # Schedule snapshot
+    work_date: date
+    start_time: str | None = None
+    end_time: str | None = None
+    user_id: str
+    user_name: str | None = None
+    store_id: str
+    store_name: str | None = None
+    schedule_status: str
+    work_role_name: str | None = None
+
+
+class ScheduleHistoryListResponse(BaseModel):
+    items: list[ScheduleHistoryItem]
+    total: int
+    page: int
+    per_page: int
 
 
 class ScheduleBulkConfirm(BaseModel):

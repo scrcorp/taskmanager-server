@@ -20,6 +20,7 @@ from app.schemas.schedule import (
     ScheduleCreate, ScheduleResponse, ScheduleSwap, ScheduleUpdate,
     ScheduleValidation, FinalizeResult,
     ScheduleReject, ScheduleBulkConfirmResult,
+    ScheduleHistoryItem, ScheduleHistoryListResponse,
 )
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 
@@ -228,6 +229,7 @@ class ScheduleService:
         organization_id: UUID,
         store_id: UUID | None = None,
         user_id: UUID | None = None,
+        user_ids: list[UUID] | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
         status: str | None = None,
@@ -238,8 +240,10 @@ class ScheduleService:
         # status 미지정 시 cancelled 제외 (requested + confirmed 모두 반환)
         # If status not specified: exclude cancelled (return requested + confirmed)
         entries, total = await schedule_repository.get_by_filters(
-            db, organization_id, store_id, user_id,
-            date_from, date_to, status, page, per_page,
+            db, organization_id,
+            store_id=store_id, user_id=user_id, user_ids=user_ids,
+            date_from=date_from, date_to=date_to,
+            status=status, page=page, per_page=per_page,
             sort_desc=sort_desc,
             exclude_cancelled=(status is None),
         )
@@ -564,8 +568,13 @@ class ScheduleService:
                 _track("break_end_time", self._format_time(entry.break_end_time), data.break_end_time)
             update_data["break_end_time"] = new_break_end
         if data.note is not None:
+            if (entry.note or "") != (data.note or ""):
+                _track("note", entry.note, data.note)
             update_data["note"] = data.note
         if data.hourly_rate is not None:
+            old_rate = float(entry.hourly_rate) if entry.hourly_rate is not None else None
+            if old_rate != data.hourly_rate:
+                _track("hourly_rate", old_rate, data.hourly_rate)
             update_data["hourly_rate"] = data.hourly_rate
 
         # requested 스케줄에 변경 사항이 있으면 is_modified + modifications 업데이트
@@ -921,8 +930,12 @@ class ScheduleService:
         db: AsyncSession,
         entry_id: UUID,
         organization_id: UUID,
+        actor: User | None = None,
     ) -> list[ScheduleAuditLogResponse]:
-        """스케줄 audit log 조회 (timestamp DESC)."""
+        """스케줄 audit log 조회 (timestamp DESC).
+
+        actor가 GM 미만(role_priority > 20)이면 cost(hourly_rate) diff 항목 제거.
+        """
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
             raise NotFoundError("Schedule not found")
@@ -937,6 +950,24 @@ class ScheduleService:
             )
             actor_names = {row[0]: row[1] for row in users_result.all()}
 
+        # SV/Staff: cost-related fields 숨김
+        actor_priority = actor.role.priority if (actor and actor.role) else 999
+        hide_cost = actor is not None and actor_priority > 20
+        cost_keys = {"hourly_rate"}
+
+        def _scrub(diff: dict | None) -> dict | None:
+            if diff is None or not hide_cost:
+                return diff
+            return {k: v for k, v in diff.items() if k not in cost_keys}
+
+        def _scrub_description(desc: str | None) -> str | None:
+            # description 형식: "Modified: hourly_rate, start_time"
+            if desc is None or not hide_cost or not desc.startswith("Modified:"):
+                return desc
+            prefix, _, fields_str = desc.partition(":")
+            fields = [f.strip() for f in fields_str.split(",") if f.strip() and f.strip() not in cost_keys]
+            return f"{prefix}: {', '.join(fields)}" if fields else None
+
         return [
             ScheduleAuditLogResponse(
                 id=str(l.id),
@@ -946,12 +977,128 @@ class ScheduleService:
                 actor_name=actor_names.get(l.actor_id) if l.actor_id else None,
                 actor_role=l.actor_role,
                 timestamp=l.timestamp,
-                description=l.description,
+                description=_scrub_description(l.description),
                 reason=l.reason,
-                diff=l.diff,
+                diff=_scrub(l.diff),
             )
             for l in logs
+            # description이 cost only edit이라 redact 후 비어있으면 entry 자체 숨김
+            if not (hide_cost and l.event_type == "modified" and not _scrub(l.diff))
         ]
+
+    async def delete_history_entry(
+        self,
+        db: AsyncSession,
+        log_id: UUID,
+        organization_id: UUID,
+        actor: User,
+    ) -> None:
+        """History entry 삭제. Owner only (priority <= 10)."""
+        actor_priority = actor.role.priority if (actor and actor.role) else 999
+        if actor_priority > 10:
+            raise ForbiddenError("Only Owner can delete history entries")
+
+        # 해당 log이 같은 org schedule인지 확인 (cross-org 방지)
+        log = await db.get(ScheduleAuditLog, log_id)
+        if log is None:
+            raise NotFoundError("History entry not found")
+        sched = await schedule_repository.get_by_id(db, log.schedule_id, organization_id)
+        if sched is None:
+            raise NotFoundError("History entry not found")
+
+        try:
+            await schedule_audit_log_repository.delete_by_id(db, log_id)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def list_history(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        *,
+        actor: User,
+        store_id: UUID | None = None,
+        user_id: UUID | None = None,
+        actor_id: UUID | None = None,
+        event_type: str | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        page: int = 1,
+        per_page: int = 50,
+    ) -> ScheduleHistoryListResponse:
+        """집계 history. SV 이상 누구나 볼 수 있고, SV/Staff은 cost 항목만 redact."""
+        rows, total = await schedule_audit_log_repository.list_history(
+            db, organization_id,
+            store_id=store_id, user_id=user_id, actor_id=actor_id,
+            event_type=event_type, date_from=date_from, date_to=date_to,
+            page=page, per_page=per_page,
+        )
+
+        # actor + user + store 이름 batch 조회
+        actor_ids = {l.actor_id for l, _ in rows if l.actor_id is not None}
+        user_ids = {s.user_id for _, s in rows}
+        store_ids = {s.store_id for _, s in rows}
+
+        actor_names: dict[UUID, str] = {}
+        user_names: dict[UUID, str] = {}
+        store_names: dict[UUID, str] = {}
+
+        if actor_ids:
+            r = await db.execute(select(User.id, User.full_name).where(User.id.in_(actor_ids)))
+            actor_names = {row[0]: row[1] for row in r.all()}
+        if user_ids:
+            r = await db.execute(select(User.id, User.full_name).where(User.id.in_(user_ids)))
+            user_names = {row[0]: row[1] for row in r.all()}
+        if store_ids:
+            r = await db.execute(select(Store.id, Store.name).where(Store.id.in_(store_ids)))
+            store_names = {row[0]: row[1] for row in r.all()}
+
+        # cost redact (GM 미만)
+        actor_priority = actor.role.priority if (actor and actor.role) else 999
+        hide_cost = actor_priority > 20
+        cost_keys = {"hourly_rate"}
+
+        items: list[ScheduleHistoryItem] = []
+        for log, sched in rows:
+            diff = log.diff
+            description = log.description
+            if hide_cost and diff:
+                diff = {k: v for k, v in diff.items() if k not in cost_keys}
+            if hide_cost and description and description.startswith("Modified:"):
+                prefix, _, fields_str = description.partition(":")
+                fields = [f.strip() for f in fields_str.split(",") if f.strip() and f.strip() not in cost_keys]
+                description = f"{prefix}: {', '.join(fields)}" if fields else None
+            # cost-only 변경이라 redact 후 비어있으면 skip
+            if hide_cost and log.event_type == "modified" and not diff:
+                continue
+
+            items.append(ScheduleHistoryItem(
+                id=str(log.id),
+                schedule_id=str(log.schedule_id),
+                event_type=log.event_type,
+                actor_id=str(log.actor_id) if log.actor_id else None,
+                actor_name=actor_names.get(log.actor_id) if log.actor_id else None,
+                actor_role=log.actor_role,
+                timestamp=log.timestamp,
+                description=description,
+                reason=log.reason,
+                diff=diff,
+                work_date=sched.work_date,
+                start_time=self._format_time(sched.start_time),
+                end_time=self._format_time(sched.end_time),
+                user_id=str(sched.user_id),
+                user_name=user_names.get(sched.user_id),
+                store_id=str(sched.store_id),
+                store_name=store_names.get(sched.store_id),
+                schedule_status=sched.status,
+                work_role_name=sched.work_role_name_snapshot,
+            ))
+
+        return ScheduleHistoryListResponse(
+            items=items, total=total, page=page, per_page=per_page,
+        )
 
     async def bulk_confirm(
         self,
