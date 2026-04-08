@@ -90,6 +90,14 @@ SETTINGS_SEED: list[SettingDefinition] = [
         default_value=False,
         category="Approval Workflow",
     ),
+    SettingDefinition(
+        key="schedule.allow_staff_request",
+        label="Allow staff to request schedules from app",
+        description="When enabled, staff can submit schedule requests from the mobile app. When disabled, the app is view-only (read-only schedule display).",
+        value_type="boolean",
+        default_value=False,
+        category="Approval Workflow",
+    ),
     # ─── Break Rules ────────────────────────────────────
     SettingDefinition(
         key="break.max_continuous_minutes",
