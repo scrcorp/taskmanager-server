@@ -207,7 +207,7 @@ class WorkRoleService:
         - Schedule has this work_role_id
         - work_date >= today
         - No existing cl_instance for this schedule
-        - Schedule status is not 'cancelled'
+        - Schedule status is not 'cancelled' or 'deleted'
 
         Auto-creates cl_instance + cl_instance_items via checklist_instance_service.
         """
@@ -221,7 +221,7 @@ class WorkRoleService:
             select(Schedule).where(
                 Schedule.work_role_id == work_role_id,
                 Schedule.work_date >= today,
-                Schedule.status != "cancelled",
+                Schedule.status.notin_(["cancelled", "deleted"]),
                 ~Schedule.id.in_(
                     select(ChecklistInstance.schedule_id).where(
                         ChecklistInstance.schedule_id.isnot(None)

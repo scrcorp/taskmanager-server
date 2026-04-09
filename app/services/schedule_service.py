@@ -649,18 +649,27 @@ class ScheduleService:
         self, db: AsyncSession, entry_id: UUID, organization_id: UUID,
         actor: User | None = None,
     ) -> None:
+        """Schedule soft delete — row를 지우지 않고 status='deleted'로 마킹.
+        audit log + 관련 데이터(attendance, cl_instance)는 모두 유지된다.
+        이미 deleted면 idempotent하게 성공 반환.
+        """
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
             raise NotFoundError("Schedule not found")
+        if entry.status == "deleted":
+            return  # 이미 삭제됨 — no-op
         # confirmed 스케줄 삭제는 GM+ 권한 필요
         if entry.status == "confirmed" and actor is not None:
             self._require_gm_or_above(actor, "delete confirmed schedule")
+        prior_status = entry.status
         try:
             await self._log_audit(
                 db, entry_id, "deleted", actor,
-                description=f"Schedule deleted from status={entry.status}",
+                description=f"Schedule deleted from status={prior_status}",
             )
-            await schedule_repository.delete(db, entry_id, organization_id)
+            await schedule_repository.update(
+                db, entry_id, {"status": "deleted"}, organization_id,
+            )
             await db.commit()
         except Exception:
             await db.rollback()
