@@ -366,15 +366,25 @@ class ScheduleRequestService:
 
         start_time = self._parse_time(data.preferred_start_time)
         end_time = self._parse_time(data.preferred_end_time)
+        break_start = self._parse_time(data.break_start_time) if data.break_start_time else None
+        break_end = self._parse_time(data.break_end_time) if data.break_end_time else None
 
-        # net_work_minutes 계산 (시간 정보가 있을 경우)
+        # net_work_minutes 계산 (break 제외)
         net_minutes = 0
         if start_time is not None and end_time is not None:
             start_m = start_time.hour * 60 + start_time.minute
             end_m = end_time.hour * 60 + end_time.minute
             if end_m <= start_m:
                 end_m += 24 * 60
-            net_minutes = max(end_m - start_m, 0)
+            gross = max(end_m - start_m, 0)
+            break_m = 0
+            if break_start is not None and break_end is not None:
+                bs = break_start.hour * 60 + break_start.minute
+                be = break_end.hour * 60 + break_end.minute
+                if be <= bs:
+                    be += 24 * 60
+                break_m = max(be - bs, 0)
+            net_minutes = max(gross - break_m, 0)
 
         try:
             schedule = await schedule_repository.create(db, {
@@ -385,8 +395,8 @@ class ScheduleRequestService:
                 "work_date": data.work_date,
                 "start_time": start_time,
                 "end_time": end_time,
-                "break_start_time": None,
-                "break_end_time": None,
+                "break_start_time": break_start,
+                "break_end_time": break_end,
                 "net_work_minutes": net_minutes,
                 "note": data.note,
                 "status": "requested",
@@ -689,6 +699,8 @@ class ScheduleRequestService:
                         work_role_id=item.work_role_id,
                         preferred_start_time=item.preferred_start_time,
                         preferred_end_time=item.preferred_end_time,
+                        break_start_time=item.break_start_time,
+                        break_end_time=item.break_end_time,
                         note=item.note,
                     ),
                 )
@@ -707,6 +719,8 @@ class ScheduleRequestService:
                         work_date=item.work_date,
                         preferred_start_time=item.preferred_start_time,
                         preferred_end_time=item.preferred_end_time,
+                        break_start_time=item.break_start_time,
+                        break_end_time=item.break_end_time,
                         note=item.note,
                     ),
                 )
