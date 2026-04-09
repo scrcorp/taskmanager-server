@@ -11,7 +11,6 @@ from app.models.organization import Organization, Store
 from app.models.schedule import Schedule, ScheduleAuditLog, StoreWorkRole
 from app.models.user import Role, User
 from app.models.work import Shift, Position
-from app.repositories.break_rule_repository import break_rule_repository
 from app.repositories.schedule_audit_log_repository import schedule_audit_log_repository
 from app.repositories.schedule_repository import schedule_repository
 from app.repositories.work_role_repository import work_role_repository
@@ -25,8 +24,6 @@ from app.schemas.schedule import (
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 
 
-MAX_DAILY_MINUTES = 720  # 12h default
-MAX_WEEKLY_MINUTES = 2400  # 40h default
 
 
 class ScheduleService:
@@ -199,28 +196,8 @@ class ScheduleService:
         ):
             errors.append("해당 직원의 같은 날짜에 시간이 겹치는 스케줄이 있습니다")
 
-        net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
-
-        # 2. Daily total check
-        break_rule = await break_rule_repository.get_by_store(db, store_id)
-        if not force:
-            max_daily = break_rule.max_daily_work_minutes if break_rule else MAX_DAILY_MINUTES
-            existing_daily = await schedule_repository.get_daily_minutes(db, user_id, work_date, exclude_id)
-            if existing_daily + net > max_daily:
-                warnings.append(f"Daily work hours exceeded: {(existing_daily + net) // 60}h > {max_daily // 60}h")
-
-        # 3. Weekly total check
-        if not force:
-            existing_weekly = await schedule_repository.get_weekly_minutes(db, user_id, work_date, exclude_id)
-            if existing_weekly + net > MAX_WEEKLY_MINUTES:
-                warnings.append(f"Weekly work hours exceeded: {(existing_weekly + net) // 60}h > {MAX_WEEKLY_MINUTES // 60}h")
-
-        # 4. Break suggestion
-        if not force and break_rule:
-            if net > break_rule.max_continuous_minutes and break_start is None:
-                warnings.append(f"Continuous work exceeds {break_rule.max_continuous_minutes}min — a break is recommended")
-
-        valid = len(errors) == 0 and (force or len(warnings) == 0)
+        # Only overlap blocks creation. Other limits removed — schedules should always be creatable.
+        valid = len(errors) == 0
         return ScheduleValidation(valid=valid, warnings=warnings, errors=errors)
 
     async def list_entries(
@@ -649,18 +626,27 @@ class ScheduleService:
         self, db: AsyncSession, entry_id: UUID, organization_id: UUID,
         actor: User | None = None,
     ) -> None:
+        """Schedule soft delete — row를 지우지 않고 status='deleted'로 마킹.
+        audit log + 관련 데이터(attendance, cl_instance)는 모두 유지된다.
+        이미 deleted면 idempotent하게 성공 반환.
+        """
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
             raise NotFoundError("Schedule not found")
+        if entry.status == "deleted":
+            return  # 이미 삭제됨 — no-op
         # confirmed 스케줄 삭제는 GM+ 권한 필요
         if entry.status == "confirmed" and actor is not None:
             self._require_gm_or_above(actor, "delete confirmed schedule")
+        prior_status = entry.status
         try:
             await self._log_audit(
                 db, entry_id, "deleted", actor,
-                description=f"Schedule deleted from status={entry.status}",
+                description=f"Schedule deleted from status={prior_status}",
             )
-            await schedule_repository.delete(db, entry_id, organization_id)
+            await schedule_repository.update(
+                db, entry_id, {"status": "deleted"}, organization_id,
+            )
             await db.commit()
         except Exception:
             await db.rollback()

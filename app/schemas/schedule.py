@@ -144,6 +144,8 @@ class ScheduleRequestCreate(BaseModel):
     work_date: date
     preferred_start_time: str | None = None
     preferred_end_time: str | None = None
+    break_start_time: str | None = None
+    break_end_time: str | None = None
     note: str | None = None
 
 
@@ -157,6 +159,8 @@ class ScheduleRequestUpdate(BaseModel):
     work_date: date | None = None
     preferred_start_time: str | None = None
     preferred_end_time: str | None = None
+    break_start_time: str | None = None
+    break_end_time: str | None = None
     note: str | None = None
 
 
@@ -223,6 +227,8 @@ class ScheduleRequestBatchItem(BaseModel):
     work_role_id: str | None = None
     preferred_start_time: str | None = None  # "HH:MM"
     preferred_end_time: str | None = None
+    break_start_time: str | None = None
+    break_end_time: str | None = None
     note: str | None = None
 
 
@@ -234,6 +240,8 @@ class ScheduleRequestBatchUpdate(BaseModel):
     work_date: date | None = None
     preferred_start_time: str | None = None
     preferred_end_time: str | None = None
+    break_start_time: str | None = None
+    break_end_time: str | None = None
     note: str | None = None
 
 

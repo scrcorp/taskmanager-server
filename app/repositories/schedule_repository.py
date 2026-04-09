@@ -46,10 +46,14 @@ class ScheduleRepository(BaseRepository[Schedule]):
             query = query.where(Schedule.work_date <= date_to)
         if status is not None:
             query = query.where(Schedule.status == status)
-        elif exclude_cancelled:
-            # status 미지정 + exclude_cancelled: cancelled/rejected 제외
-            # Exclude cancelled and rejected when no specific status is requested
-            query = query.where(Schedule.status.notin_(["cancelled", "rejected"]))
+        else:
+            # status 미지정 시 soft-deleted는 항상 제외.
+            # exclude_cancelled이면 cancelled/rejected도 추가 제외.
+            # Soft-deleted are always hidden unless explicitly requested.
+            excluded = ["deleted"]
+            if exclude_cancelled:
+                excluded.extend(["cancelled", "rejected"])
+            query = query.where(Schedule.status.notin_(excluded))
         if sort_desc:
             query = query.order_by(Schedule.work_date.desc(), Schedule.start_time.desc())
         else:
@@ -70,7 +74,7 @@ class ScheduleRepository(BaseRepository[Schedule]):
             select(Schedule).where(
                 Schedule.user_id == user_id,
                 Schedule.work_date == work_date,
-                Schedule.status != "cancelled",
+                Schedule.status.notin_(["cancelled", "deleted"]),
             )
         )
         for entry in entries.scalars().all():
@@ -101,7 +105,7 @@ class ScheduleRepository(BaseRepository[Schedule]):
             .where(
                 Schedule.user_id == user_id,
                 Schedule.work_date == work_date,
-                Schedule.status != "cancelled",
+                Schedule.status.notin_(["cancelled", "deleted"]),
             )
         )
         if exclude_id is not None:
@@ -126,7 +130,7 @@ class ScheduleRepository(BaseRepository[Schedule]):
                 Schedule.user_id == user_id,
                 Schedule.work_date >= week_start,
                 Schedule.work_date <= week_end,
-                Schedule.status != "cancelled",
+                Schedule.status.notin_(["cancelled", "deleted"]),
             )
         )
         if exclude_id is not None:
@@ -147,6 +151,7 @@ class ScheduleRepository(BaseRepository[Schedule]):
                 Schedule.store_id == store_id,
                 Schedule.work_date >= date_from,
                 Schedule.work_date <= date_to,
+                Schedule.status != "deleted",
             )
             .order_by(Schedule.work_date, Schedule.start_time)
         )
