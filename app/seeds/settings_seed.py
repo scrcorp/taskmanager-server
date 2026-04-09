@@ -98,30 +98,22 @@ SETTINGS_SEED: list[SettingDefinition] = [
         default_value=False,
         category="Approval Workflow",
     ),
-    # ─── Break Rules ────────────────────────────────────
+    # ─── Work Rules ────────────────────────────────────
     SettingDefinition(
-        key="break.max_continuous_minutes",
-        label="Max continuous work (minutes)",
-        description="Maximum continuous work time before a break is required.",
+        key="work.default_schedule_duration_minutes",
+        label="Default shift duration (minutes)",
+        description="Default schedule length when creating a new schedule. End time = start + this value.",
         value_type="number",
-        default_value=240,
-        category="Break Rules",
+        default_value=330,
+        category="Work Rules",
     ),
     SettingDefinition(
         key="break.duration_minutes",
         label="Default break duration (minutes)",
-        description="Default unpaid break length.",
+        description="Default break length when splitting a shift.",
         value_type="number",
         default_value=30,
-        category="Break Rules",
-    ),
-    SettingDefinition(
-        key="break.max_daily_work_minutes",
-        label="Max daily work (minutes)",
-        description="Maximum total work time per day.",
-        value_type="number",
-        default_value=480,
-        category="Break Rules",
+        category="Work Rules",
     ),
     # ─── Attendance ─────────────────────────────────────
     SettingDefinition(

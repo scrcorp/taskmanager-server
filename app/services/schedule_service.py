@@ -11,7 +11,6 @@ from app.models.organization import Organization, Store
 from app.models.schedule import Schedule, ScheduleAuditLog, StoreWorkRole
 from app.models.user import Role, User
 from app.models.work import Shift, Position
-from app.repositories.break_rule_repository import break_rule_repository
 from app.repositories.schedule_audit_log_repository import schedule_audit_log_repository
 from app.repositories.schedule_repository import schedule_repository
 from app.repositories.work_role_repository import work_role_repository
@@ -25,8 +24,6 @@ from app.schemas.schedule import (
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 
 
-MAX_DAILY_MINUTES = 720  # 12h default
-MAX_WEEKLY_MINUTES = 2400  # 40h default
 
 
 class ScheduleService:
@@ -199,28 +196,8 @@ class ScheduleService:
         ):
             errors.append("해당 직원의 같은 날짜에 시간이 겹치는 스케줄이 있습니다")
 
-        net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
-
-        # 2. Daily total check
-        break_rule = await break_rule_repository.get_by_store(db, store_id)
-        if not force:
-            max_daily = break_rule.max_daily_work_minutes if break_rule else MAX_DAILY_MINUTES
-            existing_daily = await schedule_repository.get_daily_minutes(db, user_id, work_date, exclude_id)
-            if existing_daily + net > max_daily:
-                warnings.append(f"Daily work hours exceeded: {(existing_daily + net) // 60}h > {max_daily // 60}h")
-
-        # 3. Weekly total check
-        if not force:
-            existing_weekly = await schedule_repository.get_weekly_minutes(db, user_id, work_date, exclude_id)
-            if existing_weekly + net > MAX_WEEKLY_MINUTES:
-                warnings.append(f"Weekly work hours exceeded: {(existing_weekly + net) // 60}h > {MAX_WEEKLY_MINUTES // 60}h")
-
-        # 4. Break suggestion
-        if not force and break_rule:
-            if net > break_rule.max_continuous_minutes and break_start is None:
-                warnings.append(f"Continuous work exceeds {break_rule.max_continuous_minutes}min — a break is recommended")
-
-        valid = len(errors) == 0 and (force or len(warnings) == 0)
+        # Only overlap blocks creation. Other limits removed — schedules should always be creatable.
+        valid = len(errors) == 0
         return ScheduleValidation(valid=valid, warnings=warnings, errors=errors)
 
     async def list_entries(
