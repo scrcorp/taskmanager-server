@@ -91,6 +91,9 @@ from app.api.admin.permissions import router as permissions_router
 # Inventory 라우터 임포트
 from app.api.admin.inventory import router as inventory_router
 
+# Bulk Upload 라우터 임포트
+from app.api.admin.bulk_upload import router as bulk_upload_router
+
 admin_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -196,3 +199,8 @@ admin_router.include_router(storage_router, prefix="/storage", tags=["Storage"])
 # Inventory 라우터 등록 — Register Inventory routers
 # ---------------------------------------------------------------------------
 admin_router.include_router(inventory_router, tags=["Inventory"])
+
+# ---------------------------------------------------------------------------
+# Bulk Upload 라우터 등록 — Register Bulk Upload routers
+# ---------------------------------------------------------------------------
+admin_router.include_router(bulk_upload_router, prefix="/bulk", tags=["Bulk Upload"])
