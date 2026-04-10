@@ -56,10 +56,15 @@ class BulkUploadService:
 
         Row keys: username, password, full_name, role, store_name, email, hourly_rate
         """
+        # "id" 컬럼을 "username"으로 정규화
+        for row in rows:
+            if "id" in row and "username" not in row:
+                row["username"] = row.pop("id")
+
         required = {"username", "password", "full_name", "role", "store_name"}
         if rows and not required.issubset(rows[0].keys()):
             missing = required - set(rows[0].keys())
-            raise BadRequestError(f"Missing CSV columns: {', '.join(missing)}")
+            raise BadRequestError(f"Missing columns: {', '.join(missing)}")
 
         roles_map = await self._load_roles_map(db, organization_id)
         stores_map = await self._load_stores_map(db, organization_id)

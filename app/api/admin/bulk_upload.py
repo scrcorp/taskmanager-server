@@ -141,9 +141,9 @@ UPLOAD_HTML = """<!DOCTYPE html>
     <h2><span class="step-badge">1</span>Employee Registration</h2>
     <p>Register employees and assign to stores</p>
     <div class="format-info">
-      CSV columns: <code>username</code>, <code>password</code>, <code>full_name</code>,
+      Columns: <code>id</code> (or <code>username</code>), <code>password</code>, <code>full_name</code>,
       <code>role</code>, <code>store_name</code>, <code>email</code>, <code>hourly_rate</code><br>
-      Multiple stores: separate with comma (wrap in quotes)
+      Multiple stores: separate with comma
     </div>
     <input type="file" class="file-input" id="empFile" accept=".csv,.xlsx">
     <button onclick="upload('employees', 'empFile', 'empResult')" id="empBtn">Upload Employees</button>
@@ -158,7 +158,7 @@ UPLOAD_HTML = """<!DOCTYPE html>
       Sheet name = Store name<br>
       Row 1: <code>Week Start</code> | <code>MM/DD/YYYY</code><br>
       Row 2: <code>ID (Username)</code> | <code>Sun</code> | <code>Mon</code> | ... | <code>Sat</code><br>
-      Cells: <code>9:00AM-6:00PM</code> or <code>9:00AM-6:00PM(12:00PM-1:00PM)</code>
+      Cells: <code>09:00-18:00</code> or <code>09:00-18:00(12:00-13:00)</code>
     </div>
     <input type="file" class="file-input" id="schFile" accept=".csv,.xlsx">
     <button onclick="upload('schedules', 'schFile', 'schResult')" id="schBtn">Upload Schedules</button>
