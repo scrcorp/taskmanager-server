@@ -42,6 +42,7 @@ class OrganizationUpdate(BaseModel):
     default_hourly_rate: float | None = None  # 기본 시급 (Default hourly rate, optional)
 
 
+
 class OrganizationResponse(BaseModel):
     """조직 응답 스키마.
 

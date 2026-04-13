@@ -49,6 +49,7 @@ class StoreService:
             require_approval=store.require_approval,
             operating_hours=store.operating_hours,
             day_start_time=store.day_start_time,
+
             max_work_hours_weekly=store.max_work_hours_weekly,
             state_code=store.state_code,
             timezone=store.timezone,
@@ -116,6 +117,7 @@ class StoreService:
             require_approval=store.require_approval,
             operating_hours=store.operating_hours,
             day_start_time=store.day_start_time,
+
             max_work_hours_weekly=store.max_work_hours_weekly,
             state_code=store.state_code,
             timezone=store.timezone,

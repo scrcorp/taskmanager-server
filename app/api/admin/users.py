@@ -32,17 +32,25 @@ router: APIRouter = APIRouter()
 async def list_users(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("users:read"))],
-    store_id: Annotated[UUID | None, Query(description="매장 ID 필터")] = None,
+    store_id: Annotated[UUID | None, Query(description="매장 ID 필터 (단일)")] = None,
+    store_ids: Annotated[str | None, Query(description="매장 ID 필터 (복수, 콤마 구분)")] = None,
     role_id: Annotated[UUID | None, Query(description="역할 ID 필터")] = None,
     is_active: Annotated[bool | None, Query(description="활성 상태 필터")] = None,
 ) -> list[UserListResponse]:
     """사용자 목록을 필터 조건으로 조회합니다.
 
-    List users with optional filters (store_id, role_id, is_active).
+    List users with optional filters (store_id/store_ids, role_id, is_active).
+    store_ids는 콤마로 구분된 UUID 문자열 (예: "uuid1,uuid2").
     """
     org_id: UUID = current_user.organization_id
-    filters: dict[str, UUID | bool | None] = {
-        "store_id": store_id,
+    # store_ids가 있으면 store_id보다 우선
+    parsed_store_ids: list[UUID] | None = None
+    if store_ids:
+        parsed_store_ids = [UUID(s.strip()) for s in store_ids.split(",") if s.strip()]
+    elif store_id:
+        parsed_store_ids = [store_id]
+    filters: dict = {
+        "store_ids": parsed_store_ids,
         "role_id": role_id,
         "is_active": is_active,
     }

@@ -115,6 +115,15 @@ SETTINGS_SEED: list[SettingDefinition] = [
         default_value=30,
         category="Work Rules",
     ),
+    # ─── Schedule Range ─────────────────────────────────
+    SettingDefinition(
+        key="schedule.range",
+        label="Schedule Range",
+        description="Time range displayed on the schedule grid. Defines the start and end hours for the timetable.",
+        value_type="json",
+        default_value={"all": {"start": "06:00", "end": "23:00"}},
+        category="Schedule Range",
+    ),
     # ─── Attendance ─────────────────────────────────────
     SettingDefinition(
         key="attendance.late_buffer_minutes",
