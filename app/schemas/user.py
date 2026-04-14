@@ -72,12 +72,14 @@ class UserUpdate(BaseModel):
     Only provided fields are updated; omitted fields remain unchanged.
 
     Attributes:
+        username: 로그인 아이디 (New username, optional)
         full_name: 실명 (New display name, optional)
         email: 이메일 (New email, optional)
         role_id: 역할 UUID (New role assignment, optional)
         is_active: 활성 상태 (Active status toggle, optional)
     """
 
+    username: str | None = None  # 변경할 로그인 아이디 (New username, optional)
     full_name: str | None = None  # 변경할 실명 (New name, optional)
     email: str | None = None  # 변경할 이메일 (New email, optional)
     role_id: str | None = None  # 변경할 역할 UUID (New role, optional)
@@ -199,9 +201,11 @@ class ProfileUpdate(BaseModel):
     Only provided fields are updated; omitted fields remain unchanged.
 
     Attributes:
+        username: 새 로그인 아이디, 선택 (New username, optional)
         full_name: 새 전체 이름, 선택 (New full name, optional)
         email: 새 이메일, 선택 (New email, optional)
     """
 
+    username: str | None = None  # 변경할 로그인 아이디 (New username, optional)
     full_name: str | None = None  # 변경할 실명 (New name, optional)
     email: str | None = None  # 변경할 이메일 (New email, optional)

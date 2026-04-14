@@ -265,6 +265,31 @@ class UserService:
         """
         update_data: dict = data.model_dump(exclude_unset=True)
 
+        # username 변경 시 조직 내 중복 검사 — Check username uniqueness within org
+        if "username" in update_data and update_data["username"] is not None:
+            new_username: str = update_data["username"].strip()
+            if not new_username:
+                raise BadRequestError("Username cannot be empty")
+            update_data["username"] = new_username
+            exists: bool = await user_repository.exists(
+                db, {"organization_id": organization_id, "username": new_username}
+            )
+            if exists:
+                # 자기 자신의 기존 username이면 무시
+                current_user_obj: User | None = await user_repository.get_by_id(
+                    db, user_id, organization_id
+                )
+                if current_user_obj is None or current_user_obj.username != new_username:
+                    raise DuplicateError("Username already exists in this organization")
+
+        # 이메일 변경 시 인증 상태 리셋 — Reset email_verified when email changes
+        if "email" in update_data:
+            current_user_obj_for_email: User | None = await user_repository.get_by_id(
+                db, user_id, organization_id
+            )
+            if current_user_obj_for_email and update_data["email"] != current_user_obj_for_email.email:
+                update_data["email_verified"] = False
+
         # role_id를 문자열에서 UUID로 변환 — Convert role_id from string to UUID
         if "role_id" in update_data and update_data["role_id"] is not None:
             role: Role | None = await role_repository.get_by_id(
