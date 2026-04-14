@@ -10,7 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.organization import Store
+from app.models.organization import Organization, Store
 from app.models.user import Role, User
 from app.repositories.store_repository import store_repository
 from app.repositories.role_repository import role_repository
@@ -34,19 +34,22 @@ class UserService:
     Provides CRUD operations and store assignment management.
     """
 
-    def _to_response(self, user: User) -> UserResponse:
-        """사용자 모델을 상세 응답 스키마로 변환합니다.
+    @staticmethod
+    def _effective_rate(user_rate, org_rate) -> float | None:
+        """effective hourly rate = user.hourly_rate (if set) → org default → None.
 
-        Convert a User model instance to a UserResponse schema.
-        Requires role relationship to be loaded.
-
-        Args:
-            user: 역할이 로드된 사용자 모델 (User model with role loaded)
-
-        Returns:
-            UserResponse: 사용자 상세 응답 (User detail response)
+        DB 레벨에서는 상속 의미를 보존 (NULL은 '상속'). 응답 시점에만 계산.
         """
+        if user_rate is not None:
+            return float(user_rate)
+        if org_rate is not None:
+            return float(org_rate)
+        return None
+
+    def _to_response(self, user: User, org_rate: float | None = None) -> UserResponse:
+        """사용자 모델을 상세 응답 스키마로 변환 (effective rate 포함)."""
         role: Role = user.role
+        raw_rate = float(user.hourly_rate) if user.hourly_rate is not None else None
         return UserResponse(
             id=str(user.id),
             username=user.username,
@@ -54,33 +57,35 @@ class UserService:
             email=user.email,
             role_name=role.name,
             role_priority=role.priority,
-            hourly_rate=float(user.hourly_rate) if user.hourly_rate is not None else None,
+            hourly_rate=raw_rate,
+            effective_hourly_rate=self._effective_rate(raw_rate, org_rate),
             is_active=user.is_active,
             created_at=user.created_at,
         )
 
-    def _to_list_response(self, user: User) -> UserListResponse:
-        """사용자 모델을 목록 응답 스키마로 변환합니다.
-
-        Convert a User model instance to a UserListResponse schema.
-
-        Args:
-            user: 역할이 로드된 사용자 모델 (User model with role loaded)
-
-        Returns:
-            UserListResponse: 사용자 목록 항목 응답 (User list item response)
-        """
+    def _to_list_response(self, user: User, org_rate: float | None = None) -> UserListResponse:
+        """사용자 모델을 목록 응답 스키마로 변환 (effective rate 포함)."""
         role: Role = user.role
+        raw_rate = float(user.hourly_rate) if user.hourly_rate is not None else None
         return UserListResponse(
             id=str(user.id),
             username=user.username,
             full_name=user.full_name,
             role_name=role.name,
             role_priority=role.priority,
-            hourly_rate=float(user.hourly_rate) if user.hourly_rate is not None else None,
+            hourly_rate=raw_rate,
+            effective_hourly_rate=self._effective_rate(raw_rate, org_rate),
             is_active=user.is_active,
             created_at=user.created_at,
         )
+
+    async def _get_org_rate(self, db: AsyncSession, organization_id: UUID) -> float | None:
+        """조직 default_hourly_rate 한 번만 조회 (effective 계산용)."""
+        r = await db.execute(
+            select(Organization.default_hourly_rate).where(Organization.id == organization_id)
+        )
+        val = r.scalar()
+        return float(val) if val is not None else None
 
     async def list_users(
         self,
@@ -104,7 +109,8 @@ class UserService:
         users: list[User] = await user_repository.get_by_org(
             db, organization_id, filters
         )
-        return [self._to_list_response(u) for u in users]
+        org_rate = await self._get_org_rate(db, organization_id)
+        return [self._to_list_response(u, org_rate) for u in users]
 
     async def get_user(
         self,
@@ -133,7 +139,8 @@ class UserService:
         if user is None:
             raise NotFoundError("User not found")
 
-        return self._to_response(user)
+        org_rate = await self._get_org_rate(db, organization_id)
+        return self._to_response(user, org_rate)
 
     async def create_user(
         self,
@@ -217,7 +224,8 @@ class UserService:
             if loaded is None:
                 raise NotFoundError("User not found after creation")
 
-            result = self._to_response(loaded)
+            org_rate = await self._get_org_rate(db, organization_id)
+            result = self._to_response(loaded, org_rate)
             await db.commit()
             return result
         except Exception:
@@ -284,7 +292,8 @@ class UserService:
             if loaded is None:
                 raise NotFoundError("User not found")
 
-            result = self._to_response(loaded)
+            org_rate = await self._get_org_rate(db, organization_id)
+            result = self._to_response(loaded, org_rate)
             await db.commit()
             return result
         except Exception:
@@ -333,7 +342,8 @@ class UserService:
             if loaded is None:
                 raise NotFoundError("User not found")
 
-            result = self._to_response(loaded)
+            org_rate = await self._get_org_rate(db, organization_id)
+            result = self._to_response(loaded, org_rate)
             await db.commit()
             return result
         except Exception:

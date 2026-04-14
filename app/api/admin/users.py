@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_permission
+from app.api.deps import hide_cost_for, require_permission, scrub_cost_fields
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse
@@ -32,21 +32,33 @@ router: APIRouter = APIRouter()
 async def list_users(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("users:read"))],
-    store_id: Annotated[UUID | None, Query(description="매장 ID 필터")] = None,
+    store_id: Annotated[UUID | None, Query(description="매장 ID 필터 (단일)")] = None,
+    store_ids: Annotated[str | None, Query(description="매장 ID 필터 (복수, 콤마 구분)")] = None,
     role_id: Annotated[UUID | None, Query(description="역할 ID 필터")] = None,
     is_active: Annotated[bool | None, Query(description="활성 상태 필터")] = None,
 ) -> list[UserListResponse]:
     """사용자 목록을 필터 조건으로 조회합니다.
 
-    List users with optional filters (store_id, role_id, is_active).
+    List users with optional filters (store_id/store_ids, role_id, is_active).
+    store_ids는 콤마로 구분된 UUID 문자열 (예: "uuid1,uuid2").
     """
     org_id: UUID = current_user.organization_id
-    filters: dict[str, UUID | bool | None] = {
-        "store_id": store_id,
+    # store_ids가 있으면 store_id보다 우선
+    parsed_store_ids: list[UUID] | None = None
+    if store_ids:
+        parsed_store_ids = [UUID(s.strip()) for s in store_ids.split(",") if s.strip()]
+    elif store_id:
+        parsed_store_ids = [store_id]
+    filters: dict = {
+        "store_ids": parsed_store_ids,
         "role_id": role_id,
         "is_active": is_active,
     }
-    return await user_service.list_users(db, org_id, filters)
+    users = await user_service.list_users(db, org_id, filters)
+    if hide_cost_for(current_user):
+        for u in users:
+            scrub_cost_fields(u)
+    return users
 
 
 @router.get("/{user_id}", response_model=UserResponse)
@@ -60,7 +72,10 @@ async def get_user(
     Retrieve user detail with role information.
     """
     org_id: UUID = current_user.organization_id
-    return await user_service.get_user(db, user_id, org_id)
+    user = await user_service.get_user(db, user_id, org_id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(user)
+    return user
 
 
 @router.post("", response_model=UserResponse, status_code=201)
@@ -75,7 +90,10 @@ async def create_user(
     Supervisor can create Staff; GM can create Supervisor+Staff; Owner can create all.
     """
     org_id: UUID = current_user.organization_id
-    return await user_service.create_user(db, org_id, data, caller=current_user)
+    user = await user_service.create_user(db, org_id, data, caller=current_user)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(user)
+    return user
 
 
 @router.put("/{user_id}", response_model=UserResponse)
@@ -90,7 +108,10 @@ async def update_user(
     Update an existing user's information.
     """
     org_id: UUID = current_user.organization_id
-    return await user_service.update_user(db, user_id, org_id, data, caller=current_user)
+    user = await user_service.update_user(db, user_id, org_id, data, caller=current_user)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(user)
+    return user
 
 
 @router.patch("/{user_id}/active", response_model=UserResponse)
@@ -104,7 +125,10 @@ async def toggle_user_active(
     Toggle a user's active/inactive status.
     """
     org_id: UUID = current_user.organization_id
-    return await user_service.toggle_active(db, user_id, org_id)
+    user = await user_service.toggle_active(db, user_id, org_id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(user)
+    return user
 
 
 @router.delete("/{user_id}", response_model=MessageResponse)

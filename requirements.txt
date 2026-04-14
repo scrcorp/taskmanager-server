@@ -35,3 +35,6 @@ aiosmtplib==3.0.2
 # AWS
 boto3==1.35.0
 fpdf2==2.8.7
+
+# Scheduler (cron jobs for attendance state transitions)
+APScheduler==3.10.4

@@ -15,9 +15,41 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attendance import Attendance, AttendanceCorrection, QRCode
 from app.models.organization import Store
+from app.models.schedule import Schedule
 from app.models.user import User
 from app.repositories.attendance_repository import attendance_repository, qr_code_repository
 from app.utils.exceptions import BadRequestError, NotFoundError
+
+
+# 지각/조퇴/휴식 anomaly 임계치 (분 단위) — defaults
+LATE_BUFFER_MINUTES = 5
+EARLY_LEAVE_THRESHOLD_MINUTES = 5
+
+
+async def _find_schedule_for_attendance(
+    db: AsyncSession,
+    user_id: UUID,
+    store_id: UUID,
+    work_date: date,
+) -> Schedule | None:
+    """해당 user/store/date의 confirmed schedule 찾기 (있으면 1개)."""
+    result = await db.execute(
+        select(Schedule).where(
+            Schedule.user_id == user_id,
+            Schedule.store_id == store_id,
+            Schedule.work_date == work_date,
+            Schedule.status == "confirmed",
+        ).limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+def _add_anomaly(attendance: Attendance, code: str) -> None:
+    """anomalies 배열에 중복 없이 추가."""
+    current = list(attendance.anomalies or [])
+    if code not in current:
+        current.append(code)
+    attendance.anomalies = current
 
 
 class AttendanceService:
@@ -207,17 +239,32 @@ class AttendanceService:
                 raise BadRequestError(
                     "이미 오늘 출근 기록이 있습니다 (Already clocked in today)"
                 )
-            # 새 근태 기록 생성 — Create new attendance record
+            # 해당 날짜의 confirmed schedule 찾기 (있으면 link + late 체크)
+            schedule = await _find_schedule_for_attendance(db, user_id, store_id, today)
+            new_status = "working"
+            anomalies: list[str] = []
+            if schedule and schedule.start_time is not None:
+                # store timezone 기준 schedule 시작 시각
+                from datetime import datetime as _dt
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(effective_tz)
+                scheduled_start = _dt.combine(today, schedule.start_time, tzinfo=tz)
+                from datetime import timedelta as _td
+                if now > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
+                    new_status = "late"
+                    anomalies.append("late")
             attendance = await attendance_repository.create(
                 db,
                 {
                     "organization_id": organization_id,
                     "store_id": store_id,
                     "user_id": user_id,
+                    "schedule_id": schedule.id if schedule else None,
                     "work_date": today,
                     "clock_in": now,
                     "clock_in_timezone": client_timezone,
-                    "status": "clocked_in",
+                    "status": new_status,
+                    "anomalies": anomalies or None,
                 },
             )
 
@@ -226,7 +273,7 @@ class AttendanceService:
                 raise BadRequestError(
                     "먼저 출근해야 합니다 (Must clock in first)"
                 )
-            if attendance.status != "clocked_in":
+            if attendance.status not in ("working", "late"):
                 raise BadRequestError(
                     "현재 상태에서 휴식을 시작할 수 없습니다 (Cannot start break in current state)"
                 )
@@ -245,7 +292,7 @@ class AttendanceService:
                     "현재 휴식 중이 아닙니다 (Not currently on break)"
                 )
             attendance.break_end = now
-            attendance.status = "clocked_in"
+            attendance.status = "working"
 
             # 휴식 시간 계산 — Calculate break minutes
             if attendance.break_start is not None:
@@ -260,7 +307,7 @@ class AttendanceService:
                 raise BadRequestError(
                     "먼저 출근해야 합니다 (Must clock in first)"
                 )
-            if attendance.status not in ("clocked_in", "on_break"):
+            if attendance.status not in ("working", "late", "on_break"):
                 raise BadRequestError(
                     "이미 퇴근 처리되었습니다 (Already clocked out)"
                 )
@@ -279,6 +326,37 @@ class AttendanceService:
             if attendance.clock_in is not None:
                 work_delta = now - attendance.clock_in
                 attendance.total_work_minutes = int(work_delta.total_seconds() / 60)
+
+            # ─── Anomaly 감지 ───
+            schedule = None
+            if attendance.schedule_id is not None:
+                schedule_result = await db.execute(
+                    select(Schedule).where(Schedule.id == attendance.schedule_id)
+                )
+                schedule = schedule_result.scalar_one_or_none()
+
+            if schedule and schedule.end_time is not None:
+                from datetime import datetime as _dt, timedelta as _td
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(effective_tz)
+                scheduled_end = _dt.combine(today, schedule.end_time, tzinfo=tz)
+                # 조퇴
+                if now < scheduled_end - _td(minutes=EARLY_LEAVE_THRESHOLD_MINUTES):
+                    _add_anomaly(attendance, "early_leave")
+                # 초과근무
+                if attendance.total_work_minutes is not None:
+                    scheduled_minutes = (
+                        (scheduled_end - _dt.combine(today, schedule.start_time, tzinfo=tz)).total_seconds() / 60
+                    )
+                    if attendance.total_work_minutes > scheduled_minutes + 30:
+                        _add_anomaly(attendance, "overtime")
+
+            # 휴식 미사용 + 연속 근무 임계치 초과 체크
+            from app.repositories.break_rule_repository import break_rule_repository
+            break_rule = await break_rule_repository.get_by_store(db, store_id)
+            if break_rule and (attendance.total_break_minutes or 0) == 0:
+                if (attendance.total_work_minutes or 0) > break_rule.max_continuous_minutes:
+                    _add_anomaly(attendance, "no_break")
 
             await db.flush()
             await db.refresh(attendance)
@@ -502,6 +580,7 @@ class AttendanceService:
             "store_name": store_name,
             "user_id": str(attendance.user_id),
             "user_name": user_name,
+            "schedule_id": str(attendance.schedule_id) if attendance.schedule_id else None,
             "work_date": attendance.work_date,
             "clock_in": attendance.clock_in,
             "clock_in_timezone": attendance.clock_in_timezone,
@@ -510,6 +589,7 @@ class AttendanceService:
             "clock_out": attendance.clock_out,
             "clock_out_timezone": attendance.clock_out_timezone,
             "status": attendance.status,
+            "anomalies": attendance.anomalies,
             "total_work_minutes": attendance.total_work_minutes,
             "total_break_minutes": attendance.total_break_minutes,
             "net_work_minutes": net_work_minutes,

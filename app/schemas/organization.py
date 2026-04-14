@@ -42,6 +42,7 @@ class OrganizationUpdate(BaseModel):
     default_hourly_rate: float | None = None  # 기본 시급 (Default hourly rate, optional)
 
 
+
 class OrganizationResponse(BaseModel):
     """조직 응답 스키마.
 
@@ -60,7 +61,7 @@ class OrganizationResponse(BaseModel):
     timezone: str  # IANA 타임존 (Organization timezone)
     day_start_time: str | None = None  # 하루 기준 시작 시각 (HH:MM)
     weekly_overtime_limit: int = 40  # 주간 OT 기준 시간
-    default_hourly_rate: float = 0  # 기본 시급 (Default hourly rate)
+    default_hourly_rate: float | None = 0  # 기본 시급 (Default hourly rate). SV/Staff에는 redact되어 None.
     is_active: bool  # 활성 상태 (Active flag)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 

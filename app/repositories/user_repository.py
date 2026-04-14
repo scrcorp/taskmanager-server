@@ -57,16 +57,15 @@ class UserRepository(BaseRepository[User]):
         )
 
         if filters:
-            store_id: UUID | None = filters.get("store_id")  # type: ignore[assignment]
+            store_ids: list[UUID] | None = filters.get("store_ids")  # type: ignore[assignment]
             role_id: UUID | None = filters.get("role_id")  # type: ignore[assignment]
             is_active: bool | None = filters.get("is_active")  # type: ignore[assignment]
 
-            if store_id is not None:
-                # 특정 매장에 배정된 사용자만 조회
-                # Only users assigned to a specific store
+            if store_ids:
+                # 특정 매장(들)에 배정된 사용자만 조회
                 query = query.join(UserStore, UserStore.user_id == User.id).where(
-                    UserStore.store_id == store_id
-                )
+                    UserStore.store_id.in_(store_ids)
+                ).distinct()
             if role_id is not None:
                 query = query.where(User.role_id == role_id)
             if is_active is not None:

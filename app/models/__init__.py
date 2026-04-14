@@ -28,13 +28,14 @@ from app.models.user_store import UserStore
 from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistInstance, ChecklistInstanceItem, ChecklistItemFile, ChecklistItemSubmission, ChecklistItemReviewLog, ChecklistItemMessage
 from app.models.communication import Announcement, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, AnnouncementRead, Voice
 from app.models.notification import Notification
-from app.models.schedule import Schedule, StoreWorkRole, StoreBreakRule, SchedulePeriod, ScheduleRequestTemplate, ScheduleRequestTemplateItem, ScheduleRequest
+from app.models.schedule import Schedule, StoreWorkRole, StoreBreakRule, ScheduleRequestTemplate, ScheduleRequestTemplateItem, ScheduleRequest, ScheduleAuditLog
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
 from app.models.evaluation import EvalTemplate, EvalTemplateItem, Evaluation, EvalResponse
 from app.models.permission import Permission, RolePermission
 from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSection, DailyReport, DailyReportSection, DailyReportComment
 from app.models.email_verification import EmailVerificationCode
 from app.models.inventory import InventoryCategory, InventorySubUnit, InventoryProduct, StoreInventory, InventoryTransaction, InventoryAudit, InventoryAuditItem, InventoryAuditSetting
+from app.models.settings import SettingsRegistry, OrgSetting, StoreSetting, StaffSetting
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -44,11 +45,12 @@ __all__ = [
     "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistInstance", "ChecklistInstanceItem", "ChecklistItemFile", "ChecklistItemSubmission", "ChecklistItemReviewLog", "ChecklistItemMessage",
     "Announcement", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "AnnouncementRead", "Voice",
     "Notification",
-    "Schedule", "StoreWorkRole", "StoreBreakRule", "SchedulePeriod", "ScheduleRequestTemplate", "ScheduleRequestTemplateItem", "ScheduleRequest",
+    "Schedule", "StoreWorkRole", "StoreBreakRule", "ScheduleRequestTemplate", "ScheduleRequestTemplateItem", "ScheduleRequest", "ScheduleAuditLog",
     "QRCode", "Attendance", "AttendanceCorrection",
     "EvalTemplate", "EvalTemplateItem", "Evaluation", "EvalResponse",
     "Permission", "RolePermission",
     "DailyReportTemplate", "DailyReportTemplateSection", "DailyReport", "DailyReportSection", "DailyReportComment",
     "EmailVerificationCode",
     "InventoryCategory", "InventorySubUnit", "InventoryProduct", "StoreInventory", "InventoryTransaction", "InventoryAudit", "InventoryAuditItem", "InventoryAuditSetting",
+    "SettingsRegistry", "OrgSetting", "StoreSetting", "StaffSetting",
 ]
