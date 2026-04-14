@@ -17,6 +17,7 @@ from app.models.organization import Organization
 from app.models.user import Role, User
 from app.schemas.auth import LoginRequest, TokenResponse
 from app.services.auth_service import auth_service
+from app.core.permissions import OWNER_PRIORITY, GM_PRIORITY, SV_PRIORITY, STAFF_PRIORITY
 from app.utils.password import hash_password
 
 router: APIRouter = APIRouter()
@@ -69,11 +70,11 @@ async def admin_setup(
     # 기본 역할 4개 생성
     admin_role: Role | None = None
     roles_created: list[Role] = []
-    for name, priority in [("owner", 10), ("general_manager", 20), ("supervisor", 30), ("staff", 40)]:
+    for name, priority in [("owner", OWNER_PRIORITY), ("general_manager", GM_PRIORITY), ("supervisor", SV_PRIORITY), ("staff", STAFF_PRIORITY)]:
         role = Role(organization_id=org.id, name=name, priority=priority)
         db.add(role)
         roles_created.append(role)
-        if priority == 10:
+        if priority == OWNER_PRIORITY:
             admin_role = role
     await db.flush()
 
@@ -93,11 +94,11 @@ async def admin_setup(
     }
 
     for r in roles_created:
-        if r.priority <= 10:
+        if r.priority <= OWNER_PRIORITY:
             codes = list(all_perms.keys())
-        elif r.priority <= 20:
+        elif r.priority <= GM_PRIORITY:
             codes = [c for c in all_perms if c not in gm_excluded]
-        elif r.priority <= 30:
+        elif r.priority <= SV_PRIORITY:
             codes = [c for c in all_perms if c in sv_allowed]
         else:
             codes = []

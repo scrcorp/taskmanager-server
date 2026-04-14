@@ -16,6 +16,7 @@ from app.repositories.store_repository import store_repository
 from app.repositories.role_repository import role_repository
 from app.repositories.user_repository import user_repository
 from app.schemas.organization import StoreResponse
+from app.core.permissions import STAFF_PRIORITY, SV_PRIORITY
 from app.schemas.user import (
     UserCreate,
     UserListResponse,
@@ -302,8 +303,8 @@ class UserService:
                 raise ForbiddenError("Cannot assign a role at or above your priority")
             update_data["role_id"] = UUID(update_data["role_id"])
 
-            # Staff(priority>=40)로 변경 시 모든 매장의 is_manager 초기화
-            if role.priority >= 40:
+            # Staff로 변경 시 모든 매장의 is_manager 초기화
+            if role.priority >= STAFF_PRIORITY:
                 await user_repository.reset_manager_flags(db, user_id)
 
         try:
@@ -487,10 +488,10 @@ class UserService:
         # Role별 검증
         manager_count = sum(1 for a in assignments if a["is_manager"])
 
-        if priority >= 40 and manager_count > 0:
+        if priority >= STAFF_PRIORITY and manager_count > 0:
             raise BadRequestError("Staff cannot be assigned as manager")
 
-        if priority == 30 and manager_count > 1:
+        if priority == SV_PRIORITY and manager_count > 1:
             raise BadRequestError("Supervisor can only manage one store")
 
         # 매장 존재 확인

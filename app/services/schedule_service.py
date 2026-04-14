@@ -21,6 +21,7 @@ from app.schemas.schedule import (
     ScheduleReject, ScheduleBulkConfirmResult,
     ScheduleHistoryItem, ScheduleHistoryListResponse,
 )
+from app.core.permissions import GM_PRIORITY, OWNER_PRIORITY, hide_cost_for_priority
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 
 
@@ -146,9 +147,9 @@ class ScheduleService:
 
     @staticmethod
     def _require_gm_or_above(actor: User, action: str) -> None:
-        """GM+ 권한 체크 (role.priority <= 20). 실패 시 ForbiddenError."""
+        """GM+ 권한 체크. 실패 시 ForbiddenError."""
         priority = actor.role.priority if actor.role else 999
-        if priority > 20:
+        if priority > GM_PRIORITY:
             raise ForbiddenError(f"GM or above required for action: {action}")
 
     async def _resolve_work_role_snapshot(
@@ -920,7 +921,7 @@ class ScheduleService:
     ) -> list[ScheduleAuditLogResponse]:
         """스케줄 audit log 조회 (timestamp DESC).
 
-        actor가 GM 미만(role_priority > 20)이면 cost(hourly_rate) diff 항목 제거.
+        actor가 GM 미만이면 cost(hourly_rate) diff 항목 제거.
         """
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
@@ -938,7 +939,7 @@ class ScheduleService:
 
         # SV/Staff: cost-related fields 숨김
         actor_priority = actor.role.priority if (actor and actor.role) else 999
-        hide_cost = actor is not None and actor_priority > 20
+        hide_cost = actor is not None and hide_cost_for_priority(actor_priority)
         cost_keys = {"hourly_rate"}
 
         def _scrub(diff: dict | None) -> dict | None:
@@ -979,9 +980,9 @@ class ScheduleService:
         organization_id: UUID,
         actor: User,
     ) -> None:
-        """History entry 삭제. Owner only (priority <= 10)."""
+        """History entry 삭제. Owner only."""
         actor_priority = actor.role.priority if (actor and actor.role) else 999
-        if actor_priority > 10:
+        if actor_priority > OWNER_PRIORITY:
             raise ForbiddenError("Only Owner can delete history entries")
 
         # 해당 log이 같은 org schedule인지 확인 (cross-org 방지)
@@ -1043,7 +1044,7 @@ class ScheduleService:
 
         # cost redact (GM 미만)
         actor_priority = actor.role.priority if (actor and actor.role) else 999
-        hide_cost = actor_priority > 20
+        hide_cost = hide_cost_for_priority(actor_priority)
         cost_keys = {"hourly_rate"}
 
         items: list[ScheduleHistoryItem] = []

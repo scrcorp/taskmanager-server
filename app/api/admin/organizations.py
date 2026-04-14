@@ -22,7 +22,7 @@ router: APIRouter = APIRouter()
 @router.get("/me", response_model=OrganizationResponse)
 async def get_current_organization(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+    current_user: Annotated[User, Depends(require_permission("org:read"))],
 ) -> OrganizationResponse:
     """현재 조직 정보를 조회합니다.
 
@@ -39,7 +39,7 @@ async def get_current_organization(
 async def update_current_organization(
     data: OrganizationUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+    current_user: Annotated[User, Depends(require_permission("org:update"))],
 ) -> OrganizationResponse:
     """현재 조직 정보를 수정합니다.
 

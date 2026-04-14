@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import check_store_access, require_permission
+from app.core.permissions import is_owner
 from app.database import get_db
 from app.models.user import User
 from app.schemas.inventory import (
@@ -40,7 +41,7 @@ async def list_managed_stores(
     from app.models.organization import Store
     from app.models.user_store import UserStore
 
-    if current_user.role.priority <= 10:
+    if is_owner(current_user):
         # Owner: all active stores in org
         query = sa_select(Store).where(
             Store.organization_id == current_user.organization_id,

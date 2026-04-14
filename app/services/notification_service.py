@@ -17,6 +17,7 @@ from app.models.communication import AdditionalTask, Announcement
 from app.models.notification import Notification
 from app.models.permission import Permission, RolePermission
 from app.models.schedule import Schedule
+from app.core.permissions import OWNER_PRIORITY
 from app.models.user import Role, User
 from app.repositories.notification_repository import notification_repository
 
@@ -294,7 +295,7 @@ class NotificationService:
                 User.is_active.is_(True),
                 User.deleted_at.is_(None),
                 Permission.code == "checklists:update",
-                Role.priority > 10,  # Owner 제외 (비즈니스 규칙)
+                Role.priority > OWNER_PRIORITY,  # Owner 제외 (비즈니스 규칙)
             )
         )
         result = await db.execute(managers_q)

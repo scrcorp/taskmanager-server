@@ -182,3 +182,62 @@ async def ensure_daily_report_templates() -> None:
                 await db.commit()
     except Exception as e:
         logger.warning(f"Failed to ensure daily report templates: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Startup: Permission Registry sync (DB에 없는 permission 자동 추가)
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def sync_permission_registry() -> None:
+    """PERMISSION_REGISTRY → DB permissions 테이블 동기화.
+
+    이미 존재하는 코드는 description만 업데이트.
+    새로 추가된 코드는 INSERT.
+    Owner는 require_permission()에서 bypass하므로 role_permissions 불필요.
+    """
+    import logging
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.permission import Permission
+    from app.core.permissions import PERMISSION_REGISTRY
+
+    logger = logging.getLogger("uvicorn.error")
+    try:
+        async with async_session() as db:
+            result = await db.execute(select(Permission))
+            existing = {p.code: p for p in result.scalars().all()}
+
+            new_permission_ids: list = []
+            inserted, updated = 0, 0
+            for code, resource, action, description, require_priority_check in PERMISSION_REGISTRY:
+                if code in existing:
+                    p = existing[code]
+                    changed = False
+                    if p.description != description:
+                        p.description = description
+                        changed = True
+                    if p.require_priority_check != require_priority_check:
+                        p.require_priority_check = require_priority_check
+                        changed = True
+                    if changed:
+                        updated += 1
+                else:
+                    perm = Permission(
+                        code=code,
+                        resource=resource,
+                        action=action,
+                        description=description,
+                        require_priority_check=require_priority_check,
+                    )
+                    db.add(perm)
+                    inserted += 1
+                    new_permission_ids.append(perm)
+
+            if inserted or updated:
+                await db.flush()
+
+            if inserted or updated:
+                await db.commit()
+                logger.info(f"[permission_sync] Inserted {inserted}, updated {updated} permissions")
+    except Exception as e:
+        logger.warning(f"Failed to sync permission registry: {e}")
