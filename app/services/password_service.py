@@ -14,6 +14,7 @@ from app.models.user import User
 from app.repositories.auth_repository import auth_repository
 from app.services.email_verification_service import email_verification_service
 from app.utils.email import send_email
+from app.core.permissions import GM_PRIORITY
 from app.utils.email_templates import (
     build_password_reset_code_email,
     build_temporary_password_email,
@@ -247,14 +248,14 @@ class PasswordService:
 
         # 권한 검증: Owner(10) 전체, GM(20) 자기 매장 SV/Staff만
         admin_priority = admin_user.role.priority
-        if admin_priority > 20:
+        if admin_priority > GM_PRIORITY:
             raise ForbiddenError("Insufficient permission")
 
         target_priority = target.role.priority
         if target_priority <= admin_priority:
             raise ForbiddenError("Cannot reset password for equal or higher role")
 
-        if admin_priority == 20:
+        if admin_priority == GM_PRIORITY:
             admin_stores = await user_repository.get_managed_store_ids(db, admin_user.id)
             target_stores = await user_repository.get_work_store_ids(db, target.id)
             if not admin_stores or not target_stores:

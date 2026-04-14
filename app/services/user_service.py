@@ -16,6 +16,7 @@ from app.repositories.store_repository import store_repository
 from app.repositories.role_repository import role_repository
 from app.repositories.user_repository import user_repository
 from app.schemas.organization import StoreResponse
+from app.core.permissions import STAFF_PRIORITY, SV_PRIORITY
 from app.schemas.user import (
     UserCreate,
     UserListResponse,
@@ -55,6 +56,7 @@ class UserService:
             username=user.username,
             full_name=user.full_name,
             email=user.email,
+            email_verified=user.email_verified,
             role_name=role.name,
             role_priority=role.priority,
             hourly_rate=raw_rate,
@@ -71,6 +73,8 @@ class UserService:
             id=str(user.id),
             username=user.username,
             full_name=user.full_name,
+            email=user.email,
+            email_verified=user.email_verified,
             role_name=role.name,
             role_priority=role.priority,
             hourly_rate=raw_rate,
@@ -262,6 +266,31 @@ class UserService:
         """
         update_data: dict = data.model_dump(exclude_unset=True)
 
+        # username 변경 시 조직 내 중복 검사 — Check username uniqueness within org
+        if "username" in update_data and update_data["username"] is not None:
+            new_username: str = update_data["username"].strip()
+            if not new_username:
+                raise BadRequestError("Username cannot be empty")
+            update_data["username"] = new_username
+            exists: bool = await user_repository.exists(
+                db, {"organization_id": organization_id, "username": new_username}
+            )
+            if exists:
+                # 자기 자신의 기존 username이면 무시
+                current_user_obj: User | None = await user_repository.get_by_id(
+                    db, user_id, organization_id
+                )
+                if current_user_obj is None or current_user_obj.username != new_username:
+                    raise DuplicateError("Username already exists in this organization")
+
+        # 이메일 변경 시 인증 상태 리셋 — Reset email_verified when email changes
+        if "email" in update_data:
+            current_user_obj_for_email: User | None = await user_repository.get_by_id(
+                db, user_id, organization_id
+            )
+            if current_user_obj_for_email and update_data["email"] != current_user_obj_for_email.email:
+                update_data["email_verified"] = False
+
         # role_id를 문자열에서 UUID로 변환 — Convert role_id from string to UUID
         if "role_id" in update_data and update_data["role_id"] is not None:
             role: Role | None = await role_repository.get_by_id(
@@ -274,8 +303,8 @@ class UserService:
                 raise ForbiddenError("Cannot assign a role at or above your priority")
             update_data["role_id"] = UUID(update_data["role_id"])
 
-            # Staff(priority>=40)로 변경 시 모든 매장의 is_manager 초기화
-            if role.priority >= 40:
+            # Staff로 변경 시 모든 매장의 is_manager 초기화
+            if role.priority >= STAFF_PRIORITY:
                 await user_repository.reset_manager_flags(db, user_id)
 
         try:
@@ -459,10 +488,10 @@ class UserService:
         # Role별 검증
         manager_count = sum(1 for a in assignments if a["is_manager"])
 
-        if priority >= 40 and manager_count > 0:
+        if priority >= STAFF_PRIORITY and manager_count > 0:
             raise BadRequestError("Staff cannot be assigned as manager")
 
-        if priority == 30 and manager_count > 1:
+        if priority == SV_PRIORITY and manager_count > 1:
             raise BadRequestError("Supervisor can only manage one store")
 
         # 매장 존재 확인

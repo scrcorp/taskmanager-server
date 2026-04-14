@@ -82,7 +82,7 @@ async def get_user(
 async def create_user(
     data: UserCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("users:read"))],
+    current_user: Annotated[User, Depends(require_permission("users:create"))],
 ) -> UserResponse:
     """새 사용자를 생성합니다.
 

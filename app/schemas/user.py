@@ -72,12 +72,14 @@ class UserUpdate(BaseModel):
     Only provided fields are updated; omitted fields remain unchanged.
 
     Attributes:
+        username: 로그인 아이디 (New username, optional)
         full_name: 실명 (New display name, optional)
         email: 이메일 (New email, optional)
         role_id: 역할 UUID (New role assignment, optional)
         is_active: 활성 상태 (Active status toggle, optional)
     """
 
+    username: str | None = None  # 변경할 로그인 아이디 (New username, optional)
     full_name: str | None = None  # 변경할 실명 (New name, optional)
     email: str | None = None  # 변경할 이메일 (New email, optional)
     role_id: str | None = None  # 변경할 역할 UUID (New role, optional)
@@ -105,6 +107,7 @@ class UserResponse(BaseModel):
     username: str  # 로그인 아이디 (Login username)
     full_name: str  # 실명 (Full display name)
     email: str | None  # 이메일 (Email, may be null)
+    email_verified: bool  # 이메일 인증 여부 (Email verification status)
     role_name: str  # 역할 이름 — 조인된 값 (Role name, resolved from Role table)
     role_priority: int  # 역할 우선순위 — 조인된 값
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속 (None = inherit from store/org)
@@ -130,6 +133,8 @@ class UserListResponse(BaseModel):
     id: str  # 사용자 UUID 문자열 (User UUID as string)
     username: str  # 로그인 아이디 (Login username)
     full_name: str  # 실명 (Full display name)
+    email: str | None = None  # 이메일 (Email, may be null)
+    email_verified: bool = False  # 이메일 인증 여부 (Email verification status)
     role_name: str  # 역할 이름 — 조인된 값 (Role name, resolved from Role table)
     role_priority: int  # 역할 우선순위 — 조인된 값
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속
@@ -196,9 +201,11 @@ class ProfileUpdate(BaseModel):
     Only provided fields are updated; omitted fields remain unchanged.
 
     Attributes:
+        username: 새 로그인 아이디, 선택 (New username, optional)
         full_name: 새 전체 이름, 선택 (New full name, optional)
         email: 새 이메일, 선택 (New email, optional)
     """
 
+    username: str | None = None  # 변경할 로그인 아이디 (New username, optional)
     full_name: str | None = None  # 변경할 실명 (New name, optional)
     email: str | None = None  # 변경할 이메일 (New email, optional)

@@ -13,6 +13,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.permissions import STAFF_PRIORITY
+
 from app.config import settings
 from app.models.organization import Organization, Store
 from app.models.user import Role, User
@@ -196,8 +198,8 @@ class AuthService:
 
         role: Role = user.role
 
-        # Staff(priority >= 40) 차단 — admin login은 SV 이상만
-        if role.priority >= 40:
+        # Staff 차단 — admin login은 SV 이상만
+        if role.priority >= STAFF_PRIORITY:
             raise ForbiddenError("Staff accounts cannot sign in to admin")
 
         # permission이 없으면 관리자 로그인 불가
@@ -308,11 +310,11 @@ class AuthService:
         if existing is not None:
             raise DuplicateError("Username already exists")
 
-        # 스태프 역할 조회 (priority = 40)
+        # 스태프 역할 조회
         roles: list[Role] = await role_repository.get_by_org(db, organization_id)
         staff_role: Role | None = None
         for r in roles:
-            if r.priority == 40:
+            if r.priority == STAFF_PRIORITY:
                 staff_role = r
                 break
 

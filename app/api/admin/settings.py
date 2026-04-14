@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_permission
+from app.core.permissions import is_owner
 from app.database import get_db
 from app.models.settings import OrgSetting, SettingsRegistry, StaffSetting, StoreSetting
 from app.models.user import User
@@ -30,7 +31,7 @@ router: APIRouter = APIRouter()
 @router.get("/registry", response_model=list[SettingsRegistryResponse])
 async def list_registry(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("stores:read"))],
+    current_user: Annotated[User, Depends(require_permission("org:read"))],
     category: Annotated[str | None, Query()] = None,
 ) -> list[SettingsRegistryResponse]:
     """Settings registry 메타 조회 (전체 또는 카테고리 필터)."""
@@ -56,10 +57,10 @@ async def list_registry(
 async def upsert_registry(
     data: SettingsRegistryUpsert,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+    current_user: Annotated[User, Depends(require_permission("org:update"))],
 ) -> SettingsRegistryResponse:
     """Settings registry 메타 등록/수정. Owner 권한 권장."""
-    if current_user.role.priority > 10:
+    if not is_owner(current_user):
         raise ForbiddenError("Owner only")
     existing = await db.scalar(select(SettingsRegistry).where(SettingsRegistry.key == data.key))
     if existing is None:
@@ -95,7 +96,7 @@ async def upsert_registry(
 @router.get("/org", response_model=list[OrgSettingResponse])
 async def list_org_settings(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("stores:read"))],
+    current_user: Annotated[User, Depends(require_permission("org:read"))],
 ) -> list[OrgSettingResponse]:
     """현재 조직의 모든 설정 override 조회."""
     result = await db.execute(
@@ -117,7 +118,7 @@ async def list_org_settings(
 async def upsert_org_setting(
     data: OrgSettingUpsert,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+    current_user: Annotated[User, Depends(require_permission("org:update"))],
 ) -> OrgSettingResponse:
     """조직 설정 upsert. registry 키 검증."""
     registry = await db.scalar(select(SettingsRegistry).where(SettingsRegistry.key == data.key))
@@ -160,7 +161,7 @@ async def upsert_org_setting(
 async def delete_org_setting(
     key: str,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+    current_user: Annotated[User, Depends(require_permission("org:update"))],
 ) -> None:
     """조직 설정 override 제거 (default로 복원)."""
     existing = await db.scalar(
