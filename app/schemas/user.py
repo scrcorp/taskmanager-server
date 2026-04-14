@@ -105,6 +105,7 @@ class UserResponse(BaseModel):
     username: str  # 로그인 아이디 (Login username)
     full_name: str  # 실명 (Full display name)
     email: str | None  # 이메일 (Email, may be null)
+    email_verified: bool  # 이메일 인증 여부 (Email verification status)
     role_name: str  # 역할 이름 — 조인된 값 (Role name, resolved from Role table)
     role_priority: int  # 역할 우선순위 — 조인된 값
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속 (None = inherit from store/org)
@@ -130,6 +131,8 @@ class UserListResponse(BaseModel):
     id: str  # 사용자 UUID 문자열 (User UUID as string)
     username: str  # 로그인 아이디 (Login username)
     full_name: str  # 실명 (Full display name)
+    email: str | None = None  # 이메일 (Email, may be null)
+    email_verified: bool = False  # 이메일 인증 여부 (Email verification status)
     role_name: str  # 역할 이름 — 조인된 값 (Role name, resolved from Role table)
     role_priority: int  # 역할 우선순위 — 조인된 값
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속
