@@ -17,6 +17,7 @@ from app.schemas.schedule import (
     ScheduleResponse, ScheduleSwap, ScheduleUpdate, ScheduleValidation,
     ScheduleConfirm, ScheduleReject, ScheduleBulkConfirm, ScheduleBulkConfirmResult,
     ScheduleHistoryListResponse,
+    ScheduleAssignChecklist, ScheduleAssignChecklistResult,
 )
 from app.services.schedule_service import schedule_service
 
@@ -308,6 +309,24 @@ async def validate_entry(
 ) -> ScheduleValidation:
     """검증만 (저장 안함)."""
     return await schedule_service.validate_entry(db, current_user.organization_id, data)
+
+
+@router.post("/{entry_id}/checklist", response_model=ScheduleAssignChecklistResult, status_code=201)
+async def assign_checklist(
+    entry_id: UUID,
+    data: ScheduleAssignChecklist,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> ScheduleAssignChecklistResult:
+    """체크리스트가 없는 confirmed 스케줄에 템플릿을 선택하여 수동 부여."""
+    result = await schedule_service.assign_checklist_to_schedule(
+        db,
+        schedule_id=entry_id,
+        organization_id=current_user.organization_id,
+        template_id=UUID(data.template_id),
+        actor=current_user,
+    )
+    return ScheduleAssignChecklistResult(**result)
 
 
 @router.post("/assign-checklist", response_model=BulkAssignChecklistResult, status_code=200)
