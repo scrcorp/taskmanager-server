@@ -345,6 +345,11 @@ class ScheduleUpdate(BaseModel):
     note: str | None = None
     hourly_rate: float | None = None  # 시급 override (optional)
     force: bool = False
+    reset_checklist: bool | None = None
+    # user_id 변경 시 기존 체크리스트 처리:
+    # None  = 충돌(in_progress/completed) 시 에러 반환 (프론트가 선택 후 재요청)
+    # True  = 체크리스트 초기화
+    # False = 진행 상태 그대로 유지
 
 
 class ScheduleResponse(BaseModel):
@@ -403,6 +408,22 @@ class ScheduleSwap(BaseModel):
     """Swap two confirmed schedules' assigned users (GM+ only)."""
     other_schedule_id: str
     reason: str | None = None
+    reset_checklists: bool | None = None
+    force: bool = False  # 겹침 경고 무시
+    # None  = 충돌(in_progress/completed) 시 에러 반환 (프론트가 선택 후 재요청)
+    # True  = 양쪽 체크리스트 초기화
+    # False = 진행 상태 그대로 유지
+
+
+class ScheduleAssignChecklist(BaseModel):
+    """단일 스케줄에 체크리스트 템플릿 수동 부여."""
+    template_id: str
+
+
+class ScheduleAssignChecklistResult(BaseModel):
+    instance_id: str
+    template_id: str
+    schedule_id: str
 
 
 class ScheduleAuditLogResponse(BaseModel):

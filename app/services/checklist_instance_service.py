@@ -131,6 +131,47 @@ class ChecklistInstanceService:
         await db.flush()
         return instance
 
+    async def get_for_schedule(
+        self,
+        db: AsyncSession,
+        schedule_id: UUID,
+    ) -> "ChecklistInstance | None":
+        """schedule_id로 체크리스트 인스턴스를 조회합니다."""
+        result = await db.execute(
+            select(ChecklistInstance).where(ChecklistInstance.schedule_id == schedule_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def reset_instance(
+        self,
+        db: AsyncSession,
+        instance: "ChecklistInstance",
+    ) -> None:
+        """체크리스트 인스턴스를 초기 상태(pending)로 초기화합니다.
+
+        모든 항목 완료 상태를 클리어하고 status → pending.
+        cl_item_submissions, cl_item_files 등 이력 데이터는 보존.
+        """
+        from sqlalchemy import update as sa_update
+
+        await db.execute(
+            sa_update(ChecklistInstanceItem)
+            .where(ChecklistInstanceItem.instance_id == instance.id)
+            .values(
+                is_completed=False,
+                completed_at=None,
+                completed_tz=None,
+                completed_by=None,
+                review_result=None,
+                reviewer_id=None,
+                reviewed_at=None,
+            )
+        )
+        instance.completed_items = 0
+        instance.status = "pending"
+        instance.reported_at = None
+        await db.flush()
+
     async def get_instances(
         self,
         db: AsyncSession,
