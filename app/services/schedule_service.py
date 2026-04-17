@@ -16,7 +16,7 @@ from app.repositories.schedule_repository import schedule_repository
 from app.repositories.work_role_repository import work_role_repository
 from app.schemas.schedule import (
     ScheduleAuditLogResponse, ScheduleCancel,
-    ScheduleCreate, ScheduleResponse, ScheduleSwap, ScheduleUpdate,
+    ScheduleCreate, ScheduleResponse, ScheduleSwitch, ScheduleUpdate,
     ScheduleValidation, FinalizeResult,
     ScheduleReject, ScheduleBulkConfirmResult,
     ScheduleHistoryItem, ScheduleHistoryListResponse,
@@ -378,6 +378,155 @@ class ScheduleService:
             created=created, skipped=skipped, failed=failed,
             errors=errors, items=items,
         )
+
+    async def bulk_preview(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        entries_data: list,  # list[BulkPreviewEntry]
+        actor: "User",
+    ) -> "BulkPreviewResponse":
+        """벌크 스케줄 dry-run — DB 변경 없이 충돌/경고/예상비용 반환."""
+        from app.schemas.schedule import (
+            BulkPreviewConflict, BulkPreviewItem,
+            BulkPreviewResponse, BulkPreviewWarning,
+        )
+
+        valid: list[BulkPreviewItem] = []
+        conflicts: list[BulkPreviewConflict] = []
+        # user_id → simulated minutes accumulated across this batch
+        user_batch_minutes: dict[UUID, int] = {}
+
+        for i, entry in enumerate(entries_data):
+            try:
+                user_id = UUID(entry.user_id)
+                store_id = UUID(entry.store_id)
+                start_time = self._parse_time(entry.start_time)
+                end_time = self._parse_time(entry.end_time)
+                if start_time is None or end_time is None:
+                    conflicts.append(BulkPreviewConflict(index=i, message="start_time and end_time are required"))
+                    continue
+
+                break_start = self._parse_time(entry.break_start_time)
+                break_end = self._parse_time(entry.break_end_time)
+
+                validation = await self._validate_entry(
+                    db, user_id, store_id, entry.work_date,
+                    start_time, end_time, break_start, break_end, force=False,
+                )
+                if not validation.valid:
+                    conflicts.append(BulkPreviewConflict(
+                        index=i,
+                        message="; ".join(validation.errors),
+                    ))
+                    continue
+
+                net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
+                resolved_rate = await self._resolve_hourly_rate(db, user_id, store_id, organization_id)
+                estimated_cost = round(resolved_rate * net / 60, 2) if resolved_rate else None
+
+                # 배치 내 누적 분 추적 (주간 초과근무 경고용)
+                user_batch_minutes[user_id] = user_batch_minutes.get(user_id, 0) + net
+
+                valid.append(BulkPreviewItem(
+                    index=i,
+                    estimated_cost=estimated_cost,
+                    net_work_minutes=net,
+                ))
+            except (ValueError, Exception) as exc:
+                conflicts.append(BulkPreviewConflict(index=i, message=str(exc)))
+
+        # 초과근무 경고 — 유저별 기존 주간 근무분 + 배치 누적분 합산
+        WEEKLY_LIMIT = 40 * 60  # 40시간
+        warnings: list[BulkPreviewWarning] = []
+        for user_id, batch_minutes in user_batch_minutes.items():
+            # 기존 DB 주간 근무분 (첫 유효 항목의 work_date 기준)
+            first_entry = next(
+                (e for idx, e in enumerate(entries_data)
+                 if not any(c.index == idx for c in conflicts)),
+                None,
+            )
+            if first_entry is None:
+                continue
+            existing_minutes = await schedule_repository.get_weekly_minutes(
+                db, user_id, first_entry.work_date,
+            )
+            total = existing_minutes + batch_minutes
+            if total > WEEKLY_LIMIT:
+                warnings.append(BulkPreviewWarning(
+                    user_id=str(user_id),
+                    type="overtime",
+                    total_minutes=total,
+                    limit_minutes=WEEKLY_LIMIT,
+                ))
+
+        return BulkPreviewResponse(valid=valid, conflicts=conflicts, warnings=warnings)
+
+    async def bulk_update(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        updates_data: list,  # list[BulkUpdateItem]
+        actor: "User",
+    ) -> "BulkUpdateResult":
+        """벌크 스케줄 수정 — work_role/시간 필드만 변경."""
+        from app.schemas.schedule import BulkUpdateResult, ScheduleUpdate
+
+        updated = 0
+        failed = 0
+        errors: list[str] = []
+
+        for item in updates_data:
+            try:
+                entry_id = UUID(item.id)
+                update_data = ScheduleUpdate(
+                    work_role_id=item.work_role_id,
+                    start_time=item.start_time,
+                    end_time=item.end_time,
+                    break_start_time=item.break_start_time,
+                    break_end_time=item.break_end_time,
+                    note=item.note,
+                    hourly_rate=item.hourly_rate,
+                    force=False,
+                )
+                await self.update_entry(db, entry_id, organization_id, update_data, actor=actor)
+                updated += 1
+            except (BadRequestError, ForbiddenError, NotFoundError) as exc:
+                failed += 1
+                errors.append(f"[{item.id}] {exc.detail if hasattr(exc, 'detail') else str(exc)}")
+            except Exception as exc:
+                failed += 1
+                errors.append(f"[{item.id}] {str(exc)}")
+
+        return BulkUpdateResult(updated=updated, failed=failed, errors=errors)
+
+    async def bulk_delete(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        ids: list[str],
+        actor: "User",
+    ) -> "BulkDeleteResult":
+        """벌크 스케줄 삭제 (soft delete)."""
+        from app.schemas.schedule import BulkDeleteResult
+
+        deleted = 0
+        failed = 0
+        errors: list[str] = []
+
+        for id_str in ids:
+            try:
+                entry_id = UUID(id_str)
+                await self.delete_entry(db, entry_id, organization_id, actor=actor)
+                deleted += 1
+            except (BadRequestError, ForbiddenError, NotFoundError) as exc:
+                failed += 1
+                errors.append(f"[{id_str}] {exc.detail if hasattr(exc, 'detail') else str(exc)}")
+            except Exception as exc:
+                failed += 1
+                errors.append(f"[{id_str}] {str(exc)}")
+
+        return BulkDeleteResult(deleted=deleted, failed=failed, errors=errors)
 
     async def generate_from_requests(
         self,
@@ -921,34 +1070,34 @@ class ScheduleService:
             await db.rollback()
             raise
 
-    async def swap_schedules(
+    async def switch_schedules(
         self,
         db: AsyncSession,
         entry_id: UUID,
         organization_id: UUID,
-        data: ScheduleSwap,
+        data: ScheduleSwitch,
         actor: User,
     ) -> tuple[ScheduleResponse, ScheduleResponse]:
         """두 confirmed 스케줄의 user_id를 교환 (GM+ only)."""
-        self._require_gm_or_above(actor, "swap schedules")
+        self._require_gm_or_above(actor, "switch schedules")
         try:
             other_id = UUID(data.other_schedule_id)
         except ValueError:
             raise BadRequestError("Invalid other_schedule_id")
         if other_id == entry_id:
-            raise BadRequestError("Cannot swap a schedule with itself")
+            raise BadRequestError("Cannot switch a schedule with itself")
 
         a = await schedule_repository.get_by_id(db, entry_id, organization_id)
         b = await schedule_repository.get_by_id(db, other_id, organization_id)
         if a is None or b is None:
             raise NotFoundError("Schedule not found")
         if a.status != "confirmed" or b.status != "confirmed":
-            raise BadRequestError("Both schedules must be confirmed to swap")
+            raise BadRequestError("Both schedules must be confirmed to switch")
 
         a_user = a.user_id
         b_user = b.user_id
 
-        # 겹침 검사 — swap 후 각 user가 충돌 없는지 확인
+        # 겹침 검사 — switch 후 각 user가 충돌 없는지 확인
         # b_user → a 스케줄 (a 제외), a_user → b 스케줄 (b 제외)
         val_a = await self._validate_entry(
             db, b_user, a.store_id, a.work_date,
@@ -966,7 +1115,7 @@ class ScheduleService:
         if not val_b.valid:
             errors.extend(val_b.errors)
         if errors and not data.force:
-            raise BadRequestError(f"Swap would cause conflicts: {'; '.join(errors)}")
+            raise BadRequestError(f"Switch would cause conflicts: {'; '.join(errors)}")
 
         # 체크리스트 상태 확인
         from app.models.checklist import ChecklistInstance
@@ -1007,7 +1156,7 @@ class ScheduleService:
             updated_b = await schedule_repository.update(
                 db, b.id, {"user_id": a_user, "hourly_rate": rate_b, "is_modified": True}, organization_id,
             )
-            # store/role 이름 조회 (swap_with 표시용)
+            # store/role 이름 조회 (switch_with 표시용)
             a_store_r = await db.execute(select(Store.name).where(Store.id == a.store_id))
             a_store_name = a_store_r.scalar() or ""
             b_store_r = await db.execute(select(Store.name).where(Store.id == b.store_id))
@@ -1034,21 +1183,21 @@ class ScheduleService:
                 "work_role_name": b_role_name,
             }
             diff_a = {
-                "_swap_this": sched_info_a,
-                "_swap_with": sched_info_b,
+                "_switch_this": sched_info_a,
+                "_switch_with": sched_info_b,
             }
             diff_b = {
-                "_swap_this": sched_info_b,
-                "_swap_with": sched_info_a,
+                "_switch_this": sched_info_b,
+                "_switch_with": sched_info_a,
             }
             await self._log_audit(
-                db, a.id, "swapped", actor,
-                description=f"Swapped: {a_name} ↔ {b_name}",
+                db, a.id, "switched", actor,
+                description=f"Switched: {a_name} ↔ {b_name}",
                 reason=data.reason, diff=diff_a,
             )
             await self._log_audit(
-                db, b.id, "swapped", actor,
-                description=f"Swapped: {b_name} ↔ {a_name}",
+                db, b.id, "switched", actor,
+                description=f"Switched: {b_name} ↔ {a_name}",
                 reason=data.reason, diff=diff_b,
             )
 

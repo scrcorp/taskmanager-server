@@ -404,8 +404,8 @@ class ScheduleCancel(BaseModel):
     cancellation_reason: str | None = None
 
 
-class ScheduleSwap(BaseModel):
-    """Swap two confirmed schedules' assigned users (GM+ only)."""
+class ScheduleSwitch(BaseModel):
+    """Switch two confirmed schedules' assigned users (GM+ only)."""
     other_schedule_id: str
     reason: str | None = None
     reset_checklists: bool | None = None
@@ -413,6 +413,9 @@ class ScheduleSwap(BaseModel):
     # None  = 충돌(in_progress/completed) 시 에러 반환 (프론트가 선택 후 재요청)
     # True  = 양쪽 체크리스트 초기화
     # False = 진행 상태 그대로 유지
+
+# backward compat alias
+ScheduleSwap = ScheduleSwitch
 
 
 class ScheduleAssignChecklist(BaseModel):
@@ -529,4 +532,88 @@ class BulkAssignChecklistResult(BaseModel):
     assigned: int = 0
     removed: int = 0
     skipped: int = 0
+    errors: list[str] = []
+
+
+# ─── Bulk Preview ────────────────────────────────────
+
+
+class BulkPreviewEntry(BaseModel):
+    """벌크 preview 요청의 단일 항목 — ScheduleCreate 슬림 버전."""
+    user_id: str
+    store_id: str
+    work_role_id: str | None = None
+    work_date: date
+    start_time: str  # "HH:MM"
+    end_time: str
+    break_start_time: str | None = None
+    break_end_time: str | None = None
+
+
+class BulkPreviewRequest(BaseModel):
+    entries: list[BulkPreviewEntry]
+
+
+class BulkPreviewItem(BaseModel):
+    """유효한 항목 — 예상 비용 포함."""
+    index: int
+    estimated_cost: float | None = None
+    net_work_minutes: int = 0
+
+
+class BulkPreviewConflict(BaseModel):
+    """충돌 항목 — index + 사유."""
+    index: int
+    message: str
+
+
+class BulkPreviewWarning(BaseModel):
+    """초과근무 경고 — 유저 단위."""
+    user_id: str
+    type: str  # "overtime"
+    total_minutes: int
+    limit_minutes: int
+
+
+class BulkPreviewResponse(BaseModel):
+    valid: list[BulkPreviewItem] = []
+    conflicts: list[BulkPreviewConflict] = []
+    warnings: list[BulkPreviewWarning] = []
+
+
+# ─── Bulk Update ─────────────────────────────────────
+
+
+class BulkUpdateItem(BaseModel):
+    """단일 수정 항목."""
+    id: str
+    work_role_id: str | None = None
+    start_time: str | None = None  # "HH:MM"
+    end_time: str | None = None
+    break_start_time: str | None = None
+    break_end_time: str | None = None
+    note: str | None = None
+    hourly_rate: float | None = None
+
+
+class BulkUpdateRequest(BaseModel):
+    updates: list[BulkUpdateItem]
+
+
+class BulkUpdateResult(BaseModel):
+    updated: int = 0
+    failed: int = 0
+    errors: list[str] = []
+
+
+# ─── Bulk Delete ─────────────────────────────────────
+
+
+class BulkDeleteRequest(BaseModel):
+    ids: list[str]
+
+
+class BulkDeleteResult(BaseModel):
+    deleted: int = 0
+    failed: int = 0
     errors: list[str] = []

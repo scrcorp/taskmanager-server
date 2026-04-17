@@ -196,7 +196,7 @@ class Schedule(Base):
 class ScheduleAuditLog(Base):
     """스케줄 변경 이력 — Schedule의 모든 상태 변경/수정/취소 등을 audit trail로 기록.
 
-    Event types: created, requested, modified, confirmed, rejected, cancelled, reverted, swapped, deleted
+    Event types: created, requested, modified, confirmed, rejected, cancelled, reverted, switched, deleted
     """
 
     __tablename__ = "schedule_audit_logs"
