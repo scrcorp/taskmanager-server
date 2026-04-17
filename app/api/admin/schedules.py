@@ -17,7 +17,7 @@ from app.schemas.schedule import (
     BulkUpdateRequest, BulkUpdateResult,
     FinalizeResult, ScheduleAuditLogResponse, ScheduleBulkCreate, ScheduleBulkResult,
     ScheduleCancel, ScheduleCreate,
-    ScheduleResponse, ScheduleSwap, ScheduleUpdate, ScheduleValidation,
+    ScheduleResponse, ScheduleSwitch, ScheduleUpdate, ScheduleValidation,
     ScheduleConfirm, ScheduleReject, ScheduleBulkConfirm, ScheduleBulkConfirmResult,
     ScheduleHistoryListResponse,
     ScheduleAssignChecklist, ScheduleAssignChecklistResult,
@@ -299,21 +299,22 @@ async def cancel_schedule(
     ), current_user)
 
 
-@router.post("/{entry_id}/swap", response_model=dict)
-async def swap_schedule(
+@router.post("/{entry_id}/switch", response_model=dict)
+async def switch_schedule(
     entry_id: UUID,
-    data: ScheduleSwap,
+    data: ScheduleSwitch,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> dict:
     """두 confirmed 스케줄의 user_id 교환 (GM+ only)."""
-    a, b = await schedule_service.swap_schedules(
+    a, b = await schedule_service.switch_schedules(
         db, entry_id, current_user.organization_id, data, actor=current_user,
     )
     if hide_cost_for(current_user):
         scrub_cost_fields(a)
         scrub_cost_fields(b)
     return {"a": a, "b": b}
+
 
 
 @router.delete("/history/{log_id}", status_code=204)

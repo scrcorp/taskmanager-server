@@ -404,8 +404,8 @@ class ScheduleCancel(BaseModel):
     cancellation_reason: str | None = None
 
 
-class ScheduleSwap(BaseModel):
-    """Swap two confirmed schedules' assigned users (GM+ only)."""
+class ScheduleSwitch(BaseModel):
+    """Switch two confirmed schedules' assigned users (GM+ only)."""
     other_schedule_id: str
     reason: str | None = None
     reset_checklists: bool | None = None
@@ -413,6 +413,9 @@ class ScheduleSwap(BaseModel):
     # None  = 충돌(in_progress/completed) 시 에러 반환 (프론트가 선택 후 재요청)
     # True  = 양쪽 체크리스트 초기화
     # False = 진행 상태 그대로 유지
+
+# backward compat alias
+ScheduleSwap = ScheduleSwitch
 
 
 class ScheduleAssignChecklist(BaseModel):

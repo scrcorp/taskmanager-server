@@ -16,7 +16,7 @@ from app.repositories.schedule_repository import schedule_repository
 from app.repositories.work_role_repository import work_role_repository
 from app.schemas.schedule import (
     ScheduleAuditLogResponse, ScheduleCancel,
-    ScheduleCreate, ScheduleResponse, ScheduleSwap, ScheduleUpdate,
+    ScheduleCreate, ScheduleResponse, ScheduleSwitch, ScheduleUpdate,
     ScheduleValidation, FinalizeResult,
     ScheduleReject, ScheduleBulkConfirmResult,
     ScheduleHistoryItem, ScheduleHistoryListResponse,
@@ -1070,34 +1070,34 @@ class ScheduleService:
             await db.rollback()
             raise
 
-    async def swap_schedules(
+    async def switch_schedules(
         self,
         db: AsyncSession,
         entry_id: UUID,
         organization_id: UUID,
-        data: ScheduleSwap,
+        data: ScheduleSwitch,
         actor: User,
     ) -> tuple[ScheduleResponse, ScheduleResponse]:
         """두 confirmed 스케줄의 user_id를 교환 (GM+ only)."""
-        self._require_gm_or_above(actor, "swap schedules")
+        self._require_gm_or_above(actor, "switch schedules")
         try:
             other_id = UUID(data.other_schedule_id)
         except ValueError:
             raise BadRequestError("Invalid other_schedule_id")
         if other_id == entry_id:
-            raise BadRequestError("Cannot swap a schedule with itself")
+            raise BadRequestError("Cannot switch a schedule with itself")
 
         a = await schedule_repository.get_by_id(db, entry_id, organization_id)
         b = await schedule_repository.get_by_id(db, other_id, organization_id)
         if a is None or b is None:
             raise NotFoundError("Schedule not found")
         if a.status != "confirmed" or b.status != "confirmed":
-            raise BadRequestError("Both schedules must be confirmed to swap")
+            raise BadRequestError("Both schedules must be confirmed to switch")
 
         a_user = a.user_id
         b_user = b.user_id
 
-        # 겹침 검사 — swap 후 각 user가 충돌 없는지 확인
+        # 겹침 검사 — switch 후 각 user가 충돌 없는지 확인
         # b_user → a 스케줄 (a 제외), a_user → b 스케줄 (b 제외)
         val_a = await self._validate_entry(
             db, b_user, a.store_id, a.work_date,
@@ -1115,7 +1115,7 @@ class ScheduleService:
         if not val_b.valid:
             errors.extend(val_b.errors)
         if errors and not data.force:
-            raise BadRequestError(f"Swap would cause conflicts: {'; '.join(errors)}")
+            raise BadRequestError(f"Switch would cause conflicts: {'; '.join(errors)}")
 
         # 체크리스트 상태 확인
         from app.models.checklist import ChecklistInstance
@@ -1156,7 +1156,7 @@ class ScheduleService:
             updated_b = await schedule_repository.update(
                 db, b.id, {"user_id": a_user, "hourly_rate": rate_b, "is_modified": True}, organization_id,
             )
-            # store/role 이름 조회 (swap_with 표시용)
+            # store/role 이름 조회 (switch_with 표시용)
             a_store_r = await db.execute(select(Store.name).where(Store.id == a.store_id))
             a_store_name = a_store_r.scalar() or ""
             b_store_r = await db.execute(select(Store.name).where(Store.id == b.store_id))
@@ -1183,21 +1183,21 @@ class ScheduleService:
                 "work_role_name": b_role_name,
             }
             diff_a = {
-                "_swap_this": sched_info_a,
-                "_swap_with": sched_info_b,
+                "_switch_this": sched_info_a,
+                "_switch_with": sched_info_b,
             }
             diff_b = {
-                "_swap_this": sched_info_b,
-                "_swap_with": sched_info_a,
+                "_switch_this": sched_info_b,
+                "_switch_with": sched_info_a,
             }
             await self._log_audit(
-                db, a.id, "swapped", actor,
-                description=f"Swapped: {a_name} ↔ {b_name}",
+                db, a.id, "switched", actor,
+                description=f"Switched: {a_name} ↔ {b_name}",
                 reason=data.reason, diff=diff_a,
             )
             await self._log_audit(
-                db, b.id, "swapped", actor,
-                description=f"Swapped: {b_name} ↔ {a_name}",
+                db, b.id, "switched", actor,
+                description=f"Switched: {b_name} ↔ {a_name}",
                 reason=data.reason, diff=diff_b,
             )
 
