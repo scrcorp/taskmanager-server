@@ -12,6 +12,9 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.schedule import (
     BulkAssignChecklistRequest, BulkAssignChecklistResult,
+    BulkDeleteRequest, BulkDeleteResult,
+    BulkPreviewRequest, BulkPreviewResponse,
+    BulkUpdateRequest, BulkUpdateResult,
     FinalizeResult, ScheduleAuditLogResponse, ScheduleBulkCreate, ScheduleBulkResult,
     ScheduleCancel, ScheduleCreate,
     ScheduleResponse, ScheduleSwap, ScheduleUpdate, ScheduleValidation,
@@ -84,6 +87,42 @@ async def bulk_create(
     return await schedule_service.bulk_create(
         db, current_user.organization_id, data.entries, current_user.id,
         skip_on_conflict=data.skip_on_conflict,
+    )
+
+
+@router.post("/bulk/preview", response_model=BulkPreviewResponse)
+async def bulk_preview(
+    data: BulkPreviewRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:create"))],
+) -> BulkPreviewResponse:
+    """벌크 스케줄 dry-run — DB 변경 없이 충돌/경고/예상비용 반환."""
+    return await schedule_service.bulk_preview(
+        db, current_user.organization_id, data.entries, actor=current_user,
+    )
+
+
+@router.patch("/bulk", response_model=BulkUpdateResult)
+async def bulk_update(
+    data: BulkUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> BulkUpdateResult:
+    """벌크 스케줄 수정 — work_role/시간 필드 일괄 변경."""
+    return await schedule_service.bulk_update(
+        db, current_user.organization_id, data.updates, actor=current_user,
+    )
+
+
+@router.delete("/bulk", response_model=BulkDeleteResult)
+async def bulk_delete(
+    data: BulkDeleteRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:delete"))],
+) -> BulkDeleteResult:
+    """벌크 스케줄 삭제 (soft delete). confirmed 스케줄은 GM+ 만 가능."""
+    return await schedule_service.bulk_delete(
+        db, current_user.organization_id, data.ids, actor=current_user,
     )
 
 
