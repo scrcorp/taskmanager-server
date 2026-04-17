@@ -172,7 +172,7 @@ async def update_score(
     instance_id: UUID,
     data: ScoreUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:create"))],
 ) -> dict:
     """인스턴스에 점수를 부여하거나 수정합니다."""
     instance = await checklist_instance_service.update_score(
@@ -197,7 +197,7 @@ async def bulk_review(
     instance_id: UUID,
     data: BulkReviewRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:create"))],
 ) -> dict:
     """여러 항목에 리뷰 결과를 일괄 적용합니다."""
     reviewed = await checklist_instance_service.bulk_review(
@@ -267,7 +267,7 @@ async def upsert_review(
     item_index: int,
     data: ItemReviewUpsert,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:create"))],
 ) -> dict:
     """아이템 리뷰를 생성하거나 수정합니다 (upsert). 인라인 코멘트 옵션 포함."""
     review = await checklist_instance_service.upsert_review(
@@ -299,7 +299,7 @@ async def delete_review(
     instance_id: UUID,
     item_index: int,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:delete"))],
 ) -> dict:
     """아이템 리뷰를 삭제합니다."""
     await checklist_instance_service.delete_review(db, instance_id, item_index, current_user.id)
@@ -312,7 +312,7 @@ async def add_review_content(
     item_index: int,
     data: ReviewContentCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:create"))],
 ) -> dict:
     """리뷰에 콘텐츠(텍스트/사진/영상)를 추가합니다."""
     rc = await checklist_instance_service.add_review_content(
@@ -342,7 +342,7 @@ async def delete_review_content(
     item_index: int,
     content_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:delete"))],
 ) -> dict:
     """리뷰 콘텐츠를 삭제합니다."""
     await checklist_instance_service.delete_review_content(db, content_id)

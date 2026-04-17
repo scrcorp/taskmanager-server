@@ -10,7 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import Role, User
+from app.repositories.user_repository import user_repository
 from app.schemas.user import ProfileResponse, ProfileUpdate
+from app.utils.exceptions import BadRequestError, DuplicateError
 
 
 class ProfileService:
@@ -99,6 +101,27 @@ class ProfileService:
         """
         # None이 아닌 필드만 업데이트 — Only update non-None (provided) fields
         update_data: dict = data.model_dump(exclude_unset=True)
+
+        # username 변경 시 조직 내 중복 검사
+        if "username" in update_data and update_data["username"] is not None:
+            new_username: str = update_data["username"].strip()
+            if not new_username:
+                raise BadRequestError("Username cannot be empty")
+            update_data["username"] = new_username
+            if new_username != current_user.username:
+                exists: bool = await user_repository.exists(
+                    db, {
+                        "organization_id": current_user.organization_id,
+                        "username": new_username,
+                    }
+                )
+                if exists:
+                    raise DuplicateError("Username already exists in this organization")
+
+        # 이메일 변경 시 인증 상태 리셋
+        if "email" in update_data and update_data["email"] != current_user.email:
+            update_data["email_verified"] = False
+
         try:
             for field, value in update_data.items():
                 if hasattr(current_user, field):

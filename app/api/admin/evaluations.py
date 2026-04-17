@@ -145,7 +145,7 @@ async def get_evaluation(
 async def create_evaluation(
     data: EvaluationCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("evaluations:read"))],
+    current_user: Annotated[User, Depends(require_permission("evaluations:create"))],
 ) -> dict:
     """새 평가를 생성합니다. 방향 검증: 상위→하위."""
     evaluation = await evaluation_service.create_evaluation(
@@ -161,7 +161,7 @@ async def create_evaluation(
 async def submit_evaluation(
     evaluation_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("evaluations:read"))],
+    current_user: Annotated[User, Depends(require_permission("evaluations:update"))],
 ) -> dict:
     """평가를 제출합니다 (draft → submitted)."""
     evaluation = await evaluation_service.submit_evaluation(

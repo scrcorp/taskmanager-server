@@ -20,6 +20,7 @@ from app.database import get_db
 from app.utils.jwt import decode_token
 from app.models.user import User
 from app.repositories.permission_repository import permission_repository
+from app.core.permissions import is_owner, hide_cost_for_priority
 
 security: HTTPBearer = HTTPBearer()
 
@@ -76,6 +77,8 @@ def require_permission(*permission_codes: str) -> Callable[..., Awaitable[User]]
         current_user: Annotated[User, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> User:
+        if is_owner(current_user):
+            return current_user
         user_perms = await get_user_permissions(db, current_user.role_id)
         for code in permission_codes:
             if code not in user_perms:
@@ -88,8 +91,8 @@ def require_permission(*permission_codes: str) -> Callable[..., Awaitable[User]]
 
 
 def hide_cost_for(user: User) -> bool:
-    """SV 이상(priority > 20)이면 cost(hourly_rate) 정보 숨김."""
-    return (user.role.priority if user.role else 999) > 20
+    """SV 이상이면 cost(hourly_rate) 정보 숨김."""
+    return hide_cost_for_priority(user.role.priority if user.role else 999)
 
 
 def scrub_cost_fields(obj: object, fields: tuple[str, ...] = ("hourly_rate", "default_hourly_rate", "effective_hourly_rate")) -> None:
@@ -106,7 +109,7 @@ async def get_accessible_store_ids(
 
     None = full access (Owner). List = 관리매장만 (is_manager=true).
     """
-    if user.role.priority <= 10:
+    if is_owner(user):
         return None
     from app.repositories.user_repository import user_repository
     return await user_repository.get_managed_store_ids(db, user.id)
@@ -119,7 +122,7 @@ async def get_work_store_ids(
 
     None = full access (Owner). List = 모든 배정 매장.
     """
-    if user.role.priority <= 10:
+    if is_owner(user):
         return None
     from app.repositories.user_repository import user_repository
     return await user_repository.get_work_store_ids(db, user.id)

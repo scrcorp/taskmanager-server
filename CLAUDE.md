@@ -30,6 +30,8 @@ server/
 │   ├── main.py            ← FastAPI app factory
 │   ├── config.py           ← Settings (env vars)
 │   ├── database.py         ← Async engine + session
+│   ├── core/
+│   │   └── permissions.py    (RBAC 상수 + 헬퍼: OWNER_PRIORITY, is_owner 등)
 │   ├── models/             ← SQLAlchemy models
 │   │   ├── __init__.py
 │   │   ├── organization.py  (organizations, stores)
@@ -250,6 +252,53 @@ pytest tests/ -v
 - **dev 머지는 반드시 사용자 허락 후 진행**
 - docs 같은 경량 작업은 main에서 직접 분기 허용
 - **AI Agent는 작업 시 무조건 worktree 사용**
+
+## Permission System (MUST FOLLOW)
+
+이 프로젝트는 Permission-Based RBAC를 사용한다. **모든 priority 비교는 `app/core/permissions.py`의 상수/함수를 사용.**
+
+### 상수 및 헬퍼 (`app/core/permissions.py`)
+
+```python
+from app.core.permissions import (
+    OWNER_PRIORITY,       # 10
+    GM_PRIORITY,          # 20
+    SV_PRIORITY,          # 30
+    STAFF_PRIORITY,       # 40
+    is_owner,             # User → bool
+    is_gm_plus,           # User → bool (Owner 포함)
+    is_sv_plus,           # User → bool (Owner, GM 포함)
+    hide_cost_for_priority,  # int → bool
+)
+```
+
+### 엔드포인트 권한 체크 (`app/api/deps.py`)
+
+```python
+# 올바른 패턴
+Depends(require_permission("schedules:create"))   # permission 코드 기반
+if is_owner(current_user):                         # 상수 헬퍼 사용
+if not is_gm_plus(current_user):                   # 상수 헬퍼 사용
+```
+
+### 새 기능에 권한이 필요할 때
+
+1. `app/core/permissions.py`의 `PERMISSION_REGISTRY`를 먼저 확인
+2. 기존 코드가 있으면 그대로 사용
+3. 없으면 REGISTRY에 추가 후 사용 (서버 재시작 시 DB 자동 동기화)
+4. **REGISTRY 밖에서 permission 코드 문자열을 임의 생성 금지**
+5. 네이밍: `resource:action` (기본 CRUD) 또는 `resource_sub:action` (하위 기능 분리)
+
+### 금지 패턴
+
+```python
+# ❌ 절대 하지 말 것 — 매직넘버 직접 비교
+if user.role.priority <= 10:     # → is_owner(user)
+if user.role.priority <= 20:     # → is_gm_plus(user)
+if user.role.priority > 20:      # → hide_cost_for_priority(priority)
+if role.priority >= 40:          # → role.priority >= STAFF_PRIORITY
+if priority == 30:               # → priority == SV_PRIORITY
+```
 
 ## Coding Conventions
 

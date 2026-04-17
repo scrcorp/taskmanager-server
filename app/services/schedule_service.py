@@ -16,11 +16,12 @@ from app.repositories.schedule_repository import schedule_repository
 from app.repositories.work_role_repository import work_role_repository
 from app.schemas.schedule import (
     ScheduleAuditLogResponse, ScheduleCancel,
-    ScheduleCreate, ScheduleResponse, ScheduleSwap, ScheduleUpdate,
+    ScheduleCreate, ScheduleResponse, ScheduleSwitch, ScheduleUpdate,
     ScheduleValidation, FinalizeResult,
     ScheduleReject, ScheduleBulkConfirmResult,
     ScheduleHistoryItem, ScheduleHistoryListResponse,
 )
+from app.core.permissions import GM_PRIORITY, OWNER_PRIORITY, hide_cost_for_priority
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 
 
@@ -146,9 +147,9 @@ class ScheduleService:
 
     @staticmethod
     def _require_gm_or_above(actor: User, action: str) -> None:
-        """GM+ 권한 체크 (role.priority <= 20). 실패 시 ForbiddenError."""
+        """GM+ 권한 체크. 실패 시 ForbiddenError."""
         priority = actor.role.priority if actor.role else 999
-        if priority > 20:
+        if priority > GM_PRIORITY:
             raise ForbiddenError(f"GM or above required for action: {action}")
 
     async def _resolve_work_role_snapshot(
@@ -170,6 +171,22 @@ class ScheduleService:
         shift_result = await db.execute(select(Shift.name).where(Shift.id == wr.shift_id))
         shift_name = shift_result.scalar() or ""
         return f"{shift_name} - {position_name or ''}", position_name
+
+    async def _resolve_hourly_rate(
+        self, db: AsyncSession, user_id: UUID, store_id: UUID, organization_id: UUID,
+    ) -> float:
+        """user → store → org cascade로 시급 결정."""
+        user_row = await db.execute(select(User.hourly_rate).where(User.id == user_id))
+        user_hr = user_row.scalar()
+        if user_hr is not None:
+            return float(user_hr)
+        store_row = await db.execute(select(Store.default_hourly_rate).where(Store.id == store_id))
+        store_hr = store_row.scalar()
+        if store_hr is not None:
+            return float(store_hr)
+        org_row = await db.execute(select(Organization.default_hourly_rate).where(Organization.id == organization_id))
+        org_hr = org_row.scalar()
+        return float(org_hr) if org_hr is not None else 0.0
 
     async def _validate_entry(
         self,
@@ -194,7 +211,7 @@ class ScheduleService:
         if await schedule_repository.check_time_overlap(
             db, user_id, work_date, start_m, end_m, exclude_id
         ):
-            errors.append("해당 직원의 같은 날짜에 시간이 겹치는 스케줄이 있습니다")
+            errors.append("This employee already has an overlapping schedule on the same date")
 
         # Only overlap blocks creation. Other limits removed — schedules should always be creatable.
         valid = len(errors) == 0
@@ -259,23 +276,11 @@ class ScheduleService:
 
         net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
 
-        # Resolve hourly rate: provided > user.hourly_rate > store.default_hourly_rate > org.default_hourly_rate
+        # Resolve hourly rate: provided > user → store → org cascade
         if data.hourly_rate is not None:
             resolved_rate = data.hourly_rate
         else:
-            user_row = await db.execute(select(User.hourly_rate).where(User.id == user_id))
-            user_hr = user_row.scalar()
-            if user_hr is not None:
-                resolved_rate = float(user_hr)
-            else:
-                store_row = await db.execute(select(Store.default_hourly_rate).where(Store.id == store_id))
-                store_hr = store_row.scalar()
-                if store_hr is not None:
-                    resolved_rate = float(store_hr)
-                else:
-                    org_row = await db.execute(select(Organization.default_hourly_rate).where(Organization.id == organization_id))
-                    org_hr = org_row.scalar()
-                    resolved_rate = float(org_hr) if org_hr is not None else 0.0
+            resolved_rate = await self._resolve_hourly_rate(db, user_id, store_id, organization_id)
 
         # Work Role snapshot 캡처 — name/position이 변경/삭제되어도 보존
         work_role_uuid = UUID(data.work_role_id) if data.work_role_id else None
@@ -373,6 +378,155 @@ class ScheduleService:
             created=created, skipped=skipped, failed=failed,
             errors=errors, items=items,
         )
+
+    async def bulk_preview(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        entries_data: list,  # list[BulkPreviewEntry]
+        actor: "User",
+    ) -> "BulkPreviewResponse":
+        """벌크 스케줄 dry-run — DB 변경 없이 충돌/경고/예상비용 반환."""
+        from app.schemas.schedule import (
+            BulkPreviewConflict, BulkPreviewItem,
+            BulkPreviewResponse, BulkPreviewWarning,
+        )
+
+        valid: list[BulkPreviewItem] = []
+        conflicts: list[BulkPreviewConflict] = []
+        # user_id → simulated minutes accumulated across this batch
+        user_batch_minutes: dict[UUID, int] = {}
+
+        for i, entry in enumerate(entries_data):
+            try:
+                user_id = UUID(entry.user_id)
+                store_id = UUID(entry.store_id)
+                start_time = self._parse_time(entry.start_time)
+                end_time = self._parse_time(entry.end_time)
+                if start_time is None or end_time is None:
+                    conflicts.append(BulkPreviewConflict(index=i, message="start_time and end_time are required"))
+                    continue
+
+                break_start = self._parse_time(entry.break_start_time)
+                break_end = self._parse_time(entry.break_end_time)
+
+                validation = await self._validate_entry(
+                    db, user_id, store_id, entry.work_date,
+                    start_time, end_time, break_start, break_end, force=False,
+                )
+                if not validation.valid:
+                    conflicts.append(BulkPreviewConflict(
+                        index=i,
+                        message="; ".join(validation.errors),
+                    ))
+                    continue
+
+                net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
+                resolved_rate = await self._resolve_hourly_rate(db, user_id, store_id, organization_id)
+                estimated_cost = round(resolved_rate * net / 60, 2) if resolved_rate else None
+
+                # 배치 내 누적 분 추적 (주간 초과근무 경고용)
+                user_batch_minutes[user_id] = user_batch_minutes.get(user_id, 0) + net
+
+                valid.append(BulkPreviewItem(
+                    index=i,
+                    estimated_cost=estimated_cost,
+                    net_work_minutes=net,
+                ))
+            except (ValueError, Exception) as exc:
+                conflicts.append(BulkPreviewConflict(index=i, message=str(exc)))
+
+        # 초과근무 경고 — 유저별 기존 주간 근무분 + 배치 누적분 합산
+        WEEKLY_LIMIT = 40 * 60  # 40시간
+        warnings: list[BulkPreviewWarning] = []
+        for user_id, batch_minutes in user_batch_minutes.items():
+            # 기존 DB 주간 근무분 (첫 유효 항목의 work_date 기준)
+            first_entry = next(
+                (e for idx, e in enumerate(entries_data)
+                 if not any(c.index == idx for c in conflicts)),
+                None,
+            )
+            if first_entry is None:
+                continue
+            existing_minutes = await schedule_repository.get_weekly_minutes(
+                db, user_id, first_entry.work_date,
+            )
+            total = existing_minutes + batch_minutes
+            if total > WEEKLY_LIMIT:
+                warnings.append(BulkPreviewWarning(
+                    user_id=str(user_id),
+                    type="overtime",
+                    total_minutes=total,
+                    limit_minutes=WEEKLY_LIMIT,
+                ))
+
+        return BulkPreviewResponse(valid=valid, conflicts=conflicts, warnings=warnings)
+
+    async def bulk_update(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        updates_data: list,  # list[BulkUpdateItem]
+        actor: "User",
+    ) -> "BulkUpdateResult":
+        """벌크 스케줄 수정 — work_role/시간 필드만 변경."""
+        from app.schemas.schedule import BulkUpdateResult, ScheduleUpdate
+
+        updated = 0
+        failed = 0
+        errors: list[str] = []
+
+        for item in updates_data:
+            try:
+                entry_id = UUID(item.id)
+                update_data = ScheduleUpdate(
+                    work_role_id=item.work_role_id,
+                    start_time=item.start_time,
+                    end_time=item.end_time,
+                    break_start_time=item.break_start_time,
+                    break_end_time=item.break_end_time,
+                    note=item.note,
+                    hourly_rate=item.hourly_rate,
+                    force=False,
+                )
+                await self.update_entry(db, entry_id, organization_id, update_data, actor=actor)
+                updated += 1
+            except (BadRequestError, ForbiddenError, NotFoundError) as exc:
+                failed += 1
+                errors.append(f"[{item.id}] {exc.detail if hasattr(exc, 'detail') else str(exc)}")
+            except Exception as exc:
+                failed += 1
+                errors.append(f"[{item.id}] {str(exc)}")
+
+        return BulkUpdateResult(updated=updated, failed=failed, errors=errors)
+
+    async def bulk_delete(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        ids: list[str],
+        actor: "User",
+    ) -> "BulkDeleteResult":
+        """벌크 스케줄 삭제 (soft delete)."""
+        from app.schemas.schedule import BulkDeleteResult
+
+        deleted = 0
+        failed = 0
+        errors: list[str] = []
+
+        for id_str in ids:
+            try:
+                entry_id = UUID(id_str)
+                await self.delete_entry(db, entry_id, organization_id, actor=actor)
+                deleted += 1
+            except (BadRequestError, ForbiddenError, NotFoundError) as exc:
+                failed += 1
+                errors.append(f"[{id_str}] {exc.detail if hasattr(exc, 'detail') else str(exc)}")
+            except Exception as exc:
+                failed += 1
+                errors.append(f"[{id_str}] {str(exc)}")
+
+        return BulkDeleteResult(deleted=deleted, failed=failed, errors=errors)
 
     async def generate_from_requests(
         self,
@@ -599,6 +753,37 @@ class ScheduleService:
         if not modification_entries:
             return await self._to_response(db, entry)
 
+        # user_id 변경 시 시급 자동 재계산 + 체크리스트 동기화
+        new_user_synced: UUID | None = None
+        if data.user_id is not None and str(entry.user_id) != data.user_id:
+            new_user_synced = UUID(data.user_id)
+            # hourly_rate가 명시적으로 지정되지 않았으면 새 user 기준 재계산
+            if data.hourly_rate is None:
+                new_rate = await self._resolve_hourly_rate(
+                    db, new_user_synced, entry.store_id, entry.organization_id,
+                )
+                old_rate = float(entry.hourly_rate) if entry.hourly_rate else 0.0
+                if old_rate != new_rate:
+                    _track("hourly_rate", old_rate, new_rate)
+                update_data["hourly_rate"] = new_rate
+            from app.models.checklist import ChecklistInstance
+            from app.services.checklist_instance_service import checklist_instance_service
+
+            cl_result = await db.execute(
+                select(ChecklistInstance).where(ChecklistInstance.schedule_id == entry_id)
+            )
+            cl: ChecklistInstance | None = cl_result.scalar_one_or_none()
+            if cl is not None:
+                if cl.status in ("in_progress", "completed") and data.reset_checklist is None:
+                    raise BadRequestError(
+                        f"Checklist is {cl.status}. "
+                        "Set reset_checklist=true to reset it, or reset_checklist=false to keep it."
+                    )
+                cl.user_id = new_user_synced
+                if data.reset_checklist:
+                    await checklist_instance_service.reset_instance(db, cl)
+                await db.flush()
+
         try:
             updated = await schedule_repository.update(db, entry_id, update_data, organization_id)
             if updated is None:
@@ -608,11 +793,38 @@ class ScheduleService:
                 m["field"]: {"old": m.get("old_value"), "new": m.get("new_value")}
                 for m in modification_entries if m.get("field")
             }
-            # Description: 변경된 필드 목록을 간결하게
-            changed_fields = ", ".join(m["field"] for m in modification_entries if m.get("field"))
+            # user_id diff가 있으면 이름을 resolve하여 포함
+            staff_desc_part: str | None = None
+            if "user_id" in audit_diff:
+                uid_diff = audit_diff["user_id"]
+                old_uid = uid_diff.get("old")
+                new_uid = uid_diff.get("new")
+                old_name = "Unknown"
+                new_name = "Unknown"
+                if old_uid:
+                    r = await db.execute(select(User.full_name).where(User.id == UUID(old_uid)))
+                    old_name = r.scalar() or "Unknown"
+                if new_uid:
+                    r = await db.execute(select(User.full_name).where(User.id == UUID(new_uid)))
+                    new_name = r.scalar() or "Unknown"
+                audit_diff["user_id"]["old_name"] = old_name
+                audit_diff["user_id"]["new_name"] = new_name
+                staff_desc_part = f"Staff changed: {old_name} → {new_name}"
+            # Description: 이름 포함 + 나머지 변경 필드
+            other_fields = [
+                m["field"] for m in modification_entries
+                if m.get("field") and m["field"] != "user_id"
+            ]
+            if staff_desc_part:
+                desc = staff_desc_part
+                if other_fields:
+                    desc += f", {', '.join(other_fields)} updated"
+            else:
+                changed_fields = ", ".join(m["field"] for m in modification_entries if m.get("field"))
+                desc = f"Modified: {changed_fields}" if changed_fields else "Schedule modified"
             await self._log_audit(
                 db, entry_id, "modified", actor,
-                description=f"Modified: {changed_fields}" if changed_fields else "Schedule modified",
+                description=desc,
                 diff=audit_diff or None,
             )
             result = await self._to_response(db, updated)
@@ -858,51 +1070,148 @@ class ScheduleService:
             await db.rollback()
             raise
 
-    async def swap_schedules(
+    async def switch_schedules(
         self,
         db: AsyncSession,
         entry_id: UUID,
         organization_id: UUID,
-        data: ScheduleSwap,
+        data: ScheduleSwitch,
         actor: User,
     ) -> tuple[ScheduleResponse, ScheduleResponse]:
         """두 confirmed 스케줄의 user_id를 교환 (GM+ only)."""
-        self._require_gm_or_above(actor, "swap schedules")
+        self._require_gm_or_above(actor, "switch schedules")
         try:
             other_id = UUID(data.other_schedule_id)
         except ValueError:
             raise BadRequestError("Invalid other_schedule_id")
         if other_id == entry_id:
-            raise BadRequestError("Cannot swap a schedule with itself")
+            raise BadRequestError("Cannot switch a schedule with itself")
 
         a = await schedule_repository.get_by_id(db, entry_id, organization_id)
         b = await schedule_repository.get_by_id(db, other_id, organization_id)
         if a is None or b is None:
             raise NotFoundError("Schedule not found")
         if a.status != "confirmed" or b.status != "confirmed":
-            raise BadRequestError("Both schedules must be confirmed to swap")
+            raise BadRequestError("Both schedules must be confirmed to switch")
 
         a_user = a.user_id
         b_user = b.user_id
+
+        # 겹침 검사 — switch 후 각 user가 충돌 없는지 확인
+        # b_user → a 스케줄 (a 제외), a_user → b 스케줄 (b 제외)
+        val_a = await self._validate_entry(
+            db, b_user, a.store_id, a.work_date,
+            a.start_time, a.end_time, a.break_start_time, a.break_end_time,
+            force=False, exclude_id=a.id,
+        )
+        val_b = await self._validate_entry(
+            db, a_user, b.store_id, b.work_date,
+            b.start_time, b.end_time, b.break_start_time, b.break_end_time,
+            force=False, exclude_id=b.id,
+        )
+        errors: list[str] = []
+        if not val_a.valid:
+            errors.extend(val_a.errors)
+        if not val_b.valid:
+            errors.extend(val_b.errors)
+        if errors and not data.force:
+            raise BadRequestError(f"Switch would cause conflicts: {'; '.join(errors)}")
+
+        # 체크리스트 상태 확인
+        from app.models.checklist import ChecklistInstance
+        from app.services.checklist_instance_service import checklist_instance_service
+
+        cl_a_result = await db.execute(
+            select(ChecklistInstance).where(ChecklistInstance.schedule_id == a.id)
+        )
+        cl_a: ChecklistInstance | None = cl_a_result.scalar_one_or_none()
+        cl_b_result = await db.execute(
+            select(ChecklistInstance).where(ChecklistInstance.schedule_id == b.id)
+        )
+        cl_b: ChecklistInstance | None = cl_b_result.scalar_one_or_none()
+
+        a_active = cl_a is not None and cl_a.status in ("in_progress", "completed")
+        b_active = cl_b is not None and cl_b.status in ("in_progress", "completed")
+
+        if (a_active or b_active) and data.reset_checklists is None:
+            raise BadRequestError(
+                "One or more checklists are in_progress or completed. "
+                "Set reset_checklists=true to reset them, or reset_checklists=false to keep them."
+            )
+
         try:
+            # 시급 자동 재계산
+            rate_a = await self._resolve_hourly_rate(db, b_user, a.store_id, organization_id)
+            rate_b = await self._resolve_hourly_rate(db, a_user, b.store_id, organization_id)
+
+            # user 이름 조회 (audit diff + description용)
+            a_name_r = await db.execute(select(User.full_name).where(User.id == a_user))
+            a_name = a_name_r.scalar() or "Unknown"
+            b_name_r = await db.execute(select(User.full_name).where(User.id == b_user))
+            b_name = b_name_r.scalar() or "Unknown"
+
             updated_a = await schedule_repository.update(
-                db, a.id, {"user_id": b_user, "is_modified": True}, organization_id,
+                db, a.id, {"user_id": b_user, "hourly_rate": rate_a, "is_modified": True}, organization_id,
             )
             updated_b = await schedule_repository.update(
-                db, b.id, {"user_id": a_user, "is_modified": True}, organization_id,
+                db, b.id, {"user_id": a_user, "hourly_rate": rate_b, "is_modified": True}, organization_id,
             )
-            diff_a = {"user_id": {"old": str(a_user), "new": str(b_user)}}
-            diff_b = {"user_id": {"old": str(b_user), "new": str(a_user)}}
+            # store/role 이름 조회 (switch_with 표시용)
+            a_store_r = await db.execute(select(Store.name).where(Store.id == a.store_id))
+            a_store_name = a_store_r.scalar() or ""
+            b_store_r = await db.execute(select(Store.name).where(Store.id == b.store_id))
+            b_store_name = b_store_r.scalar() or ""
+            a_role_name = a.work_role_name_snapshot or ""
+            b_role_name = b.work_role_name_snapshot or ""
+
+            sched_info_a = {
+                "schedule_id": str(a.id),
+                "user_name": a_name,
+                "work_date": str(a.work_date),
+                "start_time": self._format_time(a.start_time),
+                "end_time": self._format_time(a.end_time),
+                "store_name": a_store_name,
+                "work_role_name": a_role_name,
+            }
+            sched_info_b = {
+                "schedule_id": str(b.id),
+                "user_name": b_name,
+                "work_date": str(b.work_date),
+                "start_time": self._format_time(b.start_time),
+                "end_time": self._format_time(b.end_time),
+                "store_name": b_store_name,
+                "work_role_name": b_role_name,
+            }
+            diff_a = {
+                "_switch_this": sched_info_a,
+                "_switch_with": sched_info_b,
+            }
+            diff_b = {
+                "_switch_this": sched_info_b,
+                "_switch_with": sched_info_a,
+            }
             await self._log_audit(
-                db, a.id, "swapped", actor,
-                description=f"Swapped with schedule {b.id}",
+                db, a.id, "switched", actor,
+                description=f"Switched: {a_name} ↔ {b_name}",
                 reason=data.reason, diff=diff_a,
             )
             await self._log_audit(
-                db, b.id, "swapped", actor,
-                description=f"Swapped with schedule {a.id}",
+                db, b.id, "switched", actor,
+                description=f"Switched: {b_name} ↔ {a_name}",
                 reason=data.reason, diff=diff_b,
             )
+
+            # cl_instances.user_id 스냅샷 교환 + 필요 시 초기화
+            if cl_a is not None:
+                cl_a.user_id = b_user
+                if data.reset_checklists:
+                    await checklist_instance_service.reset_instance(db, cl_a)
+            if cl_b is not None:
+                cl_b.user_id = a_user
+                if data.reset_checklists:
+                    await checklist_instance_service.reset_instance(db, cl_b)
+
+            await db.flush()
             res_a = await self._to_response(db, updated_a)  # type: ignore[arg-type]
             res_b = await self._to_response(db, updated_b)  # type: ignore[arg-type]
             await db.commit()
@@ -920,7 +1229,7 @@ class ScheduleService:
     ) -> list[ScheduleAuditLogResponse]:
         """스케줄 audit log 조회 (timestamp DESC).
 
-        actor가 GM 미만(role_priority > 20)이면 cost(hourly_rate) diff 항목 제거.
+        actor가 GM 미만이면 cost(hourly_rate) diff 항목 제거.
         """
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
@@ -938,7 +1247,7 @@ class ScheduleService:
 
         # SV/Staff: cost-related fields 숨김
         actor_priority = actor.role.priority if (actor and actor.role) else 999
-        hide_cost = actor is not None and actor_priority > 20
+        hide_cost = actor is not None and hide_cost_for_priority(actor_priority)
         cost_keys = {"hourly_rate"}
 
         def _scrub(diff: dict | None) -> dict | None:
@@ -979,9 +1288,9 @@ class ScheduleService:
         organization_id: UUID,
         actor: User,
     ) -> None:
-        """History entry 삭제. Owner only (priority <= 10)."""
+        """History entry 삭제. Owner only."""
         actor_priority = actor.role.priority if (actor and actor.role) else 999
-        if actor_priority > 10:
+        if actor_priority > OWNER_PRIORITY:
             raise ForbiddenError("Only Owner can delete history entries")
 
         # 해당 log이 같은 org schedule인지 확인 (cross-org 방지)
@@ -1043,7 +1352,7 @@ class ScheduleService:
 
         # cost redact (GM 미만)
         actor_priority = actor.role.priority if (actor and actor.role) else 999
-        hide_cost = actor_priority > 20
+        hide_cost = hide_cost_for_priority(actor_priority)
         cost_keys = {"hourly_rate"}
 
         items: list[ScheduleHistoryItem] = []
@@ -1339,6 +1648,96 @@ class ScheduleService:
             skipped=skipped,
             errors=errors,
         )
+
+
+    async def assign_checklist_to_schedule(
+        self,
+        db: AsyncSession,
+        schedule_id: UUID,
+        organization_id: UUID,
+        template_id: UUID,
+        actor: User,
+    ) -> dict:
+        """단일 스케줄에 체크리스트 템플릿을 수동으로 부여합니다.
+
+        - confirmed 상태 스케줄에만 허용
+        - 이미 체크리스트가 있으면 400 (교체는 bulk-assign 사용)
+        - 템플릿의 모든 항목을 부여 (recurrence 필터 없음)
+        """
+        from app.models.checklist import ChecklistInstance, ChecklistTemplate, ChecklistInstanceItem
+        from app.repositories.checklist_instance_repository import checklist_instance_repository
+        from sqlalchemy.orm import selectinload
+
+        sched = await schedule_repository.get_by_id(db, schedule_id, organization_id)
+        if sched is None:
+            raise NotFoundError("Schedule not found")
+        if sched.status != "confirmed":
+            raise BadRequestError("Can only assign a checklist to confirmed schedules")
+
+        existing_result = await db.execute(
+            select(ChecklistInstance).where(ChecklistInstance.schedule_id == schedule_id)
+        )
+        if existing_result.scalar_one_or_none() is not None:
+            raise BadRequestError(
+                "Schedule already has a checklist. "
+                "Use bulk-assign to replace it."
+            )
+
+        template_result = await db.execute(
+            select(ChecklistTemplate)
+            .options(selectinload(ChecklistTemplate.items))
+            .where(
+                ChecklistTemplate.id == template_id,
+                ChecklistTemplate.organization_id == organization_id,
+            )
+        )
+        template: ChecklistTemplate | None = template_result.scalar_one_or_none()
+        if template is None:
+            raise NotFoundError("Checklist template not found")
+        if not template.items:
+            raise BadRequestError("Template has no items")
+
+        sorted_items = sorted(template.items, key=lambda x: x.sort_order)
+        try:
+            instance = await checklist_instance_repository.create(
+                db,
+                {
+                    "organization_id": organization_id,
+                    "template_id": template.id,
+                    "schedule_id": schedule_id,
+                    "store_id": sched.store_id,
+                    "user_id": sched.user_id,  # 스냅샷용
+                    "work_date": sched.work_date,
+                    "total_items": len(sorted_items),
+                    "completed_items": 0,
+                    "status": "pending",
+                },
+            )
+            for idx, item in enumerate(sorted_items):
+                ii = ChecklistInstanceItem(
+                    instance_id=instance.id,
+                    item_index=idx,
+                    title=item.title,
+                    description=item.description,
+                    verification_type=item.verification_type,
+                    min_photos=item.min_photos if "photo" in (item.verification_type or "") else 0,
+                    sort_order=item.sort_order,
+                    recurrence_type=item.recurrence_type,
+                    recurrence_days=item.recurrence_days,
+                    is_completed=False,
+                )
+                db.add(ii)
+
+            await db.flush()
+            await db.commit()
+            return {
+                "instance_id": str(instance.id),
+                "template_id": str(template.id),
+                "schedule_id": str(schedule_id),
+            }
+        except Exception:
+            await db.rollback()
+            raise
 
 
 schedule_service: ScheduleService = ScheduleService()

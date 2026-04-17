@@ -7,7 +7,7 @@ alembic upgrade head
 echo "Starting Gunicorn with Uvicorn workers..."
 exec gunicorn app.main:app \
   -k uvicorn.workers.UvicornWorker \
-  -w "${WORKERS:-2}" \
+  -w "${WORKERS:-1}" \
   --bind 0.0.0.0:8000 \
   --timeout 120 \
   --access-logfile - \

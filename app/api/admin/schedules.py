@@ -12,11 +12,15 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.schedule import (
     BulkAssignChecklistRequest, BulkAssignChecklistResult,
+    BulkDeleteRequest, BulkDeleteResult,
+    BulkPreviewRequest, BulkPreviewResponse,
+    BulkUpdateRequest, BulkUpdateResult,
     FinalizeResult, ScheduleAuditLogResponse, ScheduleBulkCreate, ScheduleBulkResult,
     ScheduleCancel, ScheduleCreate,
-    ScheduleResponse, ScheduleSwap, ScheduleUpdate, ScheduleValidation,
+    ScheduleResponse, ScheduleSwitch, ScheduleUpdate, ScheduleValidation,
     ScheduleConfirm, ScheduleReject, ScheduleBulkConfirm, ScheduleBulkConfirmResult,
     ScheduleHistoryListResponse,
+    ScheduleAssignChecklist, ScheduleAssignChecklistResult,
 )
 from app.services.schedule_service import schedule_service
 
@@ -86,6 +90,42 @@ async def bulk_create(
     )
 
 
+@router.post("/bulk/preview", response_model=BulkPreviewResponse)
+async def bulk_preview(
+    data: BulkPreviewRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:create"))],
+) -> BulkPreviewResponse:
+    """벌크 스케줄 dry-run — DB 변경 없이 충돌/경고/예상비용 반환."""
+    return await schedule_service.bulk_preview(
+        db, current_user.organization_id, data.entries, actor=current_user,
+    )
+
+
+@router.patch("/bulk", response_model=BulkUpdateResult)
+async def bulk_update(
+    data: BulkUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> BulkUpdateResult:
+    """벌크 스케줄 수정 — work_role/시간 필드 일괄 변경."""
+    return await schedule_service.bulk_update(
+        db, current_user.organization_id, data.updates, actor=current_user,
+    )
+
+
+@router.delete("/bulk", response_model=BulkDeleteResult)
+async def bulk_delete(
+    data: BulkDeleteRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:delete"))],
+) -> BulkDeleteResult:
+    """벌크 스케줄 삭제 (soft delete). confirmed 스케줄은 GM+ 만 가능."""
+    return await schedule_service.bulk_delete(
+        db, current_user.organization_id, data.ids, actor=current_user,
+    )
+
+
 @router.post("/generate-from-requests", response_model=list[ScheduleResponse], status_code=201)
 async def generate_from_requests(
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -111,7 +151,7 @@ async def generate_from_requests(
 async def bulk_confirm(
     data: ScheduleBulkConfirm,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+    current_user: Annotated[User, Depends(require_permission("schedules:approve"))],
 ) -> ScheduleBulkConfirmResult:
     """기간 내 모든 requested 스케줄 일괄 확정."""
     return await schedule_service.bulk_confirm(
@@ -127,7 +167,7 @@ async def bulk_confirm(
 @router.get("/history", response_model=ScheduleHistoryListResponse)
 async def list_history(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
+    current_user: Annotated[User, Depends(require_permission("schedule_history:read"))],
     store_id: str | None = None,
     user_id: str | None = None,
     actor_id: str | None = None,
@@ -201,7 +241,7 @@ async def submit_schedule(
 async def confirm_schedule(
     entry_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+    current_user: Annotated[User, Depends(require_permission("schedules:approve"))],
 ) -> ScheduleResponse:
     """requested 스케줄 확정 (requested → confirmed)."""
     return _scrub(await schedule_service.confirm_schedule(
@@ -213,7 +253,7 @@ async def confirm_schedule(
 async def approve_schedule(
     entry_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+    current_user: Annotated[User, Depends(require_permission("schedules:approve"))],
 ) -> ScheduleResponse:
     """requested → confirmed (confirm의 alias, 목업 명명 호환)."""
     return _scrub(await schedule_service.confirm_schedule(
@@ -226,7 +266,7 @@ async def reject_schedule(
     entry_id: UUID,
     data: ScheduleReject,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+    current_user: Annotated[User, Depends(require_permission("schedules:approve"))],
 ) -> ScheduleResponse:
     """requested → rejected. 사유 필수."""
     return _scrub(await schedule_service.reject_schedule(
@@ -238,7 +278,7 @@ async def reject_schedule(
 async def revert_schedule(
     entry_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+    current_user: Annotated[User, Depends(require_permission("schedules:revert"))],
 ) -> ScheduleResponse:
     """confirmed → requested (GM+ only)."""
     return _scrub(await schedule_service.revert_schedule(
@@ -251,7 +291,7 @@ async def cancel_schedule(
     entry_id: UUID,
     data: ScheduleCancel,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+    current_user: Annotated[User, Depends(require_permission("schedules:cancel"))],
 ) -> ScheduleResponse:
     """confirmed → cancelled (GM+ only). 사유 필수."""
     return _scrub(await schedule_service.cancel_schedule(
@@ -259,15 +299,15 @@ async def cancel_schedule(
     ), current_user)
 
 
-@router.post("/{entry_id}/swap", response_model=dict)
-async def swap_schedule(
+@router.post("/{entry_id}/switch", response_model=dict)
+async def switch_schedule(
     entry_id: UUID,
-    data: ScheduleSwap,
+    data: ScheduleSwitch,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> dict:
     """두 confirmed 스케줄의 user_id 교환 (GM+ only)."""
-    a, b = await schedule_service.swap_schedules(
+    a, b = await schedule_service.switch_schedules(
         db, entry_id, current_user.organization_id, data, actor=current_user,
     )
     if hide_cost_for(current_user):
@@ -276,13 +316,14 @@ async def swap_schedule(
     return {"a": a, "b": b}
 
 
+
 @router.delete("/history/{log_id}", status_code=204)
 async def delete_history_entry(
     log_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
+    current_user: Annotated[User, Depends(require_permission("schedule_history:delete"))],
 ) -> None:
-    """History entry 삭제. Owner only (priority <= 10)."""
+    """History entry 삭제. Owner only."""
     await schedule_service.delete_history_entry(
         db, log_id, current_user.organization_id, actor=current_user,
     )
@@ -308,6 +349,24 @@ async def validate_entry(
 ) -> ScheduleValidation:
     """검증만 (저장 안함)."""
     return await schedule_service.validate_entry(db, current_user.organization_id, data)
+
+
+@router.post("/{entry_id}/checklist", response_model=ScheduleAssignChecklistResult, status_code=201)
+async def assign_checklist(
+    entry_id: UUID,
+    data: ScheduleAssignChecklist,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> ScheduleAssignChecklistResult:
+    """체크리스트가 없는 confirmed 스케줄에 템플릿을 선택하여 수동 부여."""
+    result = await schedule_service.assign_checklist_to_schedule(
+        db,
+        schedule_id=entry_id,
+        organization_id=current_user.organization_id,
+        template_id=UUID(data.template_id),
+        actor=current_user,
+    )
+    return ScheduleAssignChecklistResult(**result)
 
 
 @router.post("/assign-checklist", response_model=BulkAssignChecklistResult, status_code=200)

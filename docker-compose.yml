@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     environment:
-      - WORKERS=2
+      - WORKERS=1
     volumes:
       - uploads:/app/uploads
     restart: unless-stopped
