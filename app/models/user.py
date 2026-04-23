@@ -128,6 +128,10 @@ class User(Base):
     must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # 기본 시급 — Default hourly rate for labor cost calculation (nullable)
     hourly_rate: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
+    # 근태 기기 PIN — 매장 공용 기기에서 clock in/out 시 사용하는 개인 6자리 PIN.
+    # Attendance device PIN — 6-digit numeric code for personal auth at shared terminals.
+    # organization 단위 unique (uq_user_org_clockin_pin).
+    clockin_pin: Mapped[Optional[str]] = mapped_column(String(6), nullable=True)
     # 소프트 삭제 일시 — Timestamp when user was soft-deleted (NULL = active)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
@@ -137,6 +141,7 @@ class User(Base):
 
     __table_args__ = (
         UniqueConstraint("organization_id", "username", name="uq_user_org_username"),
+        UniqueConstraint("organization_id", "clockin_pin", name="uq_user_org_clockin_pin"),
     )
 
     # 관계 — Relationships

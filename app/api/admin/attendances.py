@@ -73,9 +73,15 @@ async def list_attendances(
         per_page=per_page,
     )
 
+    # Batch-load breaks for all attendance IDs to avoid N+1 queries
+    attendance_ids: list[UUID] = [a.id for a in attendances]
+    breaks_map = await attendance_service._load_breaks_map(db, attendance_ids)
+
     items: list[dict] = []
     for a in attendances:
-        response: dict = await attendance_service.build_response(db, a)
+        response: dict = await attendance_service.build_response(
+            db, a, breaks=breaks_map.get(a.id, [])
+        )
         items.append(response)
 
     return {

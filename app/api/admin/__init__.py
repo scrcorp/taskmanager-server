@@ -55,6 +55,7 @@ from app.api.admin.notifications import router as notifications_router
 # Phase 5 — Attendance 라우터 임포트
 from app.api.admin.attendances import router as attendances_router
 from app.api.admin.qr_codes import router as qr_codes_router
+from app.api.admin.attendance_devices import router as attendance_devices_router
 
 # Phase 6 — Store Extensions 라우터 임포트
 from app.api.admin.shift_presets import router as shift_presets_router
@@ -135,6 +136,7 @@ admin_router.include_router(notifications_router, prefix="/notifications", tags=
 admin_router.include_router(attendances_router, prefix="/attendances", tags=["Attendances"])
 # QR 코드: /stores/{store_id}/qr-codes 및 /qr-codes 하위 (QR code management)
 admin_router.include_router(qr_codes_router, tags=["QR Codes"])
+admin_router.include_router(attendance_devices_router, tags=["Attendance Devices"])
 
 # ---------------------------------------------------------------------------
 # Phase 6 라우터 등록 — Register Phase 6 (Store Extensions) routers

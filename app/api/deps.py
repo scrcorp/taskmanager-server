@@ -23,6 +23,34 @@ from app.repositories.permission_repository import permission_repository
 from app.core.permissions import is_owner, hide_cost_for_priority
 
 security: HTTPBearer = HTTPBearer()
+device_security: HTTPBearer = HTTPBearer(auto_error=False)
+
+
+async def get_current_attendance_device(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(device_security)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Attendance Device 토큰으로 현재 기기를 인증.
+
+    평문 토큰 → sha256 해시 → attendance_devices 매칭. revoked 는 401.
+    JWT 와 별개의 인증 스코프이며, 매 호출마다 last_seen_at 갱신.
+    """
+    from app.services.attendance_device_service import attendance_device_service
+
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Attendance device token required",
+        )
+    device = await attendance_device_service.get_by_token(db, credentials.credentials)
+    if device is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or revoked attendance device token",
+        )
+    await attendance_device_service.touch_last_seen(db, device)
+    await db.commit()
+    return device
 
 
 async def get_current_user(
