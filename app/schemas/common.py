@@ -735,16 +735,28 @@ class AttendanceResponse(BaseModel):
     schedule_id: str | None = None  # 연결된 스케줄 UUID (Linked schedule, nullable)
     work_date: date  # 근무 날짜 (Work date)
     clock_in: datetime | None  # 출근 시각 (Clock-in timestamp)
+    clock_in_display: str | None = None  # store tz 기준 "HH:MM" (Pre-formatted for UI, store timezone)
     clock_in_timezone: str | None  # 출근 타임존 (Clock-in timezone)
     break_start: datetime | None  # 휴식 시작 (Break start)
     break_end: datetime | None  # 휴식 종료 (Break end)
     clock_out: datetime | None  # 퇴근 시각 (Clock-out timestamp)
+    clock_out_display: str | None = None  # store tz 기준 "HH:MM" (Pre-formatted for UI, store timezone)
     clock_out_timezone: str | None  # 퇴근 타임존 (Clock-out timezone)
+    # 연결된 스케줄의 시작/종료 시각 (store tz 기준으로 해당 날짜에 결합된 tz-aware datetime)
+    # Scheduled start/end for the linked schedule, combined with work_date in store timezone.
+    scheduled_start: datetime | None = None
+    scheduled_start_display: str | None = None  # store tz 기준 "HH:MM" (Pre-formatted)
+    scheduled_end: datetime | None = None
+    scheduled_end_display: str | None = None  # store tz 기준 "HH:MM" (Pre-formatted)
     status: str  # 상태 — not_yet/working/on_break/late/clocked_out/no_show
     anomalies: list[str] | None = None  # ['late', 'early_leave', 'no_break', 'overtime', 'no_show']
     total_work_minutes: int | None  # 총 근무 시간(분) (Total work minutes)
     total_break_minutes: int | None  # 총 휴식 시간(분) (Total break minutes)
-    net_work_minutes: int | None = None  # 순 근무 시간(분) = total - break (Net work minutes)
+    paid_break_minutes: int = 0  # 유급 휴식 (분) — attendance_breaks 합계 (Paid break minutes)
+    unpaid_break_minutes: int = 0  # 무급 휴식 (분) — attendance_breaks 합계 (Unpaid break minutes)
+    paid_break_overage_minutes: int = 0  # paid_short 세션별 (duration - 10) 합 (Paid break overage deducted from net work)
+    net_work_minutes: int | None = None  # 순 근무 시간(분) = total_work - unpaid_break - paid_overage (Net work minutes)
+    breaks: list[dict] = []  # break 세션 타임라인 (Per-break timeline: started_at/ended_at/type/duration)
     note: str | None  # 메모 (Note, may be null)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 

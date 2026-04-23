@@ -30,6 +30,9 @@ from app.models.communication import Announcement, AdditionalTask, AdditionalTas
 from app.models.notification import Notification
 from app.models.schedule import Schedule, StoreWorkRole, StoreBreakRule, ScheduleRequestTemplate, ScheduleRequestTemplateItem, ScheduleRequest, ScheduleAuditLog
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
+from app.models.attendance_break import AttendanceBreak
+from app.models.attendance_device import AttendanceDevice
+from app.models.access_code import AccessCode
 from app.models.evaluation import EvalTemplate, EvalTemplateItem, Evaluation, EvalResponse
 from app.models.permission import Permission, RolePermission
 from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSection, DailyReport, DailyReportSection, DailyReportComment
@@ -47,6 +50,9 @@ __all__ = [
     "Notification",
     "Schedule", "StoreWorkRole", "StoreBreakRule", "ScheduleRequestTemplate", "ScheduleRequestTemplateItem", "ScheduleRequest", "ScheduleAuditLog",
     "QRCode", "Attendance", "AttendanceCorrection",
+    "AttendanceBreak",
+    "AttendanceDevice",
+    "AccessCode",
     "EvalTemplate", "EvalTemplateItem", "Evaluation", "EvalResponse",
     "Permission", "RolePermission",
     "DailyReportTemplate", "DailyReportTemplateSection", "DailyReport", "DailyReportSection", "DailyReportComment",

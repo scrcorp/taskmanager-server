@@ -224,3 +224,47 @@ async def admin_reset_password(
         "temporary_password": temp_password,
         "message": "Password reset successfully",
     }
+
+
+# ── Clockin PIN (attendance device 용) ───────────────────────────
+from sqlalchemy import select as _select  # noqa: E402
+
+from app.schemas.attendance_device import ClockinPinResponse  # noqa: E402
+from app.services.attendance_device_service import (  # noqa: E402
+    generate_unique_clockin_pin,
+)
+from app.utils.exceptions import NotFoundError  # noqa: E402
+
+
+async def _fetch_org_user(db: AsyncSession, user_id: UUID, org_id: UUID) -> User:
+    result = await db.execute(
+        _select(User).where(User.id == user_id, User.organization_id == org_id)
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise NotFoundError("User not found")
+    return user
+
+
+@router.get("/{user_id}/clockin-pin", response_model=ClockinPinResponse)
+async def get_user_clockin_pin(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("clockin_pin:read"))],
+) -> ClockinPinResponse:
+    """Staff detail — attendance device PIN 조회."""
+    user = await _fetch_org_user(db, user_id, current_user.organization_id)
+    return ClockinPinResponse(user_id=user.id, clockin_pin=user.clockin_pin)
+
+
+@router.post("/{user_id}/clockin-pin/regenerate", response_model=ClockinPinResponse)
+async def regenerate_user_clockin_pin(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("clockin_pin:update"))],
+) -> ClockinPinResponse:
+    """Staff detail — attendance device PIN 재발급."""
+    user = await _fetch_org_user(db, user_id, current_user.organization_id)
+    user.clockin_pin = await generate_unique_clockin_pin(db, user.organization_id)
+    await db.commit()
+    return ClockinPinResponse(user_id=user.id, clockin_pin=user.clockin_pin)
