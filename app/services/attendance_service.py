@@ -14,6 +14,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attendance import Attendance, AttendanceCorrection, QRCode
+from app.models.attendance_break import (
+    BREAK_TYPE_PAID_SHORT,
+    BREAK_TYPE_UNPAID_LONG,
+    AttendanceBreak,
+)
 from app.models.organization import Store
 from app.models.schedule import Schedule
 from app.models.user import User
@@ -22,7 +27,9 @@ from app.utils.exceptions import BadRequestError, NotFoundError
 
 
 # 지각/조퇴/휴식 anomaly 임계치 (분 단위) — defaults
-LATE_BUFFER_MINUTES = 5
+# late: clock_in > scheduled_start + LATE_BUFFER_MINUTES 이면 late 로 기록
+# no_show: cron 이 scheduled_end 이 지났는데 attendance 없으면 생성
+LATE_BUFFER_MINUTES = 0  # 0 = 1분이라도 늦으면 late
 EARLY_LEAVE_THRESHOLD_MINUTES = 5
 
 
@@ -544,10 +551,67 @@ class AttendanceService:
         """
         return await attendance_repository.get_corrections(db, attendance_id)
 
+    async def _load_breaks_map(
+        self,
+        db: AsyncSession,
+        attendance_ids: list[UUID],
+    ) -> dict[UUID, list[AttendanceBreak]]:
+        """여러 attendance 의 break 목록을 한 번에 로드합니다.
+
+        Batch-load attendance_breaks rows for a list of attendance IDs.
+        Returns a mapping attendance_id -> sorted list of AttendanceBreak rows.
+        """
+        if not attendance_ids:
+            return {}
+        result = await db.execute(
+            select(AttendanceBreak)
+            .where(AttendanceBreak.attendance_id.in_(attendance_ids))
+            .order_by(AttendanceBreak.started_at.asc())
+        )
+        out: dict[UUID, list[AttendanceBreak]] = {}
+        for br in result.scalars().all():
+            out.setdefault(br.attendance_id, []).append(br)
+        return out
+
+    @staticmethod
+    def _summarize_breaks(
+        breaks: list[AttendanceBreak],
+    ) -> tuple[int, int, int, list[dict]]:
+        """break 목록을 paid/unpaid 집계 + paid_short 10분 초과분 + dict 리스트.
+
+        Returns:
+            (paid_total, unpaid_total, paid_overage, items)
+            - paid_total: 모든 paid_short 세션 duration 합
+            - unpaid_total: 모든 unpaid_long 세션 duration 합
+            - paid_overage: 각 paid_short 세션별 (duration - 10, 0 하한) 합. 근무시간에서 추가 차감 대상.
+            - items: 타임라인용 dict 목록
+        """
+        paid: int = 0
+        unpaid: int = 0
+        paid_overage: int = 0
+        items: list[dict] = []
+        for br in breaks:
+            duration = br.duration_minutes or 0
+            if br.ended_at is not None:
+                if br.break_type == BREAK_TYPE_PAID_SHORT:
+                    paid += duration
+                    paid_overage += max(0, duration - 10)
+                elif br.break_type == BREAK_TYPE_UNPAID_LONG:
+                    unpaid += duration
+            items.append({
+                "id": str(br.id),
+                "started_at": br.started_at,
+                "ended_at": br.ended_at,
+                "break_type": br.break_type,
+                "duration_minutes": br.duration_minutes,
+            })
+        return paid, unpaid, paid_overage, items
+
     async def build_response(
         self,
         db: AsyncSession,
         attendance: Attendance,
+        breaks: list[AttendanceBreak] | None = None,
     ) -> dict:
         """근태 응답 딕셔너리를 구성합니다 (관련 엔티티 이름 포함).
 
@@ -556,23 +620,120 @@ class AttendanceService:
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             attendance: 근태 ORM 객체 (Attendance ORM object)
+            breaks: 미리 로드된 break 목록, 선택 (Preloaded attendance_breaks for batching)
 
         Returns:
             dict: 매장/사용자 이름이 포함된 응답 딕셔너리
                   (Response dict with store/user names)
         """
-        # 매장 이름 조회 — Fetch store name
-        store_result = await db.execute(select(Store.name).where(Store.id == attendance.store_id))
-        store_name: str = store_result.scalar() or "Unknown"
+        # 매장 이름 + 타임존 조회 — Fetch store name & timezone
+        store_result = await db.execute(
+            select(Store.name, Store.timezone).where(Store.id == attendance.store_id)
+        )
+        store_row = store_result.one_or_none()
+        store_name: str = (store_row[0] if store_row else None) or "Unknown"
+        store_tz_name: str | None = store_row[1] if store_row else None
 
         # 사용자 이름 조회 — Fetch user name
         user_result = await db.execute(select(User.full_name).where(User.id == attendance.user_id))
         user_name: str = user_result.scalar() or "Unknown"
 
-        # 순 근무시간 계산 — Net work minutes = total - break
+        # 연결된 스케줄 조회 (있으면) — scheduled_start/end 채움
+        scheduled_start: datetime | None = None
+        scheduled_end: datetime | None = None
+        if attendance.schedule_id is not None:
+            sch_result = await db.execute(
+                select(Schedule.start_time, Schedule.end_time, Schedule.work_date)
+                .where(Schedule.id == attendance.schedule_id)
+            )
+            sch_row = sch_result.one_or_none()
+            if sch_row is not None:
+                s_start_time, s_end_time, s_work_date = sch_row
+                # store.timezone이 None이면 organization timezone 조회 (fallback)
+                if store_tz_name is None:
+                    from app.models.organization import Organization
+                    org_result = await db.execute(
+                        select(Organization.timezone)
+                        .join(Store, Store.organization_id == Organization.id)
+                        .where(Store.id == attendance.store_id)
+                    )
+                    store_tz_name = org_result.scalar() or "UTC"
+                try:
+                    from zoneinfo import ZoneInfo
+                    tz = ZoneInfo(store_tz_name)
+                except Exception:
+                    from zoneinfo import ZoneInfo
+                    tz = ZoneInfo("UTC")
+                if s_start_time is not None:
+                    scheduled_start = datetime.combine(s_work_date, s_start_time, tzinfo=tz)
+                if s_end_time is not None:
+                    scheduled_end = datetime.combine(s_work_date, s_end_time, tzinfo=tz)
+
+        # break 로드 (미리 주입되지 않았다면 fetch) — Load breaks if not provided
+        if breaks is None:
+            br_result = await db.execute(
+                select(AttendanceBreak)
+                .where(AttendanceBreak.attendance_id == attendance.id)
+                .order_by(AttendanceBreak.started_at.asc())
+            )
+            breaks = list(br_result.scalars().all())
+
+        paid_break_minutes, unpaid_break_minutes, paid_overage_minutes, break_items = (
+            self._summarize_breaks(breaks)
+        )
+
+        # store tz 기준 "HH:MM" display formatter — admin UI 가 브라우저 로컬 tz 변환
+        # 없이 그대로 렌더할 수 있도록 pre-formatted 값 제공.
+        # store.timezone 이 아직 없으면 organization tz, 그마저도 없으면 UTC fallback.
+        display_tz_name: str | None = store_tz_name
+        if display_tz_name is None:
+            from app.models.organization import Organization
+            org_result = await db.execute(
+                select(Organization.timezone)
+                .join(Store, Store.organization_id == Organization.id)
+                .where(Store.id == attendance.store_id)
+            )
+            display_tz_name = org_result.scalar() or "UTC"
+        try:
+            from zoneinfo import ZoneInfo
+            display_tz = ZoneInfo(display_tz_name)
+        except Exception:
+            from zoneinfo import ZoneInfo
+            display_tz = ZoneInfo("UTC")
+
+        def _display_store_tz(value: datetime | None) -> str | None:
+            """UTC/offset-aware datetime → store tz 기준 HH:MM. None → None."""
+            if value is None:
+                return None
+            try:
+                return value.astimezone(display_tz).strftime("%H:%M")
+            except Exception:
+                return None
+
+        # break 타임라인에 started_at/ended_at_display 추가
+        for item in break_items:
+            item["started_at_display"] = _display_store_tz(item.get("started_at"))
+            item["ended_at_display"] = _display_store_tz(item.get("ended_at"))
+
+        # 총 휴식시간 — prefer aggregated paid+unpaid (더 정확), fallback to legacy field
+        aggregated_break_minutes: int | None = None
+        if break_items:
+            aggregated_break_minutes = paid_break_minutes + unpaid_break_minutes
+        total_break_minutes: int | None = (
+            aggregated_break_minutes if aggregated_break_minutes is not None
+            else attendance.total_break_minutes
+        )
+
+        # 순 근무시간 계산 — Net work minutes
+        # = total_work
+        #   - unpaid_break 전체 (일 안 한 시간)
+        #   - paid_short 10분 초과분 (10분은 유급, 초과는 비근무 처리)
         total_work = attendance.total_work_minutes or 0
-        total_break = attendance.total_break_minutes or 0
-        net_work_minutes = max(0, total_work - total_break) if attendance.total_work_minutes is not None else None
+        net_work_minutes: int | None = None
+        if attendance.total_work_minutes is not None:
+            net_work_minutes = max(
+                0, total_work - unpaid_break_minutes - paid_overage_minutes
+            )
 
         return {
             "id": str(attendance.id),
@@ -583,16 +744,26 @@ class AttendanceService:
             "schedule_id": str(attendance.schedule_id) if attendance.schedule_id else None,
             "work_date": attendance.work_date,
             "clock_in": attendance.clock_in,
+            "clock_in_display": _display_store_tz(attendance.clock_in),
             "clock_in_timezone": attendance.clock_in_timezone,
             "break_start": attendance.break_start,
             "break_end": attendance.break_end,
             "clock_out": attendance.clock_out,
+            "clock_out_display": _display_store_tz(attendance.clock_out),
             "clock_out_timezone": attendance.clock_out_timezone,
+            "scheduled_start": scheduled_start,
+            "scheduled_start_display": _display_store_tz(scheduled_start),
+            "scheduled_end": scheduled_end,
+            "scheduled_end_display": _display_store_tz(scheduled_end),
             "status": attendance.status,
             "anomalies": attendance.anomalies,
             "total_work_minutes": attendance.total_work_minutes,
-            "total_break_minutes": attendance.total_break_minutes,
+            "total_break_minutes": total_break_minutes,
+            "paid_break_minutes": paid_break_minutes,
+            "unpaid_break_minutes": unpaid_break_minutes,
+            "paid_break_overage_minutes": paid_overage_minutes,
             "net_work_minutes": net_work_minutes,
+            "breaks": break_items,
             "note": attendance.note,
             "created_at": attendance.created_at,
         }

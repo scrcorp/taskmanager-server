@@ -153,6 +153,14 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     # ── Organization ──
     ("org:read",   "org", "read",   "View organization info and settings", False),
     ("org:update", "org", "update", "Modify organization settings", False),
+
+    # ── Attendance Devices (공용 근태 기기 관리) ──
+    ("attendance_devices:read",   "attendance_devices", "read",   "View attendance terminal devices", False),
+    ("attendance_devices:update", "attendance_devices", "update", "Rename, revoke terminal devices, rotate access code", False),
+
+    # ── Clock-in PIN (직원 근태 기기 PIN 관리) ──
+    ("clockin_pin:read",   "clockin_pin", "read",   "View staff clock-in PIN (admin lookup)", False),
+    ("clockin_pin:update", "clockin_pin", "update", "Regenerate staff clock-in PIN", False),
 ]
 
 # 편의용: code → description 조회

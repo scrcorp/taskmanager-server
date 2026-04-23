@@ -204,6 +204,11 @@ class UserService:
             org_rate = org_row.scalar()
             hourly_rate = float(org_rate) if org_rate else None
 
+        # Attendance device 용 clockin_pin 자동 발급 (organization 단위 unique)
+        from app.services.attendance_device_service import generate_unique_clockin_pin
+
+        clockin_pin = await generate_unique_clockin_pin(db, organization_id)
+
         try:
             create_data: dict = {
                 "organization_id": organization_id,
@@ -212,6 +217,7 @@ class UserService:
                 "full_name": data.full_name,
                 "email": data.email,
                 "password_hash": password_hash,
+                "clockin_pin": clockin_pin,
             }
             if hourly_rate is not None:
                 create_data["hourly_rate"] = hourly_rate
