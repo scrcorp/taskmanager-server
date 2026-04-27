@@ -63,8 +63,8 @@ class Attendance(Base):
     One record per user per work date. Tracks clock-in, break, and clock-out times
     with timezone information and auto-calculated work/break durations.
 
-    Status flow: not_yet → working → on_break → working → clocked_out
-                 (late, no_show as alternates)
+    Status flow: upcoming → working → on_break → working → clocked_out
+                 (late, no_show as alternates; cancelled for rejected/cancelled/deleted schedules)
 
     Attributes:
         id: 고유 식별자 UUID (Unique identifier)
@@ -86,8 +86,8 @@ class Attendance(Base):
         updated_at: 수정 일시 UTC (Last update timestamp)
 
     Constraints:
-        uq_attendance_user_date: 동일 사용자+날짜 중복 불가
-            (One attendance record per user per day)
+        uq_attendance_schedule (partial): schedule_id IS NOT NULL 일 때 schedule당 1개.
+        uq_attendance_walkin (partial): schedule_id IS NULL 일 때 user+work_date 1개.
     """
 
     __tablename__ = "attendances"
@@ -116,8 +116,8 @@ class Attendance(Base):
     clock_out: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 퇴근 타임존 — IANA timezone at clock-out
     clock_out_timezone: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # 상태 — Status: not_yet/working/on_break/late/clocked_out/no_show
-    status: Mapped[str] = mapped_column(String(20), default="not_yet")
+    # 상태 — Status: upcoming/working/on_break/late/clocked_out/no_show/cancelled
+    status: Mapped[str] = mapped_column(String(20), default="upcoming")
     # 이상 항목 — anomaly flags: ['late', 'early_leave', 'no_break', 'overtime', 'no_show']
     anomalies: Mapped[list[str] | None] = mapped_column(ARRAY(String(30)), nullable=True)
     # 총 근무 시간(분) — Auto-calculated on clock_out: (clock_out - clock_in) in minutes
@@ -132,7 +132,21 @@ class Attendance(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
-        UniqueConstraint("user_id", "work_date", name="uq_attendance_user_date"),
+        # schedule에 묶인 attendance는 schedule 당 1개 (partial unique)
+        Index(
+            "uq_attendance_schedule",
+            "schedule_id",
+            unique=True,
+            postgresql_where=(schedule_id.is_not(None)),
+        ),
+        # walk-in (schedule_id NULL) 은 user + work_date 조합으로 1개
+        Index(
+            "uq_attendance_walkin",
+            "user_id",
+            "work_date",
+            unique=True,
+            postgresql_where=(schedule_id.is_(None)),
+        ),
         Index("ix_attendances_schedule_id", "schedule_id"),
     )
 

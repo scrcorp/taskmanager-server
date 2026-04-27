@@ -172,6 +172,33 @@ class ChecklistInstanceService:
         instance.reported_at = None
         await db.flush()
 
+    async def replace_for_new_work_role(
+        self,
+        db: AsyncSession,
+        instance: "ChecklistInstance",
+        schedule_id: UUID,
+        organization_id: UUID,
+        store_id: UUID,
+        user_id: UUID,
+        work_date: date,
+        new_work_role_id: UUID | None,
+    ) -> "ChecklistInstance | None":
+        """Work role 변경 시 기존 instance를 삭제하고 새 role 기반으로 재생성.
+
+        기존 진행 기록(item submissions, files, messages 등)은 DB cascade로 함께 삭제.
+        호출자가 'reset_checklist=true' 플래그로 이를 명시적으로 동의한 상태여야 함.
+        """
+        from sqlalchemy import delete as sa_delete
+
+        # cascade로 items 포함 삭제 (FK on delete cascade 의존)
+        await db.execute(sa_delete(ChecklistInstanceItem).where(ChecklistInstanceItem.instance_id == instance.id))
+        await db.delete(instance)
+        await db.flush()
+        # 새 work_role 기반으로 재생성. default_checklist_id 없으면 None 반환되어 CL 없는 상태로 남음.
+        return await self.create_for_schedule(
+            db, schedule_id, organization_id, store_id, user_id, work_date, new_work_role_id,
+        )
+
     async def get_instances(
         self,
         db: AsyncSession,

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.organization import Organization, Store
 from app.models.schedule import Schedule, ScheduleAuditLog, StoreWorkRole
 from app.models.user import Role, User
+from app.models.user_store import UserStore
 from app.models.work import Shift, Position
 from app.repositories.schedule_audit_log_repository import schedule_audit_log_repository
 from app.repositories.schedule_repository import schedule_repository
@@ -23,6 +24,7 @@ from app.schemas.schedule import (
 )
 from app.core.permissions import GM_PRIORITY, OWNER_PRIORITY, hide_cost_for_priority
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
+from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 
 
 
@@ -83,6 +85,18 @@ class ScheduleService:
                     pn = p.scalar() or ""
                     work_role_name = f"{sn} - {pn}"
 
+        # effective_rate: schedule.hourly_rate가 있으면 그대로, 없으면 cascade로 계산
+        stored_rate = float(entry.hourly_rate) if entry.hourly_rate is not None else 0.0
+        if entry.hourly_rate is not None and entry.hourly_rate > 0:
+            effective_rate: float | None = stored_rate
+            effective_source: str | None = "schedule"
+        else:
+            rate, source = await self._resolve_hourly_rate_with_source(
+                db, entry.user_id, entry.store_id, entry.organization_id,
+            )
+            effective_rate = rate if source else None
+            effective_source = source
+
         return ScheduleResponse(
             id=str(entry.id),
             organization_id=str(entry.organization_id),
@@ -106,7 +120,9 @@ class ScheduleService:
             approved_by=str(entry.approved_by) if entry.approved_by else None,
             confirmed_at=entry.confirmed_at,
             note=entry.note,
-            hourly_rate=float(entry.hourly_rate),
+            hourly_rate=stored_rate,
+            effective_rate=effective_rate,
+            effective_rate_source=effective_source,
             submitted_at=entry.submitted_at,
             is_modified=entry.is_modified,
             rejected_by=str(entry.rejected_by) if entry.rejected_by else None,
@@ -175,18 +191,27 @@ class ScheduleService:
     async def _resolve_hourly_rate(
         self, db: AsyncSession, user_id: UUID, store_id: UUID, organization_id: UUID,
     ) -> float:
-        """user → store → org cascade로 시급 결정."""
+        """user → store → org cascade로 시급 결정 (legacy: 단일 float 반환)."""
+        rate, _ = await self._resolve_hourly_rate_with_source(db, user_id, store_id, organization_id)
+        return rate
+
+    async def _resolve_hourly_rate_with_source(
+        self, db: AsyncSession, user_id: UUID, store_id: UUID, organization_id: UUID,
+    ) -> tuple[float, str | None]:
+        """cascade + 출처 레이어 반환. 어디서도 없으면 (0.0, None)."""
         user_row = await db.execute(select(User.hourly_rate).where(User.id == user_id))
         user_hr = user_row.scalar()
         if user_hr is not None:
-            return float(user_hr)
+            return float(user_hr), "user"
         store_row = await db.execute(select(Store.default_hourly_rate).where(Store.id == store_id))
         store_hr = store_row.scalar()
         if store_hr is not None:
-            return float(store_hr)
+            return float(store_hr), "store"
         org_row = await db.execute(select(Organization.default_hourly_rate).where(Organization.id == organization_id))
         org_hr = org_row.scalar()
-        return float(org_hr) if org_hr is not None else 0.0
+        if org_hr is not None:
+            return float(org_hr), "org"
+        return 0.0, None
 
     async def _validate_entry(
         self,
@@ -207,13 +232,57 @@ class ScheduleService:
         start_m = self._time_to_minutes(start_time)
         end_m = self._time_to_minutes(end_time)
 
+        # A-3: 0분 shift 차단
+        if start_m == end_m:
+            errors.append("Shift duration must be greater than 0 minutes")
+        else:
+            # A-2 자정넘김: end < start는 overnight shift로 허용
+            net_minutes = (end_m - start_m) if end_m > start_m else (end_m + 24 * 60 - start_m)
+            # A-6: 과도한 근무시간 경고 — org/store setting 기반 (fallback 16h)
+            max_hours = 16.0
+            store_org_id = await db.scalar(select(Store.organization_id).where(Store.id == store_id))
+            if store_org_id is not None:
+                try:
+                    raw = await resolve_setting(
+                        db,
+                        key="schedule.max_shift_hours",
+                        organization_id=store_org_id,
+                        store_id=store_id,
+                    )
+                    if raw is not None:
+                        max_hours = float(raw)
+                except (SettingNotRegisteredError, TypeError, ValueError):
+                    max_hours = 16.0
+            if net_minutes > max_hours * 60:
+                warnings.append(
+                    f"Shift is longer than {max_hours:g} hours ({net_minutes // 60}h {net_minutes % 60}m). Verify before saving."
+                )
+
         # 1. Time overlap check
         if await schedule_repository.check_time_overlap(
             db, user_id, work_date, start_m, end_m, exclude_id
         ):
             errors.append("This employee already has an overlapping schedule on the same date")
 
-        # Only overlap blocks creation. Other limits removed — schedules should always be creatable.
+        # 2. user-store relation + is_work_assignment check (A-8)
+        # 직원이 해당 매장에 배정되어 있고, Work 플래그가 켜져있어야 스케줄 가능
+        # Owner는 전 매장 접근권이 있으므로 이 체크를 bypass.
+        target_priority = await db.scalar(
+            select(Role.priority).join(User, User.role_id == Role.id).where(User.id == user_id)
+        )
+        if target_priority is not None and target_priority > OWNER_PRIORITY:
+            us_row = await db.execute(
+                select(UserStore.is_work_assignment).where(
+                    UserStore.user_id == user_id,
+                    UserStore.store_id == store_id,
+                )
+            )
+            us_flag = us_row.scalar_one_or_none()
+            if us_flag is None:
+                errors.append("This employee is not assigned to this store")
+            elif us_flag is False:
+                errors.append("This employee is not marked for work at this store")
+
         valid = len(errors) == 0
         return ScheduleValidation(valid=valid, warnings=warnings, errors=errors)
 
@@ -264,6 +333,25 @@ class ScheduleService:
         # status 유효성 확인 — Validate status value (draft/requested/confirmed)
         allowed_statuses = {"draft", "requested", "confirmed"}
         entry_status = data.status if data.status in allowed_statuses else "confirmed"
+
+        # A-9: Approval Workflow 강제 — approval_required=True이면 non-GM+는 "confirmed" 직행 불가
+        if entry_status == "confirmed":
+            actor_priority = await db.scalar(
+                select(Role.priority).join(User, User.role_id == Role.id).where(User.id == created_by)
+            )
+            if actor_priority is not None and actor_priority > GM_PRIORITY:
+                try:
+                    approval_required = await resolve_setting(
+                        db,
+                        key="schedule.approval_required",
+                        organization_id=organization_id,
+                        store_id=store_id,
+                    )
+                except SettingNotRegisteredError:
+                    approval_required = True
+                if approval_required:
+                    # SV/Staff → "confirmed" 요청은 "requested"로 다운그레이드
+                    entry_status = "requested"
 
         # Validate
         validation = await self._validate_entry(
@@ -317,10 +405,16 @@ class ScheduleService:
             audit_event = "created" if entry_status == "draft" else (
                 "requested" if entry_status == "requested" else "confirmed"
             )
+            # description: action과 status가 같으면 괄호 생략 (R2-12)
+            description = (
+                f"Schedule {audit_event}"
+                if audit_event == entry_status
+                else f"Schedule {audit_event} ({entry_status})"
+            )
             actor = await db.scalar(select(User).where(User.id == created_by))
             await self._log_audit(
                 db, entry.id, audit_event, actor,
-                description=f"Schedule {audit_event} ({entry_status})",
+                description=description,
             )
 
             # confirmed 상태일 때만 체크리스트 인스턴스 자동 생성
@@ -336,6 +430,11 @@ class ScheduleService:
                     work_date=data.work_date,
                     work_role_id=UUID(data.work_role_id) if data.work_role_id else None,
                 )
+
+            # Eager attendance: schedule 생성 즉시 attendance row 를 동반 생성.
+            # draft/requested 는 upcoming, 이미 시각이 지났으면 late/no_show 로 반영.
+            from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
+            await ensure_attendance_for_schedule(db, entry)
 
             result = await self._to_response(db, entry)
             await db.commit()
@@ -487,6 +586,7 @@ class ScheduleService:
                     break_end_time=item.break_end_time,
                     note=item.note,
                     hourly_rate=item.hourly_rate,
+                    reset_checklist=item.reset_checklist,
                     force=False,
                 )
                 await self.update_entry(db, entry_id, organization_id, update_data, actor=actor)
@@ -599,6 +699,10 @@ class ScheduleService:
                     work_date=s.work_date,
                     work_role_id=s.work_role_id,
                 )
+
+                # Eager attendance: row 보장
+                from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
+                await ensure_attendance_for_schedule(db, entry)  # type: ignore[arg-type]
 
                 results.append(await self._to_response(db, entry))  # type: ignore[arg-type]
             await db.commit()
@@ -784,6 +888,58 @@ class ScheduleService:
                     await checklist_instance_service.reset_instance(db, cl)
                 await db.flush()
 
+            # Eager attendance: schedule.user_id 가 바뀌면 attendance.user_id 도 동기화
+            # 기존 clock_in 등 기록 정책은 4-2 에서 별도 논의 — 일단 단순 동기화만 수행.
+            from app.services.attendance_lifecycle_service import reassign_attendance_user
+            await reassign_attendance_user(db, entry_id, new_user_synced)
+
+        # work_role_id 변경 시 체크리스트 재생성 (새 role의 default template 기반)
+        #   - CL 없거나 pending(진행 0) → 자동 교체 (A-2 정책)
+        #   - in_progress/completed → reset_checklist 플래그 필수
+        #     * true  → 삭제 후 새 role 기반으로 재생성 (진행 이력 소실)
+        #     * false → work_role만 바꾸고 CL은 유지 (stale 허용)
+        #     * None  → 400으로 거절, 프론트가 사용자 확인 요구
+        if (
+            data.work_role_id is not None
+            and (str(entry.work_role_id) if entry.work_role_id else None) != data.work_role_id
+        ):
+            from app.models.checklist import ChecklistInstance
+            from app.services.checklist_instance_service import checklist_instance_service
+
+            new_work_role_uuid: UUID | None = UUID(data.work_role_id) if data.work_role_id else None
+            cl_result = await db.execute(
+                select(ChecklistInstance).where(ChecklistInstance.schedule_id == entry_id)
+            )
+            cl_wr: ChecklistInstance | None = cl_result.scalar_one_or_none()
+            if cl_wr is None or cl_wr.status == "pending":
+                # 자동 교체: 기존 CL 없거나 진행 0이면 바로 새 role 기반으로 재생성
+                target_user = new_user_synced or entry.user_id
+                if cl_wr is not None:
+                    await checklist_instance_service.replace_for_new_work_role(
+                        db, cl_wr, entry.id, entry.organization_id, entry.store_id,
+                        target_user, entry.work_date, new_work_role_uuid,
+                    )
+                else:
+                    await checklist_instance_service.create_for_schedule(
+                        db, entry.id, entry.organization_id, entry.store_id,
+                        target_user, entry.work_date, new_work_role_uuid,
+                    )
+            else:
+                # 진행 중 / 완료 상태 → 사용자 동의 필요
+                if data.reset_checklist is None:
+                    raise BadRequestError(
+                        f"Checklist is {cl_wr.status}. "
+                        "Set reset_checklist=true to reset it with the new work role's template, "
+                        "or reset_checklist=false to keep the existing checklist (it will not match the new role)."
+                    )
+                if data.reset_checklist:
+                    target_user = new_user_synced or entry.user_id
+                    await checklist_instance_service.replace_for_new_work_role(
+                        db, cl_wr, entry.id, entry.organization_id, entry.store_id,
+                        target_user, entry.work_date, new_work_role_uuid,
+                    )
+                # reset_checklist=False면 기존 instance 그대로 유지 (stale 허용)
+
         try:
             updated = await schedule_repository.update(db, entry_id, update_data, organization_id)
             if updated is None:
@@ -859,6 +1015,10 @@ class ScheduleService:
             await schedule_repository.update(
                 db, entry_id, {"status": "deleted"}, organization_id,
             )
+            # Eager attendance: cancelled 로 마킹 (기록 보존)
+            from app.services.attendance_lifecycle_service import cancel_attendance_for_schedule
+            await cancel_attendance_for_schedule(db, entry_id)
+
             await db.commit()
         except Exception:
             await db.rollback()
@@ -918,6 +1078,10 @@ class ScheduleService:
                     work_role_id=updated.work_role_id,
                 )
 
+            # Eager attendance: 이미 있는 row 를 업데이트하거나 없으면 생성
+            from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
+            await ensure_attendance_for_schedule(db, updated)
+
             result = await self._to_response(db, updated)
             await db.commit()
             return result
@@ -958,6 +1122,10 @@ class ScheduleService:
                 description="Schedule rejected",
                 reason=data.rejection_reason,
             )
+            # Eager attendance: cancelled 로 마킹
+            from app.services.attendance_lifecycle_service import cancel_attendance_for_schedule
+            await cancel_attendance_for_schedule(db, entry_id)
+
             result = await self._to_response(db, updated)
             await db.commit()
             return result
@@ -990,6 +1158,10 @@ class ScheduleService:
                 db, entry_id, "requested", actor,
                 description="Schedule submitted for review",
             )
+            # Eager attendance: 이미 생성돼 있거나 존재하지 않는 경우 대비
+            from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
+            await ensure_attendance_for_schedule(db, updated)  # type: ignore[arg-type]
+
             result = await self._to_response(db, updated)  # type: ignore[arg-type]
             await db.commit()
             return result
@@ -1004,27 +1176,45 @@ class ScheduleService:
         organization_id: UUID,
         actor: User,
     ) -> ScheduleResponse:
-        """confirmed → requested 전환 (GM+ only)."""
-        self._require_gm_or_above(actor, "revert confirmed schedule")
+        """confirmed → requested, 또는 cancelled → requested 전환 (GM+ only).
+
+        cancelled 에서 되살릴 때는 cancellation 메타 (cancelled_by/at/reason) 를 함께
+        초기화해 "취소 안 됐던 상태" 로 되돌린다. attendance row 도 ensure 로 재활성.
+        """
+        self._require_gm_or_above(actor, "revert schedule")
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
             raise NotFoundError("Schedule not found")
-        if entry.status != "confirmed":
-            raise BadRequestError(f"Only confirmed schedules can be reverted (current status: {entry.status})")
+        if entry.status not in ("confirmed", "cancelled"):
+            raise BadRequestError(f"Only confirmed or cancelled schedules can be reverted (current status: {entry.status})")
+        was_cancelled = entry.status == "cancelled"
         try:
+            update_payload: dict[str, Any] = {
+                "status": "requested",
+                "approved_by": None,
+                "confirmed_at": None,
+            }
+            if was_cancelled:
+                # 취소 메타 초기화 — 아예 취소된 적 없던 상태로 되돌린다
+                update_payload.update({
+                    "cancelled_by": None,
+                    "cancelled_at": None,
+                    "cancellation_reason": None,
+                })
             updated = await schedule_repository.update(
-                db, entry_id,
-                {
-                    "status": "requested",
-                    "approved_by": None,
-                    "confirmed_at": None,
-                },
-                organization_id,
+                db, entry_id, update_payload, organization_id,
             )
             await self._log_audit(
                 db, entry_id, "reverted", actor,
-                description="Confirmed schedule reverted to requested",
+                description=(
+                    "Cancelled schedule restored to requested" if was_cancelled
+                    else "Confirmed schedule reverted to requested"
+                ),
             )
+            # Eager attendance: status 유지 or 재계산. cancelled 였으면 row 되살림.
+            from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
+            await ensure_attendance_for_schedule(db, updated)  # type: ignore[arg-type]
+
             result = await self._to_response(db, updated)  # type: ignore[arg-type]
             await db.commit()
             return result
@@ -1063,6 +1253,10 @@ class ScheduleService:
                 description="Confirmed schedule cancelled",
                 reason=data.cancellation_reason,
             )
+            # Eager attendance: cancelled 로 마킹
+            from app.services.attendance_lifecycle_service import cancel_attendance_for_schedule
+            await cancel_attendance_for_schedule(db, entry_id)
+
             result = await self._to_response(db, updated)  # type: ignore[arg-type]
             await db.commit()
             return result
@@ -1210,6 +1404,11 @@ class ScheduleService:
                 cl_b.user_id = a_user
                 if data.reset_checklists:
                     await checklist_instance_service.reset_instance(db, cl_b)
+
+            # Eager attendance: 각 schedule 의 attendance row user_id 를 함께 swap
+            from app.services.attendance_lifecycle_service import reassign_attendance_user
+            await reassign_attendance_user(db, a.id, b_user)
+            await reassign_attendance_user(db, b.id, a_user)
 
             await db.flush()
             res_a = await self._to_response(db, updated_a)  # type: ignore[arg-type]
@@ -1466,6 +1665,10 @@ class ScheduleService:
                         work_role_id=entry.work_role_id,
                     )
 
+                # Eager attendance: 각 confirmed schedule 에 row 보장
+                from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
+                await ensure_attendance_for_schedule(db, entry)
+
                 confirmed += 1
 
             await db.commit()
@@ -1662,7 +1865,7 @@ class ScheduleService:
 
         - confirmed 상태 스케줄에만 허용
         - 이미 체크리스트가 있으면 400 (교체는 bulk-assign 사용)
-        - 템플릿의 모든 항목을 부여 (recurrence 필터 없음)
+        - 템플릿 항목을 스케줄의 work_date 요일에 맞게 recurrence 필터 적용
         """
         from app.models.checklist import ChecklistInstance, ChecklistTemplate, ChecklistInstanceItem
         from app.repositories.checklist_instance_repository import checklist_instance_repository
@@ -1698,6 +1901,20 @@ class ScheduleService:
             raise BadRequestError("Template has no items")
 
         sorted_items = sorted(template.items, key=lambda x: x.sort_order)
+        # recurrence 필터: create_for_schedule과 동일 로직 (C — Manual assign 일관성)
+        day_of_week = sched.work_date.weekday()  # Monday=0 ... Sunday=6
+        applicable_items = [
+            item for item in sorted_items
+            if item.recurrence_type == "daily"
+            or (
+                item.recurrence_type == "weekly"
+                and item.recurrence_days
+                and day_of_week in item.recurrence_days
+            )
+        ]
+        if not applicable_items:
+            raise BadRequestError("Template has no items applicable to this shift's day")
+
         try:
             instance = await checklist_instance_repository.create(
                 db,
@@ -1708,12 +1925,12 @@ class ScheduleService:
                     "store_id": sched.store_id,
                     "user_id": sched.user_id,  # 스냅샷용
                     "work_date": sched.work_date,
-                    "total_items": len(sorted_items),
+                    "total_items": len(applicable_items),
                     "completed_items": 0,
                     "status": "pending",
                 },
             )
-            for idx, item in enumerate(sorted_items):
+            for idx, item in enumerate(applicable_items):
                 ii = ChecklistInstanceItem(
                     instance_id=instance.id,
                     item_index=idx,

@@ -40,6 +40,7 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
         store_id: UUID | None = None,
         shift_id: UUID | None = None,
         position_id: UUID | None = None,
+        include_archived: bool = False,
     ) -> Sequence[ChecklistTemplate]:
         """조직 전체의 체크리스트 템플릿 목록을 조회합니다.
 
@@ -72,6 +73,8 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
             query = query.where(ChecklistTemplate.shift_id == shift_id)
         if position_id is not None:
             query = query.where(ChecklistTemplate.position_id == position_id)
+        if not include_archived:
+            query = query.where(ChecklistTemplate.is_archived.is_(False))
 
         query = query.order_by(ChecklistTemplate.created_at.desc())
         result = await db.execute(query)
@@ -83,6 +86,7 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
         store_id: UUID,
         shift_id: UUID | None = None,
         position_id: UUID | None = None,
+        include_archived: bool = False,
     ) -> Sequence[ChecklistTemplate]:
         """매장별 체크리스트 템플릿 목록을 조회합니다.
 
@@ -111,6 +115,8 @@ class ChecklistRepository(BaseRepository[ChecklistTemplate]):
             query = query.where(ChecklistTemplate.shift_id == shift_id)
         if position_id is not None:
             query = query.where(ChecklistTemplate.position_id == position_id)
+        if not include_archived:
+            query = query.where(ChecklistTemplate.is_archived.is_(False))
 
         query = query.order_by(ChecklistTemplate.created_at.desc())
         result = await db.execute(query)

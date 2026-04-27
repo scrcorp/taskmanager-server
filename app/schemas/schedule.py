@@ -5,7 +5,7 @@ Schedule system Pydantic schemas for work roles, break rules, periods, requests,
 
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ─── Work Role ───────────────────────────────────────
@@ -329,7 +329,7 @@ class ScheduleCreate(BaseModel):
     break_start_time: str | None = None
     break_end_time: str | None = None
     note: str | None = None
-    hourly_rate: float | None = None  # 시급 override (optional — auto-calculated if not provided)
+    hourly_rate: float | None = Field(default=None, ge=0)  # 시급 override (optional, non-negative)
     status: str = "confirmed"  # "requested" for app submissions, "confirmed" for direct admin creation
     force: bool = False  # Override warnings
 
@@ -343,7 +343,7 @@ class ScheduleUpdate(BaseModel):
     break_start_time: str | None = None
     break_end_time: str | None = None
     note: str | None = None
-    hourly_rate: float | None = None  # 시급 override (optional)
+    hourly_rate: float | None = Field(default=None, ge=0)  # 시급 override (optional, non-negative)
     force: bool = False
     reset_checklist: bool | None = None
     # user_id 변경 시 기존 체크리스트 처리:
@@ -376,7 +376,9 @@ class ScheduleResponse(BaseModel):
     approved_by: str | None
     confirmed_at: datetime | None = None
     note: str | None
-    hourly_rate: float | None = 0  # 확정 시급 (Resolved hourly rate). SV/Staff에는 redact되어 None.
+    hourly_rate: float | None = 0  # 스냅샷 시급 (저장 시점). NULL은 override 없음. SV/Staff는 redact.
+    effective_rate: float | None = None  # 상속 체인(user → store → org)으로 계산된 실효 시급. redact 시 None.
+    effective_rate_source: str | None = None  # "schedule" | "user" | "store" | "org" | None
     submitted_at: datetime | None = None
     is_modified: bool = False
     rejected_by: str | None = None
@@ -594,6 +596,7 @@ class BulkUpdateItem(BaseModel):
     break_end_time: str | None = None
     note: str | None = None
     hourly_rate: float | None = None
+    reset_checklist: bool | None = None
 
 
 class BulkUpdateRequest(BaseModel):
