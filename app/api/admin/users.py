@@ -176,7 +176,11 @@ async def sync_user_stores(
     """매장 배정 일괄 저장 (diff 기반)."""
     org_id: UUID = current_user.organization_id
     assignments = [
-        {"store_id": UUID(a.store_id), "is_manager": a.is_manager}
+        {
+            "store_id": UUID(a.store_id),
+            "is_manager": a.is_manager,
+            "is_work_assignment": a.is_work_assignment,
+        }
         for a in data.assignments
     ]
     await user_service.sync_user_stores(db, user_id, org_id, assignments)

@@ -7,7 +7,7 @@ including filtering, eager loading, and user-store associations.
 
 from uuid import UUID
 
-from sqlalchemy import Select, and_, delete, select, update
+from sqlalchemy import Select, and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -62,10 +62,26 @@ class UserRepository(BaseRepository[User]):
             is_active: bool | None = filters.get("is_active")  # type: ignore[assignment]
 
             if store_ids:
-                # 특정 매장(들)에 배정된 사용자만 조회
-                query = query.join(UserStore, UserStore.user_id == User.id).where(
-                    UserStore.store_id.in_(store_ids)
-                ).distinct()
+                # 해당 매장(들)의 스케줄 대상 직원 조회:
+                #   - Work 체크된 user_stores 레코드 OR
+                #   - Owner (role.priority == OWNER_PRIORITY) — 전 매장 접근권
+                from app.core.permissions import OWNER_PRIORITY
+                from app.models.user import Role
+
+                query = (
+                    query.outerjoin(UserStore, UserStore.user_id == User.id)
+                    .join(Role, Role.id == User.role_id)
+                    .where(
+                        or_(
+                            and_(
+                                UserStore.store_id.in_(store_ids),
+                                UserStore.is_work_assignment.is_(True),
+                            ),
+                            Role.priority == OWNER_PRIORITY,
+                        )
+                    )
+                    .distinct()
+                )
             if role_id is not None:
                 query = query.where(User.role_id == role_id)
             if is_active is not None:
@@ -247,15 +263,16 @@ class UserRepository(BaseRepository[User]):
         """일괄 저장: 현재 상태와 diff 계산 후 추가/수정/삭제.
 
         Args:
-            assignments: [{"store_id": UUID, "is_manager": bool}, ...]
+            assignments: [{"store_id": UUID, "is_manager": bool, "is_work_assignment": bool}, ...]
         """
         # 현재 상태 조회
         current = await self.get_user_store_assignments(db, user_id)
         current_map: dict[UUID, UserStore] = {us.store_id: us for us in current}
 
         # 목표 상태
-        target_map: dict[UUID, bool] = {
-            a["store_id"]: a["is_manager"] for a in assignments
+        target_map: dict[UUID, tuple[bool, bool]] = {
+            a["store_id"]: (a["is_manager"], a.get("is_work_assignment", True))
+            for a in assignments
         }
 
         # 삭제: 현재에 있지만 목표에 없는 것
@@ -269,14 +286,20 @@ class UserRepository(BaseRepository[User]):
             )
 
         # 추가/수정
-        for store_id, is_manager in target_map.items():
+        for store_id, (is_manager, is_work) in target_map.items():
             existing = current_map.get(store_id)
             if existing is None:
                 db.add(UserStore(
-                    user_id=user_id, store_id=store_id, is_manager=is_manager
+                    user_id=user_id,
+                    store_id=store_id,
+                    is_manager=is_manager,
+                    is_work_assignment=is_work,
                 ))
-            elif existing.is_manager != is_manager:
-                existing.is_manager = is_manager
+            else:
+                if existing.is_manager != is_manager:
+                    existing.is_manager = is_manager
+                if existing.is_work_assignment != is_work:
+                    existing.is_work_assignment = is_work
 
         await db.flush()
 

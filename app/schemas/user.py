@@ -150,6 +150,7 @@ class UserStoreAssignment(BaseModel):
     """매장 배정 항목."""
     store_id: str
     is_manager: bool = False
+    is_work_assignment: bool = True
 
 
 class SyncUserStoresRequest(BaseModel):
@@ -158,13 +159,14 @@ class SyncUserStoresRequest(BaseModel):
 
 
 class UserStoreResponse(BaseModel):
-    """매장 배정 응답 (is_manager 포함)."""
+    """매장 배정 응답 (is_manager + is_work_assignment 포함)."""
     id: str
     organization_id: str
     name: str
     address: str | None
     is_active: bool
     is_manager: bool
+    is_work_assignment: bool
     created_at: datetime
 
 

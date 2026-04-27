@@ -10,7 +10,7 @@ from typing import Sequence
 from uuid import UUID
 
 from openpyxl import load_workbook
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem
@@ -332,21 +332,15 @@ class ChecklistService:
         template_id: UUID,
         organization_id: UUID,
     ) -> bool:
-        """체크리스트 템플릿을 삭제합니다 (cascade로 항목도 삭제).
+        """체크리스트 템플릿을 아카이브합니다 (soft delete).
 
-        Delete a checklist template (items are cascade-deleted).
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            template_id: 템플릿 UUID (Template UUID)
-            organization_id: 조직 UUID (Organization UUID)
-
-        Returns:
-            bool: 삭제 성공 여부 (Whether the deletion was successful)
+        실제 물리 삭제 대신 `is_archived=True`로 전환. 이미 생성된 cl_instance는
+        items snapshot을 자체 보유하므로 독립적으로 계속 표시 가능. archived 템플릿은
+        새로운 할당 목록에서 숨겨짐. 실수로 archive한 경우 `unarchive_template`으로 복구.
 
         Raises:
-            NotFoundError: 템플릿이 없을 때 (When template not found)
-            ForbiddenError: 다른 조직 매장일 때 (When store belongs to another org)
+            NotFoundError: 템플릿이 없을 때
+            ForbiddenError: 다른 조직 매장일 때
         """
         template: ChecklistTemplate | None = await checklist_repository.get_with_items(
             db, template_id
@@ -356,9 +350,38 @@ class ChecklistService:
 
         await self._validate_store_ownership(db, template.store_id, organization_id)
         try:
-            result = await checklist_repository.delete(db, template_id)
+            template.is_archived = True
+            await db.flush()
+            # work_role의 default_checklist_id 연결 해제 (새 할당 방지)
+            await db.execute(
+                sa_update(StoreWorkRole)
+                .where(StoreWorkRole.default_checklist_id == template_id)
+                .values(default_checklist_id=None)
+            )
             await db.commit()
-            return result
+            return True
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def unarchive_template(
+        self,
+        db: AsyncSession,
+        template_id: UUID,
+        organization_id: UUID,
+    ) -> bool:
+        """아카이브된 템플릿을 복구합니다."""
+        template: ChecklistTemplate | None = await checklist_repository.get_with_items(
+            db, template_id
+        )
+        if template is None:
+            raise NotFoundError("Checklist template not found")
+        await self._validate_store_ownership(db, template.store_id, organization_id)
+        try:
+            template.is_archived = False
+            await db.flush()
+            await db.commit()
+            return True
         except Exception:
             await db.rollback()
             raise

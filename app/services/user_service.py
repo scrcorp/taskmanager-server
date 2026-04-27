@@ -461,6 +461,7 @@ class UserService:
                 address=store_map[a.store_id].address if a.store_id in store_map else None,
                 is_active=store_map[a.store_id].is_active if a.store_id in store_map else False,
                 is_manager=a.is_manager,
+                is_work_assignment=a.is_work_assignment,
                 created_at=store_map[a.store_id].created_at if a.store_id in store_map else a.created_at,
             )
             for a in assignments

@@ -477,10 +477,22 @@ class AttendanceService:
             BadRequestError: 수정 불가 필드일 때 (When field cannot be corrected)
         """
         # 수정 가능한 필드 목록 — Allowed correctable fields
-        allowed_fields: set[str] = {"clock_in", "clock_out", "break_start", "break_end"}
+        # status 는 plain string, 그 외는 ISO datetime
+        time_fields: set[str] = {"clock_in", "clock_out", "break_start", "break_end"}
+        allowed_fields: set[str] = time_fields | {"status"}
         if field_name not in allowed_fields:
             raise BadRequestError(
                 f"Cannot correct field: {field_name}. Allowed: {', '.join(allowed_fields)}"
+            )
+
+        # status 화이트리스트 검증
+        allowed_statuses: set[str] = {
+            "upcoming", "soon", "working", "on_break",
+            "late", "clocked_out", "no_show", "cancelled",
+        }
+        if field_name == "status" and corrected_value not in allowed_statuses:
+            raise BadRequestError(
+                f"Invalid status: {corrected_value}. Allowed: {', '.join(sorted(allowed_statuses))}"
             )
 
         # 근태 기록 조회 — Fetch attendance record
@@ -488,9 +500,12 @@ class AttendanceService:
 
         # 기존 값 가져오기 — Get original value
         original_value: str | None = None
-        original_dt = getattr(attendance, field_name, None)
-        if original_dt is not None:
-            original_value = original_dt.isoformat()
+        original_raw = getattr(attendance, field_name, None)
+        if original_raw is not None:
+            if field_name in time_fields:
+                original_value = original_raw.isoformat()
+            else:
+                original_value = str(original_raw)
 
         # 수정 이력 생성 — Create correction record
         correction: AttendanceCorrection = await attendance_repository.create_correction(
@@ -506,8 +521,11 @@ class AttendanceService:
         )
 
         # 근태 기록 업데이트 — Update attendance field with corrected value
-        corrected_dt: datetime = datetime.fromisoformat(corrected_value)
-        setattr(attendance, field_name, corrected_dt)
+        if field_name in time_fields:
+            corrected_dt: datetime = datetime.fromisoformat(corrected_value)
+            setattr(attendance, field_name, corrected_dt)
+        else:
+            setattr(attendance, field_name, corrected_value)
 
         # 시간 재계산 — Recalculate minutes if relevant
         if field_name in ("clock_in", "clock_out") and attendance.clock_in and attendance.clock_out:
@@ -941,6 +959,205 @@ class AttendanceService:
                     "overtime_hours": round(total_hours - max_weekly, 1),
                 })
         return alerts
+
+    # ─── Break session CRUD (admin correction) ──────────────────────────────
+    # admin 이 attendance_breaks row 를 직접 추가/수정/삭제할 수 있게 한다.
+    # 동시성 보장: 새 세션 추가/수정 시 이미 열린(open) break 와 시간이 겹치지 않는지 검증.
+
+    async def _recalculate_break_aggregates(
+        self,
+        db: AsyncSession,
+        attendance: Attendance,
+    ) -> None:
+        """attendance.total_break_minutes 를 attendance_breaks 합계로 재계산."""
+        result = await db.execute(
+            select(AttendanceBreak)
+            .where(AttendanceBreak.attendance_id == attendance.id)
+        )
+        breaks = list(result.scalars().all())
+        total: int = sum((b.duration_minutes or 0) for b in breaks if b.ended_at is not None)
+        attendance.total_break_minutes = total
+
+    @staticmethod
+    def _validate_break_session(
+        started_at: datetime,
+        ended_at: datetime | None,
+        break_type: str,
+    ) -> None:
+        """break_type 화이트리스트 + started_at < ended_at 검증."""
+        valid_types = {BREAK_TYPE_PAID_SHORT, BREAK_TYPE_UNPAID_LONG}
+        if break_type not in valid_types:
+            raise BadRequestError(
+                f"Invalid break_type: {break_type}. Allowed: {', '.join(sorted(valid_types))}"
+            )
+        if ended_at is not None and ended_at <= started_at:
+            raise BadRequestError("ended_at must be after started_at")
+
+    @staticmethod
+    def _check_overlap(
+        sessions: list[AttendanceBreak],
+        started_at: datetime,
+        ended_at: datetime | None,
+        exclude_id: UUID | None = None,
+    ) -> None:
+        """기존 세션 목록과 시간 구간 겹침 검증.
+
+        ended_at 이 None (open) 이면 시작 시각만으로 검사 — 다른 세션의 구간 안에 들어가면 안됨.
+        그 외에는 (start, end) 두 구간이 겹치면 안됨.
+        """
+        for s in sessions:
+            if exclude_id is not None and s.id == exclude_id:
+                continue
+            s_start = s.started_at
+            s_end = s.ended_at
+            # 기존 세션이 open 이면 (s_end is None) 무한대로 가정
+            new_end = ended_at
+            # 두 구간 [a_start, a_end), [b_start, b_end) 가 겹치는지
+            # — None 은 +infinity 로 간주
+            a_start, a_end = started_at, new_end
+            b_start, b_end = s_start, s_end
+            overlap = (
+                (a_end is None or a_end > b_start)
+                and (b_end is None or b_end > a_start)
+            )
+            if overlap:
+                raise BadRequestError(
+                    "Break session overlaps an existing one"
+                )
+
+    async def add_break(
+        self,
+        db: AsyncSession,
+        attendance_id: UUID,
+        organization_id: UUID,
+        started_at: datetime,
+        ended_at: datetime | None,
+        break_type: str,
+    ) -> AttendanceBreak:
+        """admin 이 새 break 세션을 attendance 에 추가."""
+        self._validate_break_session(started_at, ended_at, break_type)
+        attendance = await self.get_attendance(db, attendance_id, organization_id)
+
+        # 기존 세션 로드 + 겹침 검증
+        existing = await db.execute(
+            select(AttendanceBreak).where(AttendanceBreak.attendance_id == attendance_id)
+        )
+        sessions = list(existing.scalars().all())
+        self._check_overlap(sessions, started_at, ended_at)
+
+        duration: int | None = None
+        if ended_at is not None:
+            duration = max(0, int((ended_at - started_at).total_seconds() / 60))
+
+        new_break = AttendanceBreak(
+            attendance_id=attendance_id,
+            started_at=started_at,
+            ended_at=ended_at,
+            break_type=break_type,
+            duration_minutes=duration,
+        )
+        db.add(new_break)
+        await db.flush()
+
+        await self._recalculate_break_aggregates(db, attendance)
+        await db.flush()
+
+        try:
+            await db.commit()
+            await db.refresh(new_break)
+            return new_break
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def update_break(
+        self,
+        db: AsyncSession,
+        attendance_id: UUID,
+        break_id: UUID,
+        organization_id: UUID,
+        started_at: datetime | None,
+        ended_at: datetime | None,
+        break_type: str | None,
+        clear_ended_at: bool,
+    ) -> AttendanceBreak:
+        """admin 이 기존 break 세션을 수정.
+
+        Args:
+            clear_ended_at: True 면 ended_at 을 명시적으로 None 으로 설정 (다시 open).
+                            False 면 ended_at 인자 그대로 (None 인자는 "변경 안 함").
+        """
+        attendance = await self.get_attendance(db, attendance_id, organization_id)
+        target = await db.scalar(
+            select(AttendanceBreak)
+            .where(AttendanceBreak.id == break_id, AttendanceBreak.attendance_id == attendance_id)
+        )
+        if target is None:
+            raise NotFoundError("Break session not found")
+
+        new_started = started_at if started_at is not None else target.started_at
+        if clear_ended_at:
+            new_ended: datetime | None = None
+        else:
+            new_ended = ended_at if ended_at is not None else target.ended_at
+        new_type = break_type if break_type is not None else target.break_type
+
+        self._validate_break_session(new_started, new_ended, new_type)
+
+        # 자기 자신 제외하고 겹침 검사
+        existing = await db.execute(
+            select(AttendanceBreak).where(AttendanceBreak.attendance_id == attendance_id)
+        )
+        sessions = list(existing.scalars().all())
+        self._check_overlap(sessions, new_started, new_ended, exclude_id=break_id)
+
+        target.started_at = new_started
+        target.ended_at = new_ended
+        target.break_type = new_type
+        target.duration_minutes = (
+            None if new_ended is None
+            else max(0, int((new_ended - new_started).total_seconds() / 60))
+        )
+        await db.flush()
+
+        await self._recalculate_break_aggregates(db, attendance)
+        await db.flush()
+
+        try:
+            await db.commit()
+            await db.refresh(target)
+            return target
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def delete_break(
+        self,
+        db: AsyncSession,
+        attendance_id: UUID,
+        break_id: UUID,
+        organization_id: UUID,
+    ) -> None:
+        """admin 이 break 세션을 삭제. attendance 의 누적 분 재계산."""
+        attendance = await self.get_attendance(db, attendance_id, organization_id)
+        target = await db.scalar(
+            select(AttendanceBreak)
+            .where(AttendanceBreak.id == break_id, AttendanceBreak.attendance_id == attendance_id)
+        )
+        if target is None:
+            raise NotFoundError("Break session not found")
+
+        await db.delete(target)
+        await db.flush()
+
+        await self._recalculate_break_aggregates(db, attendance)
+        await db.flush()
+
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # 싱글턴 인스턴스 — Singleton instance

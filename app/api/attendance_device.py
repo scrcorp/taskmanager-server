@@ -268,10 +268,8 @@ async def today_staff(
     if device.store_id is None:
         return []
 
-    from datetime import date as date_cls, datetime as dt, timezone as tz
+    from datetime import date as date_cls, datetime as dt, timedelta, timezone as tz
     from zoneinfo import ZoneInfo
-
-    from sqlalchemy import and_
 
     from app.models.attendance import Attendance
     from app.models.attendance_break import (
@@ -281,6 +279,7 @@ async def today_staff(
     )
     from app.models.schedule import Schedule
     from app.models.user import User
+    from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
     from app.utils.timezone import get_store_day_config, get_work_date
 
     now = dt.now(tz.utc)
@@ -288,42 +287,23 @@ async def today_staff(
     today: date_cls = get_work_date(store_tz, store_day_start, now)
     tz_info = ZoneInfo(store_tz)
 
-    # 오늘의 confirmed schedule + user 정보
-    sched_rows = await db.execute(
-        select(Schedule, User)
-        .join(User, Schedule.user_id == User.id)
-        .where(
-            Schedule.store_id == device.store_id,
-            Schedule.work_date == today,
-            Schedule.status == "confirmed",
-            Schedule.user_id.is_not(None),
-        )
-        .order_by(Schedule.start_time.asc().nulls_last())
-    )
-    scheduled_users: dict[uuid.UUID, tuple[Schedule, User]] = {}
-    for schedule, user in sched_rows.all():
-        scheduled_users[user.id] = (schedule, user)
-
-    # 같은 날짜의 attendance (스케줄 없이 출근한 경우도 포함)
-    att_rows = await db.execute(
-        select(Attendance, User)
-        .join(User, Attendance.user_id == User.id)
+    # ── Eager 모델: attendance row 가 진실원. schedule 은 LEFT JOIN.
+    rows = await db.execute(
+        select(Attendance, Schedule, User)
+        .outerjoin(Schedule, Schedule.id == Attendance.schedule_id)
+        .join(User, User.id == Attendance.user_id)
         .where(
             Attendance.store_id == device.store_id,
             Attendance.work_date == today,
+            Attendance.status != "cancelled",
         )
     )
-    attendances_by_user: dict[uuid.UUID, Attendance] = {}
-    for att, user in att_rows.all():
-        attendances_by_user[att.user_id] = att
-        if user.id not in scheduled_users:
-            scheduled_users[user.id] = (None, user)
-
-    if not scheduled_users:
+    triples: list[tuple[Attendance, Schedule | None, User]] = list(rows.all())
+    if not triples:
         return []
 
-    # break 요약 미리 로드
-    att_ids = [a.id for a in attendances_by_user.values()]
+    # break 요약
+    att_ids = [a.id for (a, _s, _u) in triples]
     break_map: dict[uuid.UUID, list[AttendanceBreak]] = {}
     if att_ids:
         br_rows = await db.execute(
@@ -332,60 +312,91 @@ async def today_staff(
         for br in br_rows.scalars().all():
             break_map.setdefault(br.attendance_id, []).append(br)
 
+    # late_buffer 설정 — effective status 계산용
+    organization_id = triples[0][0].organization_id
+    try:
+        late_buf_raw = await resolve_setting(
+            db,
+            key="attendance.late_buffer_minutes",
+            organization_id=organization_id,
+            store_id=device.store_id,
+        )
+        late_buffer = int(late_buf_raw) if late_buf_raw is not None else 5
+    except (SettingNotRegisteredError, TypeError, ValueError):
+        late_buffer = 5
+    SOON_THRESHOLD_MINUTES = 5
+
     def combine(t):
         if t is None:
             return None
         return dt.combine(today, t, tzinfo=tz_info)
 
     def display_store_tz(value):
-        """UTC 또는 offset-aware datetime 을 store tz 기준 HH:mm 로 포매팅."""
         if value is None:
             return None
         return value.astimezone(tz_info).strftime("%H:%M")
 
+    def effective_status(att: Attendance, schedule: Schedule | None) -> str:
+        """DB attendance.status + 현재 시각 + late_buffer 로 최종 표시 status 계산."""
+        if att.status != "upcoming" or schedule is None or schedule.start_time is None:
+            return att.status
+        sched_start = dt.combine(schedule.work_date, schedule.start_time, tzinfo=tz_info)
+        sched_end = (
+            dt.combine(schedule.work_date, schedule.end_time, tzinfo=tz_info)
+            if schedule.end_time is not None else None
+        )
+        if sched_end is not None and sched_end <= sched_start:
+            sched_end = sched_end + timedelta(days=1)
+        if sched_end is not None and now >= sched_end:
+            return "no_show"
+        if now >= sched_start + timedelta(minutes=late_buffer):
+            return "late"
+        if now >= sched_start - timedelta(minutes=SOON_THRESHOLD_MINUTES):
+            return "soon"
+        return "upcoming"
+
     result: list[TodayStaffRow] = []
-    for user_id, (schedule, user) in scheduled_users.items():
-        att = attendances_by_user.get(user_id)
+    for att, schedule, user in triples:
         paid = unpaid = 0
         current: TodayStaffBreak | None = None
-        if att is not None:
-            for br in break_map.get(att.id, []):
-                if br.ended_at is None:
-                    current = TodayStaffBreak(
-                        started_at=br.started_at, break_type=br.break_type
-                    )
-                else:
-                    if br.break_type == BREAK_TYPE_PAID_SHORT:
-                        paid += br.duration_minutes or 0
-                    elif br.break_type == BREAK_TYPE_UNPAID_LONG:
-                        unpaid += br.duration_minutes or 0
+        for br in break_map.get(att.id, []):
+            if br.ended_at is None:
+                current = TodayStaffBreak(
+                    started_at=br.started_at, break_type=br.break_type
+                )
+            else:
+                if br.break_type == BREAK_TYPE_PAID_SHORT:
+                    paid += br.duration_minutes or 0
+                elif br.break_type == BREAK_TYPE_UNPAID_LONG:
+                    unpaid += br.duration_minutes or 0
 
-        status_val = att.status if att else "not_yet"
         sched_start = combine(schedule.start_time) if schedule else None
         sched_end = combine(schedule.end_time) if schedule else None
-        clock_in = att.clock_in if att else None
-        clock_out = att.clock_out if att else None
         result.append(
             TodayStaffRow(
                 user_id=user.id,
                 user_name=user.full_name or user.username,
+                schedule_id=schedule.id if schedule else None,
                 scheduled_start=sched_start,
                 scheduled_end=sched_end,
                 scheduled_start_display=display_store_tz(sched_start),
                 scheduled_end_display=display_store_tz(sched_end),
-                clock_in=clock_in,
-                clock_out=clock_out,
-                clock_in_display=display_store_tz(clock_in),
-                clock_out_display=display_store_tz(clock_out),
-                status=status_val,
+                clock_in=att.clock_in,
+                clock_out=att.clock_out,
+                clock_in_display=display_store_tz(att.clock_in),
+                clock_out_display=display_store_tz(att.clock_out),
+                status=effective_status(att, schedule),
                 current_break=current,
                 paid_break_minutes=paid,
                 unpaid_break_minutes=unpaid,
             )
         )
 
-    # working > on_break > not_yet(시간 임박) > clocked_out 순으로 정렬
-    status_rank = {"working": 0, "on_break": 1, "late": 2, "not_yet": 3, "clocked_out": 4, "no_show": 5}
+    # 정렬: working → on_break → soon → late → upcoming → clocked_out → no_show
+    status_rank = {
+        "working": 0, "on_break": 1, "soon": 2, "late": 3,
+        "upcoming": 4, "clocked_out": 5, "no_show": 6,
+    }
 
     def sort_key(row: TodayStaffRow):
         return (status_rank.get(row.status, 99), row.scheduled_start or datetime.max)

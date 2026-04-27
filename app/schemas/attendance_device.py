@@ -68,13 +68,21 @@ class TodayStaffBreak(BaseModel):
 
 
 class TodayStaffRow(BaseModel):
-    """today-staff 엔드포인트 1건 — 유저 + 오늘 schedule + attendance.
+    """today-staff 엔드포인트 1건 — 유저 + 해당 schedule + attendance.
+
+    Split shift 지원: 같은 user 가 하루 여러 shift 를 가지면 여러 row 로 반환됨.
+    각 row 는 schedule_id 로 구분된다.
 
     `*_display` 필드는 store 타임존 기준 HH:mm 문자열. 클라이언트는
     별도 타임존 변환 없이 그대로 표시.
+
+    `status` 는 DB 의 attendance.status 를 기반으로 하되, "upcoming" 이면
+    서버가 요청 시점과 late_buffer_minutes 를 고려해 "soon" / "late" 로
+    격상된 값을 내려준다. 클라이언트는 별도 분류 로직 없이 그대로 렌더.
     """
     user_id: UUID
     user_name: str
+    schedule_id: UUID | None = None
     scheduled_start: datetime | None = None
     scheduled_end: datetime | None = None
     scheduled_start_display: str | None = None  # "HH:mm" (store tz)
@@ -83,7 +91,7 @@ class TodayStaffRow(BaseModel):
     clock_out: datetime | None = None
     clock_in_display: str | None = None          # "HH:mm" (store tz)
     clock_out_display: str | None = None
-    status: str  # not_yet | working | on_break | late | clocked_out | no_show
+    status: str  # upcoming | soon | working | on_break | late | clocked_out | no_show | cancelled
     current_break: TodayStaffBreak | None = None
     paid_break_minutes: int = 0
     unpaid_break_minutes: int = 0
