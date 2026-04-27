@@ -244,10 +244,12 @@ class InventoryProductService:
         keyword: str | None = None, search_field: str | None = None,
         category_id: str | None = None,
         is_active: bool | None = None, page: int = 1, per_page: int = 20,
+        sort_by: str | None = None, sort_dir: str | None = None,
     ) -> tuple[list[ProductResponse], int]:
         cat_uuid = UUID(category_id) if category_id else None
         products, total = await product_repository.search(
-            db, organization_id, keyword, search_field, cat_uuid, is_active, page, per_page
+            db, organization_id, keyword, search_field, cat_uuid, is_active, page, per_page,
+            sort_by=sort_by, sort_dir=sort_dir,
         )
         results = [await self._enrich_response(db, p) for p in products]
         return results, total
@@ -428,16 +430,34 @@ class InventoryProductService:
 
         result = {"created": 0, "linked": 0, "skipped": [], "errors": [], "warnings": []}
 
+        def _as_int(v) -> int:
+            # Parser already coerces, but stay defensive against legacy callers.
+            if isinstance(v, bool):
+                return 0
+            if isinstance(v, int):
+                return v
+            if isinstance(v, float):
+                return int(v) if v.is_integer() else 0
+            try:
+                return int(float(str(v).strip())) if v not in (None, "") else 0
+            except (ValueError, TypeError):
+                return 0
+
+        def _as_bool(v) -> bool:
+            if isinstance(v, bool):
+                return v
+            return str(v or "").strip().lower() in ("true", "yes", "1", "y")
+
         try:
             for i, row in enumerate(rows):
-                row_num = i + 2  # excel row (1-indexed header + data)
-                name = (row.get("name") or "").strip()
+                row_num = row.get("_excel_row", i + 2)
+                name = str(row.get("name") or "").strip()
                 if not name:
                     result["errors"].append(f"Row {row_num}: name is required")
                     continue
 
-                code = (row.get("code") or "").strip() or None
-                store_codes_raw = (row.get("store_code") or "").strip()
+                code = str(row.get("code") or "").strip() or None
+                store_codes_raw = str(row.get("store_code") or "").strip()
                 store_ids: list[UUID] = []
                 if store_codes_raw:
                     for sc in store_codes_raw.split(","):
@@ -457,7 +477,7 @@ class InventoryProductService:
 
                 # Resolve category
                 category_id = None
-                cat_name = (row.get("category") or "").strip()
+                cat_name = str(row.get("category") or "").strip()
                 if cat_name:
                     cats = await category_repository.get_tree(db, organization_id)
                     for c in cats:
@@ -476,7 +496,7 @@ class InventoryProductService:
 
                 # Resolve subcategory
                 subcategory_id = None
-                subcat_name = (row.get("subcategory") or "").strip()
+                subcat_name = str(row.get("subcategory") or "").strip()
                 if subcat_name and category_id:
                     children = await category_repository.get_children(db, category_id)
                     for c in children:
@@ -516,9 +536,9 @@ class InventoryProductService:
                                 db, sid, existing_product.id
                             )
                             if not existing_si:
-                                min_qty = int(row.get("min_quantity") or 0)
-                                init_qty = int(row.get("initial_quantity") or 0)
-                                is_freq = str(row.get("is_frequent") or "").lower() in ("true", "yes", "1", "y")
+                                min_qty = _as_int(row.get("min_quantity"))
+                                init_qty = _as_int(row.get("initial_quantity"))
+                                is_freq = _as_bool(row.get("is_frequent"))
                                 si = StoreInventory(
                                     store_id=sid, product_id=existing_product.id,
                                     current_quantity=init_qty, min_quantity=min_qty,
@@ -554,13 +574,10 @@ class InventoryProductService:
                     if not code:
                         code = await product_repository.generate_unique_code(db, organization_id)
 
-                    sub_unit = (row.get("sub_unit") or "").strip() or None
+                    sub_unit = str(row.get("sub_unit") or "").strip() or None
                     sub_unit_ratio = None
                     if sub_unit:
-                        try:
-                            sub_unit_ratio = int(row.get("sub_unit_ratio") or 0)
-                        except (ValueError, TypeError):
-                            sub_unit_ratio = None
+                        sub_unit_ratio = _as_int(row.get("sub_unit_ratio")) or None
 
                         # Auto-register sub_unit if not in inventory_sub_units table
                         existing_unit = await sub_unit_repository.exists(db, {
@@ -581,15 +598,15 @@ class InventoryProductService:
                         "subcategory_id": subcategory_id,
                         "sub_unit": sub_unit,
                         "sub_unit_ratio": sub_unit_ratio if sub_unit_ratio and sub_unit_ratio > 0 else None,
-                        "description": (row.get("description") or "").strip() or None,
+                        "description": str(row.get("description") or "").strip() or None,
                     })
                     result["created"] += 1
 
                     # Link to stores if store_codes provided
                     for sid in store_ids:
-                        min_qty = int(row.get("min_quantity") or 0)
-                        init_qty = int(row.get("initial_quantity") or 0)
-                        is_freq = str(row.get("is_frequent") or "").lower() in ("true", "yes", "1", "y")
+                        min_qty = _as_int(row.get("min_quantity"))
+                        init_qty = _as_int(row.get("initial_quantity"))
+                        is_freq = _as_bool(row.get("is_frequent"))
                         si = StoreInventory(
                             store_id=sid, product_id=product.id,
                             current_quantity=init_qty, min_quantity=min_qty,
@@ -645,12 +662,14 @@ class StoreInventoryService:
         keyword: str | None = None, search_field: str | None = None,
         status: str | None = None,
         is_frequent: bool | None = None, page: int = 1, per_page: int = 50,
+        sort_by: str | None = None, sort_dir: str | None = None,
     ) -> tuple[list[StoreInventoryResponse], int]:
         store = await store_repository.get_by_id(db, store_id, organization_id)
         if not store:
             raise NotFoundError("Store not found")
         items, total = await store_inventory_repository.get_by_store(
-            db, store_id, keyword, search_field, status, is_frequent, page, per_page
+            db, store_id, keyword, search_field, status, is_frequent, page, per_page,
+            sort_by=sort_by, sort_dir=sort_dir,
         )
         results = []
         for si in items:
@@ -665,6 +684,52 @@ class StoreInventoryService:
         if not store:
             raise NotFoundError("Store not found")
         return await store_inventory_repository.get_summary(db, store_id)
+
+    async def list_addable_products(
+        self, db: AsyncSession, store_id: UUID, organization_id: UUID,
+        keyword: str | None = None, page: int = 1, per_page: int = 30,
+    ) -> tuple[list[dict], int]:
+        """List active products with an `is_in_store` flag, sorted addable-first.
+
+        Used by the "Add Products" modal: every org product is returned
+        (regardless of pagination of the store's inventory page), with a flag
+        telling the UI whether it's already linked to this store. Sorted by
+        `is_in_store ASC, name ASC` so unattached products surface first.
+        """
+        store = await store_repository.get_by_id(db, store_id, organization_id)
+        if not store:
+            raise NotFoundError("Store not found")
+
+        from sqlalchemy import select as _sel, func as _func, case as _case, exists as _exists, literal_column
+
+        in_store_subq = _sel(StoreInventory.id).where(
+            StoreInventory.store_id == store_id,
+            StoreInventory.product_id == InventoryProduct.id,
+        )
+        is_in_store_expr = _case((_exists(in_store_subq), True), else_=False).label("is_in_store")
+
+        base = _sel(InventoryProduct, is_in_store_expr).where(
+            InventoryProduct.organization_id == organization_id,
+            InventoryProduct.is_active == True,  # noqa: E712
+        )
+        if keyword:
+            kw = f"%{keyword}%"
+            base = base.where(
+                InventoryProduct.name.ilike(kw) | InventoryProduct.code.ilike(kw)
+            )
+
+        total_q = _sel(_func.count()).select_from(base.subquery())
+        total = (await db.execute(total_q)).scalar_one()
+
+        ordered = base.order_by(literal_column("is_in_store").asc(), InventoryProduct.name.asc())
+        ordered = ordered.offset((page - 1) * per_page).limit(per_page)
+        rows = (await db.execute(ordered)).all()
+
+        items: list[dict] = []
+        for product, is_in_store in rows:
+            base_resp = await product_service._enrich_response(db, product)
+            items.append({**base_resp.model_dump(by_alias=False), "is_in_store": bool(is_in_store)})
+        return items, int(total)
 
     async def bulk_add(
         self, db: AsyncSession, store_id: UUID, organization_id: UUID,
