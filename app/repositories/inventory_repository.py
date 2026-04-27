@@ -85,6 +85,16 @@ class InventoryProductRepository(BaseRepository[InventoryProduct]):
     def __init__(self) -> None:
         super().__init__(InventoryProduct)
 
+    # Whitelist of sortable columns for products list. Anything outside this
+    # falls back to the default order (active first, then name).
+    _PRODUCT_SORT_COLUMNS = {
+        "name": InventoryProduct.name,
+        "code": InventoryProduct.code,
+        "is_active": InventoryProduct.is_active,
+        "created_at": InventoryProduct.created_at,
+        "updated_at": InventoryProduct.updated_at,
+    }
+
     async def search(
         self,
         db: AsyncSession,
@@ -95,6 +105,8 @@ class InventoryProductRepository(BaseRepository[InventoryProduct]):
         is_active: bool | None = None,
         page: int = 1,
         per_page: int = 20,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
     ) -> tuple[Sequence[InventoryProduct], int]:
         query = (
             select(InventoryProduct)
@@ -118,7 +130,12 @@ class InventoryProductRepository(BaseRepository[InventoryProduct]):
         if is_active is not None:
             query = query.where(InventoryProduct.is_active == is_active)
 
-        query = query.order_by(InventoryProduct.is_active.desc(), InventoryProduct.name)
+        col = self._PRODUCT_SORT_COLUMNS.get(sort_by) if sort_by else None
+        if col is not None:
+            order_expr = col.desc() if sort_dir == "desc" else col.asc()
+            query = query.order_by(order_expr, InventoryProduct.id)
+        else:
+            query = query.order_by(InventoryProduct.is_active.desc(), InventoryProduct.name)
         return await self.get_paginated(db, query, page, per_page)
 
     async def generate_unique_code(
@@ -171,6 +188,8 @@ class StoreInventoryRepository(BaseRepository[StoreInventory]):
         is_frequent: bool | None = None,
         page: int = 1,
         per_page: int = 50,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
     ) -> tuple[Sequence[StoreInventory], int]:
         query = (
             select(StoreInventory)
@@ -180,6 +199,9 @@ class StoreInventoryRepository(BaseRepository[StoreInventory]):
                 StoreInventory.is_active == True,
             )
         )
+        # Joining InventoryProduct unconditionally so we can both search and
+        # sort by product columns without re-joining.
+        joined_product = False
         if keyword:
             kw = f"%{keyword}%"
             if search_field == "name":
@@ -191,14 +213,31 @@ class StoreInventoryRepository(BaseRepository[StoreInventory]):
                     InventoryProduct.name.ilike(kw) |
                 InventoryProduct.code.ilike(f"%{keyword}%")
             )
+            joined_product = True
         if is_frequent is not None:
             query = query.where(StoreInventory.is_frequent == is_frequent)
 
-        # Ordering: frequent first, then oldest audited
-        query = query.order_by(
-            StoreInventory.is_frequent.desc(),
-            StoreInventory.last_audited_at.asc().nulls_first(),
-        )
+        # Sortable columns whitelist. `name`/`code` need the InventoryProduct join.
+        sort_columns: dict[str, object] = {
+            "name": InventoryProduct.name,
+            "code": InventoryProduct.code,
+            "current_quantity": StoreInventory.current_quantity,
+            "min_quantity": StoreInventory.min_quantity,
+            "is_frequent": StoreInventory.is_frequent,
+            "last_audited_at": StoreInventory.last_audited_at,
+        }
+        col = sort_columns.get(sort_by) if sort_by else None
+        if col is not None:
+            if sort_by in ("name", "code") and not joined_product:
+                query = query.join(InventoryProduct)
+            order_expr = col.desc() if sort_dir == "desc" else col.asc()  # type: ignore[union-attr]
+            query = query.order_by(order_expr, StoreInventory.id)
+        else:
+            # Default: frequent first, then oldest audited
+            query = query.order_by(
+                StoreInventory.is_frequent.desc(),
+                StoreInventory.last_audited_at.asc().nulls_first(),
+            )
 
         items, total = await self.get_paginated(db, query, page, per_page)
 

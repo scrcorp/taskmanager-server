@@ -75,11 +75,27 @@ else
     echo "SKIP: bucket dir not found"
 fi
 
+# ── 3b. admin worktree 삭제 ────────────────────────────────
+ADMIN_REPO="$PROJECT_ROOT/admin"
+ADMIN_WT="$ADMIN_REPO/.claude/worktrees/$SANITIZED"
+if [ -d "$ADMIN_WT" ]; then
+    echo "Removing admin worktree..."
+    (cd "$ADMIN_REPO" && git worktree remove "$ADMIN_WT" --force 2>/dev/null) || true
+    [ -d "$ADMIN_WT" ] && rm -rf "$ADMIN_WT"
+    echo "OK: admin worktree removed"
+else
+    echo "SKIP: admin worktree not found"
+fi
+
 # ── 4. Git branch 삭제 ────────────────────────────────────
 # --delete-branch 플래그가 있으면 자동 삭제 (AI agent용)
 if [ "${2:-}" = "--delete-branch" ]; then
     cd "$SERVER_DIR"
-    git branch -D "$BRANCH" 2>/dev/null && echo "OK: branch deleted" || echo "SKIP: branch not found"
+    git branch -D "$BRANCH" 2>/dev/null && echo "OK: server branch deleted" || echo "SKIP: server branch not found"
+    if [ -d "$ADMIN_REPO/.git" ] || [ -f "$ADMIN_REPO/.git" ]; then
+        (cd "$ADMIN_REPO" && git branch -D "$BRANCH" 2>/dev/null) && \
+            echo "OK: admin branch deleted" || echo "SKIP: admin branch not found"
+    fi
 fi
 
 echo ""

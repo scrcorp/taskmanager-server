@@ -153,6 +153,45 @@ fi
 
 echo "OK: .env configured (ports: server=$DEV_SERVER_PORT, admin=$DEV_ADMIN_PORT, app=$DEV_APP_PORT)"
 
+# ── 4b. admin worktree + .env.local ───────────────────────
+# admin/도 같은 브랜치로 worktree를 만들고 .env.local에 server 포트와
+# 회사코드를 박아준다. (메인 admin/.env.local에서 NEXT_PUBLIC_COMPANY_CODE 복사.)
+ADMIN_REPO="$PROJECT_ROOT/admin"
+if [ -d "$ADMIN_REPO/.git" ] || [ -f "$ADMIN_REPO/.git" ]; then
+    ADMIN_WT="$ADMIN_REPO/.claude/worktrees/$SANITIZED"
+    if [ -d "$ADMIN_WT" ]; then
+        echo "SKIP: admin worktree already exists at $ADMIN_WT"
+    else
+        echo "Creating admin worktree..."
+        (cd "$ADMIN_REPO" && \
+            git worktree add "$ADMIN_WT" -b "$BRANCH" "$BASE_BRANCH" 2>/dev/null || \
+            git worktree add "$ADMIN_WT" "$BRANCH")
+        echo "OK: admin worktree created"
+    fi
+
+    ADMIN_ENV_LOCAL="$ADMIN_WT/.env.local"
+    if [ -f "$ADMIN_ENV_LOCAL" ]; then
+        echo "SKIP: $ADMIN_ENV_LOCAL already exists"
+    else
+        # 메인 admin/.env.local에서 회사코드 가져오기 (없으면 빈 값)
+        ADMIN_COMPANY_CODE=""
+        if [ -f "$ADMIN_REPO/.env.local" ]; then
+            ADMIN_COMPANY_CODE="$(grep -E '^NEXT_PUBLIC_COMPANY_CODE=' "$ADMIN_REPO/.env.local" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+        fi
+        cat > "$ADMIN_ENV_LOCAL" <<EOF
+NEXT_PUBLIC_API_URL=http://localhost:${DEV_SERVER_PORT}/api/v1
+NEXT_PUBLIC_COMPANY_CODE=${ADMIN_COMPANY_CODE}
+EOF
+        if [ -z "$ADMIN_COMPANY_CODE" ]; then
+            echo "OK: admin .env.local created (NEXT_PUBLIC_COMPANY_CODE empty — main admin/.env.local has no value)"
+        else
+            echo "OK: admin .env.local created (company code: $ADMIN_COMPANY_CODE)"
+        fi
+    fi
+else
+    echo "SKIP: admin/ not found at $ADMIN_REPO — skipping admin worktree"
+fi
+
 # ── 5. venv 생성 + 패키지 설치 ──────────────────────────────
 if [ -d "$WORKTREE_DIR/.venv" ]; then
     echo "SKIP: .venv already exists"
