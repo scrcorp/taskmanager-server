@@ -43,6 +43,9 @@ class UserStore(Base):
     is_manager: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False
     )
+    is_work_assignment: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

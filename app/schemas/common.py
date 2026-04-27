@@ -773,9 +773,9 @@ class AttendanceCorrectionRequest(BaseModel):
         reason: 수정 사유 (Reason for correction)
     """
 
-    field_name: str  # 수정 필드 — "clock_in"|"clock_out"|"break_start"|"break_end" (Field to correct)
-    corrected_value: str  # 수정 값 — ISO datetime 문자열 (Corrected value, ISO format)
-    reason: str  # 수정 사유 (Reason for correction)
+    field_name: str  # 수정 필드 — "clock_in"|"clock_out"|"break_start"|"break_end"|"status" (Field to correct)
+    corrected_value: str  # 수정 값 — ISO datetime 또는 status 문자열 (Corrected value, ISO datetime for time fields, plain string for status)
+    reason: str | None = None  # 수정 사유, optional (Reason for correction, optional)
 
 
 class AttendanceCorrectionResponse(BaseModel):
@@ -798,10 +798,47 @@ class AttendanceCorrectionResponse(BaseModel):
     field_name: str  # 수정된 필드 (Corrected field name)
     original_value: str | None  # 수정 전 값 (Original value, may be null)
     corrected_value: str  # 수정 후 값 (Corrected value)
-    reason: str  # 수정 사유 (Reason for correction)
+    reason: str | None  # 수정 사유, optional (Reason for correction, may be null)
     corrected_by: str  # 수정자 UUID 문자열 (Corrector UUID as string)
     corrected_by_name: str | None = None  # 수정자 이름 — 조인된 값 (Corrector name, resolved)
     created_at: datetime  # 수정 일시 UTC (Correction timestamp)
+
+
+class BreakSessionCreateRequest(BaseModel):
+    """admin 이 break 세션을 추가할 때 쓰는 요청 스키마.
+
+    Attributes:
+        started_at: 휴식 시작 ISO datetime
+        ended_at: 휴식 종료 ISO datetime, optional (in-progress 면 null)
+        break_type: paid_short | unpaid_long
+    """
+
+    started_at: datetime
+    ended_at: datetime | None = None
+    break_type: str  # paid_short | unpaid_long
+
+
+class BreakSessionUpdateRequest(BaseModel):
+    """admin 이 break 세션을 수정할 때 쓰는 요청 스키마.
+
+    필드는 모두 optional 이며 None 인 필드는 변경하지 않는다.
+    ended_at 을 명시적으로 NULL 로 만들고 싶으면 clear_ended_at=true 로.
+    """
+
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    break_type: str | None = None
+    clear_ended_at: bool = False
+
+
+class BreakSessionResponse(BaseModel):
+    """break 세션 응답 스키마."""
+
+    id: str
+    started_at: datetime
+    ended_at: datetime | None
+    break_type: str
+    duration_minutes: int | None
 
 
 class ScheduleResponse(BaseModel):

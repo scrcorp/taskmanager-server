@@ -105,7 +105,53 @@ grep -q '^LOCAL_FALLBACK_BUCKET_DIR=' "$WT_ENV" && \
     sed -i '' "s|^LOCAL_FALLBACK_BUCKET_DIR=.*|LOCAL_FALLBACK_BUCKET_DIR=${FALLBACK_BUCKET_DIR}|" "$WT_ENV" || \
     echo "LOCAL_FALLBACK_BUCKET_DIR=${FALLBACK_BUCKET_DIR}" >> "$WT_ENV"
 
-echo "OK: .env configured"
+# ── 포트 자동 스캔 — dev 와 다른 워크트리 와 모두 겹치지 않도록 ─
+# dev 는 58000/53000/58080 고정. 워크트리는 58100~58999 / 53100~53999 / 58180~58999 에서 첫 빈 자리.
+port_free() {
+    # lsof 는 빠르지만 없을 수도 있어 nc 로 폴백
+    if command -v lsof >/dev/null 2>&1; then
+        ! lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    else
+        ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+    fi
+}
+
+find_free_port() {
+    local start="$1" end="$2"
+    for ((p=start; p<=end; p++)); do
+        if port_free "$p"; then echo "$p"; return 0; fi
+    done
+    echo "ERROR: no free port in [$start-$end]" >&2
+    return 1
+}
+
+# 이미 포트가 기록돼 있으면 유지, 없을 때만 스캔
+EXISTING_SERVER_PORT="$(grep -E '^DEV_SERVER_PORT=' "$WT_ENV" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+EXISTING_ADMIN_PORT="$(grep -E '^DEV_ADMIN_PORT='  "$WT_ENV" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+EXISTING_APP_PORT="$(grep -E '^DEV_APP_PORT='     "$WT_ENV" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+
+if [ -z "$EXISTING_SERVER_PORT" ]; then
+    DEV_SERVER_PORT=$(find_free_port 58100 58999)
+    echo "DEV_SERVER_PORT=${DEV_SERVER_PORT}" >> "$WT_ENV"
+else
+    DEV_SERVER_PORT="$EXISTING_SERVER_PORT"
+fi
+
+if [ -z "$EXISTING_ADMIN_PORT" ]; then
+    DEV_ADMIN_PORT=$(find_free_port 53100 53999)
+    echo "DEV_ADMIN_PORT=${DEV_ADMIN_PORT}" >> "$WT_ENV"
+else
+    DEV_ADMIN_PORT="$EXISTING_ADMIN_PORT"
+fi
+
+if [ -z "$EXISTING_APP_PORT" ]; then
+    DEV_APP_PORT=$(find_free_port 58180 58999)
+    echo "DEV_APP_PORT=${DEV_APP_PORT}" >> "$WT_ENV"
+else
+    DEV_APP_PORT="$EXISTING_APP_PORT"
+fi
+
+echo "OK: .env configured (ports: server=$DEV_SERVER_PORT, admin=$DEV_ADMIN_PORT, app=$DEV_APP_PORT)"
 
 # ── 5. venv 생성 + 패키지 설치 ──────────────────────────────
 if [ -d "$WORKTREE_DIR/.venv" ]; then
@@ -120,6 +166,13 @@ fi
 
 echo ""
 echo "=== Done ==="
-echo "cd $WORKTREE_DIR"
-echo "source .venv/bin/activate"
-echo "alembic upgrade head  # if you have new migrations"
+echo ""
+echo "Ports: server=$DEV_SERVER_PORT  admin=$DEV_ADMIN_PORT  app=$DEV_APP_PORT"
+echo ""
+echo "로컬 개발 서버 띄우기:"
+echo "  ./scripts/dev-up.sh -w $BRANCH"
+echo ""
+echo "또는 수동:"
+echo "  cd $WORKTREE_DIR"
+echo "  source .venv/bin/activate"
+echo "  alembic upgrade head  # if you have new migrations"

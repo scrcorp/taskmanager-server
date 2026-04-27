@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     # Admin 콘솔 베이스 URL — 이메일 링크 등에서 사용
     ADMIN_BASE_URL: str = "https://console.hermesops.site"
 
-    model_config = {"env_file": _ENV_FILE, "env_file_encoding": "utf-8"}
+    model_config = {"env_file": _ENV_FILE, "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 # 전역 설정 싱글턴 인스턴스 — Global settings singleton instance

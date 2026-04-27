@@ -288,26 +288,28 @@ class AttendanceDeviceService:
         store_tz, store_day_start = await get_store_day_config(db, store_id)
         today: date = get_work_date(store_tz, store_day_start, now)
 
-        attendance = await attendance_repository.get_user_today(db, user.id, today)
+        # Split shift 대응 — 하루 여러 row 가 있을 수 있으므로 list 로 조회.
+        day_rows = await attendance_repository.list_user_day(db, user.id, today)
+
+        # clock-in 외 액션(break/clock_out)은 "지금 활성" row 기준.
+        # working → on_break → late 순으로 찾고, 없으면 None.
+        def _active_row() -> Attendance | None:
+            for target_status in ("working", "on_break", "late"):
+                for r in day_rows:
+                    if r.status == target_status:
+                        return r
+            return None
+
+        attendance = _active_row() if action != "clock_in" else (day_rows[0] if day_rows else None)
 
         if action == "clock_in":
-            # 1) 이미 clock_in 되어 진행중인 attendance (working/on_break/late) 가
-            #    있으면 새 clock_in 거절 — 하루 2 schedule 케이스: 이전 shift 를
-            #    먼저 clock_out 해야 다음 shift 출근 가능.
-            if attendance is not None and attendance.status in (
-                "working",
-                "on_break",
-                "late",
-            ):
-                raise BadRequestError(
-                    "Previous shift not clocked out. Clock out first."
-                )
-            # 2) 이미 오늘 clocked_out 인 경우 재출근 금지.
-            if attendance is not None and attendance.status == "clocked_out":
-                raise BadRequestError("Already clocked in today")
+            # 1) 이미 진행중인 shift(working/on_break/late) 가 있으면 거절.
+            active = next((r for r in day_rows if r.status in ("working", "on_break", "late")), None)
+            if active is not None:
+                raise BadRequestError("Previous shift not clocked out. Clock out first.")
 
-            # 3) 스케줄 필수 — 이 매장/유저/오늘 confirmed schedule. 2건 이상이면
-            #    현재 시각 기준 우선순위로 1건 선택.
+            # 2) clock-in 대상 schedule 선택 — 이 매장/유저/오늘 confirmed 중
+            #    "아직 clock_in 안 된" attendance row 와 묶인 것만 후보.
             from app.models.schedule import Schedule
             from datetime import timedelta as _td
             from zoneinfo import ZoneInfo as _Zi
@@ -322,9 +324,16 @@ class AttendanceDeviceService:
                 )
                 .order_by(Schedule.start_time.asc().nulls_last())
             )
-            candidates = list(sch_result.scalars().all())
-            if not candidates:
+            all_candidates = list(sch_result.scalars().all())
+            if not all_candidates:
                 raise BadRequestError("No scheduled shift for today at this store")
+
+            # 이미 끝난(clocked_out) shift 는 후보에서 제외. 같은 schedule_id 에
+            # attendance 가 clocked_out 인 경우 재출근 금지.
+            done_schedule_ids = {r.schedule_id for r in day_rows if r.status == "clocked_out" and r.schedule_id is not None}
+            candidates = [s for s in all_candidates if s.id not in done_schedule_ids]
+            if not candidates:
+                raise BadRequestError("All today's shifts are already completed")
 
             tz = _Zi(store_tz)
 
@@ -346,22 +355,18 @@ class AttendanceDeviceService:
                 if sd is not None and ed is not None and sd <= now <= ed:
                     schedule = s
                     break
-
             # 우선순위 2: 가장 가까운 미래 (start > now)
             if schedule is None:
                 future = [s for s in candidates if (_start_dt(s) or datetime.min.replace(tzinfo=tz)) > now]
                 if future:
                     future.sort(key=lambda s: _start_dt(s) or datetime.max.replace(tzinfo=tz))
                     schedule = future[0]
-
             # 우선순위 3: 가장 최근 종료 (end < now)
             if schedule is None:
                 past = [s for s in candidates if (_end_dt(s) or datetime.max.replace(tzinfo=tz)) < now]
                 if past:
                     past.sort(key=lambda s: _end_dt(s) or datetime.min.replace(tzinfo=tz), reverse=True)
                     schedule = past[0]
-
-            # fallback: start/end 가 모두 null 인 schedule 1건만 있을 수 있음
             if schedule is None:
                 schedule = candidates[0]
 
@@ -371,36 +376,30 @@ class AttendanceDeviceService:
             status_val = "working"
             anomalies: list[str] | None = None
             if schedule.start_time is not None:
-                scheduled_start = datetime.combine(
-                    today, schedule.start_time, tzinfo=tz
-                )
+                scheduled_start = datetime.combine(today, schedule.start_time, tzinfo=tz)
                 if now > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
                     status_val = "late"
                     anomalies = ["late"]
 
-            # 4) no_show 상태의 기존 row 가 있으면 업데이트 (새 row 안 만듦).
-            #    unique(user_id, work_date) 제약으로도 INSERT 는 실패한다.
-            if (
-                attendance is not None
-                and attendance.status == "no_show"
-                and attendance.clock_in is None
-            ):
-                attendance.schedule_id = schedule.id
-                attendance.store_id = store_id
-                attendance.clock_in = now
-                attendance.clock_in_timezone = store_tz
-                attendance.status = status_val
-                # 기존 anomalies 에서 no_show 제거하고 late 반영
-                existing_anoms = list(attendance.anomalies or [])
-                existing_anoms = [a for a in existing_anoms if a != "no_show"]
+            # Eager 모델: 이 schedule 에 묶인 attendance row 는 이미 존재해야 함.
+            # upcoming/late/no_show 상태에서 clock-in 시 update.
+            target = await attendance_repository.get_by_schedule_id(db, schedule.id)
+            if target is not None:
+                target.store_id = store_id
+                target.clock_in = now
+                target.clock_in_timezone = store_tz
+                target.status = status_val
+                existing_anoms = [a for a in (target.anomalies or []) if a != "no_show"]
                 if anomalies:
                     for a in anomalies:
                         if a not in existing_anoms:
                             existing_anoms.append(a)
-                attendance.anomalies = existing_anoms or None
+                target.anomalies = existing_anoms or None
                 await db.flush()
-                await db.refresh(attendance)
+                await db.refresh(target)
+                attendance = target
             else:
+                # 예외적인 경우 (eager 훅 누락 등) — 안전망으로 새 row 생성.
                 attendance = await attendance_repository.create(
                     db,
                     {

@@ -56,6 +56,14 @@ SETTINGS_SEED: list[SettingDefinition] = [
         default_value=7.5,
         category="Work Hour Alerts",
     ),
+    SettingDefinition(
+        key="schedule.max_shift_hours",
+        label="Max shift hours",
+        description="Single shift above this duration triggers a confirmation warning before saving.",
+        value_type="number",
+        default_value=16,
+        category="Work Hour Alerts",
+    ),
     # ─── Weekly Limits ──────────────────────────────────
     SettingDefinition(
         key="schedule.weekly_hour_limit",

@@ -18,6 +18,9 @@ from app.schemas.common import (
     AttendanceCorrectionRequest,
     AttendanceCorrectionResponse,
     AttendanceResponse,
+    BreakSessionCreateRequest,
+    BreakSessionResponse,
+    BreakSessionUpdateRequest,
     PaginatedResponse,
 )
 from app.services.attendance_service import attendance_service
@@ -199,4 +202,83 @@ async def get_overtime_alerts(
         organization_id=current_user.organization_id,
         store_id=UUID(store_id) if store_id else None,
         week_date=week_date,
+    )
+
+
+@router.post(
+    "/{attendance_id}/breaks",
+    response_model=BreakSessionResponse,
+    status_code=201,
+)
+async def add_break_session(
+    attendance_id: UUID,
+    data: BreakSessionCreateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> dict:
+    """admin 이 새 break 세션을 attendance 에 추가 (GM+ 전용)."""
+    new_break = await attendance_service.add_break(
+        db,
+        attendance_id=attendance_id,
+        organization_id=current_user.organization_id,
+        started_at=data.started_at,
+        ended_at=data.ended_at,
+        break_type=data.break_type,
+    )
+    return {
+        "id": str(new_break.id),
+        "started_at": new_break.started_at,
+        "ended_at": new_break.ended_at,
+        "break_type": new_break.break_type,
+        "duration_minutes": new_break.duration_minutes,
+    }
+
+
+@router.patch(
+    "/{attendance_id}/breaks/{break_id}",
+    response_model=BreakSessionResponse,
+)
+async def update_break_session(
+    attendance_id: UUID,
+    break_id: UUID,
+    data: BreakSessionUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> dict:
+    """admin 이 기존 break 세션을 수정 (GM+ 전용)."""
+    target = await attendance_service.update_break(
+        db,
+        attendance_id=attendance_id,
+        break_id=break_id,
+        organization_id=current_user.organization_id,
+        started_at=data.started_at,
+        ended_at=data.ended_at,
+        break_type=data.break_type,
+        clear_ended_at=data.clear_ended_at,
+    )
+    return {
+        "id": str(target.id),
+        "started_at": target.started_at,
+        "ended_at": target.ended_at,
+        "break_type": target.break_type,
+        "duration_minutes": target.duration_minutes,
+    }
+
+
+@router.delete(
+    "/{attendance_id}/breaks/{break_id}",
+    status_code=204,
+)
+async def delete_break_session(
+    attendance_id: UUID,
+    break_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> None:
+    """admin 이 break 세션을 삭제 (GM+ 전용)."""
+    await attendance_service.delete_break(
+        db,
+        attendance_id=attendance_id,
+        break_id=break_id,
+        organization_id=current_user.organization_id,
     )

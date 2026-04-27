@@ -1,102 +1,110 @@
 """Attendance Cron Service — 자동 상태 전환.
 
-매 1분마다 실행되어 다음 처리를 수행:
-1. confirmed schedule인데 attendance가 없고 schedule.end_time이 지난 경우 → no_show 생성
-2. (향후 확장) 추가 자동 전환 로직
+Eager 모델 전환 후 역할이 단순해졌다:
+- attendance row 는 schedule 생성 시점에 이미 존재.
+- API 응답 시점에 effective status 가 계산(upcoming → soon/late)돼서 UX 에 바로 반영.
+- 이 cron 은 DB persist 용: upcoming 인데 이미 시간이 지나 late/no_show 로 굳어진
+  row 를 실제로 해당 status 로 업데이트 한다. 정산/통계 쿼리가 실시간 계산 없이
+  DB 만 봐도 되도록.
 
-APScheduler에서 호출되는 진입점은 `run_attendance_state_tick()`.
+APScheduler 진입점은 `run_attendance_state_tick()`.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
 from app.models.attendance import Attendance
+from app.models.organization import Store
 from app.models.schedule import Schedule
+from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 
 
 logger = logging.getLogger("uvicorn.error")
 
+DEFAULT_LATE_BUFFER_MINUTES = 5
 
-async def _process_no_shows(db: AsyncSession) -> int:
-    """end_time이 지난 confirmed schedule 중 attendance 없는 건을 no_show로 생성."""
-    from datetime import datetime as _dt, timedelta as _td
-    from zoneinfo import ZoneInfo
 
-    from app.utils.timezone import get_store_day_config
-
+async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
+    """upcoming 인 attendance 중 이미 시간이 지난 것들을 late/no_show 로 승격."""
     now_utc = datetime.now(timezone.utc)
-    created = 0
-
     today_utc = now_utc.date()
-    two_days_ago = today_utc - _td(days=2)
+    two_days_ago = today_utc - timedelta(days=2)
 
-    schedules_result = await db.execute(
-        select(Schedule).where(
-            Schedule.status == "confirmed",
-            Schedule.work_date >= two_days_ago,
-            Schedule.work_date <= today_utc,
-            Schedule.end_time.isnot(None),
-            Schedule.user_id.isnot(None),
-            Schedule.store_id.isnot(None),
+    rows = await db.execute(
+        select(Attendance, Schedule, Store)
+        .join(Schedule, Schedule.id == Attendance.schedule_id)
+        .outerjoin(Store, Store.id == Attendance.store_id)
+        .where(
+            Attendance.status == "upcoming",
+            Attendance.work_date >= two_days_ago,
+            Attendance.work_date <= today_utc,
+            Schedule.start_time.isnot(None),
         )
     )
-    schedules = list(schedules_result.scalars().all())
+    rows_list = list(rows.all())
 
-    for sch in schedules:
-        # 해당 schedule_id에 이미 attendance가 있는지
-        existing = await db.execute(
-            select(Attendance).where(Attendance.schedule_id == sch.id)
-        )
-        if existing.scalar_one_or_none() is not None:
-            continue
+    late_count = 0
+    no_show_count = 0
 
-        # 같은 user/date에 attendance가 있는지 (schedule_id 없이)
-        existing_by_user = await db.execute(
-            select(Attendance).where(
-                Attendance.user_id == sch.user_id,
-                Attendance.work_date == sch.work_date,
-            )
-        )
-        if existing_by_user.scalar_one_or_none() is not None:
-            continue
-
-        # store timezone 기준 schedule end 시각이 지났는지
-        store_tz, _ = await get_store_day_config(db, sch.store_id)  # type: ignore[arg-type]
+    for att, sch, store in rows_list:
+        tz_name = (store.timezone if store else None) or "UTC"
         try:
-            tz = ZoneInfo(store_tz or "UTC")
+            tz = ZoneInfo(tz_name)
         except Exception:
             tz = ZoneInfo("UTC")
-        scheduled_end = _dt.combine(sch.work_date, sch.end_time, tzinfo=tz)  # type: ignore[arg-type]
-        if now_utc < scheduled_end:
-            continue  # still ongoing
-
-        attendance = Attendance(
-            organization_id=sch.organization_id,
-            store_id=sch.store_id,
-            user_id=sch.user_id,
-            schedule_id=sch.id,
-            work_date=sch.work_date,
-            status="no_show",
-            anomalies=["no_show"],
+        sched_start = datetime.combine(sch.work_date, sch.start_time, tzinfo=tz)
+        sched_end = (
+            datetime.combine(sch.work_date, sch.end_time, tzinfo=tz)
+            if sch.end_time is not None else None
         )
-        db.add(attendance)
-        created += 1
+        if sched_end is not None and sched_end <= sched_start:
+            sched_end = sched_end + timedelta(days=1)
 
-    if created > 0:
+        # late_buffer setting per org/store
+        try:
+            raw = await resolve_setting(
+                db,
+                key="attendance.late_buffer_minutes",
+                organization_id=att.organization_id,
+                store_id=att.store_id,
+            )
+            late_buffer = int(raw) if raw is not None else DEFAULT_LATE_BUFFER_MINUTES
+        except (SettingNotRegisteredError, TypeError, ValueError):
+            late_buffer = DEFAULT_LATE_BUFFER_MINUTES
+
+        if sched_end is not None and now_utc >= sched_end:
+            att.status = "no_show"
+            anoms = list(att.anomalies or [])
+            if "no_show" not in anoms:
+                anoms.append("no_show")
+            att.anomalies = anoms or None
+            no_show_count += 1
+        elif now_utc >= sched_start + timedelta(minutes=late_buffer):
+            att.status = "late"
+            anoms = list(att.anomalies or [])
+            if "late" not in anoms:
+                anoms.append("late")
+            att.anomalies = anoms or None
+            late_count += 1
+
+    if late_count or no_show_count:
         await db.commit()
-    return created
+    return late_count, no_show_count
 
 
 async def run_attendance_state_tick() -> None:
-    """APScheduler에서 호출되는 진입점. 1분마다 실행."""
+    """APScheduler에서 호출되는 진입점. 5분마다 실행(혹은 원하는 간격)."""
     try:
         async with async_session() as db:
-            count = await _process_no_shows(db)
-            if count > 0:
-                logger.info(f"[attendance_cron] Created {count} no_show records")
+            late_cnt, no_show_cnt = await _persist_late_and_no_show(db)
+            if late_cnt or no_show_cnt:
+                logger.info(
+                    f"[attendance_cron] persist late={late_cnt} no_show={no_show_cnt}"
+                )
     except Exception as e:
         logger.warning(f"[attendance_cron] tick failed: {e}")

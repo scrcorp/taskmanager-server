@@ -67,6 +67,8 @@ class ChecklistTemplate(Base):
     position_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("positions.id", ondelete="CASCADE"), nullable=False)
     # 템플릿 제목 — Template display title
     title: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 아카이브 상태 — Archived templates hidden from default lists but preserved for history
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)

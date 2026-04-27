@@ -113,24 +113,45 @@ class AttendanceRepository(BaseRepository[Attendance]):
         user_id: UUID,
         work_date: date,
     ) -> Attendance | None:
-        """특정 사용자의 오늘 근태 기록을 조회합니다.
+        """특정 사용자의 오늘 근태 기록을 조회합니다 (legacy: 1건만 반환).
 
-        Retrieve today's attendance record for a specific user.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            user_id: 사용자 UUID (User UUID)
-            work_date: 근무일 (Work date, usually today)
-
-        Returns:
-            Attendance | None: 오늘 근태 기록 또는 None (Today's attendance or None)
+        Split shift 환경에서는 여러 row 가 존재할 수 있으므로 이 메서드는
+        진행 중(working/on_break/late)인 row 를 우선 반환하고, 없으면 가장
+        먼저 시작하는 활성 row 를 반환한다. 여러 건을 모두 다루려면
+        `list_user_day` 를 사용한다.
         """
+        rows = await self.list_user_day(db, user_id, work_date)
+        if not rows:
+            return None
+        active_priority = {"working": 0, "on_break": 1, "late": 2, "no_show": 3,
+                           "upcoming": 4, "clocked_out": 5, "cancelled": 6}
+        rows.sort(key=lambda r: active_priority.get(r.status, 99))
+        return rows[0]
+
+    async def list_user_day(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        work_date: date,
+    ) -> list[Attendance]:
+        """특정 사용자의 특정 날짜 attendance row 전부 (split shift 포함)."""
         query: Select = (
             select(Attendance)
             .where(Attendance.user_id == user_id)
             .where(Attendance.work_date == work_date)
         )
         result = await db.execute(query)
+        return list(result.scalars().all())
+
+    async def get_by_schedule_id(
+        self,
+        db: AsyncSession,
+        schedule_id: UUID,
+    ) -> Attendance | None:
+        """schedule_id 로 attendance row 조회 (eager 모델에서 1:1)."""
+        result = await db.execute(
+            select(Attendance).where(Attendance.schedule_id == schedule_id)
+        )
         return result.scalar_one_or_none()
 
     async def get_user_attendances(
