@@ -151,6 +151,14 @@ else
     DEV_APP_PORT="$EXISTING_APP_PORT"
 fi
 
+# SERVER_BASE_URL — 워크트리 포트로 강제. 안 그러면 storage_service.resolve_url()
+# 이 dev .env 의 :8000 을 그대로 써서 워크트리에 업로드된 파일이 dev 서버 URL 로
+# 노출되어 안 보이거나 fallback 으로 dev 버킷의 다른 파일이 보이는 사고가 난다.
+NEW_BASE_URL="http://localhost:${DEV_SERVER_PORT}"
+grep -q '^SERVER_BASE_URL=' "$WT_ENV" && \
+    sed -i '' "s|^SERVER_BASE_URL=.*|SERVER_BASE_URL=${NEW_BASE_URL}|" "$WT_ENV" || \
+    echo "SERVER_BASE_URL=${NEW_BASE_URL}" >> "$WT_ENV"
+
 echo "OK: .env configured (ports: server=$DEV_SERVER_PORT, admin=$DEV_ADMIN_PORT, app=$DEV_APP_PORT)"
 
 # ── 4b. admin worktree + .env.local ───────────────────────

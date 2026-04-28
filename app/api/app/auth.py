@@ -8,11 +8,14 @@ Common endpoints (refresh, logout, me) are in app.api.auth.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.url_encoding import decode_uuid
 from app.database import get_db
 from app.api.deps import get_current_user
+from app.models.organization import Organization, Store
 from app.models.user import User
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
 from app.repositories.store_repository import store_repository
@@ -23,8 +26,82 @@ from app.schemas.email_verification import (
 )
 from app.services.auth_service import auth_service
 from app.services.email_verification_service import email_verification_service
+from app.services.storage_service import storage_service
 
 router: APIRouter = APIRouter()
+
+
+@router.get("/stores/by-code/{encoded}")
+async def get_store_by_code(
+    encoded: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """공개 매장 조회 — 가입 링크 진입점 (No auth).
+
+    Public store lookup for `hermesops.site/join/{encoded}` signup pages.
+    Decodes the base64url store_id, returns store/organization info plus
+    cover photos resolved to URLs.
+
+    Errors:
+        404 invalid_link    — encoded payload is malformed or wrong length
+        404 store_not_found — store deleted or doesn't exist
+        404 signups_paused  — store has accepting_signups=false
+    """
+    try:
+        store_id = decode_uuid(encoded)
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "invalid_link", "message": "Signup link is malformed."},
+        )
+
+    result = await db.execute(
+        select(Store, Organization)
+        .join(Organization, Store.organization_id == Organization.id)
+        .where(Store.id == store_id)
+    )
+    row = result.first()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "store_not_found", "message": "Store does not exist."},
+        )
+    store, org = row
+
+    if not store.is_active or store.deleted_at is not None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "store_not_found", "message": "Store is no longer available."},
+        )
+
+    if not store.accepting_signups:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "signups_paused", "message": "This store is not accepting new sign-ups right now."},
+        )
+
+    cover_photos = []
+    for photo in (store.cover_photos or []):
+        url = storage_service.resolve_url(photo.get("key"))
+        if url is None:
+            continue
+        cover_photos.append({
+            "url": url,
+            "is_primary": bool(photo.get("is_primary", False)),
+        })
+
+    return {
+        "store": {
+            "id": str(store.id),
+            "name": store.name,
+            "address": store.address,
+            "cover_photos": cover_photos,
+        },
+        "organization": {
+            "name": org.name,
+            "company_code": org.code,
+        },
+    }
 
 
 @router.get("/stores")
