@@ -1082,7 +1082,7 @@ class ChecklistInstanceService:
         from app.utils.email_templates import build_checklist_completed_email
 
         work_date_str = instance.work_date.isoformat() if instance.work_date else ""
-        admin_url = f"{settings.ADMIN_BASE_URL}/schedules/{instance.schedule_id}"
+        admin_url = f"{settings.ADMIN_BASE_URL}/checklists/instances/{instance.id}"
 
         for manager in managers:
             if manager.email:
