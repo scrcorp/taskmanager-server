@@ -137,6 +137,13 @@ class Store(Base):
     state_code: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # 매장 기본 시급 — Store default hourly rate (overrides org rate, null = use org rate)
     default_hourly_rate: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
+    # 공개 가입 링크 활성화 여부 — Whether the public signup link (/join/{encoded}) accepts new hires.
+    # When false, GET /app/auth/stores/by-code/{encoded} returns "signups_paused".
+    accepting_signups: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # 매장 표지 사진 — Cover photos for the public signup page (JSONB array).
+    # Format: [{"key": "stores/{store_id}/cover/{uuid}.jpg", "is_primary": bool, "uploaded_at": "ISO", "size": int}]
+    # DB stores only relative keys; URLs resolved at runtime via storage_service.resolve_url(key).
+    cover_photos: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
