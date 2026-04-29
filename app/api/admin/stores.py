@@ -161,6 +161,7 @@ from app.services.storage_service import storage_service
 # 허용 이미지 포맷 — 서버 측 magic byte 검증은 우선 ContentType + 확장자만
 _ALLOWED_PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _MAX_PHOTO_BYTES = 5 * 1024 * 1024  # 5 MB
+_MAX_COVER_PHOTOS = 8
 
 
 class _AcceptingSignupsBody(BaseModel):
@@ -252,6 +253,15 @@ async def upload_cover_photo(
 
     store = await _load_store_for_hiring(db, store_id, current_user.organization_id)
     photos = list(store.cover_photos or [])
+
+    if len(photos) >= _MAX_COVER_PHOTOS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "max_photos_reached",
+                "message": f"Maximum {_MAX_COVER_PHOTOS} photos per store. Delete an existing photo to upload more.",
+            },
+        )
 
     key = storage_service.upload_bytes(
         data, filename=file.filename or "photo.jpg",
