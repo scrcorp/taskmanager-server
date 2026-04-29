@@ -135,6 +135,24 @@ class StorageService:
         file_url = f"https://{settings.AWS_S3_BUCKET}.s3.{settings.AWS_S3_REGION}.amazonaws.com/{key}"
         return {"upload_url": upload_url, "file_url": file_url, "key": key}
 
+    def generate_presigned_download_url(
+        self,
+        key: str,
+        expires: int = 600,
+    ) -> str:
+        """presigned GET URL — 임시 다운로드 링크.
+
+        S3 모드: get_object presigned URL (default 10분 만료).
+        로컬 모드: 그냥 정적 파일 URL (만료 개념 없음).
+        """
+        if self.is_local:
+            return self._build_url(key)
+        return self.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": settings.AWS_S3_BUCKET, "Key": key},
+            ExpiresIn=expires,
+        )
+
     # ── 로컬 파일 저장 ────────────────────────────────────────
 
     def save_local(self, key: str, data: bytes) -> str:

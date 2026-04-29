@@ -20,6 +20,7 @@ from app.core.access_code import verify_code
 from app.database import get_db
 from app.models.attendance_device import AttendanceDevice
 from app.models.organization import Organization, Store
+from app.schemas.app_version import AppVersionResponse
 from app.schemas.attendance_device import (
     AssignStoreRequest,
     AttendanceStoreOption,
@@ -31,6 +32,7 @@ from app.schemas.attendance_device import (
     TodayStaffBreak,
     TodayStaffRow,
 )
+from app.services.app_version_service import app_version_service
 from app.services.attendance_device_service import attendance_device_service
 from app.services.attendance_service import attendance_service
 
@@ -337,8 +339,12 @@ async def today_staff(
         return value.astimezone(tz_info).strftime("%H:%M")
 
     def effective_status(att: Attendance, schedule: Schedule | None) -> str:
-        """DB attendance.status + 현재 시각 + late_buffer 로 최종 표시 status 계산."""
-        if att.status != "upcoming" or schedule is None or schedule.start_time is None:
+        """DB attendance.status + 현재 시각 + late_buffer 로 최종 표시 status 계산.
+
+        upcoming/late 처럼 미출근 상태는 schedule end 가 지나면 no_show 로 강등.
+        그 외(working, on_break, clocked_out 등 출근 후 상태)는 그대로 반환.
+        """
+        if att.status not in {"upcoming", "late"} or schedule is None or schedule.start_time is None:
             return att.status
         sched_start = dt.combine(schedule.work_date, schedule.start_time, tzinfo=tz_info)
         sched_end = (
@@ -347,8 +353,13 @@ async def today_staff(
         )
         if sched_end is not None and sched_end <= sched_start:
             sched_end = sched_end + timedelta(days=1)
+        # 1) sched_end 지났으면 무조건 no_show
         if sched_end is not None and now >= sched_end:
             return "no_show"
+        # 2) 이미 persisted 가 late 면 그대로 (시간이 sched_end 안 지난 경우만 도달)
+        if att.status == "late":
+            return "late"
+        # 3) upcoming 인 경우 시간 비교로 분기
         if now >= sched_start + timedelta(minutes=late_buffer):
             return "late"
         if now >= sched_start - timedelta(minutes=SOON_THRESHOLD_MINUTES):
@@ -438,3 +449,25 @@ async def notices(
         )
         for a in result.scalars().all()
     ]
+
+
+@router.get("/app-version", response_model=AppVersionResponse)
+async def get_app_version(
+    device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AppVersionResponse:
+    """현재 환경 attendance 채널의 최신/최소 버전 + 다운로드 URL.
+
+    Sideload APK 배포에서 클라이언트가 강제 업데이트 여부를 판단할 때 사용.
+    등록 릴리스가 없으면 모든 필드 None → 클라이언트는 enforcement 없음으로 해석.
+    """
+    channel = app_version_service.attendance_channel()
+    latest, min_version = await app_version_service.get_for_channel(db, channel)
+    if latest is None:
+        return AppVersionResponse()
+    return AppVersionResponse(
+        min_version=min_version,
+        latest_version=latest.version,
+        download_url=app_version_service.presigned_download_url(latest.s3_key),
+        release_notes=latest.release_notes,
+    )
