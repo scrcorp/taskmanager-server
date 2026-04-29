@@ -161,6 +161,12 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     # ── Clock-in PIN (직원 근태 기기 PIN 관리) ──
     ("clockin_pin:read",   "clockin_pin", "read",   "View staff clock-in PIN (admin lookup)", False),
     ("clockin_pin:update", "clockin_pin", "update", "Regenerate staff clock-in PIN", False),
+
+    # ── Hiring (Form builder + applications) ──
+    ("hiring:read",   "hiring", "read",   "View hiring form and applications", False),
+    ("hiring:update", "hiring", "update", "Edit hiring form, change application stage", False),
+    ("hiring:hire",   "hiring", "hire",   "Convert applicant into staff", True),
+    ("hiring:block",  "hiring", "block",  "Block candidates from a store", True),
 ]
 
 # 편의용: code → description 조회

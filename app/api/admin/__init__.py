@@ -206,3 +206,9 @@ admin_router.include_router(inventory_router, tags=["Inventory"])
 # Bulk Upload 라우터 등록 — Register Bulk Upload routers
 # ---------------------------------------------------------------------------
 admin_router.include_router(bulk_upload_router, prefix="/bulk", tags=["Bulk Upload"])
+
+# ---------------------------------------------------------------------------
+# Hiring 라우터 등록
+# ---------------------------------------------------------------------------
+from app.api.admin.hiring import router as hiring_router  # noqa: E402
+admin_router.include_router(hiring_router, tags=["Admin Hiring"])

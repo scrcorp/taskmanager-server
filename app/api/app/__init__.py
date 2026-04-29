@@ -126,3 +126,9 @@ app_router.include_router(schedule_entries_router, prefix="/my", tags=["My Sched
 # ---------------------------------------------------------------------------
 from app.api.app.inventory import router as app_inventory_router
 app_router.include_router(app_inventory_router, tags=["App Inventory"])
+
+# ---------------------------------------------------------------------------
+# Public Applications 라우터 등록
+# ---------------------------------------------------------------------------
+from app.api.app.applications import router as app_applications_router  # noqa: E402
+app_router.include_router(app_applications_router, tags=["App Applications"])
