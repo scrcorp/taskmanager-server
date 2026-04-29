@@ -95,6 +95,9 @@ from app.api.admin.inventory import router as inventory_router
 # Bulk Upload 라우터 임포트
 from app.api.admin.bulk_upload import router as bulk_upload_router
 
+# App Versions (sideload APK 릴리스 카탈로그) 라우터 임포트
+from app.api.admin.app_versions import router as app_versions_router
+
 admin_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -206,3 +209,14 @@ admin_router.include_router(inventory_router, tags=["Inventory"])
 # Bulk Upload 라우터 등록 — Register Bulk Upload routers
 # ---------------------------------------------------------------------------
 admin_router.include_router(bulk_upload_router, prefix="/bulk", tags=["Bulk Upload"])
+
+# ---------------------------------------------------------------------------
+# Hiring 라우터 등록
+# ---------------------------------------------------------------------------
+from app.api.admin.hiring import router as hiring_router  # noqa: E402
+admin_router.include_router(hiring_router, tags=["Admin Hiring"])
+
+# ---------------------------------------------------------------------------
+# App Versions 라우터 등록 — sideload APK 릴리스 카탈로그
+# ---------------------------------------------------------------------------
+admin_router.include_router(app_versions_router, prefix="/app-versions", tags=["App Versions"])
