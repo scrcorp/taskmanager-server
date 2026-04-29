@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     AXIOM_API_TOKEN: str = ""  # Axiom API 토큰 (API token from Axiom dashboard)
     AXIOM_DATASET: str = ""  # Axiom 데이터셋 이름 (Dataset name for API logs)
 
+    # 앱 실행 환경 — 모바일 앱 릴리스 채널 결정에 사용
+    # local | staging | production
+    APP_ENV: str = "local"
+
     # Storage 모드 — "local" 또는 "s3" (s3일 때 access key 없으면 IAM role 사용)
     STORAGE_MODE: str = "local"
 

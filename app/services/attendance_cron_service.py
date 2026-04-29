@@ -30,7 +30,11 @@ DEFAULT_LATE_BUFFER_MINUTES = 5
 
 
 async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
-    """upcoming 인 attendance 중 이미 시간이 지난 것들을 late/no_show 로 승격."""
+    """미출근 attendance 의 status 를 시간 경과에 따라 late / no_show 로 승격.
+
+    승격 대상 status: 'upcoming' 또는 이미 'late' (clock-in 안 한 상태).
+    'working' / 'on_break' 등 clock-in 후 상태는 건드리지 않음.
+    """
     now_utc = datetime.now(timezone.utc)
     today_utc = now_utc.date()
     two_days_ago = today_utc - timedelta(days=2)
@@ -40,7 +44,7 @@ async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
         .join(Schedule, Schedule.id == Attendance.schedule_id)
         .outerjoin(Store, Store.id == Attendance.store_id)
         .where(
-            Attendance.status == "upcoming",
+            Attendance.status.in_(["upcoming", "late"]),
             Attendance.work_date >= two_days_ago,
             Attendance.work_date <= today_utc,
             Schedule.start_time.isnot(None),
@@ -77,14 +81,19 @@ async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
         except (SettingNotRegisteredError, TypeError, ValueError):
             late_buffer = DEFAULT_LATE_BUFFER_MINUTES
 
+        # 1) sched_end 가 지났으면 무조건 no_show (upcoming/late 모두 해당)
         if sched_end is not None and now_utc >= sched_end:
-            att.status = "no_show"
-            anoms = list(att.anomalies or [])
-            if "no_show" not in anoms:
-                anoms.append("no_show")
-            att.anomalies = anoms or None
-            no_show_count += 1
-        elif now_utc >= sched_start + timedelta(minutes=late_buffer):
+            if att.status != "no_show":
+                att.status = "no_show"
+                anoms = list(att.anomalies or [])
+                if "no_show" not in anoms:
+                    anoms.append("no_show")
+                att.anomalies = anoms or None
+                no_show_count += 1
+            continue
+
+        # 2) 아직 sched_end 전이면 late_buffer 지났을 때 upcoming → late
+        if att.status == "upcoming" and now_utc >= sched_start + timedelta(minutes=late_buffer):
             att.status = "late"
             anoms = list(att.anomalies or [])
             if "late" not in anoms:

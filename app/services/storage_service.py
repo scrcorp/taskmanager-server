@@ -135,6 +135,24 @@ class StorageService:
         file_url = f"https://{settings.AWS_S3_BUCKET}.s3.{settings.AWS_S3_REGION}.amazonaws.com/{key}"
         return {"upload_url": upload_url, "file_url": file_url, "key": key}
 
+    def generate_presigned_download_url(
+        self,
+        key: str,
+        expires: int = 600,
+    ) -> str:
+        """presigned GET URL — 임시 다운로드 링크.
+
+        S3 모드: get_object presigned URL (default 10분 만료).
+        로컬 모드: 그냥 정적 파일 URL (만료 개념 없음).
+        """
+        if self.is_local:
+            return self._build_url(key)
+        return self.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": settings.AWS_S3_BUCKET, "Key": key},
+            ExpiresIn=expires,
+        )
+
     # ── 로컬 파일 저장 ────────────────────────────────────────
 
     def save_local(self, key: str, data: bytes) -> str:
@@ -143,6 +161,48 @@ class StorageService:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         return str(path)
+
+    # ── 직접 업로드 (multipart 요청에서 서버가 직접 S3/로컬에 저장) ─
+
+    def upload_bytes(
+        self,
+        data: bytes,
+        filename: str,
+        folder: str,
+        content_type: str | None = None,
+    ) -> str:
+        """multipart 요청 등에서 받은 바이트를 직접 저장하고 key를 반환합니다.
+
+        presigned 패턴 대신 서버가 직접 업로드하는 단순 케이스용.
+        temp/ 폴더를 거치지 않고 곧바로 최종 위치에 저장합니다.
+
+        Args:
+            data: 파일 바이트.
+            filename: 원본 파일명 (확장자 추출용).
+            folder: 폴더 키 (FOLDER_MAP 또는 임의 값).
+            content_type: S3 업로드 시 ContentType. None이면 자동 추론하지 않음.
+
+        Returns:
+            상대경로(key). 예: store_covers/2026/04/28/{uuid}.jpg
+        """
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
+        date_prefix = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+        resolved = resolve_folder(folder)
+        key = f"{resolved}/{date_prefix}/{uuid.uuid4().hex}.{ext}"
+
+        if self.is_local:
+            self.save_local(key, data)
+            return key
+
+        kwargs: dict = {
+            "Bucket": settings.AWS_S3_BUCKET,
+            "Key": key,
+            "Body": data,
+        }
+        if content_type:
+            kwargs["ContentType"] = content_type
+        self.client.put_object(**kwargs)
+        return key
 
     # ── key 추출 (기존 절대 URL + 새 상대경로 모두 지원) ──────
 

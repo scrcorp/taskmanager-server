@@ -39,6 +39,8 @@ from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSect
 from app.models.email_verification import EmailVerificationCode
 from app.models.inventory import InventoryCategory, InventorySubUnit, InventoryProduct, StoreInventory, InventoryTransaction, InventoryAudit, InventoryAuditItem, InventoryAuditSetting
 from app.models.settings import SettingsRegistry, OrgSetting, StoreSetting, StaffSetting
+from app.models.hiring import StoreHiringForm, Candidate, Application, CandidateBlock
+from app.models.app_version import AppVersion
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -59,4 +61,6 @@ __all__ = [
     "EmailVerificationCode",
     "InventoryCategory", "InventorySubUnit", "InventoryProduct", "StoreInventory", "InventoryTransaction", "InventoryAudit", "InventoryAuditItem", "InventoryAuditSetting",
     "SettingsRegistry", "OrgSetting", "StoreSetting", "StaffSetting",
+    "StoreHiringForm", "Candidate", "Application", "CandidateBlock",
+    "AppVersion",
 ]
