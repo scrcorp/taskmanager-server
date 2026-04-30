@@ -125,6 +125,41 @@ class HiringFormConfig(BaseModel):
     attachments: list[AttachmentSlotDef] = Field(default_factory=list, max_length=MAX_ATTACHMENTS_PER_FORM)
 
 
+# ── 매장이 폼을 만들기 전 사용하는 기본 V0 폼 ──────────────────────
+# admin Form 탭에서 매니저가 published 폼을 만들기 전에는 모든 매장이 이 기본 폼을 사용.
+# 매니저가 published 폼을 만들면 그쪽이 우선.
+DEFAULT_FORM_CONFIG: dict = {
+    "welcome_message": None,
+    "questions": [
+        {
+            "type": "long_text",
+            "id": "default_motivation",
+            "label": "Why do you want to work here?",
+            "required": True,
+            "max_length": 1000,
+            "placeholder": None,
+        },
+        {
+            "type": "long_text",
+            "id": "default_anything_else",
+            "label": "Anything else you'd like us to know?",
+            "required": False,
+            "max_length": 1000,
+            "placeholder": None,
+        },
+    ],
+    "attachments": [
+        {
+            "id": "default_resume",
+            "label": "Resume (optional)",
+            "description": "PDF or image. Up to 20 MB.",
+            "accept": "pdf_or_image",
+            "required": False,
+        },
+    ],
+}
+
+
 # ── 답변 스냅샷 (지원서 측) ───────────────────────────────────
 # applicants.data JSONB 안의 형태. 폼 정의를 그대로 박아 스냅샷으로 보존.
 class AnswerSnapshot(BaseModel):
@@ -154,10 +189,19 @@ class ApplicantData(BaseModel):
 
 
 # ── Stage ────────────────────────────────────────────────────
+# pending_form: 회원가입은 됐으나 폼 미작성. 매니저 인박스에는 안 보임.
+#               candidate 로그인 시 이 application 이어서 작성 가능.
 ApplicationStage = Literal[
-    "new", "reviewing", "interview", "hired", "rejected", "withdrawn"
+    "pending_form",
+    "new",
+    "reviewing",
+    "interview",
+    "hired",
+    "rejected",
+    "withdrawn",
 ]
 APPLICATION_STAGES: tuple[ApplicationStage, ...] = (
+    "pending_form",
     "new",
     "reviewing",
     "interview",
@@ -166,4 +210,19 @@ APPLICATION_STAGES: tuple[ApplicationStage, ...] = (
     "withdrawn",
 )
 # 활성 단계 — 한 candidate가 같은 매장에 동시에 여러 active application 못 가짐.
-ACTIVE_STAGES: tuple[ApplicationStage, ...] = ("new", "reviewing", "interview")
+# pending_form 도 active로 취급 — 작성 중 application 보호.
+ACTIVE_STAGES: tuple[ApplicationStage, ...] = (
+    "pending_form",
+    "new",
+    "reviewing",
+    "interview",
+)
+# 매니저 인박스/Pipeline에 표시되는 단계 (pending_form 제외)
+MANAGER_VISIBLE_STAGES: tuple[ApplicationStage, ...] = (
+    "new",
+    "reviewing",
+    "interview",
+    "hired",
+    "rejected",
+    "withdrawn",
+)
