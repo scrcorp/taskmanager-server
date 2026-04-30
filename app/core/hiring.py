@@ -37,10 +37,21 @@ MAX_OPTIONS_PER_QUESTION = 20
 
 
 # ── 질문 스키마 (Form 정의 측) ──────────────────────────────
-class QuestionTextDef(BaseModel):
+class QuestionShortTextDef(BaseModel):
     """한 줄 텍스트 입력."""
 
-    type: Literal["text"]
+    type: Literal["short_text"]
+    id: str
+    label: str
+    required: bool = False
+    placeholder: str | None = None
+    max_length: int | None = None
+
+
+class QuestionLongTextDef(BaseModel):
+    """여러 줄 텍스트 입력 (textarea)."""
+
+    type: Literal["long_text"]
     id: str
     label: str
     required: bool = False
@@ -84,7 +95,8 @@ class QuestionMultiChoiceDef(BaseModel):
 
 QuestionDef = Annotated[
     Union[
-        QuestionTextDef,
+        QuestionShortTextDef,
+        QuestionLongTextDef,
         QuestionNumberDef,
         QuestionSingleChoiceDef,
         QuestionMultiChoiceDef,
@@ -99,6 +111,7 @@ class AttachmentSlotDef(BaseModel):
 
     id: str
     label: str
+    description: str | None = None  # 지원자에게 보여줄 안내문 (예: "Color scan preferred")
     accept: AcceptPreset = "pdf_or_image"
     required: bool = False
 

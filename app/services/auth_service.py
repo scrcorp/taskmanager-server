@@ -303,11 +303,20 @@ class AuthService:
         if org_result.scalar_one_or_none() is None:
             raise NotFoundError("Organization not found or inactive")
 
-        # 사용자명 중복 확인 — Check username uniqueness
+        # 사용자명 중복 확인 — users + candidates 양쪽에서 체크.
+        # 회원가입 경로(register, direct-signup) 모두 이 함수를 거치므로
+        # 두 테이블 모두에 같은 ID가 존재하지 않도록 막아둔다.
         existing: User | None = await auth_repository.get_user_by_username(
             db, data.username, organization_id
         )
         if existing is not None:
+            raise DuplicateError("Username already exists")
+        # candidate 측 — 매장 organization과 무관하게 글로벌 unique이므로 username만 비교.
+        from app.models.hiring import Candidate as _Candidate
+        cand_clash = await db.execute(
+            select(_Candidate).where(_Candidate.username == data.username)
+        )
+        if cand_clash.scalar_one_or_none() is not None:
             raise DuplicateError("Username already exists")
 
         # 스태프 역할 조회
