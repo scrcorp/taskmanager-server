@@ -55,6 +55,33 @@ async def create_presigned_url(
     return {"upload_url": result["upload_url"], "file_url": result["file_url"]}
 
 
+@router.get("/sign-download")
+async def sign_download(
+    key: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """다운로드 가능한 URL 발급.
+
+    S3 모드: presigned GET URL (만료 1시간).
+    로컬 모드: storage_service.resolve_url로 환경별 URL 반환.
+    """
+    url: str | None
+    if storage_service.is_local:
+        url = storage_service.resolve_url(key)
+    else:
+        try:
+            url = storage_service.client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": __import__("app.config", fromlist=["settings"]).settings.AWS_S3_BUCKET, "Key": key},
+                ExpiresIn=3600,
+            )
+        except Exception:
+            url = storage_service.resolve_url(key)
+    if not url:
+        raise HTTPException(status_code=404, detail={"code": "file_not_found"})
+    return {"url": url}
+
+
 @router.put("/upload/{key:path}")
 async def upload_local(
     key: str,

@@ -120,6 +120,26 @@ class EmailVerificationService:
         email = email.strip().lower()
         now = datetime.now(timezone.utc)
 
+        # ── QA bypass — settings.EMAIL_VERIFICATION_TEST_CODE 가 설정되고 그 코드와 일치하면
+        # 실제 DB record 없어도 verification_token 발급. worktree/local에서만 set, prod 미설정.
+        from app.config import settings as _settings
+        magic = (_settings.EMAIL_VERIFICATION_TEST_CODE or "").strip()
+        if magic and code == magic:
+            token = uuid.uuid4()
+            # 미래 register/submit에서 validate_verification_token이 DB row를 찾으니
+            # is_used=True 인 dummy row 한 개를 만들어 둠.
+            dummy = EmailVerificationCode(
+                email=email,
+                code=magic,
+                purpose="registration",
+                expires_at=now + timedelta(minutes=10),
+                is_used=True,
+                verification_token=token,
+            )
+            db.add(dummy)
+            await db.commit()
+            return {"verification_token": str(token), "email": email}
+
         # 유효한 코드 조회
         result = await db.execute(
             select(EmailVerificationCode).where(

@@ -9,6 +9,7 @@ Common endpoints (refresh, logout, me) are in app.api.auth.
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -139,6 +140,62 @@ async def app_register(
     """
     organization_id = await auth_service.resolve_company_code(db, data.company_code)
     return await auth_service.app_register(db, data, organization_id)
+
+
+class _DirectSignupBody(BaseModel):
+    """매장 다이렉트 가입 (지원자 단계 없이 즉시 staff 등록).
+
+    공개 페이지 `/direct/{encoded}` 진입점. encoded store_id로 매장/조직을 식별하고
+    바로 users 생성한다. 기존 회원가입(`/register`)과 동일하게 staff 권한 부여.
+
+    공개 가입(`/applications/submit`)과의 차이: 폼/지원자 단계 없음, 즉시 로그인 가능.
+    """
+
+    encoded: str
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=6, max_length=100)
+    full_name: str = Field(min_length=1, max_length=255)
+    email: str = Field(min_length=3, max_length=255)
+    verification_token: str
+
+
+@router.post("/direct-signup", response_model=TokenResponse, status_code=201)
+async def app_direct_signup(
+    data: _DirectSignupBody,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TokenResponse:
+    """매장 다이렉트 가입 — 지원자 단계 건너뛰고 즉시 staff 계정 생성.
+
+    encoded(base64url 인코딩된 store_id)만으로 매장/조직 식별. 폼 검증 없음.
+    """
+    try:
+        store_id = decode_uuid(data.encoded)
+    except Exception:
+        raise HTTPException(status_code=404, detail={"code": "invalid_link"})
+
+    # 매장 + 조직 조회 (cover photos 등은 안 가져옴)
+    store_res = await db.execute(
+        select(Store, Organization).join(Organization, Organization.id == Store.organization_id)
+        .where(Store.id == store_id, Store.deleted_at.is_(None))
+    )
+    row = store_res.one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "store_not_found"})
+    store, org = row
+    if not store.accepting_signups:
+        raise HTTPException(status_code=404, detail={"code": "signups_paused"})
+
+    # 기존 register 흐름 위임 — RegisterRequest로 변환
+    register_req = RegisterRequest(
+        username=data.username,
+        password=data.password,
+        full_name=data.full_name,
+        email=data.email,
+        company_code=org.code,
+        verification_token=data.verification_token,
+        store_ids=[str(store_id)],
+    )
+    return await auth_service.app_register(db, register_req, org.id)
 
 
 @router.post("/login", response_model=TokenResponse)

@@ -35,7 +35,11 @@ from app.database import Base
 
 
 class StoreHiringForm(Base):
-    """매장 가입 폼의 한 버전. 매장당 여러 버전이 누적, is_current가 활성 1개."""
+    """매장 가입 폼의 한 버전.
+
+    매장당 published 여러 버전이 누적되며, status='published' + is_current=True인 row가 활성.
+    매장당 status='draft' row는 0~1개. draft는 version=NULL.
+    """
 
     __tablename__ = "store_hiring_forms"
 
@@ -43,11 +47,23 @@ class StoreHiringForm(Base):
     store_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # published 행만 매장 내 일련번호. draft는 NULL.
+    version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 'draft' | 'published'
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="published", server_default="published"
+    )
     config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # status='published'인 row 중 활성 1개만 True. draft는 항상 False.
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
     )
     created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -129,6 +145,8 @@ class Application(Base):
     score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     interview_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 변경 히스토리 — [{action, before, after, by_user_id, by_username, at}, ...]
+    history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
     submitted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )

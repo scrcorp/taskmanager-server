@@ -6,6 +6,8 @@ Public Applications Router — `/join/{encoded}` 가입 페이지에서 호출.
 
 from __future__ import annotations
 
+import uuid as _uuid_mod
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 from uuid import UUID
 
@@ -44,6 +46,107 @@ def _normalize_email(email: str) -> str:
 
 
 # ────────────────────────────────────────────────────────────────
+# 기존 candidate 로그인 — 다른 매장 지원 / 가입만 하고 이탈한 케이스 이어가기
+# ────────────────────────────────────────────────────────────────
+class CandidateLoginBody(BaseModel):
+    encoded: str
+    username: str
+    password: str
+
+
+@router.post("/login")
+async def candidate_login(
+    body: CandidateLoginBody,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """이미 가입한 적 있는 candidate가 로그인해서 폼 작성을 이어가도록.
+
+    응답에 verification_token을 dummy로 발급 (이메일 재인증 면제 — 이미 verified).
+    클라는 응답의 account 정보 + token을 그대로 들고 form step → submit으로 진행.
+    """
+    try:
+        store_id = decode_uuid(body.encoded)
+    except Exception:
+        raise HTTPException(status_code=404, detail={"code": "invalid_link"})
+
+    store_res = await db.execute(
+        select(Store).where(Store.id == store_id, Store.deleted_at.is_(None))
+    )
+    store = store_res.scalar_one_or_none()
+    if store is None:
+        raise HTTPException(status_code=404, detail={"code": "store_not_found"})
+    if not store.accepting_signups:
+        raise HTTPException(status_code=404, detail={"code": "signups_paused"})
+
+    cand_res = await db.execute(
+        select(Candidate).where(Candidate.username == body.username)
+    )
+    candidate = cand_res.scalar_one_or_none()
+    if candidate is None:
+        raise HTTPException(
+            status_code=401, detail={"code": "invalid_credentials"}
+        )
+    from app.utils.password import verify_password as _vp
+    if not _vp(body.password, candidate.password_hash):
+        raise HTTPException(
+            status_code=401, detail={"code": "invalid_credentials"}
+        )
+
+    # block 검사
+    blk_res = await db.execute(
+        select(CandidateBlock).where(
+            CandidateBlock.candidate_id == candidate.id,
+            CandidateBlock.store_id == store_id,
+        )
+    )
+    if blk_res.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "not_eligible", "message": "You are not eligible to apply to this store."},
+        )
+
+    # 활성 application 검사
+    active_res = await db.execute(
+        select(Application).where(
+            Application.candidate_id == candidate.id,
+            Application.store_id == store_id,
+            Application.stage.in_(ACTIVE_STAGES),
+        )
+    )
+    if active_res.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "active_application_exists",
+                "message": "You already have an active application for this store.",
+            },
+        )
+
+    # email_verified=True인 candidate은 재인증 면제. dummy row + token 발급.
+    from app.models.email_verification import EmailVerificationCode
+    token = _uuid_mod.uuid4()
+    now = datetime.now(timezone.utc)
+    dummy = EmailVerificationCode(
+        email=candidate.email_normalized,
+        code="000000",
+        purpose="registration",
+        expires_at=now + timedelta(minutes=10),
+        is_used=True,
+        verification_token=token,
+    )
+    db.add(dummy)
+    await db.commit()
+
+    return {
+        "candidate_id": str(candidate.id),
+        "username": candidate.username,
+        "email": candidate.email,
+        "full_name": candidate.full_name,
+        "verification_token": str(token),
+    }
+
+
+# ────────────────────────────────────────────────────────────────
 # Form 조회 (공개) — 가입 페이지가 폼 정의 가져가서 동적 렌더
 # ────────────────────────────────────────────────────────────────
 @router.get("/form/{encoded}")
@@ -72,6 +175,7 @@ async def get_public_form(
     form_res = await db.execute(
         select(StoreHiringForm).where(
             StoreHiringForm.store_id == store_id,
+            StoreHiringForm.status == "published",
             StoreHiringForm.is_current.is_(True),
         )
     )
@@ -165,6 +269,9 @@ class AttachmentInput(BaseModel):
 
 class SubmitBody(BaseModel):
     encoded: str
+    # 클라가 폼 fetch 시 받은 form_id. 없으면 폼 미설정 매장으로 간주.
+    # 매장이 publish 후에도 진행 중이던 지원자가 자기가 본 폼 그대로 통과하게 하기 위함.
+    form_id: Optional[str] = None
     username: str = Field(min_length=3, max_length=50)
     email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=6, max_length=100)
@@ -303,7 +410,23 @@ async def submit_application(
     matches = cand_res.scalars().all()
     candidate: Optional[Candidate] = None
     if len(matches) == 0:
-        # 신규
+        # 신규 — 가입 시점에 그 매장 organization의 users.username과도 충돌 체크.
+        # 미리 막아두면 hire 시점에 username override 받을 일이 없음.
+        from app.models.user import User as _User
+        org_user_clash = await db.execute(
+            select(_User).where(
+                _User.organization_id == store.organization_id,
+                _User.username == body.username,
+            )
+        )
+        if org_user_clash.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "username_taken",
+                    "message": "This ID is already in use at this store. Please choose a different one.",
+                },
+            )
         candidate = Candidate(
             username=body.username,
             email=body.email,
@@ -383,14 +506,44 @@ async def submit_application(
             },
         )
 
-    # 6. 폼 + 검증
-    form_res = await db.execute(
-        select(StoreHiringForm).where(
-            StoreHiringForm.store_id == store_id,
-            StoreHiringForm.is_current.is_(True),
+    # 6. 폼 + 검증 — 클라가 들고 있던 form_id 기준.
+    # 진행 중이던 지원자가 매장 publish 후에도 자기가 본 폼대로 제출 가능하게 함.
+    form: Optional[StoreHiringForm] = None
+    if body.form_id:
+        try:
+            form_uuid = UUID(body.form_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"code": "invalid_form_id"})
+        f_res = await db.execute(
+            select(StoreHiringForm).where(StoreHiringForm.id == form_uuid)
         )
-    )
-    form = form_res.scalar_one_or_none()
+        form = f_res.scalar_one_or_none()
+        if form is None:
+            raise HTTPException(status_code=404, detail={"code": "form_not_found"})
+        if form.store_id != store_id:
+            raise HTTPException(status_code=400, detail={"code": "form_store_mismatch"})
+        if form.status != "published":
+            # draft form_id로 submit 못 함
+            raise HTTPException(status_code=400, detail={"code": "form_not_published"})
+    else:
+        # 클라가 form_id를 안 보냈으면 폼 미설정 매장으로 간주.
+        # 단, 매장에 published 폼이 실제로 있는데 form_id를 빠뜨린 거면 reject (실수 방지).
+        existing_pub = await db.execute(
+            select(StoreHiringForm.id).where(
+                StoreHiringForm.store_id == store_id,
+                StoreHiringForm.status == "published",
+                StoreHiringForm.is_current.is_(True),
+            )
+        )
+        if existing_pub.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "form_id_required",
+                    "message": "This store has a published form. Refresh and submit again.",
+                },
+            )
+
     answer_snaps: list[dict] = []
     attachment_snaps: list[dict] = []
     if form is not None:
