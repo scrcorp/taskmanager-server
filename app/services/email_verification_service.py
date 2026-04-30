@@ -94,13 +94,17 @@ class EmailVerificationService:
         db.add(verification)
         await db.flush()
 
-        # 이메일 발송 (SMTP 미설정 시 skip)
-        try:
-            subject, html = build_verification_code_email(code)
-            await send_email(to=email, subject=subject, html=html)
-        except Exception:
-            # SMTP 미설정 등 발송 실패 시에도 코드는 DB에 저장됨
-            pass
+        # 이메일 발송 — settings.EMAIL_VERIFICATION_TEST_CODE 가 설정되어 있으면
+        # 실제 SMTP 호출 자체를 skip한다 (테스트 환경 의도). DB record는 그대로 남는다.
+        from app.config import settings as _settings
+        magic = (_settings.EMAIL_VERIFICATION_TEST_CODE or "").strip()
+        if not magic:
+            try:
+                subject, html = build_verification_code_email(code)
+                await send_email(to=email, subject=subject, html=html)
+            except Exception:
+                # SMTP 미설정 / 일시 장애에도 코드 record 는 보존
+                pass
 
         await db.commit()
 
