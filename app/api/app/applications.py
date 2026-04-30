@@ -105,22 +105,18 @@ async def candidate_login(
             detail={"code": "not_eligible", "message": "You are not eligible to apply to this store."},
         )
 
-    # 활성 application 검사
-    active_res = await db.execute(
-        select(Application).where(
+    # 가장 최근 application 가져옴 — 어느 stage든 status 화면에 보여줄 수 있도록.
+    # (pending_form: 이어서 폼 작성 / new/reviewing/interview: 진행 상태 표시 /
+    #  hired/rejected/withdrawn: 결과 표시)
+    latest_res = await db.execute(
+        select(Application)
+        .where(
             Application.candidate_id == candidate.id,
             Application.store_id == store_id,
-            Application.stage.in_(ACTIVE_STAGES),
         )
+        .order_by(Application.submitted_at.desc())
     )
-    if active_res.scalar_one_or_none() is not None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "active_application_exists",
-                "message": "You already have an active application for this store.",
-            },
-        )
+    pending_app = latest_res.scalars().first()
 
     # email_verified=True인 candidate은 재인증 면제. dummy row + token 발급.
     from app.models.email_verification import EmailVerificationCode
@@ -143,6 +139,15 @@ async def candidate_login(
         "email": candidate.email,
         "full_name": candidate.full_name,
         "verification_token": str(token),
+        "pending_application": (
+            {
+                "id": str(pending_app.id),
+                "store_id": str(pending_app.store_id),
+                "stage": pending_app.stage,
+            }
+            if pending_app
+            else None
+        ),
     }
 
 
@@ -180,6 +185,8 @@ async def get_public_form(
         )
     )
     form = form_res.scalar_one_or_none()
+    # 매장 생성 시 v0 published row 가 자동 삽입되므로 form 은 항상 존재해야 함.
+    # (혹시라도 없는 케이스는 빈 config 로 대응 — 서버 무결성 문제이지 fallback 아님.)
     return {
         "store_id": str(store_id),
         "form_id": str(form.id) if form else None,
@@ -265,6 +272,27 @@ class AttachmentInput(BaseModel):
     file_name: str
     file_size: int
     mime_type: str
+
+
+class StartBody(BaseModel):
+    """Step 1 — 회원가입만. application은 stage='pending_form' 으로 생성."""
+
+    encoded: str
+    username: str = Field(min_length=3, max_length=50)
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=6, max_length=100)
+    full_name: str = Field(min_length=1, max_length=255)
+    phone: Optional[str] = None
+    verification_token: str
+
+
+class CompleteBody(BaseModel):
+    """Step 2 — pending_form application의 폼 답변/첨부 채우기."""
+
+    application_id: str
+    form_id: Optional[str] = None
+    answers: list["AnswerInput"] = Field(default_factory=list)
+    attachments: list["AttachmentInput"] = Field(default_factory=list)
 
 
 class SubmitBody(BaseModel):
@@ -356,6 +384,308 @@ def _validate_against_form(
             })
 
     return answer_snaps, attachment_snaps
+
+
+# ────────────────────────────────────────────────────────────────
+# 진행형 가입 — Step 1: 회원가입만 (pending_form application 생성)
+# ────────────────────────────────────────────────────────────────
+@router.post("/start", status_code=201)
+async def start_application(
+    body: StartBody,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """회원가입 + application 생성 (stage='pending_form').
+
+    이 시점엔 폼 답변/첨부 안 받음. 다음에 로그인해서 /complete 호출해 마저 작성.
+    """
+    # 1. store
+    try:
+        store_id = decode_uuid(body.encoded)
+    except Exception:
+        raise HTTPException(status_code=404, detail={"code": "invalid_link"})
+    store_res = await db.execute(
+        select(Store).where(Store.id == store_id, Store.deleted_at.is_(None))
+    )
+    store = store_res.scalar_one_or_none()
+    if store is None:
+        raise HTTPException(status_code=404, detail={"code": "store_not_found"})
+    if not store.accepting_signups:
+        raise HTTPException(status_code=404, detail={"code": "signups_paused"})
+
+    # 2. email verification
+    await email_verification_service.validate_verification_token(
+        db, body.verification_token, body.email
+    )
+
+    email_norm = _normalize_email(body.email)
+
+    # 3. candidate lookup / create
+    cand_res = await db.execute(
+        select(Candidate).where(
+            or_(
+                Candidate.username == body.username,
+                Candidate.email_normalized == email_norm,
+            )
+        )
+    )
+    matches = cand_res.scalars().all()
+    candidate: Optional[Candidate] = None
+    if len(matches) == 0:
+        # 신규 — 그 매장 org users.username과 충돌 체크
+        from app.models.user import User as _User
+        org_user_clash = await db.execute(
+            select(_User).where(
+                _User.organization_id == store.organization_id,
+                _User.username == body.username,
+            )
+        )
+        if org_user_clash.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "username_taken",
+                    "message": "This ID is already in use at this store. Please choose a different one.",
+                },
+            )
+        candidate = Candidate(
+            username=body.username,
+            email=body.email,
+            email_normalized=email_norm,
+            password_hash=hash_password(body.password),
+            email_verified=True,
+            full_name=body.full_name,
+            phone=body.phone,
+        )
+        db.add(candidate)
+        await db.flush()
+        await db.refresh(candidate)
+    elif len(matches) == 1:
+        m = matches[0]
+        if m.username == body.username and m.email_normalized == email_norm:
+            from app.utils.password import verify_password as _vp
+            if not _vp(body.password, m.password_hash):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "credential_mismatch",
+                        "message": "An account with this username and email already exists. Use the existing password.",
+                    },
+                )
+            candidate = m
+        else:
+            field = "username" if m.username == body.username else "email"
+            raise HTTPException(
+                status_code=409,
+                detail={"code": f"{field}_taken", "message": f"This {field} is already in use."},
+            )
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "credentials_split",
+                "message": "Username and email belong to different existing accounts.",
+            },
+        )
+
+    # 4. block 검사
+    blk_res = await db.execute(
+        select(CandidateBlock).where(
+            CandidateBlock.candidate_id == candidate.id,
+            CandidateBlock.store_id == store_id,
+        )
+    )
+    if blk_res.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "not_eligible", "message": "You are not eligible to apply to this store."},
+        )
+
+    # 5. 활성 application 검사 (pending_form 포함 — 이미 작성 중이면 그것 그대로 사용)
+    active_res = await db.execute(
+        select(Application).where(
+            Application.candidate_id == candidate.id,
+            Application.store_id == store_id,
+            Application.stage.in_(ACTIVE_STAGES),
+        )
+    )
+    existing_active = active_res.scalar_one_or_none()
+    if existing_active is not None:
+        # 이미 active가 있으면 그대로 반환 (pending_form이면 이어서 작성, 아니면 차단)
+        if existing_active.stage == "pending_form":
+            return {
+                "application_id": str(existing_active.id),
+                "candidate_id": str(candidate.id),
+                "stage": existing_active.stage,
+                "resumed": True,
+            }
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "active_application_exists",
+                "message": "You already have an active application for this store.",
+            },
+        )
+
+    # 6. attempt_no
+    prev_count_res = await db.execute(
+        select(Application).where(
+            Application.candidate_id == candidate.id,
+            Application.store_id == store_id,
+        )
+    )
+    prev_count = len(prev_count_res.scalars().all())
+
+    # 7. application 생성 — 폼 답변/첨부 비어있는 상태
+    application = Application(
+        candidate_id=candidate.id,
+        store_id=store_id,
+        form_id=None,  # complete 시 클라가 보낸 form_id로 채움
+        attempt_no=prev_count + 1,
+        data={"answers": [], "attachments": []},
+        stage="pending_form",
+    )
+    db.add(application)
+    await db.commit()
+    await db.refresh(application)
+
+    return {
+        "application_id": str(application.id),
+        "candidate_id": str(candidate.id),
+        "stage": application.stage,
+        "resumed": False,
+    }
+
+
+# ────────────────────────────────────────────────────────────────
+# 진행형 가입 — Step 2: pending_form application 폼 채우고 제출
+# ────────────────────────────────────────────────────────────────
+@router.post("/complete")
+async def complete_application(
+    body: CompleteBody,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """pending_form application 의 답변/첨부 채우고 stage='new'로 전환."""
+    try:
+        app_uuid = UUID(body.application_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"code": "invalid_application_id"})
+
+    app_res = await db.execute(
+        select(Application).where(Application.id == app_uuid)
+    )
+    application = app_res.scalar_one_or_none()
+    if application is None:
+        raise HTTPException(status_code=404, detail={"code": "application_not_found"})
+    if application.stage != "pending_form":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "not_pending_form", "message": "This application is not in form-filling state."},
+        )
+
+    # 폼 검증
+    form: Optional[StoreHiringForm] = None
+    if body.form_id:
+        try:
+            form_uuid = UUID(body.form_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"code": "invalid_form_id"})
+        f_res = await db.execute(
+            select(StoreHiringForm).where(StoreHiringForm.id == form_uuid)
+        )
+        form = f_res.scalar_one_or_none()
+        if form is None:
+            raise HTTPException(status_code=404, detail={"code": "form_not_found"})
+        if form.store_id != application.store_id:
+            raise HTTPException(status_code=400, detail={"code": "form_store_mismatch"})
+        if form.status != "published":
+            raise HTTPException(status_code=400, detail={"code": "form_not_published"})
+    else:
+        existing_pub = await db.execute(
+            select(StoreHiringForm.id).where(
+                StoreHiringForm.store_id == application.store_id,
+                StoreHiringForm.status == "published",
+                StoreHiringForm.is_current.is_(True),
+            )
+        )
+        if existing_pub.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "form_id_required",
+                    "message": "This store has a published form. Refresh and submit again.",
+                },
+            )
+
+    answer_snaps: list[dict] = []
+    attachment_snaps: list[dict] = []
+    if form is not None:
+        answer_snaps, attachment_snaps = _validate_against_form(
+            form.config, body.answers, body.attachments
+        )
+
+    application.form_id = form.id if form else None
+    application.data = {"answers": answer_snaps, "attachments": attachment_snaps}
+    application.stage = "new"
+    await db.commit()
+    await db.refresh(application)
+
+    return {
+        "application_id": str(application.id),
+        "stage": application.stage,
+    }
+
+
+# ────────────────────────────────────────────────────────────────
+# Candidate self-withdraw — 지원자가 본인 application 자진 철회
+# ────────────────────────────────────────────────────────────────
+class WithdrawBody(BaseModel):
+    username: str
+    password: str
+
+
+@router.post("/{application_id}/withdraw")
+async def withdraw_application(
+    application_id: str,
+    body: WithdrawBody,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """지원자 본인이 application 자진 철회. username+password 로 본인 검증."""
+    try:
+        app_uuid = UUID(application_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"code": "invalid_application_id"})
+
+    app_res = await db.execute(
+        select(Application).where(Application.id == app_uuid)
+    )
+    application = app_res.scalar_one_or_none()
+    if application is None:
+        raise HTTPException(status_code=404, detail={"code": "application_not_found"})
+
+    cand_res = await db.execute(
+        select(Candidate).where(Candidate.id == application.candidate_id)
+    )
+    candidate = cand_res.scalar_one_or_none()
+    if candidate is None or candidate.username != body.username:
+        raise HTTPException(status_code=403, detail={"code": "forbidden"})
+
+    from app.utils.password import verify_password as _vp
+    if not _vp(body.password, candidate.password_hash):
+        raise HTTPException(status_code=403, detail={"code": "forbidden"})
+
+    if application.stage in ("hired", "rejected", "withdrawn"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "cannot_withdraw",
+                "message": f"Application already in '{application.stage}' state.",
+            },
+        )
+
+    application.stage = "withdrawn"
+    await db.commit()
+    await db.refresh(application)
+    return {"application_id": str(application.id), "stage": application.stage}
 
 
 @router.post("/submit", status_code=201)

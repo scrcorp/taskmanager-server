@@ -24,11 +24,13 @@ from app.api.deps import (
 from app.core.hiring import (
     ACTIVE_STAGES,
     APPLICATION_STAGES,
+    DEFAULT_FORM_CONFIG,
     HiringFormConfig,
 )
 from app.core.permissions import STAFF_PRIORITY
 from app.models.hiring import (
     Application,
+    ApplicationReview,
     Candidate,
     CandidateBlock,
     StoreHiringForm,
@@ -84,7 +86,11 @@ async def get_hiring_form(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("hiring:read"))],
 ) -> dict:
-    """매장 hiring 폼 조회 — published/draft 둘 다 반환 (관리자용)."""
+    """매장 hiring 폼 조회 — published/draft 둘 다 반환 (관리자용).
+
+    매장 생성 시 v0 published row 가 자동 삽입되므로 published 는 항상 존재함.
+    매니저가 새 폼 만들고 publish 하면 v1, v2, ... 로 올라가고 그쪽이 current.
+    """
     await check_store_access(db, current_user, store_id)
     published = await _get_published(db, store_id)
     draft = await _get_draft(db, store_id)
@@ -95,6 +101,7 @@ async def get_hiring_form(
                 "version": published.version,
                 "config": published.config,
                 "updated_at": published.updated_at.isoformat(),
+                "is_default": published.version == 0,
             }
             if published
             else None
@@ -199,7 +206,14 @@ async def discard_hiring_form_draft(
 # ────────────────────────────────────────────────────────────────
 # Applications list / detail / stage
 # ────────────────────────────────────────────────────────────────
-def _serialize_application(app: Application, candidate: Candidate, *, include_data: bool) -> dict:
+def _serialize_application(
+    app: Application,
+    candidate: Candidate,
+    *,
+    include_data: bool,
+    avg_score: Optional[float] = None,
+    review_count: int = 0,
+) -> dict:
     out = {
         "id": str(app.id),
         "candidate_id": str(candidate.id),
@@ -207,7 +221,11 @@ def _serialize_application(app: Application, candidate: Candidate, *, include_da
         "form_id": str(app.form_id) if app.form_id else None,
         "attempt_no": app.attempt_no,
         "stage": app.stage,
-        "score": app.score,
+        # score 는 이제 review 평균 (없으면 None). 기존 컬럼 app.score 는 legacy fallback.
+        "score": (
+            int(round(avg_score)) if avg_score is not None else app.score
+        ),
+        "review_count": review_count,
         "interview_at": app.interview_at.isoformat() if app.interview_at else None,
         "notes": app.notes,
         "submitted_at": app.submitted_at.isoformat(),
@@ -237,6 +255,8 @@ async def list_applications(
     """매장 지원자 목록. stage 쿼리로 필터링 가능 ('active' = new+reviewing+interview)."""
     await check_store_access(db, current_user, store_id)
 
+    # 'all' (default) 은 pending_form 까지 포함 — 회원가입만 하고 폼 미제출인 사람도 표시.
+    # 'active' 는 매니저가 처리할 수 있는 단계만 (pending_form 제외).
     stmt = (
         select(Application, Candidate)
         .join(Candidate, Candidate.id == Application.candidate_id)
@@ -244,14 +264,42 @@ async def list_applications(
         .order_by(desc(Application.submitted_at))
     )
     if stage == "active":
-        stmt = stmt.where(Application.stage.in_(ACTIVE_STAGES))
+        stmt = stmt.where(Application.stage.in_(("new", "reviewing", "interview")))
     elif stage and stage in APPLICATION_STAGES:
         stmt = stmt.where(Application.stage == stage)
+    # else: default — 모든 stage 포함 (pending_form 도 보이도록)
 
     result = await db.execute(stmt)
     rows = result.all()
+    app_ids = [app.id for app, _ in rows]
+
+    # 배치로 reviews 평균 계산
+    avg_map: dict[UUID, tuple[Optional[float], int]] = {}
+    if app_ids:
+        agg_res = await db.execute(
+            select(
+                ApplicationReview.application_id,
+                func.avg(ApplicationReview.score).label("avg_score"),
+                func.count(ApplicationReview.id).label("cnt"),
+            )
+            .where(
+                ApplicationReview.application_id.in_(app_ids),
+                ApplicationReview.score.is_not(None),
+            )
+            .group_by(ApplicationReview.application_id)
+        )
+        for app_id, avg_s, cnt in agg_res.all():
+            avg_map[app_id] = (float(avg_s) if avg_s is not None else None, int(cnt))
+
     items = [
-        _serialize_application(app, cand, include_data=False) for app, cand in rows
+        _serialize_application(
+            app,
+            cand,
+            include_data=False,
+            avg_score=avg_map.get(app.id, (None, 0))[0],
+            review_count=avg_map.get(app.id, (None, 0))[1],
+        )
+        for app, cand in rows
     ]
     counts: dict[str, int] = {s: 0 for s in APPLICATION_STAGES}
     for app, _cand in rows:
@@ -288,8 +336,42 @@ async def get_application(
         if form is not None:
             form_config = form.config
 
-    out = _serialize_application(app_obj, candidate, include_data=True)
+    # reviews — 평가자별 점수+코멘트
+    reviews_res = await db.execute(
+        select(ApplicationReview, User)
+        .join(User, User.id == ApplicationReview.reviewer_id)
+        .where(ApplicationReview.application_id == app_obj.id)
+        .order_by(ApplicationReview.created_at)
+    )
+    review_rows = reviews_res.all()
+    review_scores = [r.score for r, _u in review_rows if r.score is not None]
+    avg_score: Optional[float] = (
+        sum(review_scores) / len(review_scores) if review_scores else None
+    )
+
+    out = _serialize_application(
+        app_obj,
+        candidate,
+        include_data=True,
+        avg_score=avg_score,
+        review_count=len(review_rows),
+    )
     out["form_config"] = form_config
+    out["reviews"] = [
+        {
+            "id": str(r.id),
+            "reviewer_id": str(r.reviewer_id),
+            "reviewer_username": u.username,
+            "reviewer_full_name": u.full_name,
+            "reviewer_role_priority": u.role.priority if u.role else None,
+            "score": r.score,
+            "comment": r.comment,
+            "created_at": r.created_at.isoformat(),
+            "updated_at": r.updated_at.isoformat(),
+            "is_mine": r.reviewer_id == current_user.id,
+        }
+        for r, u in review_rows
+    ]
 
     # 같은 candidate의 이전 application 시도들
     history_res = await db.execute(
@@ -733,3 +815,90 @@ async def unblock_candidate(
         await db.delete(block)
         await db.commit()
     return {"blocked": False}
+
+
+# ────────────────────────────────────────────────────────────────
+# Reviews — 평가자별 점수/코멘트 (Owner/GM 등 누구든 자기 review 추가 가능)
+# ────────────────────────────────────────────────────────────────
+class ReviewUpsertBody(BaseModel):
+    score: Optional[int] = Field(default=None, ge=0, le=100)
+    comment: Optional[str] = Field(default=None, max_length=2000)
+
+
+@router.put("/applications/{application_id}/reviews/me")
+async def upsert_my_review(
+    application_id: UUID,
+    body: ReviewUpsertBody,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("hiring:write"))],
+) -> dict:
+    """현재 사용자의 review 를 upsert. interview 단계 도달 후에만 score 입력 권장.
+
+    score 가 None 이면 코멘트만 (의견만 남김). score 만 있어도 됨.
+    """
+    res = await db.execute(select(Application).where(Application.id == application_id))
+    app_obj = res.scalar_one_or_none()
+    if app_obj is None:
+        raise HTTPException(status_code=404, detail={"code": "application_not_found"})
+    await check_store_access(db, current_user, app_obj.store_id)
+
+    if app_obj.stage == "pending_form":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "not_yet_submitted", "message": "Wait for the applicant to submit the form."},
+        )
+
+    existing_res = await db.execute(
+        select(ApplicationReview).where(
+            ApplicationReview.application_id == application_id,
+            ApplicationReview.reviewer_id == current_user.id,
+        )
+    )
+    review = existing_res.scalar_one_or_none()
+    if review is None:
+        review = ApplicationReview(
+            application_id=application_id,
+            reviewer_id=current_user.id,
+            score=body.score,
+            comment=body.comment,
+        )
+        db.add(review)
+    else:
+        review.score = body.score
+        review.comment = body.comment
+    await db.commit()
+    await db.refresh(review)
+    return {
+        "id": str(review.id),
+        "reviewer_id": str(review.reviewer_id),
+        "score": review.score,
+        "comment": review.comment,
+        "created_at": review.created_at.isoformat(),
+        "updated_at": review.updated_at.isoformat(),
+    }
+
+
+@router.delete("/applications/{application_id}/reviews/me")
+async def delete_my_review(
+    application_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("hiring:write"))],
+) -> Response:
+    """현재 사용자가 남긴 review 삭제."""
+    res = await db.execute(select(Application).where(Application.id == application_id))
+    app_obj = res.scalar_one_or_none()
+    if app_obj is None:
+        raise HTTPException(status_code=404, detail={"code": "application_not_found"})
+    await check_store_access(db, current_user, app_obj.store_id)
+
+    rev_res = await db.execute(
+        select(ApplicationReview).where(
+            ApplicationReview.application_id == application_id,
+            ApplicationReview.reviewer_id == current_user.id,
+        )
+    )
+    review = rev_res.scalar_one_or_none()
+    if review is not None:
+        await db.delete(review)
+        await db.commit()
+    return Response(status_code=204)

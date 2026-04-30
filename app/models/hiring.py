@@ -202,3 +202,40 @@ class CandidateBlock(Base):
 
     candidate = relationship("Candidate", back_populates="blocks")
     store = relationship("Store")
+
+
+class ApplicationReview(Base):
+    """평가자 1명이 application 1건에 남기는 평가(점수+코멘트).
+
+    한 application에 여러 평가자가 각자 review를 남길 수 있음 (Owner, GM 등).
+    Application.score 는 모든 review.score 의 평균.
+    한 reviewer 가 같은 application 에 여러 row 만들 수 없도록 unique 제약.
+    """
+
+    __tablename__ = "application_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("applications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    reviewer_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("application_id", "reviewer_id", name="uq_review_per_application_reviewer"),
+    )
+
+    application = relationship("Application", backref="reviews")
+    reviewer = relationship("User")
