@@ -97,6 +97,11 @@ class Settings(BaseSettings):
     # 보고서 제출 알림 수신 이메일 — Daily Report submit 시 알림 발송
     REPORT_NOTIFICATION_EMAIL: str = ""
 
+    # QA용 이메일 인증 우회 — 빈 문자열이면 비활성. 설정된 코드(예: "000000")를
+    # 입력하면 verify_code가 무조건 통과하고 verification_token 발급.
+    # prod/staging .env에는 절대 설정하지 말 것. worktree/local에서만.
+    EMAIL_VERIFICATION_TEST_CODE: str = ""
+
     # Server 베이스 URL — 로컬 이미지 URL 등에서 사용 (비어있으면 http://localhost:{port})
     SERVER_BASE_URL: str = ""
 

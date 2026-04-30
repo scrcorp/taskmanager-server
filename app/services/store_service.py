@@ -173,6 +173,19 @@ class StoreService:
             create_data["default_hourly_rate"] = data.default_hourly_rate
         try:
             store: Store = await store_repository.create(db, create_data)
+            # 매장 생성 즉시 v0 (DEFAULT_FORM_CONFIG) published row 자동 삽입.
+            # 매니저가 새 폼 만들고 publish 하면 v1, v2 ... 로 누적되며 그쪽이 current.
+            from app.core.hiring import DEFAULT_FORM_CONFIG
+            from app.models.hiring import StoreHiringForm
+
+            v0 = StoreHiringForm(
+                store_id=store.id,
+                version=0,
+                status="published",
+                config=DEFAULT_FORM_CONFIG,
+                is_current=True,
+            )
+            db.add(v0)
             await db.commit()
             return self._to_response(store)
         except Exception:
