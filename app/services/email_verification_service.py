@@ -12,6 +12,7 @@ from sqlalchemy import select, update, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.email_verification import EmailVerificationCode
+from app.models.hiring import Candidate
 from app.models.user import User
 from app.utils.email import send_email
 from app.utils.email_templates import build_verification_code_email
@@ -20,8 +21,11 @@ from app.utils.exceptions import BadRequestError, ConflictError
 
 # 인증코드 만료 시간 (5분)
 CODE_EXPIRY_MINUTES = 5
-# verification_token 만료 시간 (10분)
-TOKEN_EXPIRY_MINUTES = 10
+# verification_token 만료 시간 (60분).
+# token 만료는 verify 성공 시 record.created_at 을 now() 로 다시 찍어서
+# "verify 시점부터 N분" 의미로 동작한다. (이전엔 코드 발송 시점 기준이라
+# 폼 작성에 시간 걸리면 토큰이 만료된 것처럼 보였음 — 사용자 피드백)
+TOKEN_EXPIRY_MINUTES = 60
 # 재발송 쿨다운 (60초)
 RESEND_COOLDOWN_SECONDS = 60
 
@@ -40,15 +44,14 @@ class EmailVerificationService:
         Args:
             db: DB session
             email: target email
-            purpose: "registration" | "login_verify"
+            purpose: "registration" | "candidate_reg" | "login_verify"
 
         Returns:
             dict with message and expires_in
         """
         email = email.strip().lower()
 
-        # 이메일 중복 체크 — registration/login_verify에만 적용
-        # find_username, reset_password는 기존 이메일이 있어야 하므로 skip
+        # 이메일 중복 체크 — staff registration / login_verify
         if purpose in ("registration", "login_verify"):
             result = await db.execute(
                 select(User).where(
@@ -57,6 +60,23 @@ class EmailVerificationService:
                 )
             )
             if result.scalars().first() is not None:
+                raise ConflictError("This email is already registered")
+
+        # 후보자(hiring) 가입 — User 와 Candidate 양쪽 다 체크.
+        # 둘 중 하나라도 있으면 가입 페이지에서 "이미 가입된 이메일" 모달 → 로그인 유도.
+        if purpose == "candidate_reg":
+            user_res = await db.execute(
+                select(User).where(
+                    User.email == email,
+                    User.email_verified == True,
+                )
+            )
+            if user_res.scalars().first() is not None:
+                raise ConflictError("This email is already registered")
+            cand_res = await db.execute(
+                select(Candidate).where(Candidate.email_normalized == email)
+            )
+            if cand_res.scalars().first() is not None:
                 raise ConflictError("This email is already registered")
 
         # 재발송 쿨다운 체크
@@ -170,10 +190,13 @@ class EmailVerificationService:
             await db.commit()
             raise BadRequestError(f"Incorrect code. {remaining} attempts remaining")
 
-        # 성공 — verification_token 발급
+        # 성공 — verification_token 발급.
+        # created_at 을 now 로 재기록 — TOKEN_EXPIRY_MINUTES 가 "verify 성공 시점부터" 측정되도록.
+        # (이전에는 send 시점부터라 폼 작성 중 만료될 수 있었음)
         token = uuid.uuid4()
         record.is_used = True
         record.verification_token = token
+        record.created_at = now
         await db.commit()
 
         return {
