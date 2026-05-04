@@ -697,7 +697,7 @@ class ChecklistInstanceService:
         content_type: str,
         content: str,
     ) -> ChecklistItemMessage:
-        """리뷰에 메시지(텍스트/사진/영상)를 추가합니다."""
+        """항목에 메시지(텍스트/사진/영상)를 추가합니다. review_result 유무와 무관."""
         instance = await checklist_instance_repository.get_with_items(db, instance_id)
         if instance is None:
             raise NotFoundError("Checklist instance not found")
@@ -705,8 +705,8 @@ class ChecklistInstanceService:
         target_item: ChecklistInstanceItem | None = next(
             (it for it in instance.items if it.item_index == item_index), None
         )
-        if target_item is None or target_item.review_result is None:
-            raise NotFoundError("Review not found")
+        if target_item is None:
+            raise NotFoundError("Checklist item not found")
 
         try:
             if content_type in ("photo", "video"):
