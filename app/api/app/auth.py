@@ -6,7 +6,7 @@ Uses company_code in request body to identify organization.
 Common endpoints (refresh, logout, me) are in app.api.auth.
 """
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -157,6 +157,7 @@ class _DirectSignupBody(BaseModel):
     full_name: str = Field(min_length=1, max_length=255)
     email: str = Field(min_length=3, max_length=255)
     verification_token: str
+    preferred_language: Literal["en", "es", "ko"] = "en"
 
 
 @router.post("/direct-signup", response_model=TokenResponse, status_code=201)
@@ -194,6 +195,7 @@ async def app_direct_signup(
         company_code=org.code,
         verification_token=data.verification_token,
         store_ids=[str(store_id)],
+        preferred_language=data.preferred_language,
     )
     return await auth_service.app_register(db, register_req, org.id)
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid as _uuid_mod
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -284,6 +284,7 @@ class StartBody(BaseModel):
     full_name: str = Field(min_length=1, max_length=255)
     phone: Optional[str] = None
     verification_token: str
+    preferred_language: Literal["en", "es", "ko"] = "en"
 
 
 class CompleteBody(BaseModel):
@@ -455,6 +456,7 @@ async def start_application(
             email_verified=True,
             full_name=body.full_name,
             phone=body.phone,
+            preferred_language=body.preferred_language,
         )
         db.add(candidate)
         await db.flush()
@@ -765,6 +767,7 @@ async def submit_application(
             email_verified=True,
             full_name=body.full_name,
             phone=body.phone,
+            preferred_language=body.preferred_language,
         )
         db.add(candidate)
         await db.flush()
