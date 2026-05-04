@@ -639,6 +639,7 @@ async def hire_application(
             password_hash=candidate.password_hash,
             email_verified=candidate.email_verified,
             clockin_pin=clockin_pin,
+            preferred_language=candidate.preferred_language,
             **user_kwargs,
         )
         db.add(user)

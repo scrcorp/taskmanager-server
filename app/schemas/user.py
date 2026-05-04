@@ -6,6 +6,8 @@ within an organization, and self-service profile management.
 """
 
 from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -194,6 +196,7 @@ class ProfileResponse(BaseModel):
     email: str | None  # 이메일, null 가능 (Email, may be null)
     role_name: str  # 역할 이름 (Role name, resolved from Role table)
     organization_id: str  # 조직 UUID 문자열 (Organization UUID as string)
+    preferred_language: str = "en"  # 선호 언어 (정보 수집용, default en)
 
 
 class ProfileUpdate(BaseModel):
@@ -206,8 +209,10 @@ class ProfileUpdate(BaseModel):
         username: 새 로그인 아이디, 선택 (New username, optional)
         full_name: 새 전체 이름, 선택 (New full name, optional)
         email: 새 이메일, 선택 (New email, optional)
+        preferred_language: 선호 언어, 선택 (Preferred language, optional)
     """
 
     username: str | None = None  # 변경할 로그인 아이디 (New username, optional)
     full_name: str | None = None  # 변경할 실명 (New name, optional)
     email: str | None = None  # 변경할 이메일 (New email, optional)
+    preferred_language: Literal["en", "es", "ko"] | None = None  # 선호 언어 (정보 수집용)

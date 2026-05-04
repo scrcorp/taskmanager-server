@@ -233,6 +233,42 @@ class NotificationService:
             reference_id=schedule.id,
         )
 
+    async def create_for_reply(
+        self,
+        db: AsyncSession,
+        *,
+        organization_id: UUID,
+        recipient_id: UUID,
+        author_name: str,
+        context_label: str,
+        reference_type: str,
+        reference_id: UUID,
+    ) -> Notification:
+        """체크리스트/데일리리포트 등에 답변(메시지/코멘트)이 달렸을 때 알림 생성.
+
+        Auto-create a notification when a manager replies to the user's checklist
+        item, daily report, etc. Caller decides recipient (typically the original
+        author/completer) and provides a human-readable context_label.
+
+        Args:
+            organization_id: 조직 UUID
+            recipient_id: 알림 받는 사용자 UUID (보통 원작성자/완료자)
+            author_name: 답변 작성자 이름 (관리자)
+            context_label: "checklist item", "daily report" 등 (메시지 표시용)
+            reference_type: "checklist_review", "daily_report" 등
+            reference_id: 참조 엔티티 UUID
+        """
+        message = f"{author_name} replied on your {context_label}"
+        return await notification_repository.create_notification(
+            db,
+            organization_id=organization_id,
+            user_id=recipient_id,
+            notification_type="reply",
+            message=message,
+            reference_type=reference_type,
+            reference_id=reference_id,
+        )
+
     async def create_for_announcement(
         self,
         db: AsyncSession,

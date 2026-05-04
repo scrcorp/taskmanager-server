@@ -59,6 +59,7 @@ class ProfileService:
             email=user.email,
             role_name=role_name,
             organization_id=str(user.organization_id),
+            preferred_language=user.preferred_language,
         )
 
     async def get_profile(

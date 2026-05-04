@@ -99,6 +99,10 @@ class Candidate(Base):
     )
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    # 선호 언어 — Preferred UI/notification language (en/es/ko). hire 시 user로 복사.
+    preferred_language: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="en", server_default="en"
+    )
     # hire 시 생성된 user. 같은 candidate가 여러 매장에서 hire되어도 user 1개 + user_stores N개.
     promoted_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
