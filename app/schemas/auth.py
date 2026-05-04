@@ -4,7 +4,13 @@ Authentication-related Pydantic request/response schema definitions.
 Covers login, registration, token issuance/refresh, and current user info.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel
+
+# 지원 선호 언어 — Supported preferred language codes (BCP-47 short).
+# 현재는 정보 수집용. UI 다국어화는 추후 별도 작업.
+PreferredLanguage = Literal["en", "es", "ko"]
 
 
 class LoginRequest(BaseModel):
@@ -45,6 +51,7 @@ class RegisterRequest(BaseModel):
     company_code: str  # 회사 코드 — 필수 (Company code, required for registration)
     verification_token: str  # 이메일 인증 토큰 — 코드 검증 성공 시 발급 (Issued after code verification)
     store_ids: list[str] = []  # 배정할 매장 ID 목록 (Store UUIDs to assign user to)
+    preferred_language: PreferredLanguage = "en"  # 선호 언어 (정보 수집용, default en)
 
 
 class TokenResponse(BaseModel):
@@ -109,6 +116,7 @@ class UserMeResponse(BaseModel):
     is_active: bool
     must_change_password: bool = False  # 비밀번호 변경 권장 여부
     permissions: list[str] = []  # 역할에 할당된 permission code 목록
+    preferred_language: PreferredLanguage = "en"  # 선호 언어 (정보 수집용, default en)
 
 
 # ── Find Username ──

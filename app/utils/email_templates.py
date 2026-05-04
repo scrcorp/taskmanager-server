@@ -198,6 +198,62 @@ def build_checklist_completed_email(
     return subject, html
 
 
+def build_reply_email(
+    recipient_name: str,
+    author_name: str,
+    context_label: str,
+    context_subtitle: str,
+    excerpt: str | None,
+    cta_url: str | None = None,
+) -> tuple[str, str]:
+    """Build a generic notification email for a reply on a checklist item or daily report.
+
+    Args:
+        recipient_name: 받는 사람 이름 (예: "Alice")
+        author_name: 답변을 단 사람 이름 (관리자)
+        context_label: "Checklist Item" 또는 "Daily Report"
+        context_subtitle: 추가 식별자 (예: 항목 제목, 보고서 날짜)
+        excerpt: 답변 내용 일부 (50~120자), None 가능 (사진/영상만 첨부된 경우)
+        cta_url: 보러 갈 링크 (옵션)
+    """
+    subject = f"[TaskManager] {author_name} replied on your {context_label.lower()}"
+    excerpt_html = (
+        f'<div style="margin-top:12px;padding:12px 16px;background-color:#F1F5F9;border-left:3px solid #6C5CE7;border-radius:4px;font-size:14px;color:#334155;line-height:1.6;">{escape(excerpt)}</div>'
+        if excerpt and excerpt.strip()
+        else '<div style="margin-top:12px;font-size:13px;color:#94A3B8;font-style:italic;">(Photo or video attachment)</div>'
+    )
+    cta_html = (
+        f'<tr><td style="padding:8px 24px 28px;"><a href="{escape(cta_url)}" style="display:inline-block;padding:12px 32px;background-color:#6C5CE7;color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:6px;">Open in TaskManager</a></td></tr>'
+        if cta_url
+        else ""
+    )
+    html = f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background-color:#F8FAFC;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F8FAFC;">
+    <tr><td align="center" style="padding:32px 16px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+        <tr><td style="background-color:#6C5CE7;padding:24px 28px;"><div style="font-size:22px;font-weight:700;color:#FFFFFF;">TaskManager</div></td></tr>
+        <tr>
+          <td style="padding:28px 24px 8px;">
+            <div style="font-size:20px;font-weight:700;color:#1E293B;margin-bottom:6px;">New reply on your {escape(context_label.lower())}</div>
+            <div style="font-size:14px;color:#64748B;line-height:1.6;">Hi {escape(recipient_name)},<br><strong>{escape(author_name)}</strong> left a reply on:</div>
+            <div style="margin-top:10px;font-size:15px;font-weight:600;color:#1E293B;">{escape(context_label)} · <span style="color:#6C5CE7;">{escape(context_subtitle)}</span></div>
+            {excerpt_html}
+          </td>
+        </tr>
+        {cta_html}
+        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated notification from TaskManager</div></td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+    return subject, html
+
+
 def build_password_reset_code_email(code: str) -> tuple[str, str]:
     """Build password reset verification code email."""
     subject = "[TaskManager] Password Reset Code"

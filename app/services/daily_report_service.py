@@ -319,10 +319,70 @@ class DailyReportService:
             await db.flush()
             await db.refresh(comment)
             await db.commit()
+            await self._notify_report_reply(
+                db, report=report, author_id=user_id, excerpt=data.content,
+            )
             return comment
         except Exception:
             await db.rollback()
             raise
+
+    async def _notify_report_reply(
+        self,
+        db: AsyncSession,
+        *,
+        report,
+        author_id: UUID,
+        excerpt: str | None,
+    ) -> None:
+        """데일리리포트에 코멘트가 달렸을 때 작성자에게 알림 + 이메일.
+
+        본인이 자기 보고서에 코멘트하는 경우는 알림 생략.
+        """
+        recipient_id: UUID | None = report.author_id
+        if recipient_id is None or recipient_id == author_id:
+            return
+        try:
+            from app.services.notification_service import notification_service
+            from app.utils.email import send_email
+            from app.utils.email_templates import build_reply_email
+            import asyncio
+
+            author_r = await db.execute(select(User.full_name).where(User.id == author_id))
+            author_name = author_r.scalar() or "Manager"
+            recipient_r = await db.execute(
+                select(User.full_name, User.email).where(User.id == recipient_id)
+            )
+            row = recipient_r.first()
+            recipient_name = (row.full_name if row else None) or "there"
+            recipient_email = row.email if row else None
+
+            period_label = "Lunch" if report.period == "lunch" else "Dinner" if report.period == "dinner" else str(report.period)
+            subtitle = f"{report.report_date} · {period_label}"
+
+            await notification_service.create_for_reply(
+                db,
+                organization_id=report.organization_id,
+                recipient_id=recipient_id,
+                author_name=author_name,
+                context_label="daily report",
+                reference_type="daily_report",
+                reference_id=report.id,
+            )
+            await db.commit()
+
+            if recipient_email:
+                subject, html = build_reply_email(
+                    recipient_name=recipient_name,
+                    author_name=author_name,
+                    context_label="Daily Report",
+                    context_subtitle=subtitle,
+                    excerpt=(excerpt[:160] if excerpt else None),
+                    cta_url=None,
+                )
+                asyncio.create_task(send_email(to=recipient_email, subject=subject, html=html))
+        except Exception:
+            pass
 
     def _to_report_dict(
         self,

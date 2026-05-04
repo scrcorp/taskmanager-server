@@ -365,6 +365,7 @@ class AuthService:
             password_hash=password_hash,
             email_verified=True,
             clockin_pin=clockin_pin,
+            preferred_language=data.preferred_language,
         )
         db.add(user)
         await db.flush()
@@ -534,6 +535,7 @@ class AuthService:
             is_active=loaded_user.is_active,
             must_change_password=loaded_user.must_change_password,
             permissions=sorted(permissions),
+            preferred_language=loaded_user.preferred_language,  # type: ignore[arg-type]
         )
 
 
