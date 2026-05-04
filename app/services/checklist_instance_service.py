@@ -697,7 +697,7 @@ class ChecklistInstanceService:
         content_type: str,
         content: str,
     ) -> ChecklistItemMessage:
-        """리뷰에 메시지(텍스트/사진/영상)를 추가합니다."""
+        """항목에 메시지(텍스트/사진/영상)를 추가합니다. review_result 유무와 무관."""
         instance = await checklist_instance_repository.get_with_items(db, instance_id)
         if instance is None:
             raise NotFoundError("Checklist instance not found")
@@ -705,8 +705,8 @@ class ChecklistInstanceService:
         target_item: ChecklistInstanceItem | None = next(
             (it for it in instance.items if it.item_index == item_index), None
         )
-        if target_item is None or target_item.review_result is None:
-            raise NotFoundError("Review not found")
+        if target_item is None:
+            raise NotFoundError("Checklist item not found")
 
         try:
             if content_type in ("photo", "video"):
@@ -746,10 +746,83 @@ class ChecklistInstanceService:
             if content_type in ("photo", "video"):
                 msg.content = storage_service.resolve_url(file_key)  # type: ignore[assignment]
             await db.commit()
+            # 답변 알림 — 항목을 완료한 사람(staff)에게 통지. 본인 답변은 제외.
+            await self._notify_review_reply(
+                db,
+                instance=instance,
+                target_item=target_item,
+                author_id=author_id,
+                excerpt=content if content_type == "text" else None,
+            )
             return msg
         except Exception:
             await db.rollback()
             raise
+
+    async def _notify_review_reply(
+        self,
+        db: AsyncSession,
+        *,
+        instance: ChecklistInstance,
+        target_item: ChecklistInstanceItem,
+        author_id: UUID,
+        excerpt: str | None,
+    ) -> None:
+        """체크리스트 항목에 답변이 달렸을 때 알림 + 이메일 발송.
+
+        수신자 결정 우선순위:
+        1) target_item.completed_by — 가장 정확
+        2) instance.user_id — fallback (배정 받은 사람)
+        본인이 자기 답변에 다는 경우는 알림 생략.
+        """
+        recipient_id: UUID | None = target_item.completed_by or instance.user_id
+        if recipient_id is None or recipient_id == author_id:
+            return
+        try:
+            from app.services.notification_service import notification_service
+            from app.repositories.notification_repository import notification_repository  # noqa: F401
+
+            author_name_r = await db.execute(select(User.full_name).where(User.id == author_id))
+            author_name = author_name_r.scalar() or "Manager"
+            recipient_r = await db.execute(
+                select(User.full_name, User.email).where(User.id == recipient_id)
+            )
+            row = recipient_r.first()
+            recipient_name = (row.full_name if row else None) or "there"
+            recipient_email = row.email if row else None
+
+            item_title = target_item.title or "Checklist item"
+
+            # in-app notification
+            await notification_service.create_for_reply(
+                db,
+                organization_id=instance.organization_id,
+                recipient_id=recipient_id,
+                author_name=author_name,
+                context_label="checklist item",
+                reference_type="checklist_review",
+                reference_id=instance.id,
+            )
+            await db.commit()
+
+            # email (best-effort, async fire-and-forget)
+            if recipient_email:
+                import asyncio
+                from app.utils.email import send_email
+                from app.utils.email_templates import build_reply_email
+
+                subject, html = build_reply_email(
+                    recipient_name=recipient_name,
+                    author_name=author_name,
+                    context_label="Checklist Item",
+                    context_subtitle=item_title,
+                    excerpt=(excerpt[:160] if excerpt else None),
+                    cta_url=None,
+                )
+                asyncio.create_task(send_email(to=recipient_email, subject=subject, html=html))
+        except Exception:
+            # 알림 실패는 메시지 자체 저장에 영향 주지 않음
+            pass
 
     async def delete_review_content(
         self,

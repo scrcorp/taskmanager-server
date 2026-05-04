@@ -128,6 +128,9 @@ class User(Base):
     must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # 기본 시급 — Default hourly rate for labor cost calculation (nullable)
     hourly_rate: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
+    # 선호 언어 — Preferred UI/notification language (BCP-47 short code: en/es/ko).
+    # 현재는 정보 수집용. 실제 UI 다국어화는 추후 별도 작업.
+    preferred_language: Mapped[str] = mapped_column(String(8), nullable=False, default="en", server_default="en")
     # 근태 기기 PIN — 매장 공용 기기에서 clock in/out 시 사용하는 개인 6자리 PIN.
     # Attendance device PIN — 6-digit numeric code for personal auth at shared terminals.
     # organization 단위 unique (uq_user_org_clockin_pin).
