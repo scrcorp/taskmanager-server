@@ -1082,6 +1082,10 @@ class ScheduleService:
             from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
             await ensure_attendance_for_schedule(db, updated)
 
+            # 배정된 직원에게 승인 알림
+            from app.services.alert_service import alert_service
+            await alert_service.create_for_schedule_approve(db, updated)
+
             result = await self._to_response(db, updated)
             await db.commit()
             return result
@@ -1161,6 +1165,10 @@ class ScheduleService:
             # Eager attendance: 이미 생성돼 있거나 존재하지 않는 경우 대비
             from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
             await ensure_attendance_for_schedule(db, updated)  # type: ignore[arg-type]
+
+            # GM+ 에게 승인 대기 알림
+            from app.services.alert_service import alert_service
+            await alert_service.create_for_schedule_submit(db, updated)  # type: ignore[arg-type]
 
             result = await self._to_response(db, updated)  # type: ignore[arg-type]
             await db.commit()

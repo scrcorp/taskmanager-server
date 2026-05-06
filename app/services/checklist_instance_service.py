@@ -421,7 +421,7 @@ class ChecklistInstanceService:
         Archives existing evidence into cl_item_submissions,
         updates item with new data, sets review_result to pending_re_review.
         """
-        from app.services.notification_service import notification_service
+        from app.services.alert_service import alert_service
 
         instance = await checklist_instance_repository.get_with_items(db, instance_id)
         if instance is None:
@@ -514,7 +514,7 @@ class ChecklistInstanceService:
                 await db.flush()
 
                 # reviewer에게 알림 (기존 인터페이스와 호환성 유지)
-                await notification_service.create_for_checklist_re_review_item(
+                await alert_service.create_for_checklist_re_review_item(
                     db,
                     instance=instance,
                     item=target_item,
@@ -779,8 +779,8 @@ class ChecklistInstanceService:
         if recipient_id is None or recipient_id == author_id:
             return
         try:
-            from app.services.notification_service import notification_service
-            from app.repositories.notification_repository import notification_repository  # noqa: F401
+            from app.services.alert_service import alert_service
+            from app.repositories.alert_repository import alert_repository  # noqa: F401
 
             author_name_r = await db.execute(select(User.full_name).where(User.id == author_id))
             author_name = author_name_r.scalar() or "Manager"
@@ -793,8 +793,8 @@ class ChecklistInstanceService:
 
             item_title = target_item.title or "Checklist item"
 
-            # in-app notification
-            await notification_service.create_for_reply(
+            # in-app alert
+            await alert_service.create_for_reply(
                 db,
                 organization_id=instance.organization_id,
                 recipient_id=recipient_id,
@@ -805,8 +805,10 @@ class ChecklistInstanceService:
             )
             await db.commit()
 
-            # email (best-effort, async fire-and-forget)
-            if recipient_email:
+            # email (best-effort, async fire-and-forget) — 사용자 선호 가드
+            if recipient_email and await alert_service.should_send_email(
+                db, recipient_id, "reply"
+            ):
                 import asyncio
                 from app.utils.email import send_email
                 from app.utils.email_templates import build_reply_email
@@ -1142,9 +1144,9 @@ class ChecklistInstanceService:
             )
             template_name = tpl_result.scalar() or ""
 
-        # notification + get managers for email
-        from app.services.notification_service import notification_service
-        notifications, managers = await notification_service.create_for_checklist_submitted(
+        # alert + get managers for email
+        from app.services.alert_service import alert_service
+        alerts, managers = await alert_service.create_for_checklist_submitted(
             db, instance, staff_name, store_name
         )
         await db.commit()
@@ -1158,21 +1160,27 @@ class ChecklistInstanceService:
         admin_url = f"{settings.ADMIN_BASE_URL}/checklists/instances/{instance.id}"
 
         for manager in managers:
-            if manager.email:
-                try:
-                    subject, html = build_checklist_completed_email(
-                        store_name=store_name,
-                        staff_name=staff_name,
-                        work_role_name=work_role_name,
-                        work_date=work_date_str,
-                        template_name=template_name,
-                        total_items=instance.total_items,
-                        completed_items=instance.completed_items,
-                        admin_url=admin_url,
-                    )
-                    asyncio.create_task(send_email(to=manager.email, subject=subject, html=html))
-                except Exception:
-                    pass  # email failure should not block
+            if not manager.email:
+                continue
+            # 사용자 선호 — checklist 카테고리 email 비활성 시 skip
+            if not await alert_service.should_send_email(
+                db, manager.id, "checklist_submitted"
+            ):
+                continue
+            try:
+                subject, html = build_checklist_completed_email(
+                    store_name=store_name,
+                    staff_name=staff_name,
+                    work_role_name=work_role_name,
+                    work_date=work_date_str,
+                    template_name=template_name,
+                    total_items=instance.total_items,
+                    completed_items=instance.completed_items,
+                    admin_url=admin_url,
+                )
+                asyncio.create_task(send_email(to=manager.email, subject=subject, html=html))
+            except Exception:
+                pass  # email failure should not block
 
         return instance
 

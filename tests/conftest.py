@@ -33,7 +33,7 @@ from app.database import async_session  # noqa: E402
 from app.models.attendance import Attendance  # noqa: E402
 from app.models.attendance_break import AttendanceBreak  # noqa: E402
 from app.models.attendance_device import AttendanceDevice  # noqa: E402
-from app.models.communication import Announcement  # noqa: E402
+from app.models.communication import Notice  # noqa: E402
 from app.models.organization import Store  # noqa: E402
 from app.models.schedule import Schedule  # noqa: E402
 from app.models.user import User  # noqa: E402
@@ -363,7 +363,7 @@ async def _purge_test_data(
             )
         )
         await db.execute(
-            delete(Announcement).where(Announcement.title.like("__TEST__%"))
+            delete(Notice).where(Notice.title.like("__TEST__%"))
         )
         await db.commit()
 

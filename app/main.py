@@ -46,7 +46,7 @@ async def health_check() -> dict[str, str]:
 # Router registration — All Phase 1~3 endpoints aggregated in sub-packages
 # ---------------------------------------------------------------------------
 # admin_router: Phase 1(Foundation) + Phase 2(Core Workflow) + Phase 3(Communication)
-# app_router: Phase 1(Auth/Profile) + Phase 2(Assignments) + Phase 3(Announcements/Tasks/Notifications)
+# app_router: Phase 1(Auth/Profile) + Phase 2(Assignments) + Phase 3(Notices/Tasks/Alerts)
 from app.api.auth import router as common_auth_router  # noqa: E402
 from app.api.admin import admin_router  # noqa: E402
 from app.api.app import app_router  # noqa: E402

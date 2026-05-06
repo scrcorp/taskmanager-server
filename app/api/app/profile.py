@@ -14,7 +14,12 @@ from app.api.deps import get_current_user
 from app.database import get_db
 from app.models.user import User
 from app.schemas.attendance_device import ClockinPinResponse
-from app.schemas.user import ProfileResponse, ProfileUpdate
+from app.schemas.user import (
+    AlertPreferencesResponse,
+    AlertPreferencesUpdate,
+    ProfileResponse,
+    ProfileUpdate,
+)
 from app.services.attendance_device_service import generate_unique_clockin_pin
 from app.services.profile_service import profile_service
 
@@ -86,3 +91,21 @@ async def regenerate_my_clockin_pin(
     )
     await db.commit()
     return ClockinPinResponse(user_id=current_user.id, clockin_pin=current_user.clockin_pin)
+
+
+@router.get("/profile/alert-preferences", response_model=AlertPreferencesResponse)
+async def get_my_alert_preferences(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AlertPreferencesResponse:
+    """내 알림 선호 + 카테고리 메타 조회. 클라가 그대로 렌더 가능한 응답."""
+    return await profile_service.get_alert_preferences(current_user)
+
+
+@router.put("/profile/alert-preferences", response_model=AlertPreferencesResponse)
+async def update_my_alert_preferences(
+    data: AlertPreferencesUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AlertPreferencesResponse:
+    """내 알림 선호 부분 업데이트."""
+    return await profile_service.update_alert_preferences(db, current_user, data)

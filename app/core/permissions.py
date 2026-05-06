@@ -99,11 +99,11 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     # ── Schedule Settings ──
     ("schedule_settings:manage", "schedule_settings", "manage", "Access and modify schedule settings", False),
 
-    # ── Announcements ──
-    ("announcements:read",   "announcements", "read",   "View announcements", False),
-    ("announcements:create", "announcements", "create", "Create announcements", False),
-    ("announcements:update", "announcements", "update", "Edit announcements", False),
-    ("announcements:delete", "announcements", "delete", "Delete announcements", False),
+    # ── Notices ──
+    ("notices:read",   "notices", "read",   "View notices", False),
+    ("notices:create", "notices", "create", "Create notices", False),
+    ("notices:update", "notices", "update", "Edit notices", False),
+    ("notices:delete", "notices", "delete", "Delete notices", False),
 
     # ── Checklists ──
     ("checklists:read",   "checklists", "read",   "View checklist templates and instances", False),
@@ -195,7 +195,7 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
     "sv": {
         "stores:read", "users:read",
         "schedules:read", "schedules:create", "schedules:update",
-        "announcements:read",
+        "notices:read",
         "checklists:read",
         "checklist_review:read", "checklist_review:create",
         "checklist_log:read",

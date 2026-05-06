@@ -10,7 +10,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
-from app.models.communication import Announcement
+from app.models.communication import Notice
 
 
 pytestmark = pytest.mark.asyncio
@@ -179,21 +179,21 @@ async def test_notices_returns_org_and_store_scoped(
     org_id = test_users["testadmin"]["organization_id"]
 
     async with async_session() as db:
-        org_wide = Announcement(
+        org_wide = Notice(
             organization_id=org_id,
             store_id=None,
             title="__TEST__ org wide",
             content="hello org",
             created_by=test_users["testadmin"]["id"],
         )
-        this_store = Announcement(
+        this_store = Notice(
             organization_id=org_id,
             store_id=test_store_id,
             title="__TEST__ this store",
             content="hello store",
             created_by=test_users["testadmin"]["id"],
         )
-        other_store = Announcement(
+        other_store = Notice(
             organization_id=org_id,
             store_id=second_store_id,
             title="__TEST__ other store",

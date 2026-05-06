@@ -57,7 +57,7 @@ def build_daily_report_pdf(
     pdf.set_font(font, "B", 16)
     pdf.set_text_color(255, 255, 255)
     pdf.set_xy(14, 3)
-    pdf.cell(0, 12, "TaskManager — Daily Report", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 12, "HTM — Daily Report", new_x="LMARGIN", new_y="NEXT")
 
     # Meta section
     pdf.ln(8)
@@ -105,6 +105,6 @@ def build_daily_report_pdf(
     pdf.ln(4)
     pdf.set_font(font, "", 9)
     pdf.set_text_color(148, 163, 184)  # #94A3B8
-    pdf.cell(0, 6, "Automated report from TaskManager", align="C")
+    pdf.cell(0, 6, "Automated report from HTM", align="C")
 
     return filename, pdf.output()
