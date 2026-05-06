@@ -343,7 +343,7 @@ class DailyReportService:
         if recipient_id is None or recipient_id == author_id:
             return
         try:
-            from app.services.notification_service import notification_service
+            from app.services.alert_service import alert_service
             from app.utils.email import send_email
             from app.utils.email_templates import build_reply_email
             import asyncio
@@ -360,7 +360,7 @@ class DailyReportService:
             period_label = "Lunch" if report.period == "lunch" else "Dinner" if report.period == "dinner" else str(report.period)
             subtitle = f"{report.report_date} · {period_label}"
 
-            await notification_service.create_for_reply(
+            await alert_service.create_for_reply(
                 db,
                 organization_id=report.organization_id,
                 recipient_id=recipient_id,
@@ -371,7 +371,9 @@ class DailyReportService:
             )
             await db.commit()
 
-            if recipient_email:
+            if recipient_email and await alert_service.should_send_email(
+                db, recipient_id, "reply"
+            ):
                 subject, html = build_reply_email(
                     recipient_name=recipient_name,
                     author_name=author_name,

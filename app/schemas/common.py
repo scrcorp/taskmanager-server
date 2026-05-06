@@ -1,8 +1,8 @@
 """공통 Pydantic 요청/응답 스키마 정의.
 
 Common Pydantic request/response schema definitions.
-Includes schemas for checklists, assignments, announcements,
-additional tasks, notifications, pagination, and generic messages.
+Includes schemas for checklists, assignments, notices,
+additional tasks, alerts, pagination, and generic messages.
 This module consolidates schemas used across multiple API domains.
 """
 
@@ -244,29 +244,29 @@ class ChecklistItemRespond(BaseModel):
     photo_urls: list[str] | None = None  # 사진 URL 배열
 
 
-# === 공지사항 (Announcement) 스키마 ===
+# === 공지사항 (Notice) 스키마 ===
 
-class AnnouncementCreate(BaseModel):
+class NoticeCreate(BaseModel):
     """공지사항 생성 요청 스키마.
 
-    Announcement creation request schema.
-    If store_id is null, the announcement targets the entire organization.
+    Notice creation request schema.
+    If store_id is null, the notice targets the entire organization.
 
     Attributes:
-        title: 공지 제목 (Announcement title)
-        content: 공지 내용 (Announcement body text)
+        title: 공지 제목 (Notice title)
+        content: 공지 내용 (Notice body text)
         store_id: 대상 매장 UUID (Target store, null = org-wide)
     """
 
-    title: str  # 공지 제목 (Announcement title)
-    content: str  # 공지 내용 (Announcement body)
+    title: str  # 공지 제목 (Notice title)
+    content: str  # 공지 내용 (Notice body)
     store_id: str | None = None  # 대상 매장 — None이면 조직 전체 (Store scope, null = org-wide)
 
 
-class AnnouncementUpdate(BaseModel):
+class NoticeUpdate(BaseModel):
     """공지사항 수정 요청 스키마 (부분 업데이트).
 
-    Announcement update request schema (partial update).
+    Notice update request schema (partial update).
 
     Attributes:
         title: 공지 제목 (New title, optional)
@@ -277,22 +277,22 @@ class AnnouncementUpdate(BaseModel):
     content: str | None = None  # 변경할 공지 내용 (New content, optional)
 
 
-class AnnouncementResponse(BaseModel):
+class NoticeResponse(BaseModel):
     """공지사항 응답 스키마.
 
-    Announcement response schema with resolved names.
+    Notice response schema with resolved names.
 
     Attributes:
-        id: 공지 UUID (Announcement unique identifier)
-        title: 공지 제목 (Announcement title)
-        content: 공지 내용 (Announcement body)
+        id: 공지 UUID (Notice unique identifier)
+        title: 공지 제목 (Notice title)
+        content: 공지 내용 (Notice body)
         store_id: 대상 매장 UUID (Target store, nullable)
         store_name: 대상 매장 이름 (Resolved store name, nullable)
         created_by_name: 작성자 이름 (Resolved author name)
         created_at: 생성 일시 (Creation timestamp)
     """
 
-    id: str  # 공지 UUID 문자열 (Announcement UUID as string)
+    id: str  # 공지 UUID 문자열 (Notice UUID as string)
     title: str  # 공지 제목 (Title)
     content: str  # 공지 내용 (Body text)
     store_id: str | None  # 대상 매장 UUID — None이면 조직 전체 (Store scope, null = org-wide)
@@ -423,18 +423,18 @@ class TaskEvidenceResponse(BaseModel):
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 
-# === 알림 (Notification) 스키마 ===
+# === 알림 (Alert) 스키마 ===
 
-class NotificationResponse(BaseModel):
+class AlertResponse(BaseModel):
     """알림 응답 스키마.
 
-    Notification response schema.
+    Alert response schema.
     Uses polymorphic reference_type + reference_id for deep-linking
     to the source entity in the client app.
 
     Attributes:
-        id: 알림 UUID (Notification unique identifier)
-        type: 알림 유형 (Notification type)
+        id: 알림 UUID (Alert unique identifier)
+        type: 알림 유형 (Alert type)
         message: 알림 메시지 (Human-readable message)
         reference_type: 참조 엔티티 유형 (Source entity type, nullable)
         reference_id: 참조 엔티티 UUID (Source entity UUID, nullable)
@@ -442,8 +442,8 @@ class NotificationResponse(BaseModel):
         created_at: 생성 일시 (Creation timestamp)
     """
 
-    id: str  # 알림 UUID 문자열 (Notification UUID as string)
-    type: str  # 알림 유형 — "work_assigned"|"additional_task"|"announcement"|"task_completed"
+    id: str  # 알림 UUID 문자열 (Alert UUID as string)
+    type: str  # 알림 유형 — "work_assigned"|"additional_task"|"notice"|"task_completed"
     message: str  # 알림 메시지 (Display message)
     reference_type: str | None  # 참조 엔티티 유형 — 딥링크용 (Entity type for deep-linking)
     reference_id: str | None  # 참조 엔티티 UUID — 딥링크용 (Entity UUID for deep-linking)

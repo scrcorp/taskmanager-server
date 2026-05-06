@@ -13,7 +13,7 @@ fallback 동작 (STORAGE_FALLBACK_BUCKET 또는 LOCAL_FALLBACK_BUCKET_DIR 설정
   staging은 prod에서, worktree는 dev에서 fallback.
 
 폴더별 경로는 .env에서 설정 가능 (STORAGE_FOLDER_*). 기본값:
-  reviews, completions, profiles, announcements, issues
+  reviews, completions, profiles, notices, issues
 """
 
 import logging
@@ -40,7 +40,7 @@ FOLDER_MAP: dict[str, str] = {
     "reviews": settings.STORAGE_FOLDER_REVIEWS,
     "completions": settings.STORAGE_FOLDER_COMPLETIONS,
     "profiles": settings.STORAGE_FOLDER_PROFILES,
-    "announcements": settings.STORAGE_FOLDER_ANNOUNCEMENTS,
+    "notices": settings.STORAGE_FOLDER_ANNOUNCEMENTS,
     "issues": settings.STORAGE_FOLDER_ISSUES,
 }
 

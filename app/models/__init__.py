@@ -12,8 +12,8 @@ Modules:
     token: 리프레시 토큰 (Refresh tokens)
     user_store: 사용자-매장 매핑 (User-Store association)
     checklist: 체크리스트 템플릿, 인스턴스, 아이템 (Checklist templates, instances, items)
-    communication: 공지사항, 추가 업무, 증빙, 읽음추적 (Announcements, tasks, evidences, read tracking)
-    notification: 알림 (User notifications)
+    communication: 공지사항, 추가 업무, 증빙, 읽음추적 (Notices, tasks, evidences, read tracking)
+    alert: 알림 (User alerts)
     schedule: 스케줄 및 승인 (Schedules and approvals)
     attendance: 근태 관리 (Attendance: QR codes, records, corrections)
     evaluation: 평가 템플릿, 평가, 응답 (Evaluation templates, evaluations, responses)
@@ -26,8 +26,8 @@ from app.models.work import Shift, Position
 from app.models.token import RefreshToken
 from app.models.user_store import UserStore
 from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistInstance, ChecklistInstanceItem, ChecklistItemFile, ChecklistItemSubmission, ChecklistItemReviewLog, ChecklistItemMessage
-from app.models.communication import Announcement, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, AnnouncementRead, Voice
-from app.models.notification import Notification
+from app.models.communication import Notice, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, NoticeRead, Voice
+from app.models.alert import Alert
 from app.models.schedule import Schedule, StoreWorkRole, StoreBreakRule, ScheduleRequestTemplate, ScheduleRequestTemplateItem, ScheduleRequest, ScheduleAuditLog
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
 from app.models.attendance_break import AttendanceBreak
@@ -48,8 +48,8 @@ __all__ = [
     "Shift", "Position",
     "RefreshToken", "UserStore",
     "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistInstance", "ChecklistInstanceItem", "ChecklistItemFile", "ChecklistItemSubmission", "ChecklistItemReviewLog", "ChecklistItemMessage",
-    "Announcement", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "AnnouncementRead", "Voice",
-    "Notification",
+    "Notice", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "NoticeRead", "Voice",
+    "Alert",
     "Schedule", "StoreWorkRole", "StoreBreakRule", "ScheduleRequestTemplate", "ScheduleRequestTemplateItem", "ScheduleRequest", "ScheduleAuditLog",
     "QRCode", "Attendance", "AttendanceCorrection",
     "AttendanceBreak",

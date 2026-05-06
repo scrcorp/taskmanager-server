@@ -9,9 +9,17 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.alert_categories import CATEGORIES, normalize_preferences
 from app.models.user import Role, User
 from app.repositories.user_repository import user_repository
-from app.schemas.user import ProfileResponse, ProfileUpdate
+from app.schemas.user import (
+    AlertCategoryChannel,
+    AlertCategoryMeta,
+    AlertPreferencesResponse,
+    AlertPreferencesUpdate,
+    ProfileResponse,
+    ProfileUpdate,
+)
 from app.utils.exceptions import BadRequestError, DuplicateError
 
 
@@ -137,6 +145,79 @@ class ProfileService:
 
         role_name: str = await self._resolve_role_name(db, current_user.role_id)
         return self._to_response(current_user, role_name)
+
+
+    # --- 알림 선호 (Alert preferences) ---
+
+    def _build_preferences_response(self, user: User) -> AlertPreferencesResponse:
+        """카테고리 메타 + 사용자 현재 prefs 를 응답 형태로."""
+        prefs_raw = user.alert_preferences or {}
+        prefs: dict[str, AlertCategoryChannel] = {}
+        for code, val in prefs_raw.items():
+            if not isinstance(val, dict):
+                continue
+            prefs[code] = AlertCategoryChannel(
+                in_app=val.get("in_app"),
+                email=val.get("email"),
+            )
+        categories = [
+            AlertCategoryMeta(
+                code=c["code"],
+                label=c["label"],
+                description=c["description"],
+                email_available=c["email_available"],
+            )
+            for c in CATEGORIES
+        ]
+        return AlertPreferencesResponse(categories=categories, preferences=prefs)
+
+    async def get_alert_preferences(
+        self,
+        current_user: User,
+    ) -> AlertPreferencesResponse:
+        """현재 사용자의 알림 선호 + 카테고리 메타 조회."""
+        return self._build_preferences_response(current_user)
+
+    async def update_alert_preferences(
+        self,
+        db: AsyncSession,
+        current_user: User,
+        data: AlertPreferencesUpdate,
+    ) -> AlertPreferencesResponse:
+        """알림 선호 부분 업데이트 — 받은 카테고리/채널만 머지.
+
+        삭제 의도(default 로 복귀)는 클라가 명시적으로 in_app/email 에 None 보내면
+        해당 키 제거. 보내지 않은 카테고리는 기존 값 유지.
+        """
+        existing: dict = dict(current_user.alert_preferences or {})
+
+        # 클라 입력 정규화 — 알 수 없는 카테고리/필드 제거
+        raw_input: dict = {
+            code: val.model_dump(exclude_none=True)
+            for code, val in data.preferences.items()
+        }
+        cleaned = normalize_preferences(raw_input)
+
+        # 명시적 None 처리 — 클라가 "기본값으로" 라고 명시 → 키 삭제
+        # exclude_none 으로 이미 None 은 빠진 상태. 별도 처리 불필요.
+        for code, channels in cleaned.items():
+            merged = dict(existing.get(code, {}))
+            merged.update(channels)
+            existing[code] = merged
+
+        # 모두 None/default 가 된 카테고리는 삭제 (저장소 깔끔하게)
+        existing = {k: v for k, v in existing.items() if v}
+
+        try:
+            current_user.alert_preferences = existing
+            await db.flush()
+            await db.refresh(current_user)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+        return self._build_preferences_response(current_user)
 
 
 # 싱글턴 인스턴스 — Singleton instance

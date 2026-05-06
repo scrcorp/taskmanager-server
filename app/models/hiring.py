@@ -99,7 +99,7 @@ class Candidate(Base):
     )
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    # 선호 언어 — Preferred UI/notification language (en/es/ko). hire 시 user로 복사.
+    # 선호 언어 — Preferred UI/alert language (en/es/ko). hire 시 user로 복사.
     preferred_language: Mapped[str] = mapped_column(
         String(8), nullable=False, default="en", server_default="en"
     )

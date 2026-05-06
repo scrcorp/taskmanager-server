@@ -20,7 +20,7 @@ SETUP_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TaskManager Setup</title>
+<title>HTM Setup</title>
 <style>
 body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
 .card{background:#1a1a2e;border:1px solid #333;border-radius:12px;padding:40px;width:360px}
@@ -37,7 +37,7 @@ button:hover{background:#7c6df0}
 </head>
 <body>
 <div class="card">
-<h2>TaskManager Setup</h2>
+<h2>HTM Setup</h2>
 {{MESSAGE}}
 <form method="post" action="/api/v1/admin/auth/setup">
 <label>Organization Name</label>

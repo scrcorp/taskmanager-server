@@ -232,10 +232,10 @@ class TaskService:
             if assignee_uuids:
                 await task_repository.add_assignees(db, task.id, assignee_uuids)
 
-                # 알림 자동 생성 — Auto-create notifications
-                from app.services.notification_service import notification_service
+                # 알림 자동 생성 — Auto-create alerts
+                from app.services.alert_service import alert_service
 
-                await notification_service.create_for_task(db, task, assignee_uuids)
+                await alert_service.create_for_task(db, task, assignee_uuids)
 
             await db.commit()
             return task

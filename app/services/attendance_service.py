@@ -539,8 +539,8 @@ class AttendanceService:
         await db.flush()
 
         # 근태 수정 알림 — Notify GM+ about attendance correction
-        from app.services.notification_service import notification_service
-        await notification_service.create_for_attendance_correction(
+        from app.services.alert_service import alert_service
+        await alert_service.create_for_attendance_correction(
             db, attendance_id, organization_id, corrected_by, field_name
         )
 
