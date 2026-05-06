@@ -35,7 +35,7 @@ def build_verification_code_email(code: str) -> tuple[str, str]:
         </tr>
         <tr>
           <td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;">
-            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated notification from TaskManager</div>
+            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div>
           </td>
         </tr>
       </table>
@@ -55,7 +55,7 @@ def build_daily_report_email(
     submitted_at: str,
     sections: list[dict],
 ) -> tuple[str, str]:
-    """Build daily report submission notification email.
+    """Build daily report submission alert email.
 
     Returns:
         (subject, html_body) tuple
@@ -120,7 +120,7 @@ def build_daily_report_email(
         <!-- Footer -->
         <tr>
           <td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;">
-            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated notification from TaskManager</div>
+            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div>
           </td>
         </tr>
       </table>
@@ -142,7 +142,7 @@ def build_checklist_completed_email(
     completed_items: int,
     admin_url: str,
 ) -> tuple[str, str]:
-    """Build checklist completion notification email.
+    """Build checklist completion alert email.
 
     Returns:
         (subject, html_body) tuple
@@ -186,7 +186,7 @@ def build_checklist_completed_email(
         <!-- Footer -->
         <tr>
           <td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;">
-            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated notification from TaskManager</div>
+            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div>
           </td>
         </tr>
       </table>
@@ -206,7 +206,7 @@ def build_reply_email(
     excerpt: str | None,
     cta_url: str | None = None,
 ) -> tuple[str, str]:
-    """Build a generic notification email for a reply on a checklist item or daily report.
+    """Build a generic alert email for a reply on a checklist item or daily report.
 
     Args:
         recipient_name: 받는 사람 이름 (예: "Alice")
@@ -245,7 +245,7 @@ def build_reply_email(
           </td>
         </tr>
         {cta_html}
-        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated notification from TaskManager</div></td></tr>
+        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div></td></tr>
       </table>
     </td></tr>
   </table>
@@ -272,7 +272,7 @@ def build_password_reset_code_email(code: str) -> tuple[str, str]:
           <div style="display:inline-block;padding:16px 40px;background-color:#F1F5F9;border-radius:8px;font-size:32px;font-weight:800;letter-spacing:8px;color:#1E293B;">{escape(code)}</div>
           <div style="font-size:13px;color:#94A3B8;margin-top:24px;">This code expires in 5 minutes.</div>
         </td></tr>
-        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated notification from TaskManager</div></td></tr>
+        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div></td></tr>
       </table>
     </td></tr>
   </table>
@@ -282,7 +282,7 @@ def build_password_reset_code_email(code: str) -> tuple[str, str]:
 
 
 def build_temporary_password_email(temp_password: str) -> tuple[str, str]:
-    """Build temporary password notification email."""
+    """Build temporary password alert email."""
     subject = "[TaskManager] Your Password Has Been Reset"
     html = f"""\
 <!DOCTYPE html>
@@ -299,7 +299,7 @@ def build_temporary_password_email(temp_password: str) -> tuple[str, str]:
           <div style="display:inline-block;padding:16px 40px;background-color:#FFF8E1;border:2px solid #FDCB6E;border-radius:8px;font-size:28px;font-weight:800;letter-spacing:4px;color:#1E293B;">{escape(temp_password)}</div>
           <div style="font-size:14px;color:#64748B;margin-top:24px;font-weight:600;">We recommend changing your password after logging in.</div>
         </td></tr>
-        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated notification from TaskManager</div></td></tr>
+        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div></td></tr>
       </table>
     </td></tr>
   </table>

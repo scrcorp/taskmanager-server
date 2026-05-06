@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     STORAGE_FOLDER_REVIEWS: str = "reviews"
     STORAGE_FOLDER_COMPLETIONS: str = "completions"
     STORAGE_FOLDER_PROFILES: str = "profiles"
-    STORAGE_FOLDER_ANNOUNCEMENTS: str = "announcements"
+    STORAGE_FOLDER_ANNOUNCEMENTS: str = "notices"
     STORAGE_FOLDER_ISSUES: str = "issues"
 
     # 체크리스트 사진 최대 장수 — 플랫폼 전체 상수

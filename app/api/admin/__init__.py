@@ -17,9 +17,9 @@ Included routers (Phase 2 — Core Workflow):
     - assignments: 업무 배정 관리 (Work assignment management)
 
 Included routers (Phase 3 — Communication):
-    - announcements: 공지사항 관리 (Announcement management)
+    - notices: 공지사항 관리 (Notice management)
     - tasks: 추가 업무 관리 (Additional task management)
-    - notifications: 관리자 알림 관리 (Admin notification management)
+    - alerts: 관리자 알림 관리 (Admin alert management)
 
 Included routers (Phase 4 — Schedule):
     - schedules: 스케줄 관리 (Schedule draft & approval management)
@@ -46,9 +46,10 @@ from app.api.admin.checklists import router as checklists_router
 from app.api.admin.checklist_instances import router as checklist_instances_router
 
 # Phase 3 — Communication 라우터 임포트
-from app.api.admin.announcements import router as announcements_router
+from app.api.admin.notices import router as notices_router
 from app.api.admin.tasks import router as tasks_router
-from app.api.admin.notifications import router as notifications_router
+from app.api.admin.alerts import router as alerts_router
+from app.api.admin.profile import router as profile_router
 
 # Phase 4 — Schedule (구 schedules 라우터 삭제됨, schedule_entries가 /schedules로 이동)
 
@@ -123,9 +124,10 @@ admin_router.include_router(checklist_instances_router, prefix="/checklist-insta
 # ---------------------------------------------------------------------------
 # Phase 3 라우터 등록 — Register Phase 3 (Communication) routers
 # ---------------------------------------------------------------------------
-admin_router.include_router(announcements_router, prefix="/announcements", tags=["Announcements"])
+admin_router.include_router(notices_router, prefix="/notices", tags=["Notices"])
 admin_router.include_router(tasks_router, prefix="/additional-tasks", tags=["Additional Tasks"])
-admin_router.include_router(notifications_router, prefix="/notifications", tags=["Admin Notifications"])
+admin_router.include_router(alerts_router, prefix="/alerts", tags=["Admin Alerts"])
+admin_router.include_router(profile_router, prefix="/profile", tags=["Admin Profile"])
 
 # ---------------------------------------------------------------------------
 # Phase 4 라우터 등록 — Register Phase 4 (Schedule) routers

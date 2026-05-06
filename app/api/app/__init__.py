@@ -11,9 +11,9 @@ Included routers (Phase 2 — Core Workflow):
     - assignments: 내 업무 배정 (My work assignments)
 
 Included routers (Phase 3 — Communication):
-    - announcements: 내 공지사항 (My announcements)
+    - notices: 내 공지사항 (My notices)
     - tasks: 내 추가 업무 (My additional tasks)
-    - notifications: 내 알림 (My notifications)
+    - alerts: 내 알림 (My alerts)
 
 Included routers (Phase 5 — Attendance):
     - attendances: 내 근태 (My attendance: QR scan, today, history)
@@ -30,9 +30,9 @@ from app.api.app.profile import router as profile_router
 from app.api.app.checklist_instances import router as checklist_instances_router
 
 # Phase 3 — Communication 라우터 임포트
-from app.api.app.announcements import router as announcements_router
+from app.api.app.notices import router as notices_router
 from app.api.app.tasks import router as tasks_router
-from app.api.app.notifications import router as notifications_router
+from app.api.app.alerts import router as alerts_router
 
 # Phase 5 — Attendance 라우터 임포트
 from app.api.app.attendances import router as attendance_router
@@ -85,9 +85,9 @@ app_router.include_router(checklist_instances_router, prefix="/my/checklist-inst
 # ---------------------------------------------------------------------------
 # Phase 3 라우터 등록 — Register Phase 3 (Communication) routers
 # ---------------------------------------------------------------------------
-app_router.include_router(announcements_router, prefix="/my/announcements", tags=["My Announcements"])
+app_router.include_router(notices_router, prefix="/my/notices", tags=["My Notices"])
 app_router.include_router(tasks_router, prefix="/my/additional-tasks", tags=["My Tasks"])
-app_router.include_router(notifications_router, prefix="/my/notifications", tags=["My Notifications"])
+app_router.include_router(alerts_router, prefix="/my/alerts", tags=["My Alerts"])
 
 # ---------------------------------------------------------------------------
 # Phase 5 라우터 등록 — Register Phase 5 (Attendance) routers

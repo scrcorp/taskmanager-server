@@ -89,7 +89,7 @@ async def admin_setup(
     sv_allowed = {
         "stores:read", "users:read", "roles:read",
         "schedules:read", "schedules:create",
-        "announcements:read", "checklists:read", "tasks:read",
+        "notices:read", "checklists:read", "tasks:read",
         "evaluations:read", "dashboard:read",
     }
 

@@ -423,20 +423,20 @@ async def notices(
     limit: int = 10,
 ) -> list[NoticeRow]:
     """기기 store 대상 공지 (최근 N개, 기본 10)."""
-    from app.models.communication import Announcement
+    from app.models.communication import Notice
 
     from sqlalchemy import or_
 
     stmt = (
-        select(Announcement)
+        select(Notice)
         .where(
-            Announcement.organization_id == device.organization_id,
+            Notice.organization_id == device.organization_id,
             or_(
-                Announcement.store_id.is_(None),
-                Announcement.store_id == device.store_id,
+                Notice.store_id.is_(None),
+                Notice.store_id == device.store_id,
             ),
         )
-        .order_by(Announcement.created_at.desc())
+        .order_by(Notice.created_at.desc())
         .limit(max(1, min(limit, 50)))
     )
     result = await db.execute(stmt)

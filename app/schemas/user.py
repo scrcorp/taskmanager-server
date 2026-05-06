@@ -216,3 +216,38 @@ class ProfileUpdate(BaseModel):
     full_name: str | None = None  # 변경할 실명 (New name, optional)
     email: str | None = None  # 변경할 이메일 (New email, optional)
     preferred_language: Literal["en", "es", "ko"] | None = None  # 선호 언어 (정보 수집용)
+
+
+class AlertCategoryChannel(BaseModel):
+    """카테고리 단일 채널 토글 — null 은 default(=on) 의미."""
+
+    in_app: bool | None = None
+    email: bool | None = None
+
+
+class AlertCategoryMeta(BaseModel):
+    """카테고리 메타 — 클라이언트 렌더용."""
+
+    code: str
+    label: str
+    description: str
+    email_available: bool
+
+
+class AlertPreferencesResponse(BaseModel):
+    """GET /me/alert-preferences 응답.
+
+    카테고리 메타 + 사용자 현재 설정. 미명시 카테고리/채널은 default = True.
+    """
+
+    categories: list[AlertCategoryMeta]
+    preferences: dict[str, AlertCategoryChannel]
+
+
+class AlertPreferencesUpdate(BaseModel):
+    """PUT /me/alert-preferences 요청.
+
+    부분 업데이트 — 받은 필드만 적용. 알 수 없는 카테고리/채널은 server 가 무시.
+    """
+
+    preferences: dict[str, AlertCategoryChannel]

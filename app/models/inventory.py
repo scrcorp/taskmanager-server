@@ -167,7 +167,7 @@ class StoreInventory(Base):
         store_id: FK to stores
         product_id: FK to inventory_products
         current_quantity: Current stock in ea (can be negative)
-        min_quantity: Alert threshold (notification when current <= min)
+        min_quantity: Alert threshold (alert when current <= min)
         is_frequent: Needs frequent stock checks
         last_audited_at: Last audit timestamp for this item
         is_active: Soft delete flag
