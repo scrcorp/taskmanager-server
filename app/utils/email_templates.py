@@ -9,7 +9,7 @@ def build_verification_code_email(code: str) -> tuple[str, str]:
     Returns:
         (subject, html_body) tuple
     """
-    subject = "[TaskManager] Email Verification Code"
+    subject = "[HTM] Email Verification Code"
 
     html = f"""\
 <!DOCTYPE html>
@@ -21,7 +21,7 @@ def build_verification_code_email(code: str) -> tuple[str, str]:
       <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
         <tr>
           <td style="background-color:#3B8DD9;padding:24px 28px;">
-            <div style="font-size:22px;font-weight:700;color:#FFFFFF;">TaskManager</div>
+            <div style="font-size:22px;font-weight:700;color:#FFFFFF;">HTM</div>
           </td>
         </tr>
         <tr>
@@ -35,7 +35,7 @@ def build_verification_code_email(code: str) -> tuple[str, str]:
         </tr>
         <tr>
           <td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;">
-            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div>
+            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from HTM</div>
           </td>
         </tr>
       </table>
@@ -91,7 +91,7 @@ def build_daily_report_email(
         <!-- Header -->
         <tr>
           <td style="background-color:#2563EB;padding:24px 28px;">
-            <div style="font-size:22px;font-weight:700;color:#FFFFFF;">TaskManager</div>
+            <div style="font-size:22px;font-weight:700;color:#FFFFFF;">HTM</div>
           </td>
         </tr>
         <!-- Meta -->
@@ -120,7 +120,7 @@ def build_daily_report_email(
         <!-- Footer -->
         <tr>
           <td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;">
-            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div>
+            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from HTM</div>
           </td>
         </tr>
       </table>
@@ -160,7 +160,7 @@ def build_checklist_completed_email(
         <!-- Header -->
         <tr>
           <td style="background-color:#00B894;padding:24px 28px;">
-            <div style="font-size:22px;font-weight:700;color:#FFFFFF;">TaskManager</div>
+            <div style="font-size:22px;font-weight:700;color:#FFFFFF;">HTM</div>
           </td>
         </tr>
         <!-- Content -->
@@ -186,7 +186,7 @@ def build_checklist_completed_email(
         <!-- Footer -->
         <tr>
           <td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;">
-            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div>
+            <div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from HTM</div>
           </td>
         </tr>
       </table>
@@ -216,14 +216,14 @@ def build_reply_email(
         excerpt: 답변 내용 일부 (50~120자), None 가능 (사진/영상만 첨부된 경우)
         cta_url: 보러 갈 링크 (옵션)
     """
-    subject = f"[TaskManager] {author_name} replied on your {context_label.lower()}"
+    subject = f"[HTM] {author_name} replied on your {context_label.lower()}"
     excerpt_html = (
         f'<div style="margin-top:12px;padding:12px 16px;background-color:#F1F5F9;border-left:3px solid #6C5CE7;border-radius:4px;font-size:14px;color:#334155;line-height:1.6;">{escape(excerpt)}</div>'
         if excerpt and excerpt.strip()
         else '<div style="margin-top:12px;font-size:13px;color:#94A3B8;font-style:italic;">(Photo or video attachment)</div>'
     )
     cta_html = (
-        f'<tr><td style="padding:8px 24px 28px;"><a href="{escape(cta_url)}" style="display:inline-block;padding:12px 32px;background-color:#6C5CE7;color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:6px;">Open in TaskManager</a></td></tr>'
+        f'<tr><td style="padding:8px 24px 28px;"><a href="{escape(cta_url)}" style="display:inline-block;padding:12px 32px;background-color:#6C5CE7;color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:6px;">Open in HTM</a></td></tr>'
         if cta_url
         else ""
     )
@@ -235,7 +235,7 @@ def build_reply_email(
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F8FAFC;">
     <tr><td align="center" style="padding:32px 16px;">
       <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-        <tr><td style="background-color:#6C5CE7;padding:24px 28px;"><div style="font-size:22px;font-weight:700;color:#FFFFFF;">TaskManager</div></td></tr>
+        <tr><td style="background-color:#6C5CE7;padding:24px 28px;"><div style="font-size:22px;font-weight:700;color:#FFFFFF;">HTM</div></td></tr>
         <tr>
           <td style="padding:28px 24px 8px;">
             <div style="font-size:20px;font-weight:700;color:#1E293B;margin-bottom:6px;">New reply on your {escape(context_label.lower())}</div>
@@ -245,7 +245,7 @@ def build_reply_email(
           </td>
         </tr>
         {cta_html}
-        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div></td></tr>
+        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from HTM</div></td></tr>
       </table>
     </td></tr>
   </table>
@@ -256,7 +256,7 @@ def build_reply_email(
 
 def build_password_reset_code_email(code: str) -> tuple[str, str]:
     """Build password reset verification code email."""
-    subject = "[TaskManager] Password Reset Code"
+    subject = "[HTM] Password Reset Code"
     html = f"""\
 <!DOCTYPE html>
 <html lang="en">
@@ -265,14 +265,14 @@ def build_password_reset_code_email(code: str) -> tuple[str, str]:
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F8FAFC;">
     <tr><td align="center" style="padding:32px 16px;">
       <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-        <tr><td style="background-color:#FF6B6B;padding:24px 28px;"><div style="font-size:22px;font-weight:700;color:#FFFFFF;">TaskManager</div></td></tr>
+        <tr><td style="background-color:#FF6B6B;padding:24px 28px;"><div style="font-size:22px;font-weight:700;color:#FFFFFF;">HTM</div></td></tr>
         <tr><td style="padding:32px 24px;text-align:center;">
           <div style="font-size:20px;font-weight:700;color:#1E293B;margin-bottom:8px;">Password Reset Code</div>
           <div style="font-size:14px;color:#64748B;margin-bottom:28px;">Enter this code to reset your password.</div>
           <div style="display:inline-block;padding:16px 40px;background-color:#F1F5F9;border-radius:8px;font-size:32px;font-weight:800;letter-spacing:8px;color:#1E293B;">{escape(code)}</div>
           <div style="font-size:13px;color:#94A3B8;margin-top:24px;">This code expires in 5 minutes.</div>
         </td></tr>
-        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div></td></tr>
+        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from HTM</div></td></tr>
       </table>
     </td></tr>
   </table>
@@ -283,7 +283,7 @@ def build_password_reset_code_email(code: str) -> tuple[str, str]:
 
 def build_temporary_password_email(temp_password: str) -> tuple[str, str]:
     """Build temporary password alert email."""
-    subject = "[TaskManager] Your Password Has Been Reset"
+    subject = "[HTM] Your Password Has Been Reset"
     html = f"""\
 <!DOCTYPE html>
 <html lang="en">
@@ -292,14 +292,14 @@ def build_temporary_password_email(temp_password: str) -> tuple[str, str]:
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F8FAFC;">
     <tr><td align="center" style="padding:32px 16px;">
       <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-        <tr><td style="background-color:#FDCB6E;padding:24px 28px;"><div style="font-size:22px;font-weight:700;color:#1E293B;">TaskManager</div></td></tr>
+        <tr><td style="background-color:#FDCB6E;padding:24px 28px;"><div style="font-size:22px;font-weight:700;color:#1E293B;">HTM</div></td></tr>
         <tr><td style="padding:32px 24px;text-align:center;">
           <div style="font-size:20px;font-weight:700;color:#1E293B;margin-bottom:8px;">Password Reset by Administrator</div>
           <div style="font-size:14px;color:#64748B;margin-bottom:28px;">Your password has been reset. Use the temporary password below to log in.</div>
           <div style="display:inline-block;padding:16px 40px;background-color:#FFF8E1;border:2px solid #FDCB6E;border-radius:8px;font-size:28px;font-weight:800;letter-spacing:4px;color:#1E293B;">{escape(temp_password)}</div>
           <div style="font-size:14px;color:#64748B;margin-top:24px;font-weight:600;">We recommend changing your password after logging in.</div>
         </td></tr>
-        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from TaskManager</div></td></tr>
+        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from HTM</div></td></tr>
       </table>
     </td></tr>
   </table>

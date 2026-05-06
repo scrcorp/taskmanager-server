@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8080"]
 
     # 앱 메타데이터 — Application metadata
-    APP_NAME: str = "TaskManager API"
+    APP_NAME: str = "HTM API"
     DEBUG: bool = True  # True이면 SQLAlchemy SQL 로그 출력 (Enables SQL echo when True)
 
     # Axiom 로깅 설정 — Axiom observability platform settings
@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""  # Brevo 계정 이메일
     SMTP_PASSWORD: str = ""  # Brevo SMTP 키 (API 키 아님)
     SMTP_FROM_EMAIL: str = ""  # 발신 이메일 주소
-    SMTP_FROM_NAME: str = "TaskManager"  # 발신자 표시 이름
+    SMTP_FROM_NAME: str = "HTM"  # 발신자 표시 이름
 
     # 보고서 제출 알림 수신 이메일 — Daily Report submit 시 알림 발송
     REPORT_NOTIFICATION_EMAIL: str = ""
