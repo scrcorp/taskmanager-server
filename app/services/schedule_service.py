@@ -944,6 +944,12 @@ class ScheduleService:
             updated = await schedule_repository.update(db, entry_id, update_data, organization_id)
             if updated is None:
                 raise NotFoundError("Schedule not found")
+            # Eager attendance: schedule 시간/상태 변경 후 attendance.status 재계산.
+            # clock_in 있는 row 는 손대지 않음 (출근 기록 보존).
+            from app.services.attendance_lifecycle_service import (
+                recompute_attendance_for_schedule_change,
+            )
+            await recompute_attendance_for_schedule_change(db, updated)
             # Audit log: build diff from modification_entries
             audit_diff: dict[str, Any] = {
                 m["field"]: {"old": m.get("old_value"), "new": m.get("new_value")}

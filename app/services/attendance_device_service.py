@@ -268,6 +268,7 @@ class AttendanceDeviceService:
         action: ClockAction,
         user_id: UUID,
         break_type: str | None = None,
+        reason: str | None = None,
     ) -> Attendance:
         """기기 + user_id + PIN 으로 clock in/out/break 처리.
 
@@ -303,8 +304,15 @@ class AttendanceDeviceService:
         attendance = _active_row() if action != "clock_in" else (day_rows[0] if day_rows else None)
 
         if action == "clock_in":
-            # 1) 이미 진행중인 shift(working/on_break/late) 가 있으면 거절.
-            active = next((r for r in day_rows if r.status in ("working", "on_break", "late")), None)
+            # 1) 실제로 출근중인 shift(clock_in 있고 clock_out 없는 working/on_break) 만 차단.
+            #    late는 "스케줄 지났는데 미출근" 상태일 수 있어 clock_in 여부로 판단해야 한다 —
+            #    이전 shift가 단순 미출근(late, clock_in IS NULL)이면 새 shift clock-in 허용.
+            active = next(
+                (r for r in day_rows
+                 if r.clock_in is not None and r.clock_out is None
+                 and r.status in ("working", "on_break", "late")),
+                None,
+            )
             if active is not None:
                 raise BadRequestError("Previous shift not clocked out. Clock out first.")
 
@@ -372,11 +380,33 @@ class AttendanceDeviceService:
 
             # late 판정 — clock_in > scheduled_start + LATE_BUFFER
             from app.services.attendance_service import LATE_BUFFER_MINUTES
+            from app.utils.settings_resolver import (
+                SettingNotRegisteredError,
+                resolve_setting,
+            )
 
             status_val = "working"
             anomalies: list[str] | None = None
             if schedule.start_time is not None:
                 scheduled_start = datetime.combine(today, schedule.start_time, tzinfo=tz)
+                # Early clock-in threshold — 너무 일찍 clock-in 시도 차단.
+                try:
+                    raw = await resolve_setting(
+                        db,
+                        key="attendance.early_clock_in_threshold_minutes",
+                        organization_id=device.organization_id,
+                        store_id=store_id,
+                    )
+                    early_threshold = int(raw) if raw is not None else 5
+                except (SettingNotRegisteredError, TypeError, ValueError):
+                    early_threshold = 5
+                if now < scheduled_start - _td(minutes=early_threshold):
+                    minutes_until = int(
+                        (scheduled_start - now).total_seconds() / 60
+                    )
+                    raise BadRequestError(
+                        f"Too early to clock in. Shift starts in {minutes_until} minutes."
+                    )
                 if now > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
                     status_val = "late"
                     anomalies = ["late"]
@@ -464,6 +494,50 @@ class AttendanceDeviceService:
                 raise BadRequestError("Must clock in first")
             if attendance.status not in ("working", "late", "on_break"):
                 raise BadRequestError("Already clocked out")
+
+            # Early clock-out 검증 — schedule end 의 threshold 이전이면 reason 필수.
+            from datetime import timedelta as _td2
+            from zoneinfo import ZoneInfo as _Zi2
+            from app.utils.settings_resolver import (
+                SettingNotRegisteredError as _SNRE,
+                resolve_setting as _resolve,
+            )
+
+            is_early = False
+            sched_end_dt = None
+            if attendance.schedule_id is not None:
+                from app.models.schedule import Schedule as _Schedule
+                _sch = await db.scalar(
+                    select(_Schedule).where(_Schedule.id == attendance.schedule_id)
+                )
+                if _sch is not None and _sch.end_time is not None:
+                    _tz_obj = _Zi2(store_tz)
+                    sched_end_dt = datetime.combine(
+                        _sch.work_date, _sch.end_time, tzinfo=_tz_obj
+                    )
+                    if _sch.start_time is not None:
+                        _start_dt = datetime.combine(
+                            _sch.work_date, _sch.start_time, tzinfo=_tz_obj
+                        )
+                        if sched_end_dt <= _start_dt:
+                            sched_end_dt = sched_end_dt + _td2(days=1)
+                    try:
+                        _raw = await _resolve(
+                            db,
+                            key="attendance.early_leave_threshold_minutes",
+                            organization_id=device.organization_id,
+                            store_id=store_id,
+                        )
+                        _early_thresh = int(_raw) if _raw is not None else 5
+                    except (_SNRE, TypeError, ValueError):
+                        _early_thresh = 5
+                    if now < sched_end_dt - _td2(minutes=_early_thresh):
+                        is_early = True
+            if is_early and not (reason and reason.strip()):
+                raise BadRequestError(
+                    "Early clock-out requires a reason. Please provide one."
+                )
+
             # 진행중 break 가 있으면 먼저 종료 처리
             if attendance.status == "on_break":
                 open_break = await self._get_open_break(db, attendance.id)
@@ -479,6 +553,18 @@ class AttendanceDeviceService:
                 work_delta = now - attendance.clock_in
                 attendance.total_work_minutes = int(work_delta.total_seconds() / 60)
             attendance.total_break_minutes = await self._sum_break_minutes(db, attendance.id)
+
+            if is_early:
+                anoms = list(attendance.anomalies or [])
+                if "early_clock_out" not in anoms:
+                    anoms.append("early_clock_out")
+                attendance.anomalies = anoms or None
+                # reason 을 note 에 prepend (기존 note 보존)
+                tag = f"[Early clock-out] {reason.strip()}"
+                attendance.note = (
+                    tag if not attendance.note else f"{tag}\n\n{attendance.note}"
+                )
+
             await db.flush()
             await db.refresh(attendance)
         else:

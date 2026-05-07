@@ -59,6 +59,9 @@ class ClockActionRequest(BaseModel):
     user_id: UUID
     pin: str = Field(..., min_length=6, max_length=6)
     break_type: str | None = None
+    # Early clock-out 사유. clock-out 시점이 schedule end - threshold 이전이면 필수.
+    # 그 외엔 무시.
+    reason: str | None = None
 
 
 class TodayStaffBreak(BaseModel):

@@ -107,13 +107,13 @@ async def get_store_by_code(
 
 @router.get("/stores")
 async def get_stores_by_company_code(
-    company_code: str,
     db: Annotated[AsyncSession, Depends(get_db)],
+    company_code: str | None = None,
 ) -> list[dict]:
-    """회사 코드로 매장 목록 조회 — 인증 불필요.
+    """매장 목록 조회 — 인증 불필요.
 
-    Get active stores for an organization by company code.
-    Used during registration for store selection. No auth required.
+    Get active stores for an organization. company_code 미지정 시
+    단일 organization 자동 매칭(multi-tenant 비활성화 상태).
     """
     organization_id = await auth_service.resolve_company_code(db, company_code)
     stores = await store_repository.get_by_org(db, organization_id)
