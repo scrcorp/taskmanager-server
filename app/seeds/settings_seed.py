@@ -149,4 +149,28 @@ SETTINGS_SEED: list[SettingDefinition] = [
         default_value=5,
         category="Attendance",
     ),
+    SettingDefinition(
+        key="attendance.auto_clock_out_after_minutes",
+        label="Auto clock-out delay (minutes)",
+        description="Automatically clock out staff who forgot to clock out, this many minutes after their scheduled end. The recorded clock-out time is set to the scheduled end.",
+        value_type="number",
+        default_value=30,
+        category="Attendance",
+    ),
+    SettingDefinition(
+        key="attendance.alert_interval_minutes",
+        label="Manager alert interval (minutes)",
+        description="When a shift is past its scheduled end without clock-out, alert managers every N minutes (in-app + email).",
+        value_type="number",
+        default_value=10,
+        category="Attendance",
+    ),
+    SettingDefinition(
+        key="attendance.early_clock_in_threshold_minutes",
+        label="Early clock-in threshold (minutes)",
+        description="How many minutes before a scheduled shift starts staff are allowed to clock in. Earlier attempts are rejected.",
+        value_type="number",
+        default_value=5,
+        category="Attendance",
+    ),
 ]

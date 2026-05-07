@@ -45,10 +45,12 @@ async def _resolve_late_buffer(db: AsyncSession, organization_id: UUID, store_id
 
 
 async def _resolve_store_tz(db: AsyncSession, store_id: UUID | None) -> ZoneInfo:
+    """store.timezone null이면 organization.timezone fallback. 없으면 UTC."""
     if store_id is None:
         return ZoneInfo("UTC")
-    tz_name = await db.scalar(select(Store.timezone).where(Store.id == store_id))
+    from app.utils.timezone import get_store_day_config
     try:
+        tz_name, _ = await get_store_day_config(db, store_id)
         return ZoneInfo(tz_name or "UTC")
     except Exception:
         return ZoneInfo("UTC")
@@ -129,6 +131,41 @@ async def ensure_attendance_for_schedule(
         existing.status = status
         existing.anomalies = anomalies
     return existing
+
+
+async def recompute_attendance_for_schedule_change(
+    db: AsyncSession,
+    schedule: Schedule,
+) -> None:
+    """Schedule.work_date / start_time / end_time 이 바뀐 후 attendance.status 재계산.
+
+    clock_in 이 이미 기록된 row 는 건드리지 않는다 (출근 기록 보존). clock_in 이 없는
+    upcoming/late/no_show row 는 새 시간 기준으로 다시 계산해서 cron 의 강등/승격
+    동기화를 기다리지 않고 즉시 일관된 상태를 보장한다.
+    """
+    existing = await db.scalar(
+        select(Attendance).where(Attendance.schedule_id == schedule.id)
+    )
+    if existing is None or existing.clock_in is not None:
+        return
+    if existing.status not in ("upcoming", "late", "no_show"):
+        return
+    now = datetime.now(timezone.utc)
+    tz = await _resolve_store_tz(db, schedule.store_id)
+    buffer = await _resolve_late_buffer(db, schedule.organization_id, schedule.store_id)
+    status, anomalies = _compute_initial_status(
+        schedule.status,
+        schedule.work_date,
+        schedule.start_time,
+        schedule.end_time,
+        tz,
+        buffer,
+        now,
+    )
+    existing.status = status
+    existing.anomalies = anomalies
+    existing.work_date = schedule.work_date
+    await db.flush()
 
 
 async def cancel_attendance_for_schedule(

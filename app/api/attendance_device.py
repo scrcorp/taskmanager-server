@@ -204,6 +204,7 @@ async def _perform_action(
     user_id: uuid.UUID,
     action: str,
     break_type: str | None = None,
+    reason: str | None = None,
 ) -> dict:
     attendance = await attendance_device_service.perform_clock_action(
         db,
@@ -212,6 +213,7 @@ async def _perform_action(
         action=action,
         user_id=user_id,
         break_type=break_type,
+        reason=reason,
     )
     return await attendance_service.build_response(db, attendance)
 
@@ -231,7 +233,9 @@ async def clock_out(
     device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    return await _perform_action(db, device, data.pin, data.user_id, "clock_out")
+    return await _perform_action(
+        db, device, data.pin, data.user_id, "clock_out", reason=data.reason,
+    )
 
 
 @router.post("/break-start")
@@ -341,9 +345,13 @@ async def today_staff(
     def effective_status(att: Attendance, schedule: Schedule | None) -> str:
         """DB attendance.status + 현재 시각 + late_buffer 로 최종 표시 status 계산.
 
-        upcoming/late 처럼 미출근 상태는 schedule end 가 지나면 no_show 로 강등.
-        그 외(working, on_break, clocked_out 등 출근 후 상태)는 그대로 반환.
+        clock_in 이 이미 기록된 경우는 출근 완료 → DB status 그대로 (강등 금지).
+        그 외 upcoming/late 미출근 상태는 schedule end 가 지나면 no_show 로 강등.
         """
+        # 출근 후엔 시각과 무관하게 DB status 신뢰 — sched_end 지났다고 no_show로
+        # 강등하면 늦게 clock-in 한 직원이 "Clocked In" 섹션에서 사라진다.
+        if att.clock_in is not None:
+            return att.status
         if att.status not in {"upcoming", "late"} or schedule is None or schedule.start_time is None:
             return att.status
         sched_start = dt.combine(schedule.work_date, schedule.start_time, tzinfo=tz_info)

@@ -53,23 +53,36 @@ class AuthService:
         self,
         db: AsyncSession,
         company_code: str | None,
-    ) -> UUID | None:
+    ) -> UUID:
         """회사 코드를 조직 UUID로 변환합니다.
 
-        Resolve a company code to an organization UUID.
+        company_code가 None이면 단일 active organization을 자동 매칭한다.
+        organizations 행이 정확히 1개가 아니면 명시적 에러로 거부 — multi-tenant
+        복원 작업이 선행되어야 한다는 신호.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            company_code: 회사 코드 (Company code, may be None)
+            company_code: 회사 코드 (None이면 단일 org 자동 매칭)
 
         Returns:
-            UUID | None: 조직 UUID 또는 None (Organization UUID or None)
+            UUID: 조직 UUID
 
         Raises:
-            NotFoundError: 유효하지 않은 회사 코드일 때 (Invalid company code)
+            NotFoundError: 유효하지 않은 회사 코드 또는 조직 없음
+            BadRequestError: 회사 코드 미지정인데 organizations 2개 이상
         """
         if company_code is None:
-            return None
+            result = await db.execute(
+                select(Organization).where(Organization.is_active == True)
+            )
+            orgs = list(result.scalars().all())
+            if len(orgs) == 0:
+                raise NotFoundError("No active organization configured")
+            if len(orgs) > 1:
+                raise BadRequestError(
+                    "Multiple organizations exist; client must specify company_code"
+                )
+            return orgs[0].id
         result = await db.execute(
             select(Organization).where(
                 Organization.code == company_code.upper(),
