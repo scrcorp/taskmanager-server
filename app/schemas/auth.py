@@ -48,7 +48,7 @@ class RegisterRequest(BaseModel):
     password: str  # 비밀번호 — 평문, 서버에서 bcrypt 해싱 (Plain text, server hashes with bcrypt)
     full_name: str  # 실명 (Full display name)
     email: str  # 이메일 — 필수 (Email address, required for verification)
-    company_code: str  # 회사 코드 — 필수 (Company code, required for registration)
+    company_code: str | None = None  # 회사 코드 — 미지정 시 단일 org 자동 매칭
     verification_token: str  # 이메일 인증 토큰 — 코드 검증 성공 시 발급 (Issued after code verification)
     store_ids: list[str] = []  # 배정할 매장 ID 목록 (Store UUIDs to assign user to)
     preferred_language: PreferredLanguage = "en"  # 선호 언어 (정보 수집용, default en)
