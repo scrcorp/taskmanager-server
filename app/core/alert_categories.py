@@ -24,7 +24,7 @@ CATEGORIES: list[dict[str, Any]] = [
         "code": "schedule",
         "label": "Schedule",
         "description": "Schedule submission, approval, and substitution",
-        "types": ["schedule_pending", "schedule_approved", "schedule_substitute"],
+        "types": ["schedule_pending", "schedule_approved", "schedule_assigned", "schedule_substitute"],
         "email_available": False,
     },
     {

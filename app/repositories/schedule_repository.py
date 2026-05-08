@@ -30,10 +30,15 @@ class ScheduleRepository(BaseRepository[Schedule]):
         per_page: int = 100,
         sort_desc: bool = False,
         exclude_cancelled: bool = False,
+        accessible_store_ids: list[UUID] | None = None,
     ) -> tuple[Sequence[Schedule], int]:
         query: Select = select(Schedule).where(
             Schedule.organization_id == organization_id
         )
+        if accessible_store_ids is not None:
+            if not accessible_store_ids:
+                return [], 0
+            query = query.where(Schedule.store_id.in_(accessible_store_ids))
         if store_id is not None:
             query = query.where(Schedule.store_id == store_id)
         if user_id is not None:

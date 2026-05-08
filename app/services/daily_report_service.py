@@ -181,12 +181,14 @@ class DailyReportService:
         date_from: date | None = None, date_to: date | None = None,
         period: str | None = None, status: str | None = None,
         exclude_draft: bool = True, page: int = 1, per_page: int = 20,
+        accessible_store_ids: list[UUID] | None = None,
     ):
         exclude_status = "draft" if (status is None and exclude_draft) else None
         return await daily_report_repository.get_by_org(
             db, organization_id, store_id=store_id, author_id=author_id,
             date_from=date_from, date_to=date_to, period=period, status=status,
             exclude_status=exclude_status, page=page, per_page=per_page,
+            accessible_store_ids=accessible_store_ids,
         )
 
     async def get_report(self, db: AsyncSession, report_id: UUID, organization_id: UUID):

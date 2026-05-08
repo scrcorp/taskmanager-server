@@ -299,6 +299,7 @@ class ScheduleService:
         page: int = 1,
         per_page: int = 100,
         sort_desc: bool = False,
+        accessible_store_ids: list[UUID] | None = None,
     ) -> tuple[list[ScheduleResponse], int]:
         # status 미지정 시 cancelled 제외 (requested + confirmed 모두 반환)
         # If status not specified: exclude cancelled (return requested + confirmed)
@@ -309,6 +310,7 @@ class ScheduleService:
             status=status, page=page, per_page=per_page,
             sort_desc=sort_desc,
             exclude_cancelled=(status is None),
+            accessible_store_ids=accessible_store_ids,
         )
         responses = [await self._to_response(db, e) for e in entries]
         return responses, total
@@ -435,6 +437,12 @@ class ScheduleService:
             # draft/requested 는 upcoming, 이미 시각이 지났으면 late/no_show 로 반영.
             from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
             await ensure_attendance_for_schedule(db, entry)
+
+            # 관리자가 직접 confirmed 로 만든 경우 배정된 직원에게 알림.
+            # 본인이 자기 스케줄을 만든 경우(self-assign)는 알림 생략.
+            if entry_status == "confirmed" and entry.user_id != created_by:
+                from app.services.alert_service import alert_service
+                await alert_service.create_for_schedule_assigned(db, entry)
 
             result = await self._to_response(db, entry)
             await db.commit()
