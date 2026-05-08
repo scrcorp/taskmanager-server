@@ -436,6 +436,12 @@ class ScheduleService:
             from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
             await ensure_attendance_for_schedule(db, entry)
 
+            # 관리자가 직접 confirmed 로 만든 경우 배정된 직원에게 알림.
+            # 본인이 자기 스케줄을 만든 경우(self-assign)는 알림 생략.
+            if entry_status == "confirmed" and entry.user_id != created_by:
+                from app.services.alert_service import alert_service
+                await alert_service.create_for_schedule_assigned(db, entry)
+
             result = await self._to_response(db, entry)
             await db.commit()
             return result
