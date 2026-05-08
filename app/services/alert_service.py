@@ -395,7 +395,9 @@ class AlertService:
         from app.models.user import User
         from app.models.user_store import UserStore
 
-        # checklists:update 권한 + is_manager + same store (Owner 제외)
+        # checklist_review:create 권한 + same store (Owner 제외).
+        # 검토 권한(checklist_review:create)은 GM과 SV에게만 부여되어 있음.
+        # is_manager 조건 없음 — SV는 매장 배정만 받고 is_manager=false인 경우가 정상.
         managers_q = (
             select(User)
             .join(UserStore, User.id == UserStore.user_id)
@@ -404,12 +406,12 @@ class AlertService:
             .join(Permission, RolePermission.permission_id == Permission.id)
             .where(
                 UserStore.store_id == instance.store_id,
-                UserStore.is_manager.is_(True),
                 User.is_active.is_(True),
                 User.deleted_at.is_(None),
-                Permission.code == "checklists:update",
+                Permission.code == "checklist_review:create",
                 Role.priority > OWNER_PRIORITY,  # Owner 제외 (비즈니스 규칙)
             )
+            .distinct()
         )
         result = await db.execute(managers_q)
         managers = list(result.scalars().all())

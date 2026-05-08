@@ -7,7 +7,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import hide_cost_for, require_permission, scrub_cost_fields
+from app.api.deps import (
+    check_store_access,
+    get_accessible_store_ids,
+    hide_cost_for,
+    require_permission,
+    scrub_cost_fields,
+)
 from app.database import get_db
 from app.models.user import User
 from app.schemas.schedule import (
@@ -47,17 +53,25 @@ async def list_entries(
     page: int = 1,
     per_page: int = 100,
 ) -> dict:
-    """스케줄 목록. user_ids는 CSV로 여러 user를 한 번에 조회 가능."""
+    """스케줄 목록. user_ids는 CSV로 여러 user를 한 번에 조회 가능.
+
+    SV/GM은 본인이 접근 가능한 매장의 스케줄만 반환된다 (Owner는 전체).
+    """
     parsed_user_ids: list[UUID] | None = None
     if user_ids:
         parsed_user_ids = [UUID(x) for x in user_ids.split(",") if x.strip()]
+    accessible = await get_accessible_store_ids(db, current_user)
+    parsed_store_id = UUID(store_id) if store_id else None
+    if parsed_store_id is not None:
+        await check_store_access(db, current_user, parsed_store_id)
     items, total = await schedule_service.list_entries(
         db, current_user.organization_id,
-        store_id=UUID(store_id) if store_id else None,
+        store_id=parsed_store_id,
         user_id=UUID(user_id) if user_id else None,
         user_ids=parsed_user_ids,
         date_from=date_from, date_to=date_to,
         status=status, page=page, per_page=per_page,
+        accessible_store_ids=accessible,
     )
     if hide_cost_for(current_user):
         for item in items:

@@ -299,6 +299,7 @@ class ScheduleService:
         page: int = 1,
         per_page: int = 100,
         sort_desc: bool = False,
+        accessible_store_ids: list[UUID] | None = None,
     ) -> tuple[list[ScheduleResponse], int]:
         # status 미지정 시 cancelled 제외 (requested + confirmed 모두 반환)
         # If status not specified: exclude cancelled (return requested + confirmed)
@@ -309,6 +310,7 @@ class ScheduleService:
             status=status, page=page, per_page=per_page,
             sort_desc=sort_desc,
             exclude_cancelled=(status is None),
+            accessible_store_ids=accessible_store_ids,
         )
         responses = [await self._to_response(db, e) for e in entries]
         return responses, total
