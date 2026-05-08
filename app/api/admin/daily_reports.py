@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_permission
+from app.api.deps import check_store_access, get_accessible_store_ids, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.daily_report import DailyReportCommentCreate, DailyReportResponse
@@ -27,16 +27,21 @@ async def list_reports(
     page: int = 1,
     per_page: int = 20,
 ) -> dict:
+    accessible = await get_accessible_store_ids(db, current_user)
+    parsed_store_id = UUID(store_id) if store_id else None
+    if parsed_store_id is not None:
+        await check_store_access(db, current_user, parsed_store_id)
     reports, total = await daily_report_service.list_reports(
         db,
         organization_id=current_user.organization_id,
-        store_id=UUID(store_id) if store_id else None,
+        store_id=parsed_store_id,
         date_from=date.fromisoformat(date_from) if date_from else None,
         date_to=date.fromisoformat(date_to) if date_to else None,
         period=period,
         status=status,
         page=page,
         per_page=per_page,
+        accessible_store_ids=accessible,
     )
     items = await daily_report_service.build_responses_batch(db, reports)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
@@ -49,6 +54,7 @@ async def get_report(
     current_user: Annotated[User, Depends(require_permission("daily_reports:read"))],
 ) -> dict:
     report = await daily_report_service.get_report(db, report_id, current_user.organization_id)
+    await check_store_access(db, current_user, report.store_id)
     return await daily_report_service.build_response(db, report, include_details=True)
 
 

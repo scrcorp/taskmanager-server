@@ -20,7 +20,7 @@ from app.database import get_db
 from app.utils.jwt import decode_token
 from app.models.user import User
 from app.repositories.permission_repository import permission_repository
-from app.core.permissions import is_owner, hide_cost_for_priority
+from app.core.permissions import is_owner, is_gm_plus, hide_cost_for_priority
 
 security: HTTPBearer = HTTPBearer()
 device_security: HTTPBearer = HTTPBearer(auto_error=False)
@@ -133,14 +133,18 @@ def scrub_cost_fields(obj: object, fields: tuple[str, ...] = ("hourly_rate", "de
 async def get_accessible_store_ids(
     db: AsyncSession, user: User
 ) -> list[UUID] | None:
-    """사용자가 관리 가능한 매장 ID 목록 (admin용).
+    """사용자가 접근 가능한 매장 ID 목록 (admin용).
 
-    None = full access (Owner). List = 관리매장만 (is_manager=true).
+    None = full access (Owner).
+    GM: is_manager=true 매장 (관리 책임 매장만).
+    SV/Staff: user_stores에 등록된 모든 매장 (배정 매장 전체).
     """
     if is_owner(user):
         return None
     from app.repositories.user_repository import user_repository
-    return await user_repository.get_managed_store_ids(db, user.id)
+    if is_gm_plus(user):
+        return await user_repository.get_managed_store_ids(db, user.id)
+    return await user_repository.get_user_store_ids(db, user.id)
 
 
 async def get_work_store_ids(

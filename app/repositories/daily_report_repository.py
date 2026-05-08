@@ -49,8 +49,13 @@ class DailyReportRepository(BaseRepository[DailyReport]):
         exclude_status: str | None = None,
         page: int = 1,
         per_page: int = 20,
+        accessible_store_ids: list[UUID] | None = None,
     ) -> tuple[Sequence[DailyReport], int]:
         base = select(DailyReport).where(DailyReport.organization_id == organization_id)
+        if accessible_store_ids is not None:
+            if not accessible_store_ids:
+                return [], 0
+            base = base.where(DailyReport.store_id.in_(accessible_store_ids))
         if store_id:
             base = base.where(DailyReport.store_id == store_id)
         if author_id:

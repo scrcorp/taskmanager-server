@@ -29,7 +29,7 @@ router: APIRouter = APIRouter()
 @router.get("", response_model=PaginatedResponse)
 async def list_checklist_instances(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:read"))],
     store_id: Annotated[str | None, Query()] = None,
     user_id: Annotated[str | None, Query()] = None,
     work_date: Annotated[date | None, Query()] = None,
@@ -85,7 +85,7 @@ async def list_checklist_instances(
 async def get_instance_by_schedule(
     schedule_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:read"))],
 ) -> dict:
     """스케줄 ID로 체크리스트 인스턴스 상세를 조회합니다."""
     from app.repositories.checklist_instance_repository import checklist_instance_repository
@@ -100,7 +100,7 @@ async def get_instance_by_schedule(
 @router.get("/completion-log")
 async def get_completion_log(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:read"))],
     store_id: Annotated[str | None, Query()] = None,
     user_id: Annotated[str | None, Query()] = None,
     date_from: Annotated[date | None, Query()] = None,
@@ -137,7 +137,7 @@ async def get_completion_log(
 @router.get("/review-summary")
 async def get_review_summary(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:read"))],
     store_id: Annotated[str | None, Query()] = None,
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
@@ -218,7 +218,7 @@ async def bulk_review(
 async def send_report(
     instance_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:read"))],
 ) -> dict:
     """체크리스트 인스턴스 리포트를 전송합니다 (stub)."""
     return {"message": "Report sent"}
@@ -228,7 +228,7 @@ async def send_report(
 async def get_checklist_instance(
     instance_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:read"))],
 ) -> dict:
     """체크리스트 인스턴스 상세를 조회합니다 (스냅샷 + 완료 기록 병합).
 
@@ -255,7 +255,7 @@ async def get_checklist_instance(
 async def list_reviews(
     instance_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("checklists:read"))],
+    current_user: Annotated[User, Depends(require_permission("checklist_review:read"))],
 ) -> list[dict]:
     """인스턴스의 전체 아이템 리뷰 목록을 조회합니다."""
     return await checklist_instance_service.get_reviews_for_instance(db, instance_id)

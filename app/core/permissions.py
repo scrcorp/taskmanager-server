@@ -196,7 +196,6 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         "stores:read", "users:read",
         "schedules:read", "schedules:create", "schedules:update",
         "notices:read",
-        "checklists:read",
         "checklist_review:read", "checklist_review:create",
         "checklist_log:read",
         "tasks:read",
