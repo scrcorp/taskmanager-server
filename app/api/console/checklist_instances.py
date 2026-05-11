@@ -8,10 +8,10 @@ from datetime import date
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_permission
+from app.api.deps import get_accessible_store_ids, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
@@ -57,6 +57,10 @@ async def list_checklist_instances(
     store_uuid: UUID | None = UUID(store_id) if store_id else None
     user_uuid: UUID | None = UUID(user_id) if user_id else None
 
+    accessible_ids = await get_accessible_store_ids(db, current_user)
+    if store_uuid is not None and accessible_ids is not None and store_uuid not in accessible_ids:
+        raise HTTPException(status_code=403, detail="No access to this store")
+
     instances, total = await checklist_instance_service.get_instances(
         db,
         organization_id=current_user.organization_id,
@@ -66,6 +70,7 @@ async def list_checklist_instances(
         status=status,
         page=page,
         per_page=per_page,
+        store_ids=accessible_ids,
     )
 
     items: list[dict] = []
@@ -91,8 +96,10 @@ async def get_instance_by_schedule(
     from app.repositories.checklist_instance_repository import checklist_instance_repository
     instance = await checklist_instance_repository.get_by_schedule_id(db, schedule_id)
     if not instance:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="No checklist instance for this schedule")
+    accessible_ids = await get_accessible_store_ids(db, current_user)
+    if accessible_ids is not None and instance.store_id not in accessible_ids:
+        raise HTTPException(status_code=403, detail="No access to this store's checklist")
     return await checklist_instance_service.build_detail_response(db, instance)
 
 
@@ -115,6 +122,10 @@ async def get_completion_log(
     store_uuid: UUID | None = UUID(store_id) if store_id else None
     user_uuid: UUID | None = UUID(user_id) if user_id else None
 
+    accessible_ids = await get_accessible_store_ids(db, current_user)
+    if store_uuid is not None and accessible_ids is not None and store_uuid not in accessible_ids:
+        raise HTTPException(status_code=403, detail="No access to this store")
+
     items, total = await checklist_instance_service.get_completion_log(
         db,
         organization_id=current_user.organization_id,
@@ -124,6 +135,7 @@ async def get_completion_log(
         date_to=date_to,
         page=page,
         per_page=per_page,
+        store_ids=accessible_ids,
     )
 
     return {
@@ -158,12 +170,17 @@ async def get_review_summary(
     """
     store_uuid: UUID | None = UUID(store_id) if store_id else None
 
+    accessible_ids = await get_accessible_store_ids(db, current_user)
+    if store_uuid is not None and accessible_ids is not None and store_uuid not in accessible_ids:
+        raise HTTPException(status_code=403, detail="No access to this store")
+
     return await checklist_instance_service.get_review_summary(
         db,
         organization_id=current_user.organization_id,
         store_id=store_uuid,
         date_from=date_from,
         date_to=date_to,
+        store_ids=accessible_ids,
     )
 
 
@@ -175,6 +192,7 @@ async def update_score(
     current_user: Annotated[User, Depends(require_permission("checklist_review:create"))],
 ) -> dict:
     """인스턴스에 점수를 부여하거나 수정합니다."""
+    accessible_ids = await get_accessible_store_ids(db, current_user)
     instance = await checklist_instance_service.update_score(
         db,
         instance_id=instance_id,
@@ -182,6 +200,7 @@ async def update_score(
         scorer_id=current_user.id,
         score=data.score,
         score_note=data.score_note,
+        store_ids=accessible_ids,
     )
     return {
         "id": str(instance.id),
@@ -200,6 +219,7 @@ async def bulk_review(
     current_user: Annotated[User, Depends(require_permission("checklist_review:create"))],
 ) -> dict:
     """여러 항목에 리뷰 결과를 일괄 적용합니다."""
+    accessible_ids = await get_accessible_store_ids(db, current_user)
     reviewed = await checklist_instance_service.bulk_review(
         db,
         instance_id=instance_id,
@@ -207,6 +227,7 @@ async def bulk_review(
         reviewer_id=current_user.id,
         item_indexes=data.item_indexes,
         result=data.result,
+        store_ids=accessible_ids,
     )
     return {
         "reviewed_count": len(reviewed),
@@ -242,10 +263,12 @@ async def get_checklist_instance(
     Returns:
         dict: 인스턴스 상세 (Instance detail with merged snapshot)
     """
+    accessible_ids = await get_accessible_store_ids(db, current_user)
     instance = await checklist_instance_service.get_instance(
         db,
         instance_id=instance_id,
         organization_id=current_user.organization_id,
+        store_ids=accessible_ids,
     )
 
     return await checklist_instance_service.build_detail_response(db, instance)
@@ -258,6 +281,14 @@ async def list_reviews(
     current_user: Annotated[User, Depends(require_permission("checklist_review:read"))],
 ) -> list[dict]:
     """인스턴스의 전체 아이템 리뷰 목록을 조회합니다."""
+    accessible_ids = await get_accessible_store_ids(db, current_user)
+    # store 권한 검증을 위해 인스턴스 한 번 조회
+    await checklist_instance_service.get_instance(
+        db,
+        instance_id=instance_id,
+        organization_id=current_user.organization_id,
+        store_ids=accessible_ids,
+    )
     return await checklist_instance_service.get_reviews_for_instance(db, instance_id)
 
 
@@ -270,6 +301,7 @@ async def upsert_review(
     current_user: Annotated[User, Depends(require_permission("checklist_review:create"))],
 ) -> dict:
     """아이템 리뷰를 생성하거나 수정합니다 (upsert). 인라인 코멘트 옵션 포함."""
+    accessible_ids = await get_accessible_store_ids(db, current_user)
     review = await checklist_instance_service.upsert_review(
         db,
         instance_id=instance_id,
@@ -278,6 +310,7 @@ async def upsert_review(
         result=data.result,
         comment_text=data.comment_text,
         comment_photo_url=data.comment_photo_url,
+        store_ids=accessible_ids,
     )
 
     return {
@@ -302,7 +335,10 @@ async def delete_review(
     current_user: Annotated[User, Depends(require_permission("checklist_review:delete"))],
 ) -> dict:
     """아이템 리뷰를 삭제합니다."""
-    await checklist_instance_service.delete_review(db, instance_id, item_index, current_user.id)
+    accessible_ids = await get_accessible_store_ids(db, current_user)
+    await checklist_instance_service.delete_review(
+        db, instance_id, item_index, current_user.id, store_ids=accessible_ids,
+    )
     return {"message": "Review deleted"}
 
 
@@ -315,6 +351,7 @@ async def add_review_content(
     current_user: Annotated[User, Depends(require_permission("checklist_review:create"))],
 ) -> dict:
     """리뷰에 콘텐츠(텍스트/사진/영상)를 추가합니다."""
+    accessible_ids = await get_accessible_store_ids(db, current_user)
     rc = await checklist_instance_service.add_review_content(
         db,
         instance_id=instance_id,
@@ -322,6 +359,7 @@ async def add_review_content(
         author_id=current_user.id,
         content_type=data.type,
         content=data.content,
+        store_ids=accessible_ids,
     )
 
     review_id = getattr(rc, "review_id", rc.item_id)
@@ -345,5 +383,6 @@ async def delete_review_content(
     current_user: Annotated[User, Depends(require_permission("checklist_review:delete"))],
 ) -> dict:
     """리뷰 콘텐츠를 삭제합니다."""
-    await checklist_instance_service.delete_review_content(db, content_id)
+    accessible_ids = await get_accessible_store_ids(db, current_user)
+    await checklist_instance_service.delete_review_content(db, content_id, store_ids=accessible_ids)
     return {"message": "Content deleted"}

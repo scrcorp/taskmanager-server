@@ -754,7 +754,7 @@ class AttendanceResponse(BaseModel):
     total_break_minutes: int | None  # 총 휴식 시간(분) (Total break minutes)
     paid_break_minutes: int = 0  # 유급 휴식 (분) — attendance_breaks 합계 (Paid break minutes)
     unpaid_break_minutes: int = 0  # 무급 휴식 (분) — attendance_breaks 합계 (Unpaid break minutes)
-    paid_break_overage_minutes: int = 0  # paid_short 세션별 (duration - 10) 합 (Paid break overage deducted from net work)
+    paid_break_overage_minutes: int = 0  # paid_10min 세션별 (duration - 10) 합 (Paid break overage deducted from net work)
     net_work_minutes: int | None = None  # 순 근무 시간(분) = total_work - unpaid_break - paid_overage (Net work minutes)
     breaks: list[dict] = []  # break 세션 타임라인 (Per-break timeline: started_at/ended_at/type/duration)
     note: str | None  # 메모 (Note, may be null)
@@ -810,12 +810,12 @@ class BreakSessionCreateRequest(BaseModel):
     Attributes:
         started_at: 휴식 시작 ISO datetime
         ended_at: 휴식 종료 ISO datetime, optional (in-progress 면 null)
-        break_type: paid_short | unpaid_long
+        break_type: paid_10min | unpaid_meal (구: paid_short | unpaid_long — dual-read)
     """
 
     started_at: datetime
     ended_at: datetime | None = None
-    break_type: str  # paid_short | unpaid_long
+    break_type: str  # paid_10min | unpaid_meal (구: paid_short | unpaid_long)
 
 
 class BreakSessionUpdateRequest(BaseModel):

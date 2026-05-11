@@ -32,8 +32,9 @@ async def get_current_attendance_device(
 ):
     """Attendance Device 토큰으로 현재 기기를 인증.
 
-    평문 토큰 → sha256 해시 → attendance_devices 매칭. revoked 는 401.
-    JWT 와 별개의 인증 스코프이며, 매 호출마다 last_seen_at 갱신.
+    평문 토큰 → sha256 해시 → attendance_devices 매칭. revoke 된 기기는 row 가
+    없으므로 자동으로 401. JWT 와 별개의 인증 스코프이며, 매 호출마다
+    last_seen_at 갱신.
     """
     from app.services.attendance_device_service import attendance_device_service
 
@@ -46,7 +47,7 @@ async def get_current_attendance_device(
     if device is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or revoked attendance device token",
+            detail="Invalid attendance device token",
         )
     await attendance_device_service.touch_last_seen(db, device)
     await db.commit()

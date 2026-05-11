@@ -4,7 +4,7 @@ Sideload APK 배포 환경에서 클라이언트가 자체적으로 업데이트
 서버가 채널별 최신/최소 버전을 노출한다.
 
 흐름:
-    1. CI가 APK 빌드 → S3 업로드 → POST /api/v1/admin/app-versions 호출
+    1. CI가 APK 빌드 → S3 업로드 → POST /api/v1/console/app-versions 호출
     2. 앱이 부팅 시 GET /api/v1/attendance/app-version 호출
     3. current < min_required → 강제 update blocker
        current < latest      → 권장 update banner

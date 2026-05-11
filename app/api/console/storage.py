@@ -44,7 +44,7 @@ async def create_presigned_url(
             content_type=data.content_type,
             folder=data.folder,
             base_url=base_url,
-            upload_path_prefix="/api/v1/admin/storage",
+            upload_path_prefix="/api/v1/console/storage",
         )
     except Exception as e:
         logger.error("Presigned URL 생성 실패: %s", e)

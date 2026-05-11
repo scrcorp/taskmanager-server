@@ -69,7 +69,7 @@ server/
 │   ├── api/
 │   │   ├── __init__.py
 │   │   ├── deps.py          ← Dependency injection (get_db, get_current_user)
-│   │   ├── admin/           ← /api/v1/admin/*
+│   │   ├── console/         ← /api/v1/console/*
 │   │   │   ├── __init__.py
 │   │   │   ├── auth.py
 │   │   │   ├── organizations.py
@@ -154,7 +154,7 @@ Build in this order. Each phase should be fully working before moving to next.
 ```
 
 ### Auth Separation
-- `POST /api/v1/admin/auth/login` → Reject role level >= 4 (staff)
+- `POST /api/v1/console/auth/login` → Reject role level >= 4 (staff)
 - `POST /api/v1/app/auth/login` → Allow staff (level 4) + supervisor (level 3)
 
 ### JSONB Snapshot (Work Assignment)

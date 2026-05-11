@@ -65,7 +65,7 @@ def _png_bytes() -> bytes:
 
 async def test_accepting_signups_toggle(http, admin_headers, hiring_store):
     res = await http.patch(
-        f"/api/v1/admin/stores/{hiring_store}/accepting-signups",
+        f"/api/v1/console/stores/{hiring_store}/accepting-signups",
         json={"accepting_signups": False},
         headers=admin_headers,
     )
@@ -73,7 +73,7 @@ async def test_accepting_signups_toggle(http, admin_headers, hiring_store):
     assert res.json()["accepting_signups"] is False
 
     res = await http.patch(
-        f"/api/v1/admin/stores/{hiring_store}/accepting-signups",
+        f"/api/v1/console/stores/{hiring_store}/accepting-signups",
         json={"accepting_signups": True},
         headers=admin_headers,
     )
@@ -82,7 +82,7 @@ async def test_accepting_signups_toggle(http, admin_headers, hiring_store):
 
 async def test_list_cover_photos_empty(http, admin_headers, hiring_store):
     res = await http.get(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos",
         headers=admin_headers,
     )
     assert res.status_code == 200
@@ -91,7 +91,7 @@ async def test_list_cover_photos_empty(http, admin_headers, hiring_store):
 
 async def test_upload_cover_photo_first_is_primary(http, admin_headers, hiring_store):
     res = await http.post(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos",
         headers=admin_headers,
         files={"file": ("photo.png", _png_bytes(), "image/png")},
     )
@@ -105,7 +105,7 @@ async def test_upload_cover_photo_first_is_primary(http, admin_headers, hiring_s
 
 async def test_upload_rejects_invalid_content_type(http, admin_headers, hiring_store):
     res = await http.post(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos",
         headers=admin_headers,
         files={"file": ("photo.txt", b"hello", "text/plain")},
     )
@@ -116,7 +116,7 @@ async def test_upload_rejects_invalid_content_type(http, admin_headers, hiring_s
 async def test_upload_rejects_too_large(http, admin_headers, hiring_store):
     big = b"\x00" * (5 * 1024 * 1024 + 1)
     res = await http.post(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos",
         headers=admin_headers,
         files={"file": ("big.png", big, "image/png")},
     )
@@ -127,12 +127,12 @@ async def test_upload_rejects_too_large(http, admin_headers, hiring_store):
 async def test_set_primary_changes_only_one(http, admin_headers, hiring_store):
     # 두 장 업로드
     r1 = await http.post(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos",
         headers=admin_headers,
         files={"file": ("a.png", _png_bytes(), "image/png")},
     )
     r2 = await http.post(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos",
         headers=admin_headers,
         files={"file": ("b.png", _png_bytes(), "image/png")},
     )
@@ -143,14 +143,14 @@ async def test_set_primary_changes_only_one(http, admin_headers, hiring_store):
 
     # p2를 primary로 변경
     res = await http.patch(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos/{p2['id']}/primary",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos/{p2['id']}/primary",
         headers=admin_headers,
     )
     assert res.status_code == 200
 
     listed = (
         await http.get(
-            f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+            f"/api/v1/console/stores/{hiring_store}/cover-photos",
             headers=admin_headers,
         )
     ).json()
@@ -159,7 +159,7 @@ async def test_set_primary_changes_only_one(http, admin_headers, hiring_store):
 
 async def test_set_primary_rejects_unknown_id(http, admin_headers, hiring_store):
     res = await http.patch(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos/abc123abc123/primary",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos/abc123abc123/primary",
         headers=admin_headers,
     )
     assert res.status_code == 404
@@ -168,12 +168,12 @@ async def test_set_primary_rejects_unknown_id(http, admin_headers, hiring_store)
 
 async def test_delete_promotes_next_to_primary(http, admin_headers, hiring_store):
     r1 = await http.post(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos",
         headers=admin_headers,
         files={"file": ("a.png", _png_bytes(), "image/png")},
     )
     r2 = await http.post(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos",
         headers=admin_headers,
         files={"file": ("b.png", _png_bytes(), "image/png")},
     )
@@ -181,14 +181,14 @@ async def test_delete_promotes_next_to_primary(http, admin_headers, hiring_store
     other_id = r2.json()["id"]
 
     res = await http.delete(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos/{primary_id}",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos/{primary_id}",
         headers=admin_headers,
     )
     assert res.status_code == 204
 
     listed = (
         await http.get(
-            f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+            f"/api/v1/console/stores/{hiring_store}/cover-photos",
             headers=admin_headers,
         )
     ).json()
@@ -199,20 +199,20 @@ async def test_delete_promotes_next_to_primary(http, admin_headers, hiring_store
 
 async def test_delete_last_photo_leaves_empty_list(http, admin_headers, hiring_store):
     r = await http.post(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos",
         headers=admin_headers,
         files={"file": ("solo.png", _png_bytes(), "image/png")},
     )
     photo_id = r.json()["id"]
 
     await http.delete(
-        f"/api/v1/admin/stores/{hiring_store}/cover-photos/{photo_id}",
+        f"/api/v1/console/stores/{hiring_store}/cover-photos/{photo_id}",
         headers=admin_headers,
     )
 
     listed = (
         await http.get(
-            f"/api/v1/admin/stores/{hiring_store}/cover-photos",
+            f"/api/v1/console/stores/{hiring_store}/cover-photos",
             headers=admin_headers,
         )
     ).json()

@@ -38,7 +38,7 @@ from app.models.hiring import (
 from app.models.organization import Store
 from app.models.user import Role, User
 from app.models.user_store import UserStore
-from app.services.attendance_device_service import generate_unique_clockin_pin
+from app.services.attendance_device_service import generate_clockin_pin
 from app.utils.password import hash_password
 
 router = APIRouter(prefix="/hiring", tags=["Admin Hiring"])
@@ -533,14 +533,9 @@ async def preview_clockin_pin(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("hiring:hire"))],
 ) -> dict:
-    """hire 모달에 미리 보여줄 clockin PIN을 발급한다.
-
-    이 엔드포인트가 만든 PIN은 reservation 아님 — 이론상 모달 열고 hire 누르기 전에
-    다른 사람 hire가 같은 PIN을 잡을 수 있지만, 100만 공간이라 거의 충돌 없음.
-    hire 시점에 server가 다시 unique 검증하므로 충돌 시 자동 재발급.
-    """
+    """hire 모달에 미리 보여줄 clockin PIN을 발급한다 (단순 6자리 랜덤)."""
     await check_store_access(db, current_user, store_id)
-    pin = await generate_unique_clockin_pin(db, current_user.organization_id)
+    pin = generate_clockin_pin()
     return {"clockin_pin": pin}
 
 
@@ -610,19 +605,12 @@ async def hire_application(
                 },
             )
 
-        # 클라가 미리 보여준 PIN 사용. unique 검증 후 충돌이면 자동 재발급.
+        # 클라가 보낸 PIN 사용 (6자리 숫자). 없으면 자동 발급.
         clockin_pin: Optional[str] = None
-        if body.clockin_pin and body.clockin_pin.isdigit():
-            pin_clash = await db.execute(
-                select(User.id).where(
-                    User.organization_id == org_id,
-                    User.clockin_pin == body.clockin_pin,
-                )
-            )
-            if pin_clash.scalar_one_or_none() is None:
-                clockin_pin = body.clockin_pin
+        if body.clockin_pin and body.clockin_pin.isdigit() and len(body.clockin_pin) == 6:
+            clockin_pin = body.clockin_pin
         if clockin_pin is None:
-            clockin_pin = await generate_unique_clockin_pin(db, org_id)
+            clockin_pin = generate_clockin_pin()
         # 클라가 미리 보여준 uuid를 받았으면 그대로 사용 (모달의 User ID = 실제 user.id 보장)
         user_kwargs: dict = {}
         if body.user_id:

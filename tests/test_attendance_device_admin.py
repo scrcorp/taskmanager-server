@@ -26,7 +26,7 @@ async def test_admin_list_devices(
 ) -> None:
     """device_auth_headers fixture 가 최소 1개의 device 를 만든다."""
     resp = await async_client.get(
-        "/api/v1/admin/attendance-devices", headers=admin_headers
+        "/api/v1/console/attendance-devices", headers=admin_headers
     )
     assert resp.status_code == 200, resp.text
     devices = resp.json()
@@ -45,7 +45,7 @@ async def test_admin_rename_device(
     device_id = me["device_id"]
 
     resp = await async_client.patch(
-        f"/api/v1/admin/attendance-devices/{device_id}",
+        f"/api/v1/console/attendance-devices/{device_id}",
         headers=admin_headers,
         json={"device_name": "Renamed Terminal"},
     )
@@ -71,7 +71,7 @@ async def test_admin_revoke_device(
 
     # admin revoke
     resp = await async_client.delete(
-        f"/api/v1/admin/attendance-devices/{device_id}", headers=admin_headers
+        f"/api/v1/console/attendance-devices/{device_id}", headers=admin_headers
     )
     assert resp.status_code == 204
 
@@ -88,7 +88,7 @@ async def test_admin_get_access_code(
     attendance_access_code: str,
 ) -> None:
     resp = await async_client.get(
-        "/api/v1/admin/access-codes/attendance", headers=admin_headers
+        "/api/v1/console/access-codes/attendance", headers=admin_headers
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -104,7 +104,7 @@ async def test_admin_rotate_access_code(
     before = attendance_access_code
     try:
         resp = await async_client.post(
-            "/api/v1/admin/access-codes/attendance/rotate", headers=admin_headers
+            "/api/v1/console/access-codes/attendance/rotate", headers=admin_headers
         )
         assert resp.status_code == 200, resp.text
         new_code = resp.json()["code"]
@@ -140,7 +140,7 @@ async def test_admin_get_user_clockin_pin(
     test_user: dict,
 ) -> None:
     resp = await async_client.get(
-        f"/api/v1/admin/users/{test_user['id']}/clockin-pin",
+        f"/api/v1/console/users/{test_user['id']}/clockin-pin",
         headers=admin_headers,
     )
     assert resp.status_code == 200, resp.text
@@ -161,7 +161,7 @@ async def test_admin_regenerate_user_clockin_pin(
 
     # regenerate
     resp = await async_client.post(
-        f"/api/v1/admin/users/{test_user['id']}/clockin-pin/regenerate",
+        f"/api/v1/console/users/{test_user['id']}/clockin-pin/regenerate",
         headers=admin_headers,
     )
     assert resp.status_code == 200, resp.text
@@ -197,7 +197,7 @@ async def test_admin_create_user_auto_assigns_pin(
 ) -> None:
     """POST /admin/users 직후 GET /admin/users/{id}/clockin-pin 이 6자리 숫자 반환.
 
-    user_service.create_user 내부에서 generate_unique_clockin_pin 을 호출하여
+    user_service.create_user 내부에서 generate_clockin_pin 을 호출하여
     신규 유저에게 PIN 이 자동 발급되는지 검증.
     """
     import secrets as _secrets
@@ -205,7 +205,7 @@ async def test_admin_create_user_auto_assigns_pin(
     from app.models.user import User
 
     # testadmin 과 같은 organization 의 staff 역할 조회
-    roles_resp = await async_client.get("/api/v1/admin/roles", headers=admin_headers)
+    roles_resp = await async_client.get("/api/v1/console/roles", headers=admin_headers)
     assert roles_resp.status_code == 200, roles_resp.text
     roles = roles_resp.json()
     # priority 가 가장 큰 역할 (가장 하위) 선택 — admin (10) 은 자기 자신보다 하위여야 생성 가능
@@ -216,7 +216,7 @@ async def test_admin_create_user_auto_assigns_pin(
 
     try:
         resp = await async_client.post(
-            "/api/v1/admin/users",
+            "/api/v1/console/users",
             headers=admin_headers,
             json={
                 "username": new_username,
@@ -231,7 +231,7 @@ async def test_admin_create_user_auto_assigns_pin(
 
         # PIN 조회 — 6자리 숫자여야 함
         pin_resp = await async_client.get(
-            f"/api/v1/admin/users/{new_user_id}/clockin-pin",
+            f"/api/v1/console/users/{new_user_id}/clockin-pin",
             headers=admin_headers,
         )
         assert pin_resp.status_code == 200, pin_resp.text
@@ -253,7 +253,7 @@ async def test_admin_create_user_auto_assigns_pin(
 
 # NOTE: app self-register 도 동일 로직이지만 email verification token 발급
 # 이 필요 — 테스트 과정이 복잡 (SMTP 목/토큰 수동 주입) 하여 현재는 스킵.
-# Server 쪽 auth_service.app_register 에서 generate_unique_clockin_pin 호출은
+# Server 쪽 auth_service.app_register 에서 generate_clockin_pin 호출은
 # 소스 레벨로 확인됨.
 
 
@@ -352,7 +352,7 @@ async def test_net_work_minutes_deducts_paid_overage(
         att_id = str(att.id)
 
     resp = await async_client.get(
-        f"/api/v1/admin/attendances/{att_id}", headers=admin_headers
+        f"/api/v1/console/attendances/{att_id}", headers=admin_headers
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -396,7 +396,7 @@ async def test_net_work_minutes_deducts_unpaid(
         att_id = str(att.id)
 
     resp = await async_client.get(
-        f"/api/v1/admin/attendances/{att_id}", headers=admin_headers
+        f"/api/v1/console/attendances/{att_id}", headers=admin_headers
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -439,7 +439,7 @@ async def test_net_work_minutes_paid_within_limit_no_deduct(
         att_id = str(att.id)
 
     resp = await async_client.get(
-        f"/api/v1/admin/attendances/{att_id}", headers=admin_headers
+        f"/api/v1/console/attendances/{att_id}", headers=admin_headers
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -487,7 +487,7 @@ async def test_attendance_response_includes_display_fields(
         att_id = str(att.id)
 
     resp = await async_client.get(
-        f"/api/v1/admin/attendances/{att_id}", headers=admin_headers
+        f"/api/v1/console/attendances/{att_id}", headers=admin_headers
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
