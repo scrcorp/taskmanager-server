@@ -279,8 +279,8 @@ async def today_staff(
 
     from app.models.attendance import Attendance
     from app.models.attendance_break import (
-        BREAK_TYPE_PAID_SHORT,
-        BREAK_TYPE_UNPAID_LONG,
+        PAID_BREAK_TYPES,
+        UNPAID_BREAK_TYPES,
         AttendanceBreak,
     )
     from app.models.schedule import Schedule
@@ -384,9 +384,9 @@ async def today_staff(
                     started_at=br.started_at, break_type=br.break_type
                 )
             else:
-                if br.break_type == BREAK_TYPE_PAID_SHORT:
+                if br.break_type in PAID_BREAK_TYPES:
                     paid += br.duration_minutes or 0
-                elif br.break_type == BREAK_TYPE_UNPAID_LONG:
+                elif br.break_type in UNPAID_BREAK_TYPES:
                     unpaid += br.duration_minutes or 0
 
         sched_start = combine(schedule.start_time) if schedule else None

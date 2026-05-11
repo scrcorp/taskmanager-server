@@ -40,7 +40,6 @@ async def _build_device_response(db: AsyncSession, device) -> AdminDeviceRespons
         fingerprint=device.fingerprint,
         registered_at=device.registered_at,
         last_seen_at=device.last_seen_at,
-        revoked_at=device.revoked_at,
     )
 
 
@@ -48,10 +47,9 @@ async def _build_device_response(db: AsyncSession, device) -> AdminDeviceRespons
 async def list_devices(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("attendance_devices:read"))],
-    include_revoked: bool = False,
 ) -> list[AdminDeviceResponse]:
     devices = await attendance_device_service.list_for_org(
-        db, current_user.organization_id, include_revoked=include_revoked
+        db, current_user.organization_id
     )
     return [await _build_device_response(db, d) for d in devices]
 

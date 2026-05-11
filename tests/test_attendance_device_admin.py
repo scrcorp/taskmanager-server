@@ -197,7 +197,7 @@ async def test_admin_create_user_auto_assigns_pin(
 ) -> None:
     """POST /admin/users 직후 GET /admin/users/{id}/clockin-pin 이 6자리 숫자 반환.
 
-    user_service.create_user 내부에서 generate_unique_clockin_pin 을 호출하여
+    user_service.create_user 내부에서 generate_clockin_pin 을 호출하여
     신규 유저에게 PIN 이 자동 발급되는지 검증.
     """
     import secrets as _secrets
@@ -253,7 +253,7 @@ async def test_admin_create_user_auto_assigns_pin(
 
 # NOTE: app self-register 도 동일 로직이지만 email verification token 발급
 # 이 필요 — 테스트 과정이 복잡 (SMTP 목/토큰 수동 주입) 하여 현재는 스킵.
-# Server 쪽 auth_service.app_register 에서 generate_unique_clockin_pin 호출은
+# Server 쪽 auth_service.app_register 에서 generate_clockin_pin 호출은
 # 소스 레벨로 확인됨.
 
 

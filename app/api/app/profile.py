@@ -13,14 +13,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.database import get_db
 from app.models.user import User
-from app.schemas.attendance_device import ClockinPinResponse
+from app.schemas.attendance_device import (
+    ClockinPinResponse,
+    ClockinPinUpdateRequest,
+)
 from app.schemas.user import (
     AlertPreferencesResponse,
     AlertPreferencesUpdate,
     ProfileResponse,
     ProfileUpdate,
 )
-from app.services.attendance_device_service import generate_unique_clockin_pin
+from app.services.attendance_device_service import generate_clockin_pin
 from app.services.profile_service import profile_service
 
 router: APIRouter = APIRouter()
@@ -73,9 +76,7 @@ async def get_my_clockin_pin(
 ) -> ClockinPinResponse:
     """내 attendance device PIN 을 조회합니다."""
     if current_user.clockin_pin is None:
-        current_user.clockin_pin = await generate_unique_clockin_pin(
-            db, current_user.organization_id
-        )
+        current_user.clockin_pin = generate_clockin_pin()
         await db.commit()
     return ClockinPinResponse(user_id=current_user.id, clockin_pin=current_user.clockin_pin)
 
@@ -86,9 +87,19 @@ async def regenerate_my_clockin_pin(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ClockinPinResponse:
     """내 PIN 을 새 값으로 교체."""
-    current_user.clockin_pin = await generate_unique_clockin_pin(
-        db, current_user.organization_id
-    )
+    current_user.clockin_pin = generate_clockin_pin()
+    await db.commit()
+    return ClockinPinResponse(user_id=current_user.id, clockin_pin=current_user.clockin_pin)
+
+
+@router.put("/profile/clockin-pin", response_model=ClockinPinResponse)
+async def update_my_clockin_pin(
+    body: ClockinPinUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> ClockinPinResponse:
+    """내 PIN 을 직접 지정. 본인만 가능 (JWT 인증)."""
+    current_user.clockin_pin = body.clockin_pin
     await db.commit()
     return ClockinPinResponse(user_id=current_user.id, clockin_pin=current_user.clockin_pin)
 

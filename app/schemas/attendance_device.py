@@ -49,8 +49,8 @@ class ClockActionRequest(BaseModel):
     """POST /attendance/clock-in 등 공용 요청.
 
     `break_type` 은 break-start 요청에만 의미 있음.
-    - 'paid_short' : 10분 유급 짧은 휴식
-    - 'unpaid_long': 30분 무급 긴 휴식
+    - 'paid_10min' : 10분 유급 짧은 휴식 (구: 'paid_short' — dual-read 호환)
+    - 'unpaid_meal': 무급 식사 휴식 (구: 'unpaid_long' — dual-read 호환)
 
     `user_id` 는 기기에서 PIN 입력과 함께 전달되는 유저 식별자.
     서버는 user_id 로 유저를 조회한 뒤 PIN 이 일치하는지 확인한다.
@@ -120,7 +120,6 @@ class AdminDeviceResponse(BaseModel):
     fingerprint: str | None
     registered_at: datetime
     last_seen_at: datetime | None
-    revoked_at: datetime | None
 
 
 class AdminDeviceRenameRequest(BaseModel):
@@ -141,6 +140,11 @@ class ClockinPinResponse(BaseModel):
     """개인 PIN 조회 응답 — 본인 또는 admin lookup."""
     user_id: UUID
     clockin_pin: str | None
+
+
+class ClockinPinUpdateRequest(BaseModel):
+    """PIN 수동 변경 요청. 6자리 숫자만."""
+    clockin_pin: str = Field(..., pattern=r"^\d{6}$")
 
 
 class AttendanceStoreOption(BaseModel):
