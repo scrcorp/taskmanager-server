@@ -365,10 +365,10 @@ class AuthService:
 
         # 사용자 생성 — Create user (email_verified=True since token was validated)
         # Attendance device 용 clockin_pin 자동 발급
-        from app.services.attendance_device_service import generate_unique_clockin_pin
+        from app.services.attendance_device_service import generate_clockin_pin
 
         password_hash: str = hash_password(data.password)
-        clockin_pin = await generate_unique_clockin_pin(db, organization_id)
+        clockin_pin = generate_clockin_pin()
         user: User = User(
             organization_id=organization_id,
             role_id=staff_role.id,

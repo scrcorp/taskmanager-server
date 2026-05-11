@@ -185,7 +185,7 @@ function showLogin() {
 (async function checkToken() {
   if (!TOKEN) return;
   try {
-    const resp = await fetch('/api/v1/admin/users?page=1&size=1', {
+    const resp = await fetch('/api/v1/console/users?page=1&size=1', {
       headers: {'Authorization': 'Bearer ' + TOKEN},
     });
     if (resp.ok) {
@@ -205,7 +205,7 @@ async function doLogin() {
   const password = document.getElementById('password').value;
   const el = document.getElementById('tokenStatus');
   try {
-    const resp = await fetch('/api/v1/admin/auth/login', {
+    const resp = await fetch('/api/v1/console/auth/login', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({username, password}),
@@ -250,7 +250,7 @@ async function upload(type, fileId, resultId) {
   resultEl.textContent = 'Uploading...';
 
   try {
-    const resp = await fetch('/api/v1/admin/bulk/' + type, {
+    const resp = await fetch('/api/v1/console/bulk/' + type, {
       method: 'POST',
       headers: {'Authorization': 'Bearer ' + TOKEN},
       body: formData,

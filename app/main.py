@@ -45,15 +45,15 @@ async def health_check() -> dict[str, str]:
 # 라우터 등록 — Phase 1~3 모든 엔드포인트 통합
 # Router registration — All Phase 1~3 endpoints aggregated in sub-packages
 # ---------------------------------------------------------------------------
-# admin_router: Phase 1(Foundation) + Phase 2(Core Workflow) + Phase 3(Communication)
+# console_router: Phase 1(Foundation) + Phase 2(Core Workflow) + Phase 3(Communication)
 # app_router: Phase 1(Auth/Profile) + Phase 2(Assignments) + Phase 3(Notices/Tasks/Alerts)
 from app.api.auth import router as common_auth_router  # noqa: E402
-from app.api.admin import admin_router  # noqa: E402
+from app.api.console import console_router  # noqa: E402
 from app.api.app import app_router  # noqa: E402
-from app.api.admin.setup import router as setup_page_router  # noqa: E402
+from app.api.console.setup import router as setup_page_router  # noqa: E402
 
 app.include_router(common_auth_router, prefix="/api/v1/auth", tags=["Auth"])
-app.include_router(admin_router, prefix="/api/v1/admin")
+app.include_router(console_router, prefix="/api/v1/console")
 app.include_router(app_router, prefix="/api/v1/app")
 app.include_router(setup_page_router, tags=["Setup Page"])
 

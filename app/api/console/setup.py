@@ -1,7 +1,7 @@
 """초기 설정 HTML 페이지 — 최초 관리자 계정 생성 폼.
 
 Setup HTML page — Serves a simple form for initial admin account creation.
-The form POSTs to /api/v1/admin/auth/setup (admin auth router).
+The form POSTs to /api/v1/console/auth/setup (admin auth router).
 """
 
 from sqlalchemy import select, func
@@ -39,7 +39,7 @@ button:hover{background:#7c6df0}
 <div class="card">
 <h2>HTM Setup</h2>
 {{MESSAGE}}
-<form method="post" action="/api/v1/admin/auth/setup">
+<form method="post" action="/api/v1/console/auth/setup">
 <label>Organization Name</label>
 <input name="organization_name" required placeholder="My Company">
 <label>Admin Username</label>

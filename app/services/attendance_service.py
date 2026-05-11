@@ -15,8 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attendance import Attendance, AttendanceCorrection, QRCode
 from app.models.attendance_break import (
-    BREAK_TYPE_PAID_SHORT,
-    BREAK_TYPE_UNPAID_LONG,
+    BREAK_TYPE_PAID_10MIN,
+    BREAK_TYPE_UNPAID_MEAL,
+    PAID_BREAK_TYPES,
+    UNPAID_BREAK_TYPES,
+    VALID_BREAK_TYPES,
     AttendanceBreak,
 )
 from app.models.organization import Store
@@ -595,13 +598,13 @@ class AttendanceService:
     def _summarize_breaks(
         breaks: list[AttendanceBreak],
     ) -> tuple[int, int, int, list[dict]]:
-        """break 목록을 paid/unpaid 집계 + paid_short 10분 초과분 + dict 리스트.
+        """break 목록을 paid/unpaid 집계 + paid 10분 초과분 + dict 리스트.
 
         Returns:
             (paid_total, unpaid_total, paid_overage, items)
-            - paid_total: 모든 paid_short 세션 duration 합
-            - unpaid_total: 모든 unpaid_long 세션 duration 합
-            - paid_overage: 각 paid_short 세션별 (duration - 10, 0 하한) 합. 근무시간에서 추가 차감 대상.
+            - paid_total: 모든 paid_10min(구: paid_short) 세션 duration 합
+            - unpaid_total: 모든 unpaid_meal(구: unpaid_long) 세션 duration 합
+            - paid_overage: 각 paid 세션별 (duration - 10, 0 하한) 합. 근무시간에서 추가 차감 대상.
             - items: 타임라인용 dict 목록
         """
         paid: int = 0
@@ -611,10 +614,10 @@ class AttendanceService:
         for br in breaks:
             duration = br.duration_minutes or 0
             if br.ended_at is not None:
-                if br.break_type == BREAK_TYPE_PAID_SHORT:
+                if br.break_type in PAID_BREAK_TYPES:
                     paid += duration
                     paid_overage += max(0, duration - 10)
-                elif br.break_type == BREAK_TYPE_UNPAID_LONG:
+                elif br.break_type in UNPAID_BREAK_TYPES:
                     unpaid += duration
             items.append({
                 "id": str(br.id),
@@ -745,7 +748,7 @@ class AttendanceService:
         # 순 근무시간 계산 — Net work minutes
         # = total_work
         #   - unpaid_break 전체 (일 안 한 시간)
-        #   - paid_short 10분 초과분 (10분은 유급, 초과는 비근무 처리)
+        #   - paid break 10분 초과분 (10분은 유급, 초과는 비근무 처리)
         total_work = attendance.total_work_minutes or 0
         net_work_minutes: int | None = None
         if attendance.total_work_minutes is not None:
@@ -985,10 +988,9 @@ class AttendanceService:
         break_type: str,
     ) -> None:
         """break_type 화이트리스트 + started_at < ended_at 검증."""
-        valid_types = {BREAK_TYPE_PAID_SHORT, BREAK_TYPE_UNPAID_LONG}
-        if break_type not in valid_types:
+        if break_type not in VALID_BREAK_TYPES:
             raise BadRequestError(
-                f"Invalid break_type: {break_type}. Allowed: {', '.join(sorted(valid_types))}"
+                f"Invalid break_type: {break_type}. Allowed: {', '.join(sorted(VALID_BREAK_TYPES))}"
             )
         if ended_at is not None and ended_at <= started_at:
             raise BadRequestError("ended_at must be after started_at")
@@ -1036,6 +1038,8 @@ class AttendanceService:
     ) -> AttendanceBreak:
         """admin 이 새 break 세션을 attendance 에 추가."""
         self._validate_break_session(started_at, ended_at, break_type)
+        from app.models.attendance_break import normalize_break_type
+        break_type = normalize_break_type(break_type)
         attendance = await self.get_attendance(db, attendance_id, organization_id)
 
         # 기존 세션 로드 + 겹침 검증
@@ -1103,6 +1107,8 @@ class AttendanceService:
         new_type = break_type if break_type is not None else target.break_type
 
         self._validate_break_session(new_started, new_ended, new_type)
+        from app.models.attendance_break import normalize_break_type
+        new_type = normalize_break_type(new_type)
 
         # 자기 자신 제외하고 겹침 검사
         existing = await db.execute(

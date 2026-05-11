@@ -338,7 +338,7 @@ async def test_device_name_fallback_when_no_store_code(
             await sess.commit()
 
 
-async def test_delete_me_sets_revoked_at(
+async def test_delete_me_hard_deletes_row(
     async_client: AsyncClient,
     attendance_access_code: str,
     db: AsyncSession,
@@ -358,11 +358,11 @@ async def test_delete_me_sets_revoked_at(
     )
     assert resp_del.status_code == 204
 
-    # verify DB
+    # DB row should be gone (hard delete)
     row = (
         await db.execute(select(AttendanceDevice).where(AttendanceDevice.id == device_id))
-    ).scalar_one()
-    assert row.revoked_at is not None
+    ).scalar_one_or_none()
+    assert row is None
 
     # subsequent authed call fails
     resp_me = await async_client.get(

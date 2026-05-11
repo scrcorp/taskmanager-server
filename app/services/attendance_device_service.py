@@ -21,9 +21,10 @@ from sqlalchemy.orm import selectinload
 from app.models.attendance import Attendance
 from app.models.attendance_break import (
     VALID_BREAK_TYPES,
-    BREAK_TYPE_PAID_SHORT,
-    BREAK_TYPE_UNPAID_LONG,
+    PAID_BREAK_TYPES,
+    UNPAID_BREAK_TYPES,
     AttendanceBreak,
+    normalize_break_type,
 )
 from app.models.attendance_device import AttendanceDevice
 from app.models.organization import Store
@@ -54,22 +55,12 @@ def generate_device_name(suffix_length: int = 4) -> str:
     return f"Terminal-{suffix}"
 
 
-async def generate_unique_clockin_pin(db: AsyncSession, organization_id: UUID) -> str:
-    """organization 단위 unique 한 6자리 숫자 PIN 생성.
+def generate_clockin_pin() -> str:
+    """6자리 숫자 PIN 생성. 조직 내 unique 보장 X (user_id + pin 동시 검증 방식).
 
-    조직당 가능한 PIN 공간(100만)이 작아 운영상 안전. 50회 시도 후에도 실패하면 예외.
+    user_id 가 함께 전달되므로 PIN 중복은 인증에 영향 없음.
     """
-    for _ in range(50):
-        candidate = f"{secrets.randbelow(1_000_000):06d}"
-        result = await db.execute(
-            select(User.id).where(
-                User.organization_id == organization_id,
-                User.clockin_pin == candidate,
-            )
-        )
-        if result.scalar_one_or_none() is None:
-            return candidate
-    raise RuntimeError("Failed to allocate unique clockin PIN")
+    return f"{secrets.randbelow(1_000_000):06d}"
 
 
 class AttendanceDeviceService:
@@ -100,12 +91,11 @@ class AttendanceDeviceService:
     async def get_by_token(
         self, db: AsyncSession, token: str
     ) -> AttendanceDevice | None:
-        """평문 토큰 → 활성 기기 조회. revoked 는 반환 안 함."""
+        """평문 토큰 → 기기 조회 (revoke 시 row 삭제되므로 추가 필터 불필요)."""
         token_hash = hash_token(token)
         result = await db.execute(
             select(AttendanceDevice).where(
                 AttendanceDevice.token_hash == token_hash,
-                AttendanceDevice.revoked_at.is_(None),
             )
         )
         return result.scalar_one_or_none()
@@ -149,12 +139,11 @@ class AttendanceDeviceService:
                 prefix = base.upper()
         # 매장명이 공백이거나 비어있으면 fallback — 기존 이름 유지
         if prefix:
-            # 같은 store 의 non-revoked 기기 수 (자기 자신 제외)
+            # 같은 store 의 기기 수 (자기 자신 제외)
             count_stmt = (
                 select(_func.count(AttendanceDevice.id))
                 .where(
                     AttendanceDevice.store_id == store_id,
-                    AttendanceDevice.revoked_at.is_(None),
                     AttendanceDevice.id != device.id,
                 )
             )
@@ -176,23 +165,20 @@ class AttendanceDeviceService:
         return device
 
     async def revoke(self, db: AsyncSession, device: AttendanceDevice) -> None:
-        """해제 — revoked_at 기록. Row 는 감사용으로 유지."""
-        if device.revoked_at is None:
-            device.revoked_at = datetime.now(timezone.utc)
-            await db.flush()
+        """해제 — row 즉시 삭제. 감사 이력 보존 안 함."""
+        await db.delete(device)
+        await db.flush()
 
     async def list_for_org(
         self,
         db: AsyncSession,
         organization_id: UUID,
-        include_revoked: bool = False,
     ) -> list[AttendanceDevice]:
-        stmt = select(AttendanceDevice).where(
-            AttendanceDevice.organization_id == organization_id
+        stmt = (
+            select(AttendanceDevice)
+            .where(AttendanceDevice.organization_id == organization_id)
+            .order_by(AttendanceDevice.registered_at.desc())
         )
-        if not include_revoked:
-            stmt = stmt.where(AttendanceDevice.revoked_at.is_(None))
-        stmt = stmt.order_by(AttendanceDevice.registered_at.desc())
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
@@ -273,7 +259,7 @@ class AttendanceDeviceService:
         """기기 + user_id + PIN 으로 clock in/out/break 처리.
 
         break 는 attendance_breaks 테이블에 행 단위로 기록. break-start 는
-        break_type 필수 (paid_short | unpaid_long). 같은 attendance 에 여러 번
+        break_type 필수 (paid_10min | unpaid_meal). 같은 attendance 에 여러 번
         휴식 가능하며 open 상태 (ended_at IS NULL) 는 1건만 허용.
         """
         if device.store_id is None:
@@ -451,7 +437,7 @@ class AttendanceDeviceService:
                 raise BadRequestError("Cannot start break in current state")
             if break_type not in VALID_BREAK_TYPES:
                 raise BadRequestError(
-                    "break_type required (paid_short or unpaid_long)"
+                    "break_type required (paid_10min or unpaid_meal)"
                 )
             open_break = await self._get_open_break(db, attendance.id)
             if open_break is not None:
@@ -459,7 +445,7 @@ class AttendanceDeviceService:
             new_break = AttendanceBreak(
                 attendance_id=attendance.id,
                 started_at=now,
-                break_type=break_type,
+                break_type=normalize_break_type(break_type),
             )
             db.add(new_break)
             attendance.status = "on_break"
@@ -598,9 +584,9 @@ class AttendanceDeviceService:
             select(AttendanceBreak).where(AttendanceBreak.attendance_id == attendance_id)
         )
         breaks = list(result.scalars().all())
-        paid = sum(b.duration_minutes or 0 for b in breaks if b.break_type == BREAK_TYPE_PAID_SHORT)
+        paid = sum(b.duration_minutes or 0 for b in breaks if b.break_type in PAID_BREAK_TYPES)
         unpaid = sum(
-            b.duration_minutes or 0 for b in breaks if b.break_type == BREAK_TYPE_UNPAID_LONG
+            b.duration_minutes or 0 for b in breaks if b.break_type in UNPAID_BREAK_TYPES
         )
         current = next((b for b in breaks if b.ended_at is None), None)
         return {
