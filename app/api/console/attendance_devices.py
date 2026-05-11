@@ -1,6 +1,6 @@
 """Admin Attendance Devices 라우터 — 기기 목록/rename/revoke + access code 조회/rotate.
 
-Mounted under /api/v1/admin.
+Mounted under /api/v1/console.
 """
 
 from typing import Annotated

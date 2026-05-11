@@ -430,7 +430,7 @@ async def admin_token() -> str:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
-            "/api/v1/admin/auth/login",
+            "/api/v1/console/auth/login",
             json={"username": "testadmin", "password": "1234"},
         )
     assert resp.status_code == 200, resp.text

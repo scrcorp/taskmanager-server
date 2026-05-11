@@ -56,7 +56,7 @@ async def admin_setup(
     Only works when no organizations exist yet.
     Redirects back to /setup page with result message.
     """
-    from app.api.admin.setup import _render
+    from app.api.console.setup import _render
 
     count = (await db.execute(select(func.count()).select_from(Organization))).scalar() or 0
     if count > 0:
