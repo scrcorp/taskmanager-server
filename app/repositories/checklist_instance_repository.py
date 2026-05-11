@@ -51,13 +51,23 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
         status: str | None = None,
         page: int = 1,
         per_page: int = 20,
+        store_ids: list[UUID] | None = None,
     ) -> tuple[Sequence[ChecklistInstance], int]:
-        """필터 조건에 맞는 체크리스트 인스턴스를 페이지네이션하여 조회합니다."""
+        """필터 조건에 맞는 체크리스트 인스턴스를 페이지네이션하여 조회합니다.
+
+        store_ids: 접근 가능한 매장 ID 목록. None=전체 접근(Owner),
+        []=접근 가능한 매장 없음(빈 결과 즉시 반환).
+        """
+        if store_ids is not None and not store_ids:
+            return [], 0
+
         query: Select = (
             select(ChecklistInstance)
             .where(ChecklistInstance.organization_id == organization_id)
         )
 
+        if store_ids is not None:
+            query = query.where(ChecklistInstance.store_id.in_(store_ids))
         if store_id is not None:
             query = query.where(ChecklistInstance.store_id == store_id)
         if user_id is not None:
@@ -191,9 +201,22 @@ class ChecklistInstanceRepository(BaseRepository[ChecklistInstance]):
         store_id: UUID | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
+        store_ids: list[UUID] | None = None,
     ) -> dict:
-        """리뷰 요약 통계를 집계합니다."""
+        """리뷰 요약 통계를 집계합니다.
+
+        store_ids: 접근 가능 매장 필터. None=전체, []=빈 결과 즉시 반환.
+        """
+        if store_ids is not None and not store_ids:
+            return {
+                "total_items": 0, "completed_items": 0, "reviewed_items": 0,
+                "pass": 0, "fail": 0, "caution": 0, "pending_re_review": 0,
+                "unreviewed": 0, "total_assignments": 0, "fully_approved_assignments": 0,
+            }
+
         filters = [ChecklistInstance.organization_id == organization_id]
+        if store_ids is not None:
+            filters.append(ChecklistInstance.store_id.in_(store_ids))
         if store_id is not None:
             filters.append(ChecklistInstance.store_id == store_id)
         if date_from is not None:

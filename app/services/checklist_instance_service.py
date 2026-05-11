@@ -199,6 +199,20 @@ class ChecklistInstanceService:
             db, schedule_id, organization_id, store_id, user_id, work_date, new_work_role_id,
         )
 
+    @staticmethod
+    def _ensure_store_access(
+        instance: ChecklistInstance,
+        store_ids: list[UUID] | None,
+    ) -> None:
+        """instance의 store_id가 접근 가능 목록에 있는지 검증.
+
+        store_ids=None은 전체 접근(Owner). 위반 시 ForbiddenError.
+        """
+        if store_ids is None:
+            return
+        if instance.store_id not in store_ids:
+            raise ForbiddenError("No access to this store's checklist")
+
     async def get_instances(
         self,
         db: AsyncSession,
@@ -209,10 +223,12 @@ class ChecklistInstanceService:
         status: str | None = None,
         page: int = 1,
         per_page: int = 20,
+        store_ids: list[UUID] | None = None,
     ) -> tuple[Sequence[ChecklistInstance], int]:
         """체크리스트 인스턴스 목록을 필터링하여 페이지네이션 조회합니다."""
         return await checklist_instance_repository.get_by_filters(
-            db, organization_id, store_id, user_id, work_date, status, page, per_page
+            db, organization_id, store_id, user_id, work_date, status, page, per_page,
+            store_ids=store_ids,
         )
 
     async def get_instance(
@@ -220,17 +236,20 @@ class ChecklistInstanceService:
         db: AsyncSession,
         instance_id: UUID,
         organization_id: UUID | None = None,
+        store_ids: list[UUID] | None = None,
     ) -> ChecklistInstance:
         """체크리스트 인스턴스 상세를 조회합니다 (아이템 포함).
 
         Raises:
             NotFoundError: 인스턴스가 없을 때
+            ForbiddenError: 접근 불가 매장의 인스턴스일 때
         """
         instance: ChecklistInstance | None = await checklist_instance_repository.get_with_items(
             db, instance_id, organization_id
         )
         if instance is None:
             raise NotFoundError("Checklist instance not found")
+        self._ensure_store_access(instance, store_ids)
         return instance
 
     async def get_my_instances(
@@ -536,6 +555,7 @@ class ChecklistInstanceService:
         result: str,
         comment_text: str | None = None,
         comment_photo_url: str | None = None,
+        store_ids: list[UUID] | None = None,
     ) -> ChecklistInstanceItem:
         """항목 리뷰를 생성하거나 수정합니다 (upsert).
 
@@ -545,6 +565,7 @@ class ChecklistInstanceService:
         instance = await checklist_instance_repository.get_with_items(db, instance_id)
         if instance is None:
             raise NotFoundError("Checklist instance not found")
+        self._ensure_store_access(instance, store_ids)
 
         target_item: ChecklistInstanceItem | None = next(
             (it for it in instance.items if it.item_index == item_index), None
@@ -602,11 +623,13 @@ class ChecklistInstanceService:
         instance_id: UUID,
         item_index: int,
         reviewer_id: UUID,
+        store_ids: list[UUID] | None = None,
     ) -> None:
         """항목 리뷰를 취소합니다. 이력에 old_result → NULL로 기록."""
         instance = await checklist_instance_repository.get_with_items(db, instance_id)
         if instance is None:
             raise NotFoundError("Checklist instance not found")
+        self._ensure_store_access(instance, store_ids)
 
         target_item: ChecklistInstanceItem | None = next(
             (it for it in instance.items if it.item_index == item_index), None
@@ -696,11 +719,13 @@ class ChecklistInstanceService:
         author_id: UUID,
         content_type: str,
         content: str,
+        store_ids: list[UUID] | None = None,
     ) -> ChecklistItemMessage:
         """항목에 메시지(텍스트/사진/영상)를 추가합니다. review_result 유무와 무관."""
         instance = await checklist_instance_repository.get_with_items(db, instance_id)
         if instance is None:
             raise NotFoundError("Checklist instance not found")
+        self._ensure_store_access(instance, store_ids)
 
         target_item: ChecklistInstanceItem | None = next(
             (it for it in instance.items if it.item_index == item_index), None
@@ -830,6 +855,7 @@ class ChecklistInstanceService:
         self,
         db: AsyncSession,
         content_id: UUID,
+        store_ids: list[UUID] | None = None,
     ) -> None:
         """메시지를 삭제합니다."""
         existing = (
@@ -840,6 +866,17 @@ class ChecklistInstanceService:
 
         if existing is None:
             raise NotFoundError("Content not found")
+
+        if store_ids is not None:
+            # message → item → instance → store_id 추적해 권한 검증
+            store_id_q = (
+                select(ChecklistInstance.store_id)
+                .join(ChecklistInstanceItem, ChecklistInstanceItem.instance_id == ChecklistInstance.id)
+                .where(ChecklistInstanceItem.id == existing.item_id)
+            )
+            target_store_id = (await db.execute(store_id_q)).scalar_one_or_none()
+            if target_store_id is None or target_store_id not in store_ids:
+                raise ForbiddenError("No access to this store's checklist")
 
         try:
             # Delete associated files (context="chat", context_id=message.id)
@@ -869,6 +906,7 @@ class ChecklistInstanceService:
         store_id: UUID | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
+        store_ids: list[UUID] | None = None,
     ) -> dict:
         """리뷰 요약 통계를 조회합니다."""
         return await checklist_instance_repository.get_review_summary(
@@ -877,6 +915,7 @@ class ChecklistInstanceService:
             store_id=store_id,
             date_from=date_from,
             date_to=date_to,
+            store_ids=store_ids,
         )
 
     async def get_completion_log(
@@ -889,12 +928,18 @@ class ChecklistInstanceService:
         date_to: date | None = None,
         page: int = 1,
         per_page: int = 20,
+        store_ids: list[UUID] | None = None,
     ) -> tuple[list[dict], int]:
         """Get checklist completion log with user and instance info.
 
         Queries cl_instance_items joined with cl_instances and users.
+
+        store_ids: 접근 가능 매장 필터. None=전체, []=빈 결과.
         """
         from sqlalchemy import func as sa_func
+
+        if store_ids is not None and not store_ids:
+            return [], 0
 
         # Base: completed items joined with instances
         base_filter = (
@@ -906,6 +951,8 @@ class ChecklistInstanceService:
             )
         )
 
+        if store_ids is not None:
+            base_filter = base_filter.where(ChecklistInstance.store_id.in_(store_ids))
         if store_id is not None:
             base_filter = base_filter.where(ChecklistInstance.store_id == store_id)
         if user_id is not None:
@@ -998,9 +1045,10 @@ class ChecklistInstanceService:
         scorer_id: UUID,
         score: int,
         score_note: str | None = None,
+        store_ids: list[UUID] | None = None,
     ) -> ChecklistInstance:
         """인스턴스에 점수를 부여하거나 수정합니다. 변경 이력을 cl_score_history에 기록합니다."""
-        instance = await self.get_instance(db, instance_id, organization_id)
+        instance = await self.get_instance(db, instance_id, organization_id, store_ids=store_ids)
 
         now = datetime.now(timezone.utc)
 
@@ -1036,6 +1084,7 @@ class ChecklistInstanceService:
         reviewer_id: UUID,
         item_indexes: list[int],
         result: str,
+        store_ids: list[UUID] | None = None,
     ) -> list[ChecklistInstanceItem]:
         """여러 항목에 리뷰 결과를 일괄 적용합니다. 이미 동일 결과인 항목은 건너뜁니다."""
         reviewed: list[ChecklistInstanceItem] = []
@@ -1047,6 +1096,7 @@ class ChecklistInstanceService:
                     item_index=idx,
                     reviewer_id=reviewer_id,
                     result=result,
+                    store_ids=store_ids,
                 )
                 reviewed.append(item)
             except BadRequestError:
