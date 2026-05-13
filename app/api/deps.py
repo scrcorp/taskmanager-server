@@ -10,7 +10,7 @@ from typing import Annotated, Callable, Awaitable
 from uuid import UUID
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -19,6 +19,7 @@ from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.utils.jwt import decode_token
 from app.models.user import User
+from app.models.attendance_device import AttendanceDevice
 from app.repositories.permission_repository import permission_repository
 from app.core.permissions import is_owner, is_gm_plus, hide_cost_for_priority
 
@@ -52,6 +53,75 @@ async def get_current_attendance_device(
     await attendance_device_service.touch_last_seen(db, device)
     await db.commit()
     return device
+
+
+async def get_current_attendance_admin_session(
+    request: Request,
+    device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Kiosk 관리자 모드 세션 검증.
+
+    `X-Admin-Session` 헤더로 전달된 토큰을 in-memory 세션 캐시에서 조회.
+    device token 과 같은 device 에서 발급되었는지 검증한다.
+    매니저 user 가 비활성/삭제됐거나 더 이상 store 의 매니저가 아니면 거부.
+    반환: (device, admin_session, manager_user)
+    """
+    from app.core.attendance_admin_session import get_session
+    from app.core.permissions import is_owner, is_sv_plus
+    from app.models.user_store import UserStore
+
+    token = request.headers.get("X-Admin-Session") or request.headers.get("x-admin-session")
+    session = get_session(token)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session required or expired",
+        )
+    if session.device_id != device.id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session does not match this device",
+        )
+    if device.store_id is None or session.store_id != device.store_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Device store has changed; please re-enter manager mode",
+        )
+
+    # 매니저 user 재검증 (활성 + 권한)
+    result = await db.execute(
+        select(User)
+        .options(selectinload(User.role))
+        .where(
+            User.id == session.manager_user_id,
+            User.organization_id == device.organization_id,
+            User.is_active.is_(True),
+            User.deleted_at.is_(None),
+        )
+    )
+    manager = result.scalar_one_or_none()
+    if manager is None or manager.role is None or not is_sv_plus(manager):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Manager no longer authorized",
+        )
+    # Owner 는 모든 매장 관리. 그 외는 user_stores.is_manager 확인.
+    if not is_owner(manager):
+        us = await db.execute(
+            select(UserStore).where(
+                UserStore.user_id == manager.id,
+                UserStore.store_id == device.store_id,
+                UserStore.is_manager.is_(True),
+            )
+        )
+        if us.scalar_one_or_none() is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Manager has no permission for this store",
+            )
+
+    return device, session, manager
 
 
 async def get_current_user(

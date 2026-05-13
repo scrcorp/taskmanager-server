@@ -183,6 +183,7 @@ class AttendanceCorrection(Base):
     # 수정 사유 — Reason for the correction
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     # 수정자 FK — Admin/manager who made the correction
-    corrected_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=False)
+    # nullable — system actor (cron auto clock-out) 는 user_id 없이 기록.
+    corrected_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # 수정 일시 — Correction timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

@@ -503,6 +503,9 @@ class ScheduleService:
         conflicts: list[BulkPreviewConflict] = []
         # user_id → simulated minutes accumulated across this batch
         user_batch_minutes: dict[UUID, int] = {}
+        # (user_id, work_date) → list of (entry_index, start_min, end_min_normalized)
+        # for detecting overlaps between entries in this same save batch
+        batch_intervals: dict[tuple[UUID, object], list[tuple[int, int, int]]] = {}
 
         for i, entry in enumerate(entries_data):
             try:
@@ -527,6 +530,26 @@ class ScheduleService:
                         message="; ".join(validation.errors),
                     ))
                     continue
+
+                # Detect overlap with other entries in this same batch.
+                # 한 직원이 같은 날 두 매장에서 동시 근무할 수 없으므로 store_id는 키에서 제외.
+                start_min = start_time.hour * 60 + start_time.minute
+                end_min = end_time.hour * 60 + end_time.minute
+                if end_min <= start_min:  # overnight wrap
+                    end_min += 24 * 60
+                key = (user_id, entry.work_date)
+                overlap_idx = next(
+                    (prev_i for prev_i, ps, pe in batch_intervals.get(key, [])
+                     if start_min < pe and ps < end_min),
+                    None,
+                )
+                if overlap_idx is not None:
+                    conflicts.append(BulkPreviewConflict(
+                        index=i,
+                        message=f"Overlaps with another shift in this save (entry #{overlap_idx + 1})",
+                    ))
+                    continue
+                batch_intervals.setdefault(key, []).append((i, start_min, end_min))
 
                 net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
                 resolved_rate = await self._resolve_hourly_rate(db, user_id, store_id, organization_id)
@@ -576,7 +599,14 @@ class ScheduleService:
         updates_data: list,  # list[BulkUpdateItem]
         actor: "User",
     ) -> "BulkUpdateResult":
-        """벌크 스케줄 수정 — work_role/시간 필드만 변경."""
+        """벌크 스케줄 수정 — 시간 필드 update 후, status가 지정되면 적절한 status 전이.
+
+        Status 전이 매트릭스 (item.status 지정 시):
+          draft → requested:    submit_schedule
+          requested → confirmed: confirm_schedule
+          confirmed → requested: revert_schedule (GM+ only)
+          그 외 / 같은 status: no-op (skip)
+        """
         from app.schemas.schedule import BulkUpdateResult, ScheduleUpdate
 
         updated = 0
@@ -586,18 +616,53 @@ class ScheduleService:
         for item in updates_data:
             try:
                 entry_id = UUID(item.id)
-                update_data = ScheduleUpdate(
-                    work_role_id=item.work_role_id,
-                    start_time=item.start_time,
-                    end_time=item.end_time,
-                    break_start_time=item.break_start_time,
-                    break_end_time=item.break_end_time,
-                    note=item.note,
-                    hourly_rate=item.hourly_rate,
-                    reset_checklist=item.reset_checklist,
-                    force=False,
-                )
-                await self.update_entry(db, entry_id, organization_id, update_data, actor=actor)
+                has_field_update = any([
+                    item.work_role_id is not None,
+                    item.start_time is not None,
+                    item.end_time is not None,
+                    item.break_start_time is not None,
+                    item.break_end_time is not None,
+                    item.note is not None,
+                    item.hourly_rate is not None,
+                    item.reset_checklist is not None,
+                ])
+                if has_field_update:
+                    update_data = ScheduleUpdate(
+                        work_role_id=item.work_role_id,
+                        start_time=item.start_time,
+                        end_time=item.end_time,
+                        break_start_time=item.break_start_time,
+                        break_end_time=item.break_end_time,
+                        note=item.note,
+                        hourly_rate=item.hourly_rate,
+                        reset_checklist=item.reset_checklist,
+                        force=False,
+                    )
+                    await self.update_entry(db, entry_id, organization_id, update_data, actor=actor)
+
+                # Status 전이 — 필드 update 후, 별도 호출.
+                if item.status is not None:
+                    # 최신 entry 조회 (update_entry가 commit했으므로 다시 fetch)
+                    entry_after = await schedule_repository.get_by_id(db, entry_id, organization_id)
+                    if entry_after is None:
+                        raise NotFoundError("Schedule not found")
+                    current = entry_after.status
+                    target = item.status
+                    if current == target:
+                        pass  # no-op
+                    elif current == "draft" and target == "requested":
+                        await self.submit_schedule(db, entry_id, organization_id, actor)
+                    elif current == "draft" and target == "confirmed":
+                        # draft → confirmed: submit + confirm 순차 (GM+ 필요)
+                        await self.submit_schedule(db, entry_id, organization_id, actor)
+                        await self.confirm_schedule(db, entry_id, organization_id, actor.id)
+                    elif current == "requested" and target == "confirmed":
+                        await self.confirm_schedule(db, entry_id, organization_id, actor.id)
+                    elif current == "confirmed" and target == "requested":
+                        await self.revert_schedule(db, entry_id, organization_id, actor)
+                    else:
+                        raise BadRequestError(f"Cannot transition status from '{current}' to '{target}'")
+
                 updated += 1
             except (BadRequestError, ForbiddenError, NotFoundError) as exc:
                 failed += 1

@@ -480,9 +480,9 @@ class AttendanceService:
             BadRequestError: 수정 불가 필드일 때 (When field cannot be corrected)
         """
         # 수정 가능한 필드 목록 — Allowed correctable fields
-        # status 는 plain string, 그 외는 ISO datetime
+        # status / note 는 plain string, 그 외는 ISO datetime
         time_fields: set[str] = {"clock_in", "clock_out", "break_start", "break_end"}
-        allowed_fields: set[str] = time_fields | {"status"}
+        allowed_fields: set[str] = time_fields | {"status", "note"}
         if field_name not in allowed_fields:
             raise BadRequestError(
                 f"Cannot correct field: {field_name}. Allowed: {', '.join(allowed_fields)}"
@@ -806,11 +806,15 @@ class AttendanceService:
             dict: 수정자 이름이 포함된 응답 딕셔너리
                   (Response dict with corrector name)
         """
-        # 수정자 이름 조회 — Fetch corrector name
-        user_result = await db.execute(
-            select(User.full_name).where(User.id == correction.corrected_by)
-        )
-        corrected_by_name: str = user_result.scalar() or "Unknown"
+        # 수정자 이름 조회 — Fetch corrector name. NULL = system actor (cron).
+        corrected_by_name: str
+        if correction.corrected_by is None:
+            corrected_by_name = "System"
+        else:
+            user_result = await db.execute(
+                select(User.full_name).where(User.id == correction.corrected_by)
+            )
+            corrected_by_name = user_result.scalar() or "Unknown"
 
         return {
             "id": str(correction.id),
@@ -818,7 +822,7 @@ class AttendanceService:
             "original_value": correction.original_value,
             "corrected_value": correction.corrected_value,
             "reason": correction.reason,
-            "corrected_by": str(correction.corrected_by),
+            "corrected_by": str(correction.corrected_by) if correction.corrected_by else None,
             "corrected_by_name": corrected_by_name,
             "created_at": correction.created_at,
         }
