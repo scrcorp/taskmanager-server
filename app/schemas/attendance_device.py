@@ -151,3 +151,116 @@ class AttendanceStoreOption(BaseModel):
     """기기 입장에서 선택 가능한 매장 후보 최소 정보."""
     id: UUID
     name: str
+
+
+# ── Kiosk 관리자 모드 ──────────────────────────────────────
+# Settings 화면에서 SV/GM/Owner PIN 으로 진입. 짧은 in-memory 세션 토큰 발급.
+
+
+class AdminManagerOption(BaseModel):
+    """관리자 모드에 진입 가능한 매장 매니저 1명."""
+    user_id: UUID
+    full_name: str
+    role_name: str
+    role_priority: int
+
+
+class AdminSessionRequest(BaseModel):
+    """매니저 user_id + 본인 PIN 으로 admin session 발급."""
+    user_id: UUID
+    pin: str = Field(..., min_length=6, max_length=6)
+
+
+class AdminSessionResponse(BaseModel):
+    """admin session 발급 결과."""
+    admin_token: str
+    manager_user_id: UUID
+    manager_name: str
+    expires_at: datetime
+
+
+class AdminScheduleRow(BaseModel):
+    """오늘 매장 스케줄 1건 (관리자 모드 리스트용)."""
+    schedule_id: UUID
+    user_id: UUID
+    user_name: str
+    work_role_id: UUID | None
+    work_role_name: str | None
+    shift_name: str | None = None
+    position_name: str | None
+    start_time: str | None  # "HH:mm" (store tz)
+    end_time: str | None
+    status: str
+    attendance_id: UUID | None
+    attendance_status: str | None
+    clock_in_display: str | None = None   # "HH:mm" (store tz)
+    clock_out_display: str | None = None  # "HH:mm" (store tz)
+
+
+class AdminStatusChangeRequest(BaseModel):
+    """관리자가 attendance status 를 직접 변경할 때.
+
+    상태별로 함께 반영해야 할 시각이 다르다.
+      - working / late: clock_in 시각 필수 (없으면 기존 유지하거나 NULL→지금)
+      - clocked_out:    clock_in 유지 + clock_out 시각 필수
+      - upcoming:       clock_in/out 모두 클리어 (cancel_clock_in 동일 효과)
+      - no_show:        clock_in/out 모두 클리어 (출근 없음 확정)
+      - on_break / soon: 시간 변경 없이 status 만 토글
+    reason 은 선택. 매니저가 나중에 적어도 되므로 빈 값 허용 → 서버가 fallback 적용.
+    """
+    user_id: UUID
+    status: str
+    reason: str | None = None
+    # 선택적 시간 보정 ("HH:mm" store tz). 현재 work_date 의 store tz datetime 으로 합성.
+    clock_in_hhmm: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    clock_out_hhmm: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+
+
+class AdminAssignableUser(BaseModel):
+    """오늘 새 스케줄을 배정할 수 있는 매장 직원."""
+    user_id: UUID
+    full_name: str
+    role_name: str
+
+
+class AdminWorkRoleOption(BaseModel):
+    """매장 work role 옵션 (스케줄 생성/수정 select).
+
+    shift_name + position_name 조합으로 표시. work role 자체 name 은 비어있는
+    경우가 흔해서 클라이언트에서 "{shift} · {position}" 형태로 합성한다.
+    """
+    work_role_id: UUID
+    name: str | None
+    shift_name: str | None
+    position_name: str | None
+    default_start_time: str | None
+    default_end_time: str | None
+
+
+class AdminScheduleCreateRequest(BaseModel):
+    """관리자가 오늘 스케줄을 새로 만들 때."""
+    user_id: UUID
+    work_role_id: UUID | None = None
+    start_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")  # "HH:mm"
+    end_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+
+
+class AdminScheduleUpdateRequest(BaseModel):
+    """관리자가 오늘 스케줄 시간/배정을 수정할 때."""
+    user_id: UUID | None = None
+    work_role_id: UUID | None = None
+    start_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    end_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+
+
+class AdminClockActionRequest(BaseModel):
+    """관리자가 임의 사용자 attendance 를 override 할 때.
+
+    actions: "clock_in" | "clock_out" | "break_start" | "break_end" | "cancel_clock_in"
+    "cancel_clock_in" 은 잘못 찍힌 출근을 초기화 (attendance status → upcoming).
+    """
+    user_id: UUID
+    action: str
+    break_type: str | None = None
+    reason: str | None = None
+

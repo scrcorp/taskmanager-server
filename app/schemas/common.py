@@ -758,6 +758,9 @@ class AttendanceResponse(BaseModel):
     net_work_minutes: int | None = None  # 순 근무 시간(분) = total_work - unpaid_break - paid_overage (Net work minutes)
     breaks: list[dict] = []  # break 세션 타임라인 (Per-break timeline: started_at/ended_at/type/duration)
     note: str | None  # 메모 (Note, may be null)
+    # 수정 이력 — 상세 조회 시 함께 반환. 목록 응답에선 빈 리스트.
+    # Correction history attached on detail responses; empty in list endpoints.
+    corrections: list[dict] = []
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 
@@ -799,7 +802,7 @@ class AttendanceCorrectionResponse(BaseModel):
     original_value: str | None  # 수정 전 값 (Original value, may be null)
     corrected_value: str  # 수정 후 값 (Corrected value)
     reason: str | None  # 수정 사유, optional (Reason for correction, may be null)
-    corrected_by: str  # 수정자 UUID 문자열 (Corrector UUID as string)
+    corrected_by: str | None = None  # 수정자 UUID 문자열 (system actor 면 NULL)
     corrected_by_name: str | None = None  # 수정자 이름 — 조인된 값 (Corrector name, resolved)
     created_at: datetime  # 수정 일시 UTC (Correction timestamp)
 
