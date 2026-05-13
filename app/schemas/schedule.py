@@ -550,6 +550,9 @@ class BulkPreviewEntry(BaseModel):
     end_time: str
     break_start_time: str | None = None
     break_end_time: str | None = None
+    # 생성 시 적용할 status. 서버 측에서 store.require_approval + actor 권한에 따라
+    # 다운그레이드될 수 있음 (Decision #10). draft/requested/confirmed.
+    status: str = "confirmed"
 
 
 class BulkPreviewRequest(BaseModel):
@@ -597,6 +600,9 @@ class BulkUpdateItem(BaseModel):
     note: str | None = None
     hourly_rate: float | None = None
     reset_checklist: bool | None = None
+    # status 변경 (선택). 명시되면 시간 필드 update 후 적절한 전이 함수 호출.
+    # draft/requested/confirmed. 권한/현재 status에 따라 거부될 수 있음.
+    status: str | None = None
 
 
 class BulkUpdateRequest(BaseModel):
