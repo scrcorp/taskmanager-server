@@ -212,6 +212,18 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
         if "auto_clocked_out" not in anoms:
             anoms.append("auto_clocked_out")
         att.anomalies = anoms or None
+
+        # timeline 에 기록 — system actor (corrected_by=NULL).
+        from app.models.attendance import AttendanceCorrection
+        db.add(AttendanceCorrection(
+            attendance_id=att.id,
+            field_name="auto_clock_out",
+            original_value="working",
+            corrected_value=cutoff.isoformat(),
+            reason=f"Shift ended {after_minutes} min ago",
+            corrected_by=None,
+        ))
+
         auto_count += 1
 
     if auto_count:

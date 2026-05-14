@@ -201,6 +201,52 @@ class AttendanceDeviceService:
 
     # ── User + PIN 검증 ────────────────────────────────────
 
+    async def _get_active_user(
+        self, db: AsyncSession, user_id: UUID, organization_id: UUID
+    ) -> User:
+        """PIN 검증 없이 active user 조회 (admin override 전용)."""
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.role))
+            .where(
+                User.id == user_id,
+                User.organization_id == organization_id,
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+            )
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise BadRequestError("User not found")
+        return user
+
+    async def perform_clock_action_admin(
+        self,
+        db: AsyncSession,
+        device: AttendanceDevice,
+        action: ClockAction,
+        user_id: UUID,
+        manager_user_id: UUID,
+        break_type: str | None = None,
+        reason: str | None = None,
+    ) -> Attendance:
+        """매니저가 admin 모드에서 임의 사용자 attendance 를 처리.
+
+        PIN 우회. early clock-in/out 가드 우회. note 에 manager 표시.
+        """
+        return await self.perform_clock_action(
+            db,
+            device=device,
+            pin="",  # ignored
+            action=action,
+            user_id=user_id,
+            break_type=break_type,
+            reason=reason,
+            skip_pin_check=True,
+            skip_early_guards=True,
+            manager_user_id=manager_user_id,
+        )
+
     async def verify_user_pin(
         self, db: AsyncSession, user_id: UUID, pin: str, organization_id: UUID
     ) -> User:
@@ -255,17 +301,26 @@ class AttendanceDeviceService:
         user_id: UUID,
         break_type: str | None = None,
         reason: str | None = None,
+        skip_pin_check: bool = False,
+        skip_early_guards: bool = False,
+        manager_user_id: UUID | None = None,
     ) -> Attendance:
         """기기 + user_id + PIN 으로 clock in/out/break 처리.
 
         break 는 attendance_breaks 테이블에 행 단위로 기록. break-start 는
         break_type 필수 (paid_10min | unpaid_meal). 같은 attendance 에 여러 번
         휴식 가능하며 open 상태 (ended_at IS NULL) 는 1건만 허용.
+
+        Admin override 모드 (skip_pin_check=True) 는 매니저가 키오스크 관리자 모드에서
+        타인 attendance 를 처리할 때 사용. PIN 우회 + early in/out 가드 우회.
         """
         if device.store_id is None:
             raise BadRequestError("Device has no store assigned")
 
-        user = await self.verify_user_pin(db, user_id, pin, device.organization_id)
+        if skip_pin_check:
+            user = await self._get_active_user(db, user_id, device.organization_id)
+        else:
+            user = await self.verify_user_pin(db, user_id, pin, device.organization_id)
         store_id = device.store_id
         now = datetime.now(timezone.utc)
 
@@ -386,7 +441,7 @@ class AttendanceDeviceService:
                     early_threshold = int(raw) if raw is not None else 5
                 except (SettingNotRegisteredError, TypeError, ValueError):
                     early_threshold = 5
-                if now < scheduled_start - _td(minutes=early_threshold):
+                if not skip_early_guards and now < scheduled_start - _td(minutes=early_threshold):
                     minutes_until = int(
                         (scheduled_start - now).total_seconds() / 60
                     )
@@ -519,7 +574,7 @@ class AttendanceDeviceService:
                         _early_thresh = 5
                     if now < sched_end_dt - _td2(minutes=_early_thresh):
                         is_early = True
-            if is_early and not (reason and reason.strip()):
+            if not skip_early_guards and is_early and not (reason and reason.strip()):
                 raise BadRequestError(
                     "Early clock-out requires a reason. Please provide one."
                 )
@@ -545,16 +600,49 @@ class AttendanceDeviceService:
                 if "early_clock_out" not in anoms:
                     anoms.append("early_clock_out")
                 attendance.anomalies = anoms or None
-                # reason 을 note 에 prepend (기존 note 보존)
-                tag = f"[Early clock-out] {reason.strip()}"
-                attendance.note = (
-                    tag if not attendance.note else f"{tag}\n\n{attendance.note}"
-                )
+                # early-clock-out 사유는 attendance_corrections 에 기록 (note 더럽히지 않음).
+                # 매니저가 console 에서 note 따로 메모하는 영역과 분리.
 
             await db.flush()
             await db.refresh(attendance)
         else:
             raise BadRequestError(f"Invalid action: {action}")
+
+        # ── 모든 attendance 액션을 timeline 에 기록 ──
+        # field_name 의미:
+        #   - staff PIN 정상 액션  → action verb 그대로 (clock_in / clock_out / break_start / break_end)
+        #   - admin override      → "modify" (매니저가 임의 사용자에 대해 직접 처리)
+        # corrected_value 는 새 시각/status 등 핵심 값.
+        from app.models.attendance import AttendanceCorrection
+        actor_id = manager_user_id if skip_pin_check else user.id
+        field_label = "modify" if skip_pin_check else action
+        # corrected_value: clock_in/out/break_start/break_end 는 해당 시각 ISO,
+        # modify 는 결과 status (이 액션의 효과).
+        cv: str
+        if skip_pin_check:
+            cv = attendance.status
+        elif action in ("clock_in", "clock_out"):
+            t = getattr(attendance, action, None)
+            cv = t.isoformat() if t else "(set)"
+        elif action == "break_start":
+            cv = (break_type or "break")
+        elif action == "break_end":
+            cv = "ended"
+        else:
+            cv = attendance.status
+        user_reason = (reason or "").strip()
+        if user_reason:
+            correction_reason = user_reason
+        else:
+            correction_reason = None
+        db.add(AttendanceCorrection(
+            attendance_id=attendance.id,
+            field_name=field_label,
+            original_value=None,
+            corrected_value=cv,
+            reason=correction_reason or "(no reason)",
+            corrected_by=actor_id,
+        ))
 
         await self.touch_last_seen(db, device)
         try:
