@@ -15,6 +15,8 @@ from app.models.user import User
 from app.schemas.auth import (
     ChangePasswordRequest,
     ChangePasswordResponse,
+    ConsoleFiltersResponse,
+    ConsoleFiltersUpdateRequest,
     FindUsernameRequest,
     FindUsernameResponse,
     FindUsernameSendCodeRequest,
@@ -74,6 +76,33 @@ async def get_me(
     Get the profile of the currently authenticated user.
     """
     return await auth_service.get_me(db, current_user)
+
+
+@router.put("/me/console-filters", response_model=ConsoleFiltersResponse)
+async def put_console_filters(
+    data: ConsoleFiltersUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> ConsoleFiltersResponse:
+    """콘솔 페이지별 필터 영속 저장 (전체 교체).
+
+    Replace the user's console_filters JSONB blob with the supplied value.
+    Used by the console to keep filter/sort/page state in sync across devices.
+    The client always sends the full object — last-write-wins, no merging.
+    """
+    # 빈 dict 거르기 — 큰 페이로드 방지: 키당 ~16개 param, 키 ~50개를 넘는 페이로드 거부.
+    if len(data.filters) > 50:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=413, detail="Too many filter pages")
+    for v in data.filters.values():
+        if len(v) > 32:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=413, detail="Too many params per page")
+
+    current_user.console_filters = data.filters
+    await db.commit()
+    await db.refresh(current_user, attribute_names=["console_filters"])
+    return ConsoleFiltersResponse(console_filters=current_user.console_filters or {})
 
 
 # ── Find Username ──
