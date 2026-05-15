@@ -278,6 +278,81 @@ async def break_end(
     return await _perform_action(db, device, data.pin, data.user_id, "break_end")
 
 
+# ── Tip entry (clock-out 통합) ─────────────────────────────
+
+
+@router.post("/tip-entry", status_code=201)
+async def device_tip_entry(
+    data: dict,
+    device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """직원이 attendance device 에서 clock-out 직후 팁 입력.
+
+    device token + 본인 PIN 으로 인증. tip_service.create_entry 호출.
+    schedule_id 는 body 로 받거나, 가장 최근 attendance 의 schedule 로 자동 derive.
+
+    body: {
+        user_id, pin,
+        schedule_id (optional — 없으면 자동 derive),
+        card_tips, cash_tips_kept,
+        distributions: [{receiver_id, amount, reason}],
+    }
+    """
+    from app.models.attendance import Attendance
+    from app.schemas.tip import TipEntryCreate
+    from app.services.tip_service import tip_service
+
+    if device.store_id is None:
+        raise HTTPException(status_code=400, detail="Device has no store assigned")
+
+    user_id_raw = data.get("user_id")
+    pin = data.get("pin")
+    if not user_id_raw or not pin:
+        raise HTTPException(status_code=400, detail="user_id and pin required")
+
+    user_id = uuid.UUID(str(user_id_raw))
+    user = await attendance_device_service.verify_user_pin(
+        db, user_id, str(pin), device.organization_id,
+    )
+
+    # schedule_id 자동 derive — body 우선, 없으면 user 의 가장 최근 attendance (clock-out
+    # 직후 진입을 가정).
+    schedule_id_raw = data.get("schedule_id")
+    if schedule_id_raw:
+        schedule_id = uuid.UUID(str(schedule_id_raw))
+    else:
+        latest_att = await db.scalar(
+            select(Attendance)
+            .where(
+                Attendance.user_id == user_id,
+                Attendance.store_id == device.store_id,
+                Attendance.schedule_id.is_not(None),
+            )
+            .order_by(Attendance.clock_in.desc())
+            .limit(1)
+        )
+        if latest_att is None or latest_att.schedule_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not match this clock-out to a schedule. Use the staff app to submit.",
+            )
+        schedule_id = latest_att.schedule_id
+
+    payload = TipEntryCreate(
+        schedule_id=schedule_id,
+        card_tips=data.get("card_tips", "0"),
+        cash_tips_kept=data.get("cash_tips_kept", "0"),
+        source="attendance",
+        distributions=data.get("distributions", []),
+    )
+    entry = await tip_service.create_entry(db, actor=user, payload=payload)
+    entry = await tip_service._get_entry_with_dists(db, entry.id)
+    return tip_service.build_entry_response(
+        entry, schedule=getattr(entry, "_schedule_loaded", None),
+    )
+
+
 # ── 대시보드 데이터 ────────────────────────────────────────
 
 
@@ -411,6 +486,11 @@ async def today_staff(
 
         sched_start = combine(schedule.start_time) if schedule else None
         sched_end = combine(schedule.end_time) if schedule else None
+        # Overnight shift (예: 21:00–02:00): end_time 이 start_time 보다 빠르면
+        # sched_end 가 today 02:00 으로 만들어지는데 실제로는 다음날 02:00 이어야 한다.
+        # early clock-out 사유 dialog 가 이 차이를 사용하므로 응답에서 보정.
+        if sched_start is not None and sched_end is not None and sched_end <= sched_start:
+            sched_end = sched_end + timedelta(days=1)
         result.append(
             TodayStaffRow(
                 user_id=user.id,

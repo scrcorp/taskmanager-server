@@ -99,6 +99,12 @@ from app.api.console.bulk_upload import router as bulk_upload_router
 # App Versions (sideload APK 릴리스 카탈로그) 라우터 임포트
 from app.api.console.app_versions import router as app_versions_router
 
+# Tips (매니저용 — Stage A: Review / Distributions)
+from app.api.console.tips import router as console_tips_router
+
+# Schedule Daily Report (수동 트리거) 라우터 임포트
+from app.api.console.schedule_reports import router as schedule_reports_router
+
 console_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -203,6 +209,11 @@ console_router.include_router(settings_router, prefix="/settings", tags=["Settin
 console_router.include_router(storage_router, prefix="/storage", tags=["Storage"])
 
 # ---------------------------------------------------------------------------
+# Tips 라우터 등록 — 매니저용 entries/distributions (Stage A)
+# ---------------------------------------------------------------------------
+console_router.include_router(console_tips_router, prefix="/tips", tags=["Tips"])
+
+# ---------------------------------------------------------------------------
 # Inventory 라우터 등록 — Register Inventory routers
 # ---------------------------------------------------------------------------
 console_router.include_router(inventory_router, tags=["Inventory"])
@@ -222,3 +233,8 @@ console_router.include_router(hiring_router, tags=["Admin Hiring"])
 # App Versions 라우터 등록 — sideload APK 릴리스 카탈로그
 # ---------------------------------------------------------------------------
 console_router.include_router(app_versions_router, prefix="/app-versions", tags=["App Versions"])
+
+# ---------------------------------------------------------------------------
+# Schedule Daily Report 라우터 등록 — Owner 전용 수동 트리거
+# ---------------------------------------------------------------------------
+console_router.include_router(schedule_reports_router, prefix="/schedule-report", tags=["Schedule Report"])

@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
+from app.middleware.app_version_broadcast import AppVersionBroadcastMiddleware
 from app.middleware.axiom_logging import AxiomLoggingMiddleware
 
 app: FastAPI = FastAPI(
@@ -21,6 +22,9 @@ app: FastAPI = FastAPI(
 # Axiom API 로깅 미들웨어 — Axiom API request/response logging
 # CORS보다 먼저 등록하여 모든 요청을 캡처 (Registered before CORS to capture all requests)
 app.add_middleware(AxiomLoggingMiddleware)
+
+# Attendance 응답에 X-App-Latest-Version 등 piggyback 헤더 추가
+app.add_middleware(AppVersionBroadcastMiddleware)
 
 # CORS 미들웨어 — Cross-Origin Resource Sharing middleware
 app.add_middleware(
@@ -72,6 +76,7 @@ app.mount("/bucket", StaticFiles(directory=str(BUCKET_DIR)), name="bucket")
 # Startup: APScheduler — attendance state cron (every 1 min)
 # ---------------------------------------------------------------------------
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # noqa: E402
+from apscheduler.triggers.cron import CronTrigger  # noqa: E402
 from apscheduler.triggers.interval import IntervalTrigger  # noqa: E402
 
 scheduler: AsyncIOScheduler = AsyncIOScheduler()
@@ -79,9 +84,10 @@ scheduler: AsyncIOScheduler = AsyncIOScheduler()
 
 @app.on_event("startup")
 async def start_scheduler() -> None:
-    """APScheduler 시작 — attendance 자동 상태 전환 cron."""
+    """APScheduler 시작 — attendance state cron + 스케줄 일일 리포트."""
     import logging
     from app.services.attendance_cron_service import run_attendance_state_tick
+    from app.services.schedule_report_service import run_daily_report_tick
 
     logger = logging.getLogger("uvicorn.error")
     if not scheduler.running:
@@ -93,8 +99,21 @@ async def start_scheduler() -> None:
             max_instances=1,
             coalesce=True,
         )
+        # 각 org timezone 기준 15시. scheduler는 UTC지만 service 안에서 org tz로 today를 재계산하므로
+        # 한국/미국 orgs 모두 자기 timezone 15시 근방에 발송될 수 있도록 매 hour 0분에 깨운 뒤
+        # tz별 15시인 org만 발송하는 방식이 정석이지만, 현재 단일 org 기준이라 hour=15 단일 트리거로 충분.
+        # 운영 timezone은 settings.SCHEDULE_REPORT_TIMEZONE 에서 지정.
+        report_tz_name = settings.SCHEDULE_REPORT_TIMEZONE or "UTC"
+        scheduler.add_job(
+            run_daily_report_tick,
+            trigger=CronTrigger(hour=15, minute=0, timezone=report_tz_name),
+            id="schedule_daily_report",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
         scheduler.start()
-        logger.info("[scheduler] APScheduler started with attendance_state_tick job")
+        logger.info("[scheduler] APScheduler started (attendance_state_tick, schedule_daily_report tz=%s)", report_tz_name)
 
 
 @app.on_event("shutdown")
