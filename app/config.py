@@ -97,6 +97,11 @@ class Settings(BaseSettings):
     # 보고서 제출 알림 수신 이메일 — Daily Report submit 시 알림 발송
     REPORT_NOTIFICATION_EMAIL: str = ""
 
+    # 스케줄 일일 리포트 — 콤마 구분 수신자 목록 (e.g. "hello@tigersplus.com,boss@tigersplus.com")
+    SCHEDULE_REPORT_RECIPIENTS: str = ""
+    # 스케줄 일일 리포트 발송 시간 기준 IANA tz (e.g. "America/Los_Angeles"). 비어있으면 UTC.
+    SCHEDULE_REPORT_TIMEZONE: str = ""
+
     # QA용 이메일 인증 우회 — 빈 문자열이면 비활성. 설정된 코드(예: "000000")를
     # 입력하면 verify_code가 무조건 통과하고 verification_token 발급.
     # prod/staging .env에는 절대 설정하지 말 것. worktree/local에서만.
