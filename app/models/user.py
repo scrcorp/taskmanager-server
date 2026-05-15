@@ -144,6 +144,9 @@ class User(Base):
     # Attendance device PIN — 6-digit numeric code for personal auth at shared terminals.
     # user_id + pin 동시 검증 방식이라 UNIQUE 불필요 (조직 내 중복 허용).
     clockin_pin: Mapped[Optional[str]] = mapped_column(String(6), nullable=True)
+    # 저장된 사인 이미지 — Storage key (S3 또는 local bucket).
+    # IRS Form 4070 등 폼 서명에 재사용. 직원이 staff app Settings 에서 등록/변경.
+    signature_image_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     # 소프트 삭제 일시 — Timestamp when user was soft-deleted (NULL = active)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)

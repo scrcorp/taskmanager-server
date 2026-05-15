@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user
 from app.database import get_db
@@ -48,6 +49,41 @@ async def get_my_stores(
             "day_start_time": s.day_start_time,
         }
         for s in stores
+    ]
+
+
+@router.get("/{store_id}/staff")
+async def list_store_staff(
+    store_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> list[dict]:
+    """매장 동료 목록 — 본인 제외.
+
+    팁 분배 picker 등에서 사용. 본인이 그 매장에 user_stores 매핑이 있어야 한다.
+    """
+    from app.api.deps import check_store_access
+    await check_store_access(db, current_user, store_id)
+
+    rows = await db.execute(
+        select(User)
+        .options(selectinload(User.role))
+        .join(UserStore, UserStore.user_id == User.id)
+        .where(
+            UserStore.store_id == store_id,
+            User.id != current_user.id,
+            User.is_active.is_(True),
+            User.deleted_at.is_(None),
+        )
+        .order_by(User.full_name)
+    )
+    return [
+        {
+            "id": str(u.id),
+            "full_name": u.full_name,
+            "role_name": u.role.name if u.role else None,
+        }
+        for u in rows.scalars().all()
     ]
 
 

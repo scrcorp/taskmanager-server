@@ -99,6 +99,9 @@ from app.api.console.bulk_upload import router as bulk_upload_router
 # App Versions (sideload APK 릴리스 카탈로그) 라우터 임포트
 from app.api.console.app_versions import router as app_versions_router
 
+# Tips (매니저용 — Stage A: Review / Distributions)
+from app.api.console.tips import router as console_tips_router
+
 console_router: APIRouter = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -201,6 +204,11 @@ console_router.include_router(settings_router, prefix="/settings", tags=["Settin
 # Storage 라우터 등록 — S3 presigned URL
 # ---------------------------------------------------------------------------
 console_router.include_router(storage_router, prefix="/storage", tags=["Storage"])
+
+# ---------------------------------------------------------------------------
+# Tips 라우터 등록 — 매니저용 entries/distributions (Stage A)
+# ---------------------------------------------------------------------------
+console_router.include_router(console_tips_router, prefix="/tips", tags=["Tips"])
 
 # ---------------------------------------------------------------------------
 # Inventory 라우터 등록 — Register Inventory routers
