@@ -572,6 +572,27 @@ class AttendanceService:
         """
         return await attendance_repository.get_corrections(db, attendance_id)
 
+    async def count_corrections_by_ids(
+        self,
+        db: AsyncSession,
+        attendance_ids: list[UUID],
+    ) -> dict[UUID, int]:
+        """주어진 근태 ID 목록의 수정 이력 개수를 batch 조회합니다.
+
+        Batch-count corrections for given attendance IDs (used by list endpoints
+        to surface "edited" indicators without loading full correction rows).
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            attendance_ids: 근태 UUID 목록 (Attendance UUID list)
+
+        Returns:
+            dict[UUID, int]: {attendance_id: count} — count 0 인 ID 는 키에 없음.
+        """
+        return await attendance_repository.count_corrections_by_attendance_ids(
+            db, attendance_ids
+        )
+
     async def _load_breaks_map(
         self,
         db: AsyncSession,
