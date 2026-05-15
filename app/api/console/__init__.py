@@ -99,13 +99,11 @@ from app.api.console.bulk_upload import router as bulk_upload_router
 # App Versions (sideload APK 릴리스 카탈로그) 라우터 임포트
 from app.api.console.app_versions import router as app_versions_router
 
-<<<<<<< HEAD
 # Tips (매니저용 — Stage A: Review / Distributions)
 from app.api.console.tips import router as console_tips_router
-=======
+
 # Schedule Daily Report (수동 트리거) 라우터 임포트
 from app.api.console.schedule_reports import router as schedule_reports_router
->>>>>>> feat/schedule-daily-report
 
 console_router: APIRouter = APIRouter()
 

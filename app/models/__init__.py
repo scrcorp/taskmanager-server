@@ -41,11 +41,8 @@ from app.models.inventory import InventoryCategory, InventorySubUnit, InventoryP
 from app.models.settings import SettingsRegistry, OrgSetting, StoreSetting, StaffSetting
 from app.models.hiring import StoreHiringForm, Candidate, Application, CandidateBlock
 from app.models.app_version import AppVersion
-<<<<<<< HEAD
 from app.models.tip import TipEntry, TipDistribution, TipAuditLog, TipPeriod, Form4070Document
-=======
 from app.models.schedule_report import ScheduleReportSnapshot
->>>>>>> feat/schedule-daily-report
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -68,9 +65,6 @@ __all__ = [
     "SettingsRegistry", "OrgSetting", "StoreSetting", "StaffSetting",
     "StoreHiringForm", "Candidate", "Application", "CandidateBlock",
     "AppVersion",
-<<<<<<< HEAD
     "TipEntry", "TipDistribution", "TipAuditLog", "TipPeriod", "Form4070Document",
-=======
     "ScheduleReportSnapshot",
->>>>>>> feat/schedule-daily-report
 ]
