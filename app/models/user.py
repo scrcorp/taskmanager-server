@@ -136,10 +136,17 @@ class User(Base):
     # JSONB shape: { "<category_code>": { "in_app": bool, "email": bool } }
     # 헬퍼/카테고리 정의는 app/core/alert_categories.py 참조.
     alert_preferences: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    # 콘솔 UI 필터 영속 저장 — 페이지별 필터/검색/정렬 상태. 1계정 1데이터 (모든 디바이스 동일).
+    # JSONB shape: { "<page_storage_key>": { "<param>": "<string>" } }
+    # 예: {"users": {"q": "alice", "role": "staff"}, "tasks": {"page": "2"}}
+    console_filters: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
     # 근태 기기 PIN — 매장 공용 기기에서 clock in/out 시 사용하는 개인 6자리 PIN.
     # Attendance device PIN — 6-digit numeric code for personal auth at shared terminals.
     # user_id + pin 동시 검증 방식이라 UNIQUE 불필요 (조직 내 중복 허용).
     clockin_pin: Mapped[Optional[str]] = mapped_column(String(6), nullable=True)
+    # 저장된 사인 이미지 — Storage key (S3 또는 local bucket).
+    # IRS Form 4070 등 폼 서명에 재사용. 직원이 staff app Settings 에서 등록/변경.
+    signature_image_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     # 소프트 삭제 일시 — Timestamp when user was soft-deleted (NULL = active)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)

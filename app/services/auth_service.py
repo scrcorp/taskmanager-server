@@ -549,6 +549,7 @@ class AuthService:
             must_change_password=loaded_user.must_change_password,
             permissions=sorted(permissions),
             preferred_language=loaded_user.preferred_language,  # type: ignore[arg-type]
+            console_filters=loaded_user.console_filters or {},
         )
 
 

@@ -761,6 +761,9 @@ class AttendanceResponse(BaseModel):
     # 수정 이력 — 상세 조회 시 함께 반환. 목록 응답에선 빈 리스트.
     # Correction history attached on detail responses; empty in list endpoints.
     corrections: list[dict] = []
+    # 수정 이력 개수 — 목록 응답에서 corrections 본문 없이도 "수정됨" 표시 가능하도록 제공.
+    # Correction count — populated in both list/detail responses (lightweight flag for UI).
+    correction_count: int = 0
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 

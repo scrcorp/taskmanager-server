@@ -117,6 +117,25 @@ class UserMeResponse(BaseModel):
     must_change_password: bool = False  # 비밀번호 변경 권장 여부
     permissions: list[str] = []  # 역할에 할당된 permission code 목록
     preferred_language: PreferredLanguage = "en"  # 선호 언어 (정보 수집용, default en)
+    # 콘솔 페이지별 영속 필터/검색/정렬 상태 — 1계정 1데이터, 다른 디바이스에서도 동일.
+    # shape: { "<page_storage_key>": { "<param>": "<string>" } }
+    console_filters: dict[str, dict[str, str]] = {}
+
+
+class ConsoleFiltersUpdateRequest(BaseModel):
+    """콘솔 필터 전체 교체 요청 — PUT /auth/me/console-filters.
+
+    Replaces the entire console_filters JSONB blob with the provided value.
+    The console always sends the full object (last-write-wins).
+    """
+
+    filters: dict[str, dict[str, str]]
+
+
+class ConsoleFiltersResponse(BaseModel):
+    """콘솔 필터 응답."""
+
+    console_filters: dict[str, dict[str, str]]
 
 
 # ── Find Username ──

@@ -171,6 +171,15 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     # ── App Versions (모바일/태블릿 APK 릴리스 카탈로그) ──
     ("app_versions:read",   "app_versions", "read",   "View app release catalog", False),
     ("app_versions:create", "app_versions", "create", "Register new app release (CI integration)", True),
+
+    # ── Tips (팁 입력·분배·신고) ──
+    ("tips:read",            "tips", "read",            "View tip entries and distributions", False),
+    ("tips:edit_own",        "tips", "edit_own",        "Create and edit own tip entries", False),
+    ("tips:edit_all",        "tips", "edit_all",        "Edit any staff tip entries (manager)", False),
+    ("tips:add_for_others",  "tips", "add_for_others",  "Add missing tip entries on behalf of staff (manager)", False),
+    ("tips:period_confirm",  "tips", "period_confirm",  "Confirm bi-monthly cycle (locks entries)", False),
+    ("tips:period_override", "tips", "period_override", "Force-close cycle with reason (audit-trail)", True),
+    ("tips:form_view",       "tips", "form_view",       "View IRS Form 4070 documents", False),
 ]
 
 # 편의용: code → description 조회
@@ -205,8 +214,12 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         "inventory:read", "inventory:create",
         "org:read",
         "schedule_history:read",
+        # 가이드 §1.1: 사이클 확정은 Owner/GM 위주. SV 는 entry 수정·누락 추가만.
+        "tips:read", "tips:edit_own", "tips:edit_all", "tips:add_for_others",
+        "tips:form_view",
     },
     "staff": {
         "daily_reports:read", "daily_reports:create", "daily_reports:update",
+        "tips:read", "tips:edit_own", "tips:form_view",
     },
 }

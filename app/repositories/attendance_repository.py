@@ -234,6 +234,37 @@ class AttendanceRepository(BaseRepository[Attendance]):
         result = await db.execute(query)
         return result.scalars().all()
 
+    async def count_corrections_by_attendance_ids(
+        self,
+        db: AsyncSession,
+        attendance_ids: Sequence[UUID],
+    ) -> dict[UUID, int]:
+        """주어진 근태 ID 목록의 수정 이력 개수를 batch 로 집계합니다.
+
+        Batch-count correction records for given attendance IDs to avoid N+1 queries
+        in list endpoints (used to flag corrected rows in weekly/daily views).
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            attendance_ids: 근태 UUID 목록 (Attendance UUID list)
+
+        Returns:
+            dict[UUID, int]: {attendance_id: count}. 수정 이력이 없는 ID 는 키에 없음.
+                              (Map of attendance_id → correction count; absent if zero)
+        """
+        if not attendance_ids:
+            return {}
+        query: Select = (
+            select(
+                AttendanceCorrection.attendance_id,
+                func.count(AttendanceCorrection.id),
+            )
+            .where(AttendanceCorrection.attendance_id.in_(list(attendance_ids)))
+            .group_by(AttendanceCorrection.attendance_id)
+        )
+        result = await db.execute(query)
+        return {row[0]: int(row[1]) for row in result.all()}
+
 
 class QRCodeRepository(BaseRepository[QRCode]):
     """QR 코드 레포지토리.

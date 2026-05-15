@@ -79,12 +79,17 @@ async def list_attendances(
     # Batch-load breaks for all attendance IDs to avoid N+1 queries
     attendance_ids: list[UUID] = [a.id for a in attendances]
     breaks_map = await attendance_service._load_breaks_map(db, attendance_ids)
+    # 수정 이력 개수도 batch 로 — weekly/daily view 에서 "수정됨" 표시용.
+    correction_counts = await attendance_service.count_corrections_by_ids(
+        db, attendance_ids
+    )
 
     items: list[dict] = []
     for a in attendances:
         response: dict = await attendance_service.build_response(
             db, a, breaks=breaks_map.get(a.id, [])
         )
+        response["correction_count"] = correction_counts.get(a.id, 0)
         items.append(response)
 
     return {
@@ -127,6 +132,7 @@ async def get_attendance(
     for c in corrections:
         correction_items.append(await attendance_service.build_correction_response(db, c))
     response["corrections"] = correction_items
+    response["correction_count"] = len(correction_items)
 
     return response
 
