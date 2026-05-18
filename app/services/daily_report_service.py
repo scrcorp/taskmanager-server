@@ -95,17 +95,65 @@ class DailyReportService:
             raise NotFoundError("Template not found")
         return template
 
+    async def _clear_other_defaults_in_scope(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID | None,
+        exclude_template_id: UUID | None,
+    ) -> None:
+        """같은 scope (org + store_id NULL/value 정확히 일치)의 다른 default 템플릿을 false 로."""
+        query = select(DailyReportTemplate).where(
+            DailyReportTemplate.organization_id == organization_id,
+            DailyReportTemplate.is_default == True,  # noqa: E712
+        )
+        if store_id is None:
+            query = query.where(DailyReportTemplate.store_id.is_(None))
+        else:
+            query = query.where(DailyReportTemplate.store_id == store_id)
+        if exclude_template_id is not None:
+            query = query.where(DailyReportTemplate.id != exclude_template_id)
+        result = await db.execute(query)
+        for other in result.scalars().all():
+            other.is_default = False
+
+    async def _count_other_active_in_scope(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID | None,
+        exclude_template_id: UUID,
+    ) -> int:
+        """같은 scope 내, 자기 자신을 제외한 active 템플릿 개수."""
+        query = select(func.count()).select_from(DailyReportTemplate).where(
+            DailyReportTemplate.organization_id == organization_id,
+            DailyReportTemplate.is_active == True,  # noqa: E712
+            DailyReportTemplate.id != exclude_template_id,
+        )
+        if store_id is None:
+            query = query.where(DailyReportTemplate.store_id.is_(None))
+        else:
+            query = query.where(DailyReportTemplate.store_id == store_id)
+        result = await db.execute(query)
+        return result.scalar() or 0
+
     async def create_template(
         self, db: AsyncSession, organization_id: UUID, data: DailyReportTemplateCreate
     ) -> DailyReportTemplate:
         try:
+            store_uuid: UUID | None = UUID(data.store_id) if data.store_id else None
             template = DailyReportTemplate(
                 organization_id=organization_id,
-                store_id=UUID(data.store_id) if data.store_id else None,
+                store_id=store_uuid,
                 name=data.name, is_default=data.is_default,
             )
             db.add(template)
             await db.flush()
+            # 새 default 가 들어오면 같은 scope 의 기존 default 를 false 로 (자기 자신은 제외)
+            if data.is_default:
+                await self._clear_other_defaults_in_scope(
+                    db, organization_id, store_uuid, exclude_template_id=template.id,
+                )
             for idx, s in enumerate(data.sections, start=1):
                 db.add(DailyReportTemplateSection(
                     template_id=template.id, title=s.title, description=s.description,
@@ -127,8 +175,24 @@ class DailyReportService:
             if data.name is not None:
                 template.name = data.name
             if data.is_default is not None:
+                # default 로 promote 하는 경우 같은 scope 의 기존 default 자동 해제
+                if data.is_default and not template.is_default:
+                    await self._clear_other_defaults_in_scope(
+                        db, organization_id, template.store_id,
+                        exclude_template_id=template.id,
+                    )
                 template.is_default = data.is_default
             if data.is_active is not None:
+                # 마지막 active 를 inactive 로 만드는 경우 거부
+                if template.is_active and not data.is_active:
+                    others_active = await self._count_other_active_in_scope(
+                        db, organization_id, template.store_id,
+                        exclude_template_id=template.id,
+                    )
+                    if others_active == 0:
+                        raise BadRequestError(
+                            "Cannot deactivate the last active template in this scope"
+                        )
                 template.is_active = data.is_active
             if data.sections is not None:
                 for old in list(template.sections):
