@@ -103,6 +103,8 @@ class DailyReportTemplateRepository:
     async def get_template_for_store(
         self, db: AsyncSession, organization_id: UUID, store_id: UUID | None = None
     ) -> DailyReportTemplate | None:
+        # 매장에 active 템플릿이 여러 개여도 깨지지 않도록 default 우선 + 최신순 1개 선택.
+        # Pick default-first, newest-first to tolerate multiple active templates per store.
         # 1. Store-specific template
         if store_id:
             query = (
@@ -112,6 +114,11 @@ class DailyReportTemplateRepository:
                     DailyReportTemplate.store_id == store_id,
                     DailyReportTemplate.is_active == True,
                 )
+                .order_by(
+                    DailyReportTemplate.is_default.desc(),
+                    DailyReportTemplate.created_at.desc(),
+                )
+                .limit(1)
             )
             result = await db.execute(query)
             template = result.scalar_one_or_none()
@@ -127,6 +134,11 @@ class DailyReportTemplateRepository:
                 DailyReportTemplate.store_id == None,
                 DailyReportTemplate.is_active == True,
             )
+            .order_by(
+                DailyReportTemplate.is_default.desc(),
+                DailyReportTemplate.created_at.desc(),
+            )
+            .limit(1)
         )
         result = await db.execute(query)
         template = result.scalar_one_or_none()
@@ -142,6 +154,8 @@ class DailyReportTemplateRepository:
                 DailyReportTemplate.is_default == True,
                 DailyReportTemplate.is_active == True,
             )
+            .order_by(DailyReportTemplate.created_at.desc())
+            .limit(1)
         )
         result = await db.execute(query)
         return result.scalar_one_or_none()
