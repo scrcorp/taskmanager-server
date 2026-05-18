@@ -55,6 +55,7 @@ from app.api.console.profile import router as profile_router
 
 # Phase 5 — Attendance 라우터 임포트
 from app.api.console.attendances import router as attendances_router
+from app.api.console.attendance_actions import router as attendance_actions_router
 from app.api.console.qr_codes import router as qr_codes_router
 from app.api.console.attendance_devices import router as attendance_devices_router
 
@@ -145,6 +146,8 @@ console_router.include_router(profile_router, prefix="/profile", tags=["Admin Pr
 # ---------------------------------------------------------------------------
 # 근태: /attendances 하위 (Attendance records)
 console_router.include_router(attendances_router, prefix="/attendances", tags=["Attendances"])
+# 근태 액션: /attendances/{id}/actions/* (state-machine transitions)
+console_router.include_router(attendance_actions_router, prefix="/attendances", tags=["Attendance Actions"])
 # QR 코드: /stores/{store_id}/qr-codes 및 /qr-codes 하위 (QR code management)
 console_router.include_router(qr_codes_router, tags=["QR Codes"])
 console_router.include_router(attendance_devices_router, tags=["Attendance Devices"])

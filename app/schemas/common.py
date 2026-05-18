@@ -788,6 +788,27 @@ class AttendanceCorrectionUpdateRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class AttendanceClockActionRequest(BaseModel):
+    """clock_in / clock_out / break_end 액션. ISO datetime + 필수 reason."""
+
+    at: datetime  # ISO datetime (UTC 또는 timezone-aware)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class AttendanceBreakStartRequest(BaseModel):
+    """break_start 액션 — break_type 필수."""
+
+    at: datetime
+    break_type: str = Field(pattern=r"^(paid_10min|unpaid_meal)$")
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class AttendanceReasonOnlyRequest(BaseModel):
+    """mark_no_show / cancel / reopen — 시간 입력 없는 액션."""
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class AttendanceCorrectionResponse(BaseModel):
     """근태 수정 이력 응답 스키마.
 
