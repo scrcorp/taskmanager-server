@@ -17,6 +17,7 @@ from app.models.user import User
 from app.schemas.common import (
     AttendanceCorrectionRequest,
     AttendanceCorrectionResponse,
+    AttendanceCorrectionUpdateRequest,
     AttendanceResponse,
     BreakSessionCreateRequest,
     BreakSessionResponse,
@@ -167,6 +168,32 @@ async def correct_attendance(
         corrected_by=current_user.id,
     )
 
+    return await attendance_service.build_correction_response(db, correction)
+
+
+@router.patch(
+    "/{attendance_id}/corrections/{correction_id}",
+    response_model=AttendanceCorrectionResponse,
+)
+async def update_correction_reason(
+    attendance_id: UUID,
+    correction_id: UUID,
+    data: AttendanceCorrectionUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> dict:
+    """기존 correction 의 reason 을 수정 (History 인라인 편집).
+
+    Update reason on an existing correction record. Reason 만 변경 가능,
+    field_name/value 는 새 correction 으로 처리해야 함.
+    """
+    correction = await attendance_service.update_correction_reason(
+        db,
+        attendance_id=attendance_id,
+        correction_id=correction_id,
+        organization_id=current_user.organization_id,
+        reason=data.reason,
+    )
     return await attendance_service.build_correction_response(db, correction)
 
 

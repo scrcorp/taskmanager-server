@@ -554,6 +554,33 @@ class AttendanceService:
             await db.rollback()
             raise
 
+    async def update_correction_reason(
+        self,
+        db: AsyncSession,
+        *,
+        attendance_id: UUID,
+        correction_id: UUID,
+        organization_id: UUID,
+        reason: str,
+    ) -> AttendanceCorrection:
+        """기존 correction 의 reason 만 갱신. attendance 가 다른 org 면 NotFound.
+
+        Update only the reason of an existing correction record.
+        """
+        # attendance 가 같은 org 인지 먼저 검증 (NotFound 자동 raise)
+        await self.get_attendance(db, attendance_id, organization_id)
+
+        correction = await attendance_repository.get_correction(db, correction_id)
+        if correction is None or correction.attendance_id != attendance_id:
+            from app.utils.exceptions import NotFoundError
+            raise NotFoundError("Correction record not found")
+
+        correction.reason = reason
+        await db.flush()
+        await db.commit()
+        await db.refresh(correction)
+        return correction
+
     async def get_corrections(
         self,
         db: AsyncSession,
