@@ -269,8 +269,6 @@ class UserRepository(BaseRepository[User]):
                     "store_id": UUID,
                     "is_manager": bool,
                     "is_work_assignment": bool,
-                    "primary_work_role_id": UUID | None,
-                    "primary_position_id": UUID | None,
                 },
                 ...,
             ]
@@ -296,8 +294,6 @@ class UserRepository(BaseRepository[User]):
         for store_id, a in target_map.items():
             is_manager: bool = a["is_manager"]
             is_work: bool = a.get("is_work_assignment", True)
-            primary_role: UUID | None = a.get("primary_work_role_id")
-            primary_pos: UUID | None = a.get("primary_position_id")
 
             existing = current_map.get(store_id)
             if existing is None:
@@ -306,18 +302,12 @@ class UserRepository(BaseRepository[User]):
                     store_id=store_id,
                     is_manager=is_manager,
                     is_work_assignment=is_work,
-                    primary_work_role_id=primary_role,
-                    primary_position_id=primary_pos,
                 ))
             else:
                 if existing.is_manager != is_manager:
                     existing.is_manager = is_manager
                 if existing.is_work_assignment != is_work:
                     existing.is_work_assignment = is_work
-                if existing.primary_work_role_id != primary_role:
-                    existing.primary_work_role_id = primary_role
-                if existing.primary_position_id != primary_pos:
-                    existing.primary_position_id = primary_pos
 
         await db.flush()
 
