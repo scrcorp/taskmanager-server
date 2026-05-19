@@ -180,8 +180,6 @@ async def sync_user_stores(
             "store_id": UUID(a.store_id),
             "is_manager": a.is_manager,
             "is_work_assignment": a.is_work_assignment,
-            "primary_work_role_id": UUID(a.primary_work_role_id) if a.primary_work_role_id else None,
-            "primary_position_id": UUID(a.primary_position_id) if a.primary_position_id else None,
         }
         for a in data.assignments
     ]
