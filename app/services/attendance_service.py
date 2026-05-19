@@ -536,6 +536,24 @@ class AttendanceService:
             break_delta = attendance.break_end - attendance.break_start
             attendance.total_break_minutes = int(break_delta.total_seconds() / 60)
 
+        # no_show 자동 해제 — clock_in 이 채워지면 매니저가 직접 출근 인정한 것으로 간주.
+        # clock_out 도 있으면 clocked_out, 없으면 working 으로 전환. anomalies 에서 no_show 제거.
+        if attendance.status == "no_show" and attendance.clock_in is not None:
+            attendance.status = "clocked_out" if attendance.clock_out is not None else "working"
+            if attendance.anomalies:
+                new_anoms = [a for a in attendance.anomalies if a != "no_show"]
+                attendance.anomalies = new_anoms or None
+
+        # clock_out 채워지면 자동 clocked_out 전환 — field 별 따로 저장되는 흐름에서
+        # clock_in 만 먼저 처리되어 working 으로 갔다가 다음 clock_out correction 에서 매듭이 안 지어지는
+        # 케이스 대응. on_break 였으면 break_end 가 비어있으니 손대지 않음 (운영자가 명시 처리).
+        if (
+            field_name == "clock_out"
+            and attendance.clock_out is not None
+            and attendance.status in ("working", "late")
+        ):
+            attendance.status = "clocked_out"
+
         await db.flush()
 
         # 근태 수정 알림 — Notify GM+ about attendance correction
