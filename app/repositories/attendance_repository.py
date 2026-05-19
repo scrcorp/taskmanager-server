@@ -210,6 +210,21 @@ class AttendanceRepository(BaseRepository[Attendance]):
         await db.refresh(correction)
         return correction
 
+    async def get_correction(
+        self,
+        db: AsyncSession,
+        correction_id: UUID,
+    ) -> AttendanceCorrection | None:
+        """단일 correction 조회 (org 검증은 호출 측 책임).
+
+        Fetch a single correction by ID.
+        """
+        query: Select = select(AttendanceCorrection).where(
+            AttendanceCorrection.id == correction_id
+        )
+        result = await db.execute(query)
+        return result.scalar_one_or_none()
+
     async def get_corrections(
         self,
         db: AsyncSession,

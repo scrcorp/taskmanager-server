@@ -16,7 +16,7 @@ from app.repositories.store_repository import store_repository
 from app.repositories.role_repository import role_repository
 from app.repositories.user_repository import user_repository
 from app.schemas.organization import StoreResponse
-from app.core.permissions import STAFF_PRIORITY, SV_PRIORITY
+from app.core.permissions import OWNER_PRIORITY, STAFF_PRIORITY, SUPER_OWNER_PRIORITY, SV_PRIORITY
 from app.schemas.user import (
     UserCreate,
     UserListResponse,
@@ -25,7 +25,7 @@ from app.schemas.user import (
     UserUpdate,
 )
 from app.utils.exceptions import BadRequestError, DuplicateError, ForbiddenError, NotFoundError
-from app.utils.password import hash_password
+from app.utils.password import hash_password, verify_password
 
 
 class UserService:
@@ -100,21 +100,62 @@ class UserService:
         """조직에 속한 사용자 목록을 필터 조건으로 조회합니다.
 
         List users in the organization with optional filters.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            organization_id: 조직 ID (Organization UUID)
-            filters: 필터 딕셔너리 (store_id, role_id, is_active)
-                     (Filter dict with optional store_id, role_id, is_active)
-
-        Returns:
-            list[UserListResponse]: 사용자 목록 (List of user list responses)
+        단일 store_id 필터인 경우 응답에 매장별 primary work_role / position 정보를 채움.
         """
         users: list[User] = await user_repository.get_by_org(
             db, organization_id, filters
         )
         org_rate = await self._get_org_rate(db, organization_id)
-        return [self._to_list_response(u, org_rate) for u in users]
+        responses = [self._to_list_response(u, org_rate) for u in users]
+
+        # 단일 매장 필터 시 매장별 primary work_role / position 채우기
+        store_ids = (filters or {}).get("store_ids") if filters else None
+        single_store_id: UUID | None = None
+        if isinstance(store_ids, list) and len(store_ids) == 1:
+            single_store_id = store_ids[0]
+
+        if single_store_id and users:
+            from app.models.user_store import UserStore
+            from app.models.schedule import StoreWorkRole
+            from app.models.work import Position
+            from sqlalchemy import select as _select
+
+            user_ids = [u.id for u in users]
+            us_rows = await db.execute(
+                _select(UserStore).where(
+                    UserStore.store_id == single_store_id,
+                    UserStore.user_id.in_(user_ids),
+                )
+            )
+            us_map: dict[UUID, UserStore] = {us.user_id: us for us in us_rows.scalars().all()}
+
+            role_ids = {us.primary_work_role_id for us in us_map.values() if us.primary_work_role_id}
+            pos_ids = {us.primary_position_id for us in us_map.values() if us.primary_position_id}
+            role_name_map: dict[UUID, str | None] = {}
+            pos_name_map: dict[UUID, str] = {}
+            if role_ids:
+                rows = await db.execute(
+                    _select(StoreWorkRole.id, StoreWorkRole.name).where(StoreWorkRole.id.in_(role_ids))
+                )
+                role_name_map = {row.id: row.name for row in rows.all()}
+            if pos_ids:
+                rows = await db.execute(
+                    _select(Position.id, Position.name).where(Position.id.in_(pos_ids))
+                )
+                pos_name_map = {row.id: row.name for row in rows.all()}
+
+            for resp, u in zip(responses, users):
+                us = us_map.get(u.id)
+                if not us:
+                    continue
+                if us.primary_work_role_id:
+                    resp.primary_work_role_id_in_store = str(us.primary_work_role_id)
+                    resp.primary_work_role_name_in_store = role_name_map.get(us.primary_work_role_id)
+                if us.primary_position_id:
+                    resp.primary_position_id_in_store = str(us.primary_position_id)
+                    resp.primary_position_name_in_store = pos_name_map.get(us.primary_position_id)
+
+        return responses
 
     async def get_user(
         self,
@@ -188,9 +229,12 @@ class UserService:
         if role is None:
             raise NotFoundError("Role not found")
 
-        # 하위 직급만 생성 가능
-        if caller is not None and role.priority <= caller.role.priority:
-            raise ForbiddenError("Cannot create a user with a role at or above your priority")
+        # 하위 직급만 생성 가능. Super Owner 는 동일 priority(또 다른 super_owner)도 허용 (다수 허용 단계).
+        if caller is not None and caller.role:
+            if role.priority < caller.role.priority:
+                raise ForbiddenError("Cannot create a user with a role above your priority")
+            if role.priority == caller.role.priority and caller.role.priority != SUPER_OWNER_PRIORITY:
+                raise ForbiddenError("Cannot create a user with a role at your priority")
 
         password_hash: str = hash_password(data.password)
 
@@ -226,6 +270,13 @@ class UserService:
                 db,
                 create_data,
             )
+
+            # Owner / Super Owner 신규 생성 시 조직 내 모든 매장에 자동 배정
+            # (is_manager=true, is_work_assignment=true — manager 면 work 자동). 알림 + 관리 권한 + 근무 배정 대상.
+            if role.priority <= OWNER_PRIORITY:
+                await user_repository.bulk_assign_org_stores_to_user(
+                    db, user.id, organization_id
+                )
 
             # 역할 관계 로드를 위해 다시 조회 — Re-fetch with role loaded
             loaded: User | None = await user_repository.get_detail(
@@ -304,13 +355,32 @@ class UserService:
             )
             if role is None:
                 raise NotFoundError("Role not found")
-            # 하위 직급만 지정 가능
-            if caller is not None and role.priority <= caller.role.priority:
-                raise ForbiddenError("Cannot assign a role at or above your priority")
+            # 하위 직급만 지정 가능. Super Owner 는 동일 priority(또 다른 super_owner)도 허용 (다수 허용 단계).
+            if caller is not None and caller.role:
+                if role.priority < caller.role.priority:
+                    raise ForbiddenError("Cannot assign a role above your priority")
+                if role.priority == caller.role.priority and caller.role.priority != SUPER_OWNER_PRIORITY:
+                    raise ForbiddenError("Cannot assign a role at your priority")
             update_data["role_id"] = UUID(update_data["role_id"])
 
-            # Staff로 변경 시 모든 매장의 is_manager 초기화
-            if role.priority >= STAFF_PRIORITY:
+            # 기존 role 조회 — Owner 승격/강등 판정용
+            existing_user: User | None = await user_repository.get_detail(
+                db, user_id, organization_id
+            )
+            prev_priority = existing_user.role.priority if existing_user and existing_user.role else None
+            was_owner_tier = prev_priority is not None and prev_priority <= OWNER_PRIORITY
+            is_owner_tier = role.priority <= OWNER_PRIORITY
+
+            # Owner/Super Owner → 그 아래 role 강등: user_stores 전체 제거 (자동 배정의 역동작)
+            if was_owner_tier and not is_owner_tier:
+                await user_repository.remove_all_user_stores(db, user_id)
+            # 그 아래 role → Owner/Super Owner 승격: 조직 내 모든 매장 자동 배정
+            elif not was_owner_tier and is_owner_tier:
+                await user_repository.bulk_assign_org_stores_to_user(
+                    db, user_id, organization_id
+                )
+            # Staff 이하로 변경 시 (Owner 강등 케이스가 아니면) is_manager 만 초기화
+            elif role.priority >= STAFF_PRIORITY:
                 await user_repository.reset_manager_flags(db, user_id)
 
         try:
@@ -331,6 +401,143 @@ class UserService:
             result = self._to_response(loaded, org_rate)
             await db.commit()
             return result
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def get_super_owner_status(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+    ) -> dict:
+        """조직의 Super Owner 발급 상태 조회.
+
+        Returns:
+            dict: { "exists": bool, "username": str|None }
+        """
+        from app.core.permissions import SUPER_OWNER_PRIORITY
+
+        result = await db.execute(
+            select(User.username)
+            .join(Role, User.role_id == Role.id)
+            .where(
+                User.organization_id == organization_id,
+                Role.priority == SUPER_OWNER_PRIORITY,
+                User.deleted_at.is_(None),
+            )
+            .limit(1)
+        )
+        username = result.scalar_one_or_none()
+        return {
+            "exists": username is not None,
+            "username": username,
+        }
+
+    async def transfer_super_owner(
+        self,
+        db: AsyncSession,
+        caller: User,
+        target_user_id: UUID,
+        current_password: str,
+    ) -> dict:
+        """Super Owner 양도. caller(super_owner) → owner 강등, target(owner) → super_owner 승격.
+
+        단일 트랜잭션. 매장 배정도 함께 처리:
+        - caller(새 owner): 모든 매장 자동 배정
+        - target(새 super_owner): 매장 user_stores 전체 제거
+
+        Args:
+            caller: 현재 super_owner (priority=5)
+            target_user_id: 새 super_owner 가 될 사용자 (반드시 같은 조직의 Owner)
+            current_password: 본인 확인용 caller 비밀번호
+
+        Raises:
+            ForbiddenError: caller 가 super_owner 가 아님 / 비밀번호 불일치
+            NotFoundError: target 또는 owner role 미존재
+            BadRequestError: target 이 같은 조직 Owner 가 아님 / 자기 자신
+        """
+        from app.core.permissions import OWNER_PRIORITY, SUPER_OWNER_PRIORITY
+
+        # caller 가 super_owner 인지 검증
+        if caller.role is None or caller.role.priority != SUPER_OWNER_PRIORITY:
+            raise ForbiddenError("Only Super Owner can transfer ownership")
+
+        # 자기 자신에게 양도 불가
+        if caller.id == target_user_id:
+            raise BadRequestError("Cannot transfer to yourself")
+
+        # current_password 검증
+        if not verify_password(current_password, caller.password_hash):
+            raise ForbiddenError("Current password is incorrect")
+
+        # target 조회 (같은 조직, 활성, 미삭제)
+        target: User | None = await user_repository.get_detail(
+            db, target_user_id, caller.organization_id
+        )
+        if target is None or not target.is_active or target.deleted_at is not None:
+            raise NotFoundError("Target user not found")
+
+        # target 이 Owner 인지 확인 (Super Owner 는 Owner 에게만 양도 가능)
+        if target.role is None or target.role.priority != OWNER_PRIORITY:
+            raise BadRequestError(
+                "Target must be an Owner. Promote them to Owner first, then transfer."
+            )
+
+        # owner role / super_owner role 조회
+        owner_role_q = await db.execute(
+            select(Role).where(
+                Role.organization_id == caller.organization_id,
+                Role.priority == OWNER_PRIORITY,
+            )
+        )
+        owner_role = owner_role_q.scalar_one_or_none()
+        if owner_role is None:
+            raise NotFoundError("Owner role not provisioned")
+
+        super_owner_role_q = await db.execute(
+            select(Role).where(
+                Role.organization_id == caller.organization_id,
+                Role.priority == SUPER_OWNER_PRIORITY,
+            )
+        )
+        super_owner_role = super_owner_role_q.scalar_one_or_none()
+        if super_owner_role is None:
+            raise NotFoundError("Super Owner role not provisioned")
+
+        try:
+            # 1) target → super_owner role 로 변경
+            await user_repository.update(
+                db, target.id, {"role_id": super_owner_role.id}, caller.organization_id
+            )
+            # 2) target 의 매장 배정 전체 제거 (Super Owner 는 매장 운영 비참여)
+            await user_repository.remove_all_user_stores(db, target.id)
+
+            # 3) caller → owner role 로 강등
+            await user_repository.update(
+                db, caller.id, {"role_id": owner_role.id}, caller.organization_id
+            )
+            # 4) caller 를 조직 내 모든 매장에 자동 배정 (Owner 자동 배정 정책)
+            await user_repository.bulk_assign_org_stores_to_user(
+                db, caller.id, caller.organization_id
+            )
+
+            await db.commit()
+
+            import logging
+            logger = logging.getLogger("uvicorn.error")
+            logger.info(
+                "[super_owner_transfer] org=%s from=%s to=%s",
+                caller.organization_id, caller.id, target.id,
+            )
+
+            return {
+                "message": (
+                    f"Super Owner transferred to {target.username}. "
+                    "You are now Owner and assigned to all stores."
+                ),
+                "new_super_owner_user_id": str(target.id),
+                "new_super_owner_username": target.username,
+            }
         except Exception:
             await db.rollback()
             raise
@@ -448,11 +655,31 @@ class UserService:
             raise NotFoundError("User not found")
 
         from app.models.user_store import UserStore
+        from app.models.schedule import StoreWorkRole
+        from app.models.work import Position
+        from sqlalchemy import select as _select
 
         assignments: list[UserStore] = await user_repository.get_user_store_assignments(db, user_id)
         # store 정보가 필요하므로 store 조회
         stores: list[Store] = await user_repository.get_user_stores(db, user_id)
         store_map = {s.id: s for s in stores}
+
+        # primary work_role / position 이름 일괄 조회 (배정 수만큼 호출 없이)
+        role_ids = {a.primary_work_role_id for a in assignments if a.primary_work_role_id}
+        pos_ids = {a.primary_position_id for a in assignments if a.primary_position_id}
+        role_name_map: dict[UUID, str | None] = {}
+        pos_name_map: dict[UUID, str] = {}
+        if role_ids:
+            rows = await db.execute(
+                _select(StoreWorkRole.id, StoreWorkRole.name).where(StoreWorkRole.id.in_(role_ids))
+            )
+            role_name_map = {row.id: row.name for row in rows.all()}
+        if pos_ids:
+            rows = await db.execute(
+                _select(Position.id, Position.name).where(Position.id.in_(pos_ids))
+            )
+            pos_name_map = {row.id: row.name for row in rows.all()}
+
         return [
             UserStoreResponse(
                 id=str(a.store_id),
@@ -462,6 +689,18 @@ class UserService:
                 is_active=store_map[a.store_id].is_active if a.store_id in store_map else False,
                 is_manager=a.is_manager,
                 is_work_assignment=a.is_work_assignment,
+                primary_work_role_id=str(a.primary_work_role_id) if a.primary_work_role_id else None,
+                primary_work_role_name=(
+                    role_name_map.get(a.primary_work_role_id)
+                    if a.primary_work_role_id
+                    else None
+                ),
+                primary_position_id=str(a.primary_position_id) if a.primary_position_id else None,
+                primary_position_name=(
+                    pos_name_map.get(a.primary_position_id)
+                    if a.primary_position_id
+                    else None
+                ),
                 created_at=store_map[a.store_id].created_at if a.store_id in store_map else a.created_at,
             )
             for a in assignments
@@ -491,6 +730,12 @@ class UserService:
             raise NotFoundError("User not found")
 
         priority = user_with_role.role.priority
+
+        # 룰: is_manager=true 이면 is_work_assignment 도 자동 true (work 해제 불가).
+        # API 직접 호출도 안전하게 강제.
+        for a in assignments:
+            if a.get("is_manager"):
+                a["is_work_assignment"] = True
 
         # Role별 검증
         manager_count = sum(1 for a in assignments if a["is_manager"])

@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"  # HMAC-SHA256 대칭 서명 (Symmetric signing algorithm)
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # 액세스 토큰 유효 기간: 30분 (Access token TTL)
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # 리프레시 토큰 유효 기간: 7일 (Refresh token TTL)
+    # 회전된 refresh token 의 grace window — 멀티 탭/새로고침 race 멱등 처리용.
+    # 회전 후 N 초 안에 같은 R1 으로 재요청이 들어오면 캐시된 새 토큰을 그대로 반환.
+    REFRESH_TOKEN_GRACE_SECONDS: int = 10
 
     # CORS 설정 — 프론트엔드 개발 서버 허용 (Frontend dev server origins)
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8080"]

@@ -21,7 +21,13 @@ from app.utils.jwt import decode_token
 from app.models.user import User
 from app.models.attendance_device import AttendanceDevice
 from app.repositories.permission_repository import permission_repository
-from app.core.permissions import is_owner, is_gm_plus, hide_cost_for_priority
+from app.core.permissions import (
+    SUPER_OWNER_ONLY,
+    hide_cost_for_priority,
+    is_gm_plus,
+    is_owner,
+    is_super_owner,
+)
 
 security: HTTPBearer = HTTPBearer()
 device_security: HTTPBearer = HTTPBearer(auto_error=False)
@@ -176,7 +182,13 @@ def require_permission(*permission_codes: str) -> Callable[..., Awaitable[User]]
         current_user: Annotated[User, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> User:
-        if is_owner(current_user):
+        # Super Owner 는 항상 통과 (모든 권한 보유).
+        if is_super_owner(current_user):
+            return current_user
+        # Owner 는 super_owner 전용 permission 이 아닌 경우에만 bypass.
+        # super_owner 전용(org:delete / owner:assign / super_owner:transfer)
+        # 은 Owner 라도 일반 check 로 진입 → role_permissions 에 없으면 403.
+        if is_owner(current_user) and not any(c in SUPER_OWNER_ONLY for c in permission_codes):
             return current_user
         user_perms = await get_user_permissions(db, current_user.role_id)
         for code in permission_codes:

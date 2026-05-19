@@ -34,6 +34,7 @@ from fastapi import APIRouter
 # Phase 1 — Foundation 라우터 임포트
 from app.api.console.auth import router as auth_router
 from app.api.console.organizations import router as organizations_router
+from app.api.console.super_owner import router as super_owner_router
 from app.api.console.stores import router as stores_router
 from app.api.console.roles import router as roles_router
 from app.api.console.users import router as users_router
@@ -47,7 +48,6 @@ from app.api.console.checklist_instances import router as checklist_instances_ro
 
 # Phase 3 — Communication 라우터 임포트
 from app.api.console.notices import router as notices_router
-from app.api.console.tasks import router as tasks_router
 from app.api.console.alerts import router as alerts_router
 from app.api.console.profile import router as profile_router
 
@@ -55,6 +55,7 @@ from app.api.console.profile import router as profile_router
 
 # Phase 5 — Attendance 라우터 임포트
 from app.api.console.attendances import router as attendances_router
+from app.api.console.attendance_actions import router as attendance_actions_router
 from app.api.console.qr_codes import router as qr_codes_router
 from app.api.console.attendance_devices import router as attendance_devices_router
 
@@ -80,9 +81,16 @@ from app.api.console.break_rules import router as break_rules_router
 from app.api.console.schedule_requests import router as schedule_requests_router
 from app.api.console.schedules import router as schedule_entries_router
 
-# Daily Reports 라우터 임포트
+# Daily Reports 라우터 임포트 (legacy)
 from app.api.console.daily_reports import router as daily_reports_router
 from app.api.console.daily_report_templates import router as daily_report_templates_router
+
+# Reports 라우터 임포트 (multi-type)
+from app.api.console.reports import router as reports_router
+from app.api.console.report_templates import router as report_templates_router
+
+# Tasks 라우터 임포트 (renamed from additional_tasks → issues → tasks)
+from app.api.console.tasks import router as tasks_router
 
 # Storage 라우터 임포트
 from app.api.console.storage import router as storage_router
@@ -112,6 +120,7 @@ console_router: APIRouter = APIRouter()
 # ---------------------------------------------------------------------------
 console_router.include_router(auth_router, prefix="/auth", tags=["Console Auth"])
 console_router.include_router(organizations_router, prefix="/organizations", tags=["Organizations"])
+console_router.include_router(super_owner_router, prefix="/super-owner", tags=["Super Owner"])
 console_router.include_router(stores_router, prefix="/stores", tags=["Stores"])
 console_router.include_router(roles_router, prefix="/roles", tags=["Roles"])
 console_router.include_router(users_router, prefix="/users", tags=["Users"])
@@ -131,7 +140,6 @@ console_router.include_router(checklist_instances_router, prefix="/checklist-ins
 # Phase 3 라우터 등록 — Register Phase 3 (Communication) routers
 # ---------------------------------------------------------------------------
 console_router.include_router(notices_router, prefix="/notices", tags=["Notices"])
-console_router.include_router(tasks_router, prefix="/additional-tasks", tags=["Additional Tasks"])
 console_router.include_router(alerts_router, prefix="/alerts", tags=["Admin Alerts"])
 console_router.include_router(profile_router, prefix="/profile", tags=["Admin Profile"])
 
@@ -145,6 +153,8 @@ console_router.include_router(profile_router, prefix="/profile", tags=["Admin Pr
 # ---------------------------------------------------------------------------
 # 근태: /attendances 하위 (Attendance records)
 console_router.include_router(attendances_router, prefix="/attendances", tags=["Attendances"])
+# 근태 액션: /attendances/{id}/actions/* (state-machine transitions)
+console_router.include_router(attendance_actions_router, prefix="/attendances", tags=["Attendance Actions"])
 # QR 코드: /stores/{store_id}/qr-codes 및 /qr-codes 하위 (QR code management)
 console_router.include_router(qr_codes_router, tags=["QR Codes"])
 console_router.include_router(attendance_devices_router, tags=["Attendance Devices"])
@@ -190,6 +200,9 @@ console_router.include_router(permissions_router, prefix="/permissions", tags=["
 # ---------------------------------------------------------------------------
 console_router.include_router(daily_reports_router, prefix="/daily-reports", tags=["Daily Reports"])
 console_router.include_router(daily_report_templates_router, prefix="/daily-report-templates", tags=["Daily Report Templates"])
+console_router.include_router(reports_router, prefix="/reports", tags=["Reports"])
+console_router.include_router(report_templates_router, prefix="/report-templates", tags=["Report Templates"])
+console_router.include_router(tasks_router, prefix="/tasks", tags=["Tasks"])
 
 # ---------------------------------------------------------------------------
 # Schedule System 라우터 등록 — Work Roles + Break Rules

@@ -17,6 +17,7 @@ from app.core.permissions import STAFF_PRIORITY
 
 from app.config import settings
 from app.models.organization import Organization, Store
+from app.models.token import RefreshToken
 from app.models.user import Role, User
 from app.models.user_store import UserStore
 from app.repositories.auth_repository import auth_repository
@@ -121,11 +122,17 @@ class AuthService:
         client_type: str = "unknown",
         user_agent: str | None = None,
         ip_address: str | None = None,
+        replacing_token: RefreshToken | None = None,
     ) -> TokenResponse:
         """액세스 토큰과 리프레시 토큰을 생성합니다.
 
         Generate access and refresh token pair for a user.
         Enforces max sessions per client_type, removing oldest if exceeded.
+
+        Refresh 흐름에서 호출될 때는 ``replacing_token`` 으로 직전 R1 row 를
+        넘긴다. 그러면 새 R2 를 캐시한 상태로 R1 을 "회전됨" 표시하여
+        세션 한도 카운트에서 제외시키고, grace window 내 재요청에 멱등 응답이
+        가능하도록 한다.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -134,6 +141,7 @@ class AuthService:
             client_type: 클라이언트 유형 "admin" | "app" (Client type)
             user_agent: User-Agent 원본 (Raw User-Agent string)
             ip_address: 접속 IP (Client IP address)
+            replacing_token: 회전 대상 RefreshToken row (refresh 흐름 한정)
 
         Returns:
             TokenResponse: 토큰 응답 (Token response with access and refresh tokens)
@@ -142,10 +150,20 @@ class AuthService:
         access_token: str = create_access_token(payload)
         refresh_token: str = create_refresh_token(payload)
 
+        # 회전 모드: R1 을 먼저 "회전됨"으로 표시 → 세션 한도 카운트에서 제외 +
+        # grace window 동안 같은 R1 으로 들어온 재요청에 새 토큰을 캐시로 응답.
+        if replacing_token is not None:
+            await auth_repository.mark_refresh_token_replaced(
+                db,
+                replacing_token,
+                new_refresh_token=refresh_token,
+                new_access_token=access_token,
+            )
+
         # 만료된 토큰 정리 — Clean up expired tokens
         await auth_repository.delete_expired_tokens(db, user.id)
 
-        # 세션 수 제한 — Enforce max sessions per client_type
+        # 세션 수 제한 — Enforce max sessions per client_type (활성 세션만 카운트)
         session_count = await auth_repository.count_user_sessions(
             db, user.id, client_type
         )
@@ -410,38 +428,67 @@ class AuthService:
         ip_address: str | None = None,
         user_agent: str | None = None,
     ) -> TokenResponse:
-        """리프레시 토큰으로 새 토큰 쌍을 발급합니다.
+        """리프레시 토큰으로 새 토큰 쌍을 발급합니다 (회전 + grace window).
 
-        Issue a new token pair using a refresh token.
-        Preserves client_type and device_name from the old session.
+        Issue a new token pair using a refresh token. Preserves client_type and
+        user_agent from the old session.
+
+        회전 정책:
+          - 정상 R1 → 새 (access, refresh) 발급 + R1 row 는 삭제하지 않고
+            replaced_by_token/replaced_access_token/replaced_at 으로 캐싱.
+          - 같은 R1 으로 grace window(`REFRESH_TOKEN_GRACE_SECONDS`) 내 재요청 →
+            캐시된 새 토큰 쌍을 그대로 반환 (멱등 응답).
+            멀티 탭, 새로고침, StrictMode 더블 마운트 등에서 발생하는
+            동시 refresh race 로 인한 강제 로그아웃을 방지한다.
+          - grace window 초과한 회전된 R1 으로 들어온 재요청 → 401
+            (탈취 가능성).
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             data: 리프레시 요청 데이터 (Refresh request data)
             ip_address: 접속 IP (Client IP address)
+            user_agent: User-Agent (브라우저 업데이트 반영용)
 
         Returns:
-            TokenResponse: 새 토큰 응답 (New token response)
+            TokenResponse: 새 토큰 응답 또는 grace window 캐시 응답
 
         Raises:
-            UnauthorizedError: 유효하지 않거나 만료된 리프레시 토큰일 때
-                               (Invalid or expired refresh token)
+            UnauthorizedError: 유효하지 않거나 만료된 리프레시 토큰
         """
         # DB에서 리프레시 토큰 확인 (행 잠금으로 동시 요청 방지)
         db_token = await auth_repository.get_refresh_token_for_update(db, data.refresh_token)
         if db_token is None:
             raise UnauthorizedError("Invalid refresh token")
 
+        now = datetime.now(timezone.utc)
+
         # 만료 확인 — Check expiration
-        if db_token.expires_at < datetime.now(timezone.utc):
+        if db_token.expires_at < now:
             await auth_repository.delete_refresh_token(db, data.refresh_token)
+            await db.commit()
             raise UnauthorizedError("Refresh token has expired")
+
+        # 회전된 토큰 — grace window 안이면 캐시된 새 토큰을 다시 반환 (멱등)
+        if db_token.replaced_at is not None:
+            elapsed = (now - db_token.replaced_at).total_seconds()
+            if (
+                elapsed <= settings.REFRESH_TOKEN_GRACE_SECONDS
+                and db_token.replaced_access_token is not None
+                and db_token.replaced_by_token is not None
+            ):
+                return TokenResponse(
+                    access_token=db_token.replaced_access_token,
+                    refresh_token=db_token.replaced_by_token,
+                )
+            # grace 초과 — 한 번 쓴 토큰을 늦게 재사용. 탈취 가능성으로 차단.
+            raise UnauthorizedError("Invalid refresh token")
 
         # JWT 디코딩으로 사용자 정보 추출 — Extract user info from JWT
         try:
             payload: dict = decode_token(data.refresh_token)
         except Exception:
             await auth_repository.delete_refresh_token(db, data.refresh_token)
+            await db.commit()
             raise UnauthorizedError("Invalid refresh token")
 
         user_id: str | None = payload.get("sub")
@@ -462,17 +509,17 @@ class AuthService:
         # user_agent는 매번 현재 값으로 갱신 (브라우저 업데이트 반영)
         current_user_agent = user_agent or db_token.user_agent
 
-        # 기존 리프레시 토큰 삭제 후 새 토큰 발급 — Delete old token and issue new pair
-        await auth_repository.delete_refresh_token(db, data.refresh_token)
         try:
-            result = await self._generate_tokens(
+            # 새 access/refresh 발급 + R1 을 회전됨으로 표시 (grace 캐시)
+            token_response = await self._generate_tokens(
                 db, user, user.role,
                 client_type=old_client_type,
                 user_agent=current_user_agent,
                 ip_address=ip_address,
+                replacing_token=db_token,
             )
             await db.commit()
-            return result
+            return token_response
         except IntegrityError:
             await db.rollback()
             raise UnauthorizedError("Token already refreshed, please re-authenticate")

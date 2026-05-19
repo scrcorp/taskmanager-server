@@ -26,7 +26,7 @@ from app.models.work import Shift, Position
 from app.models.token import RefreshToken
 from app.models.user_store import UserStore
 from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistInstance, ChecklistInstanceItem, ChecklistItemFile, ChecklistItemSubmission, ChecklistItemReviewLog, ChecklistItemMessage
-from app.models.communication import Notice, AdditionalTask, AdditionalTaskAssignee, TaskEvidence, NoticeRead, Voice
+from app.models.communication import Notice, NoticeRead, Voice
 from app.models.alert import Alert
 from app.models.schedule import Schedule, StoreWorkRole, StoreBreakRule, ScheduleRequestTemplate, ScheduleRequestTemplateItem, ScheduleRequest, ScheduleAuditLog
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
@@ -36,6 +36,8 @@ from app.models.access_code import AccessCode
 from app.models.evaluation import EvalTemplate, EvalTemplateItem, Evaluation, EvalResponse
 from app.models.permission import Permission, RolePermission
 from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSection, DailyReport, DailyReportSection, DailyReportComment
+from app.models.report import Report, ReportTemplate, ReportComment
+from app.models.task import Task, TaskAssignee, TaskComment
 from app.models.email_verification import EmailVerificationCode
 from app.models.inventory import InventoryCategory, InventorySubUnit, InventoryProduct, StoreInventory, InventoryTransaction, InventoryAudit, InventoryAuditItem, InventoryAuditSetting
 from app.models.settings import SettingsRegistry, OrgSetting, StoreSetting, StaffSetting
@@ -50,7 +52,7 @@ __all__ = [
     "Shift", "Position",
     "RefreshToken", "UserStore",
     "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistInstance", "ChecklistInstanceItem", "ChecklistItemFile", "ChecklistItemSubmission", "ChecklistItemReviewLog", "ChecklistItemMessage",
-    "Notice", "AdditionalTask", "AdditionalTaskAssignee", "TaskEvidence", "NoticeRead", "Voice",
+    "Notice", "NoticeRead", "Voice",
     "Alert",
     "Schedule", "StoreWorkRole", "StoreBreakRule", "ScheduleRequestTemplate", "ScheduleRequestTemplateItem", "ScheduleRequest", "ScheduleAuditLog",
     "QRCode", "Attendance", "AttendanceCorrection",
@@ -60,6 +62,8 @@ __all__ = [
     "EvalTemplate", "EvalTemplateItem", "Evaluation", "EvalResponse",
     "Permission", "RolePermission",
     "DailyReportTemplate", "DailyReportTemplateSection", "DailyReport", "DailyReportSection", "DailyReportComment",
+    "Report", "ReportTemplate", "ReportComment",
+    "Task", "TaskAssignee", "TaskComment",
     "EmailVerificationCode",
     "InventoryCategory", "InventorySubUnit", "InventoryProduct", "StoreInventory", "InventoryTransaction", "InventoryAudit", "InventoryAuditItem", "InventoryAuditSetting",
     "SettingsRegistry", "OrgSetting", "StoreSetting", "StaffSetting",
