@@ -110,6 +110,27 @@ async def list_my_entries(
     return out
 
 
+# ── Eligible receivers ──────────────────────────────────────────
+
+@router.get("/entries/eligible-receivers")
+async def list_eligible_receivers(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("tips:edit_own"))],
+    schedule_id: Annotated[UUID, Query()],
+) -> list[dict]:
+    """본 schedule 의 분배 대상 후보 — 같은 매장 + 같은 work_date + status=confirmed.
+
+    본인 attendance 의 clock_in/clock_out 시간대와 겹치는 사람만. attendance
+    가 없으면 schedule 시간으로 fallback. 본인 제외.
+    """
+    return await tip_service.get_eligible_receivers(
+        db,
+        schedule_id=schedule_id,
+        asking_user_id=current_user.id,
+        organization_id=current_user.organization_id,
+    )
+
+
 # ── Distributions ───────────────────────────────────────────────
 
 @router.get(

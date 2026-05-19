@@ -382,6 +382,133 @@ class TipService:
                 f"Distributed exceeds card tips by ${(dist_total - card_tips):.2f}"
             )
 
+    @staticmethod
+    def _validate_no_duplicate_receivers(
+        distributions: Iterable[TipDistributionCreate],
+    ) -> None:
+        """같은 receiver 에 2번 분배 금지 — 한 줄로 합쳐서 입력하게 강제."""
+        seen: set[UUID] = set()
+        for d in distributions:
+            if d.receiver_id in seen:
+                raise BadRequestError(
+                    "Same coworker selected more than once in distributions. "
+                    "Combine into a single row."
+                )
+            seen.add(d.receiver_id)
+
+    async def get_eligible_receivers(
+        self,
+        db: AsyncSession,
+        *,
+        schedule_id: UUID,
+        asking_user_id: UUID,
+        organization_id: UUID,
+    ) -> list[dict]:
+        """주어진 schedule 의 동료 후보 — 같은 매장 + 같은 work_date + status=confirmed.
+
+        본인 제외. 가능하면 본인 attendance 의 clock_in/clock_out 시간대와
+        겹치는 사람만 (attendance 가 있는 경우). 시간 정보가 없으면 schedule
+        의 start_time/end_time 으로 fallback.
+
+        Returns: [{"id": str, "full_name": str}] — 정렬: 이름 오름차순.
+        """
+        from app.models.attendance import Attendance
+        from app.models.user import User
+        from datetime import datetime, time, timezone as tz_module
+        from zoneinfo import ZoneInfo
+        from app.utils.timezone import get_store_day_config
+
+        # 1) 본인 schedule 로 store/date 확정
+        sched = await db.scalar(
+            select(Schedule).where(
+                Schedule.id == schedule_id,
+                Schedule.organization_id == organization_id,
+            )
+        )
+        if sched is None:
+            raise BadRequestError("Schedule not found")
+        if sched.user_id != asking_user_id:
+            raise BadRequestError("Schedule does not belong to you")
+
+        # 2) 같은 매장 + 같은 날 + confirmed schedule 의 다른 user_id 들
+        peer_rows = await db.execute(
+            select(Schedule).where(
+                Schedule.store_id == sched.store_id,
+                Schedule.work_date == sched.work_date,
+                Schedule.status == "confirmed",
+                Schedule.user_id != asking_user_id,
+            )
+        )
+        peer_schedules: list[Schedule] = list(peer_rows.scalars().all())
+        if not peer_schedules:
+            return []
+
+        # 3) 본인 attendance 가져오기 — clock_in/clock_out 또는 schedule 시간으로 window 결정.
+        my_att = await db.scalar(
+            select(Attendance).where(Attendance.schedule_id == sched.id)
+        )
+
+        store_tz, _ = await get_store_day_config(db, sched.store_id)
+        store_zone = ZoneInfo(store_tz)
+
+        def _to_dt(d, t: time | None) -> datetime | None:
+            """schedule date+time 을 store tz aware datetime 으로. clock_in 과 비교 가능하게 UTC 로 정규화."""
+            if t is None:
+                return None
+            local = datetime.combine(d, t).replace(tzinfo=store_zone)
+            return local.astimezone(tz_module.utc)
+
+        my_start: datetime | None = my_att.clock_in if my_att and my_att.clock_in else _to_dt(sched.work_date, sched.start_time)
+        my_end: datetime | None = my_att.clock_out if my_att and my_att.clock_out else _to_dt(sched.work_date, sched.end_time)
+
+        # window 계산 못하면 시간 필터 skip (같은 날 같은 매장 모두 반환)
+        skip_overlap = my_start is None or my_end is None
+
+        # 4) peer attendance 일괄 조회 — 시간 비교에 사용
+        peer_schedule_ids = [s.id for s in peer_schedules]
+        peer_atts_rows = await db.execute(
+            select(Attendance).where(Attendance.schedule_id.in_(peer_schedule_ids))
+        )
+        peer_atts: dict[UUID, Attendance] = {
+            a.schedule_id: a for a in peer_atts_rows.scalars().all()
+        }
+
+        # 5) 시간 overlap 검사 + 결과 user_id 집합
+        eligible_user_ids: list[UUID] = []
+        for s in peer_schedules:
+            if skip_overlap:
+                eligible_user_ids.append(s.user_id)
+                continue
+            att = peer_atts.get(s.id)
+            other_start = att.clock_in if att and att.clock_in else _to_dt(s.work_date, s.start_time)
+            other_end = att.clock_out if att and att.clock_out else _to_dt(s.work_date, s.end_time)
+            if other_start is None or other_end is None:
+                # 정보 부족 — 보수적으로 같은 날 같은 매장이므로 포함
+                eligible_user_ids.append(s.user_id)
+                continue
+            # 좌-닫힘 개구간 교집합
+            if my_start < other_end and other_start < my_end:
+                eligible_user_ids.append(s.user_id)
+
+        if not eligible_user_ids:
+            return []
+
+        # 6) user 객체 로드 + name 정렬
+        users_rows = await db.execute(
+            select(User)
+            .where(
+                User.id.in_(eligible_user_ids),
+                User.organization_id == organization_id,
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+            )
+            .order_by(User.full_name.asc())
+        )
+        return [
+            {"id": str(u.id), "full_name": u.full_name or u.username}
+            for u in users_rows.scalars().all()
+        ]
+
     async def _resolve_work_role_snapshot(
         self,
         db: AsyncSession,
@@ -488,9 +615,10 @@ class TipService:
         actor: User,
         payload: TipEntryCreate,
     ) -> TipEntry:
-        # 1) 분배 합 검증 (Pydantic 에서 1차 검증, 서버 측 최종 검증)
+        # 1) 분배 합 + 중복 receiver 검증
         dist_total = self._distribution_total(payload.distributions)
         self._validate_distribution_total(payload.card_tips, dist_total)
+        self._validate_no_duplicate_receivers(payload.distributions)
 
         # 2) schedule 로부터 store/work_role/date 자동 derive
         sched = await self._load_user_schedule(
@@ -585,8 +713,9 @@ class TipService:
         new_card = payload.card_tips if payload.card_tips is not None else entry.card_tips
         new_cash = payload.cash_tips_kept if payload.cash_tips_kept is not None else entry.cash_tips_kept
 
-        # 분배 변경 결정
+        # 분배 변경 결정 + 중복 receiver 검증
         if payload.distributions is not None:
+            self._validate_no_duplicate_receivers(payload.distributions)
             new_dist_total = self._distribution_total(payload.distributions)
         else:
             new_dist_total = self._distribution_total(entry.distributions)
