@@ -768,20 +768,45 @@ class AttendanceResponse(BaseModel):
 
 
 class AttendanceCorrectionRequest(BaseModel):
-    """근태 수정 요청 스키마.
+    """근태 수정 요청 스키마. Reason 은 preset/Other 어느 쪽이든 항상 비지 않는 문자열로 들어옴.
 
     Attendance correction request schema.
     Used by admins to correct a specific field of an attendance record.
-
-    Attributes:
-        field_name: 수정할 필드 이름 (Field to correct)
-        corrected_value: 수정 값 — ISO 날짜/시간 문자열 (Corrected value as ISO datetime)
-        reason: 수정 사유 (Reason for correction)
     """
 
     field_name: str  # 수정 필드 — "clock_in"|"clock_out"|"break_start"|"break_end"|"status" (Field to correct)
     corrected_value: str  # 수정 값 — ISO datetime 또는 status 문자열 (Corrected value, ISO datetime for time fields, plain string for status)
-    reason: str | None = None  # 수정 사유, optional (Reason for correction, optional)
+    reason: str = Field(min_length=1, max_length=500)  # DB NOT NULL 과 일치시키기 위해 필수
+
+
+class AttendanceCorrectionUpdateRequest(BaseModel):
+    """기존 correction 의 reason 만 수정 (History 인라인 편집).
+
+    Update only the reason of an existing correction record.
+    """
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class AttendanceClockActionRequest(BaseModel):
+    """clock_in / clock_out / break_end 액션. ISO datetime + 필수 reason."""
+
+    at: datetime  # ISO datetime (UTC 또는 timezone-aware)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class AttendanceBreakStartRequest(BaseModel):
+    """break_start 액션 — break_type 필수."""
+
+    at: datetime
+    break_type: str = Field(pattern=r"^(paid_10min|unpaid_meal)$")
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class AttendanceReasonOnlyRequest(BaseModel):
+    """mark_no_show / cancel / reopen — 시간 입력 없는 액션."""
+
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class AttendanceCorrectionResponse(BaseModel):

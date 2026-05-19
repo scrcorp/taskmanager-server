@@ -67,18 +67,25 @@ async def admin_setup(
     db.add(org)
     await db.flush()
 
-    # 기본 역할 4개 생성
-    admin_role: Role | None = None
+    # 기본 역할 5개 생성 (super_owner 포함)
+    from app.core.permissions import SUPER_OWNER_PRIORITY
+    super_owner_role: Role | None = None
     roles_created: list[Role] = []
-    for name, priority in [("owner", OWNER_PRIORITY), ("general_manager", GM_PRIORITY), ("supervisor", SV_PRIORITY), ("staff", STAFF_PRIORITY)]:
+    for name, priority in [
+        ("super_owner", SUPER_OWNER_PRIORITY),
+        ("owner", OWNER_PRIORITY),
+        ("general_manager", GM_PRIORITY),
+        ("supervisor", SV_PRIORITY),
+        ("staff", STAFF_PRIORITY),
+    ]:
         role = Role(organization_id=org.id, name=name, priority=priority)
         db.add(role)
         roles_created.append(role)
-        if priority == OWNER_PRIORITY:
-            admin_role = role
+        if priority == SUPER_OWNER_PRIORITY:
+            super_owner_role = role
     await db.flush()
 
-    assert admin_role is not None
+    assert super_owner_role is not None
 
     # Permission seed — 기본 permission 할당
     from app.models.permission import Permission, RolePermission
@@ -93,11 +100,14 @@ async def admin_setup(
         "evaluations:read", "dashboard:read",
     }
 
+    super_owner_only = {"org:delete", "owner:assign", "super_owner:transfer"}
     for r in roles_created:
-        if r.priority <= OWNER_PRIORITY:
-            codes = list(all_perms.keys())
+        if r.priority <= SUPER_OWNER_PRIORITY:
+            codes = list(all_perms.keys())  # super_owner: 전부
+        elif r.priority <= OWNER_PRIORITY:
+            codes = [c for c in all_perms if c not in super_owner_only]
         elif r.priority <= GM_PRIORITY:
-            codes = [c for c in all_perms if c not in gm_excluded]
+            codes = [c for c in all_perms if c not in gm_excluded and c not in super_owner_only]
         elif r.priority <= SV_PRIORITY:
             codes = [c for c in all_perms if c in sv_allowed]
         else:
@@ -110,15 +120,17 @@ async def admin_setup(
     from app.services.daily_report_service import daily_report_service
     await daily_report_service.create_default_template_for_org(db, org.id)
 
-    # 관리자 계정 생성
+    # 첫 관리자 계정 — Super Owner role 로 생성 (조직의 진짜 대장).
+    # 다수 super_owner 는 추후 super_owner 가 직접 추가 가능.
     user = User(
         organization_id=org.id,
-        role_id=admin_role.id,
+        role_id=super_owner_role.id,
         username=username,
         full_name=username,
         password_hash=hash_password(password),
     )
     db.add(user)
+
     try:
         await db.commit()
     except Exception:
@@ -126,6 +138,6 @@ async def admin_setup(
         raise
 
     return _render(
-        f'<div class="msg ok">Done! Organization "{organization_name}" and admin "{username}" created.<br>'
+        f'<div class="msg ok">Done! Organization "{organization_name}" and Super Owner "{username}" created.<br>'
         f'Company Code: <strong>{org.code}</strong></div>'
     )

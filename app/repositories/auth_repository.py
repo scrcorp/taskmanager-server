@@ -172,9 +172,10 @@ class AuthRepository:
         user_id: UUID,
         client_type: str,
     ) -> int:
-        """특정 사용자의 client_type별 세션 수를 조회합니다.
+        """특정 사용자의 client_type별 활성 세션 수를 조회합니다.
 
-        Count the number of active sessions for a user by client_type.
+        Count the number of active (not rotated) sessions for a user by client_type.
+        replaced_at IS NOT NULL 인 회전된 토큰은 세션 한도 계산에서 제외한다.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -188,6 +189,7 @@ class AuthRepository:
             select(func.count()).select_from(RefreshToken).where(
                 RefreshToken.user_id == user_id,
                 RefreshToken.client_type == client_type,
+                RefreshToken.replaced_at.is_(None),
             )
         )
         return result.scalar() or 0
@@ -199,9 +201,10 @@ class AuthRepository:
         client_type: str,
         keep_count: int,
     ) -> None:
-        """가장 오래된 세션을 삭제하여 keep_count개만 남깁니다.
+        """가장 오래된 활성 세션을 삭제하여 keep_count개만 남깁니다.
 
-        Delete oldest sessions to keep only keep_count sessions.
+        Delete oldest active sessions to keep only keep_count sessions.
+        회전된(replaced_at IS NOT NULL) 토큰은 정렬/카운트 대상이 아니다.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -209,51 +212,56 @@ class AuthRepository:
             client_type: 클라이언트 유형 (Client type)
             keep_count: 유지할 세션 수 (Number of sessions to keep)
         """
-        # Get IDs to keep (most recently used)
+        # Get IDs to keep (most recently issued among active sessions).
+        # NOTE: last_used_at 은 토큰 생성 시점 default 만 박혀있고 갱신 wire 가
+        # 없어 사실상 created_at 과 동일하다. 의미를 명확히 하기 위해 created_at
+        # 기준으로 정렬한다 (회전 시 새 R2 의 created_at = now → 가장 마지막 삭제).
         keep_subq = (
             select(RefreshToken.id)
             .where(
                 RefreshToken.user_id == user_id,
                 RefreshToken.client_type == client_type,
+                RefreshToken.replaced_at.is_(None),
             )
-            .order_by(RefreshToken.last_used_at.desc())
+            .order_by(RefreshToken.created_at.desc())
             .limit(keep_count)
         )
-        # Delete the rest
+        # Delete the rest of the active sessions
         stmt = delete(RefreshToken).where(
             RefreshToken.user_id == user_id,
             RefreshToken.client_type == client_type,
+            RefreshToken.replaced_at.is_(None),
             RefreshToken.id.notin_(keep_subq),
         )
         await db.execute(stmt)
         await db.flush()
 
-    async def update_session_activity(
+    async def mark_refresh_token_replaced(
         self,
         db: AsyncSession,
-        token_id: UUID,
-        ip_address: str | None = None,
+        old_token: RefreshToken,
+        new_refresh_token: str,
+        new_access_token: str,
     ) -> None:
-        """세션의 last_used_at과 ip_address를 갱신합니다.
+        """기존 refresh token row 를 "회전 됨" 상태로 표시합니다.
 
-        Update session activity timestamp and IP address.
+        Mark a refresh token row as rotated. The row is NOT deleted — the
+        caller can later return the cached (new_refresh_token, new_access_token)
+        pair if the same R1 is replayed within a grace window. This makes
+        token rotation idempotent against multi-tab / refresh races.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
-            token_id: 토큰 레코드 ID (Token record UUID)
-            ip_address: 접속 IP (Client IP address)
+            old_token: 회전 대상 RefreshToken row (already loaded with FOR UPDATE)
+            new_refresh_token: 새로 발급한 refresh token (응답 캐시)
+            new_access_token: 새로 발급한 access token (응답 캐시)
         """
         from datetime import timezone as tz
 
-        result = await db.execute(
-            select(RefreshToken).where(RefreshToken.id == token_id)
-        )
-        db_token = result.scalar_one_or_none()
-        if db_token:
-            db_token.last_used_at = datetime.now(tz.utc)
-            if ip_address:
-                db_token.ip_address = ip_address
-            await db.flush()
+        old_token.replaced_by_token = new_refresh_token
+        old_token.replaced_access_token = new_access_token
+        old_token.replaced_at = datetime.now(tz.utc)
+        await db.flush()
 
     async def delete_expired_tokens(
         self,

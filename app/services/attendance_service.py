@@ -479,23 +479,20 @@ class AttendanceService:
             NotFoundError: 근태 기록이 없을 때 (When attendance not found)
             BadRequestError: 수정 불가 필드일 때 (When field cannot be corrected)
         """
-        # 수정 가능한 필드 목록 — Allowed correctable fields
-        # status / note 는 plain string, 그 외는 ISO datetime
+        # 수정 가능한 필드 — 시간 정정 + 노트만.
+        # Status 변경은 /attendances/{id}/actions/* (state-machine) 으로 옮겼다 —
+        # 연관 필드(진행중 break, total_work_minutes 등)가 함께 일관 처리되도록.
         time_fields: set[str] = {"clock_in", "clock_out", "break_start", "break_end"}
-        allowed_fields: set[str] = time_fields | {"status", "note"}
+        allowed_fields: set[str] = time_fields | {"note"}
+        if field_name == "status":
+            raise BadRequestError(
+                "Status changes are not supported here. Use the action endpoints "
+                "(/attendances/{id}/actions/clock-in, clock-out, start-break, "
+                "end-break, mark-no-show, cancel, reopen)."
+            )
         if field_name not in allowed_fields:
             raise BadRequestError(
                 f"Cannot correct field: {field_name}. Allowed: {', '.join(allowed_fields)}"
-            )
-
-        # status 화이트리스트 검증
-        allowed_statuses: set[str] = {
-            "upcoming", "soon", "working", "on_break",
-            "late", "clocked_out", "no_show", "cancelled",
-        }
-        if field_name == "status" and corrected_value not in allowed_statuses:
-            raise BadRequestError(
-                f"Invalid status: {corrected_value}. Allowed: {', '.join(sorted(allowed_statuses))}"
             )
 
         # 근태 기록 조회 — Fetch attendance record
@@ -553,6 +550,33 @@ class AttendanceService:
         except Exception:
             await db.rollback()
             raise
+
+    async def update_correction_reason(
+        self,
+        db: AsyncSession,
+        *,
+        attendance_id: UUID,
+        correction_id: UUID,
+        organization_id: UUID,
+        reason: str,
+    ) -> AttendanceCorrection:
+        """기존 correction 의 reason 만 갱신. attendance 가 다른 org 면 NotFound.
+
+        Update only the reason of an existing correction record.
+        """
+        # attendance 가 같은 org 인지 먼저 검증 (NotFound 자동 raise)
+        await self.get_attendance(db, attendance_id, organization_id)
+
+        correction = await attendance_repository.get_correction(db, correction_id)
+        if correction is None or correction.attendance_id != attendance_id:
+            from app.utils.exceptions import NotFoundError
+            raise NotFoundError("Correction record not found")
+
+        correction.reason = reason
+        await db.flush()
+        await db.commit()
+        await db.refresh(correction)
+        return correction
 
     async def get_corrections(
         self,
