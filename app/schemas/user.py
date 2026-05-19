@@ -143,11 +143,6 @@ class UserListResponse(BaseModel):
     effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
-    # store_id 필터로 단일 매장 조회 시에만 채워지는 매장별 정보 (LinkPicker 등에서 활용)
-    primary_work_role_id_in_store: str | None = None
-    primary_work_role_name_in_store: str | None = None
-    primary_position_id_in_store: str | None = None
-    primary_position_name_in_store: str | None = None
 
 
 # === 매장 배정 (Store Assignment) 스키마 ===
@@ -158,9 +153,6 @@ class UserStoreAssignment(BaseModel):
     store_id: str
     is_manager: bool = False
     is_work_assignment: bool = True
-    # 매장별 주 work_role / position — issue report LinkPicker 등에서 활용 (NULL 허용)
-    primary_work_role_id: str | None = None
-    primary_position_id: str | None = None
 
 
 class SyncUserStoresRequest(BaseModel):
@@ -169,7 +161,7 @@ class SyncUserStoresRequest(BaseModel):
 
 
 class UserStoreResponse(BaseModel):
-    """매장 배정 응답 (is_manager + is_work_assignment + primary role/position)."""
+    """매장 배정 응답 (is_manager + is_work_assignment)."""
     id: str
     organization_id: str
     name: str
@@ -177,10 +169,6 @@ class UserStoreResponse(BaseModel):
     is_active: bool
     is_manager: bool
     is_work_assignment: bool
-    primary_work_role_id: str | None = None
-    primary_work_role_name: str | None = None
-    primary_position_id: str | None = None
-    primary_position_name: str | None = None
     created_at: datetime
 
 

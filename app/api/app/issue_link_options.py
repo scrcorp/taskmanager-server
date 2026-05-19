@@ -157,7 +157,7 @@ async def get_link_options(
         for w in work_roles_raw
     ]
 
-    # Users in store + primary work_role/position 정보
+    # Users in store
     us_rows = await db.execute(
         select(UserStore, User)
         .join(User, User.id == UserStore.user_id)
@@ -176,23 +176,6 @@ async def get_link_options(
             select(Role.id, Role.name).where(Role.id.in_(role_user_ids))
         )
         user_role_map = {r.id: r.name for r in rows.all()}
-    # primary_work_role + primary_position name lookup
-    primary_role_ids = {us.primary_work_role_id for us, _u in us_data if us.primary_work_role_id}
-    primary_pos_ids = {us.primary_position_id for us, _u in us_data if us.primary_position_id}
-    primary_role_map: dict[UUID, str | None] = {}
-    primary_pos_map: dict[UUID, str] = {}
-    if primary_role_ids:
-        rows = await db.execute(
-            select(StoreWorkRole.id, StoreWorkRole.name).where(
-                StoreWorkRole.id.in_(primary_role_ids)
-            )
-        )
-        primary_role_map = {r.id: r.name for r in rows.all()}
-    if primary_pos_ids:
-        rows = await db.execute(
-            select(Position.id, Position.name).where(Position.id.in_(primary_pos_ids))
-        )
-        primary_pos_map = {r.id: r.name for r in rows.all()}
 
     users_out = [
         {
@@ -200,18 +183,8 @@ async def get_link_options(
             "username": u.username,
             "full_name": u.full_name,
             "role_name": user_role_map.get(u.role_id, ""),
-            "primary_work_role_name": (
-                primary_role_map.get(us.primary_work_role_id)
-                if us.primary_work_role_id
-                else None
-            ),
-            "primary_position_name": (
-                primary_pos_map.get(us.primary_position_id)
-                if us.primary_position_id
-                else None
-            ),
         }
-        for us, u in us_data
+        for _us, u in us_data
     ]
 
     return {
