@@ -11,8 +11,9 @@ from sqlalchemy import Select, and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.permissions import OWNER_PRIORITY
 from app.models.organization import Store
-from app.models.user import User
+from app.models.user import Role, User
 from app.models.user_store import UserStore
 from app.repositories.base import BaseRepository
 
@@ -332,6 +333,113 @@ class UserRepository(BaseRepository[User]):
             .values(is_manager=False)
         )
         await db.flush()
+
+    async def bulk_assign_org_stores_to_user(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        organization_id: UUID,
+        *,
+        is_manager: bool = True,
+        is_work_assignment: bool = True,
+    ) -> int:
+        """조직 내 모든 매장을 user_stores 에 누락분만 INSERT. Owner / Super Owner 자동 배정용.
+
+        룰: is_manager=true 이면 반드시 is_work_assignment=true (work 해제 불가).
+        반환: 신규 INSERT 된 매장 수.
+        """
+        if is_manager:
+            is_work_assignment = True
+        store_rows = await db.execute(
+            select(Store.id).where(Store.organization_id == organization_id)
+        )
+        store_ids = list(store_rows.scalars().all())
+        if not store_ids:
+            return 0
+
+        existing_rows = await db.execute(
+            select(UserStore.store_id).where(
+                UserStore.user_id == user_id,
+                UserStore.store_id.in_(store_ids),
+            )
+        )
+        existing_ids = set(existing_rows.scalars().all())
+
+        new_count = 0
+        for sid in store_ids:
+            if sid in existing_ids:
+                continue
+            db.add(UserStore(
+                user_id=user_id,
+                store_id=sid,
+                is_manager=is_manager,
+                is_work_assignment=is_work_assignment,
+            ))
+            new_count += 1
+        await db.flush()
+        return new_count
+
+    async def bulk_assign_store_to_all_owners(
+        self,
+        db: AsyncSession,
+        store_id: UUID,
+        organization_id: UUID,
+    ) -> int:
+        """신규 매장을 조직의 모든 활성 Owner / Super Owner 에게 자동 배정.
+
+        priority <= OWNER_PRIORITY 인 모든 사용자가 대상 (super_owner 포함).
+        반환: 신규 INSERT 수.
+        """
+        owner_rows = await db.execute(
+            select(User.id)
+            .join(Role, User.role_id == Role.id)
+            .where(
+                User.organization_id == organization_id,
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+                Role.priority <= OWNER_PRIORITY,
+            )
+        )
+        owner_ids = list(owner_rows.scalars().all())
+        if not owner_ids:
+            return 0
+
+        existing_rows = await db.execute(
+            select(UserStore.user_id).where(
+                UserStore.store_id == store_id,
+                UserStore.user_id.in_(owner_ids),
+            )
+        )
+        existing_user_ids = set(existing_rows.scalars().all())
+
+        new_count = 0
+        for uid in owner_ids:
+            if uid in existing_user_ids:
+                continue
+            db.add(UserStore(
+                user_id=uid,
+                store_id=store_id,
+                is_manager=True,
+                is_work_assignment=True,  # 룰: manager 면 work 도 자동 (해제 불가)
+            ))
+            new_count += 1
+        await db.flush()
+        return new_count
+
+    async def remove_all_user_stores(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+    ) -> int:
+        """사용자의 모든 user_stores 레코드 제거. Owner → 다른 role 강등 시 사용
+        (Owner 자동 배정의 역동작 — 새 role 에 맞는 매장은 운영자가 다시 설정).
+        반환: 삭제된 행 수.
+        """
+        result = await db.execute(
+            delete(UserStore).where(UserStore.user_id == user_id)
+        )
+        await db.flush()
+        return result.rowcount or 0
 
     async def user_store_exists(
         self,

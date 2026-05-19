@@ -34,6 +34,7 @@ from fastapi import APIRouter
 # Phase 1 — Foundation 라우터 임포트
 from app.api.console.auth import router as auth_router
 from app.api.console.organizations import router as organizations_router
+from app.api.console.super_owner import router as super_owner_router
 from app.api.console.stores import router as stores_router
 from app.api.console.roles import router as roles_router
 from app.api.console.users import router as users_router
@@ -119,6 +120,7 @@ console_router: APIRouter = APIRouter()
 # ---------------------------------------------------------------------------
 console_router.include_router(auth_router, prefix="/auth", tags=["Console Auth"])
 console_router.include_router(organizations_router, prefix="/organizations", tags=["Organizations"])
+console_router.include_router(super_owner_router, prefix="/super-owner", tags=["Super Owner"])
 console_router.include_router(stores_router, prefix="/stores", tags=["Stores"])
 console_router.include_router(roles_router, prefix="/roles", tags=["Roles"])
 console_router.include_router(users_router, prefix="/users", tags=["Users"])

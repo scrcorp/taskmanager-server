@@ -369,6 +369,7 @@ async def sync_default_role_permissions() -> None:
 
     # DEFAULT_ROLE_PERMISSIONS 의 키는 'gm' 등 축약형일 수 있음. role.name 매핑 테이블.
     ROLE_NAME_TO_DEFAULT_KEY = {
+        "super_owner": "super_owner",
         "owner": "owner",
         "general_manager": "gm",
         "supervisor": "sv",

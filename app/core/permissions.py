@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 # ── Priority 상수 ──────────────────────────────────────────
 # 낮을수록 높은 권한. DB roles.priority와 동일.
+# Super Owner: 조직 자체의 관리자. 매장 운영 X, 알림 X. 조직당 1명.
+SUPER_OWNER_PRIORITY = 5
 OWNER_PRIORITY = 10
 GM_PRIORITY = 20
 SV_PRIORITY = 30
@@ -33,8 +35,13 @@ def _priority(user: User) -> int:
     return user.role.priority if user.role else 999
 
 
+def is_super_owner(user: User) -> bool:
+    """Super Owner 여부 (priority <= 5). 조직당 1명, 관리 전용."""
+    return _priority(user) <= SUPER_OWNER_PRIORITY
+
+
 def is_owner(user: User) -> bool:
-    """Owner 여부 (priority <= 10)."""
+    """Owner 이상 여부 (priority <= 10). Super Owner 포함."""
     return _priority(user) <= OWNER_PRIORITY
 
 
@@ -160,6 +167,11 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     # ── Organization ──
     ("org:read",   "org", "read",   "View organization info and settings", False),
     ("org:update", "org", "update", "Modify organization settings", False),
+    ("org:delete", "org", "delete", "Delete organization (Super Owner only)", False),
+
+    # ── Owner / Super Owner (조직 관리자 전용) ──
+    ("owner:assign",         "owner",       "assign",   "Assign Owner role to a user (Super Owner only)", False),
+    ("super_owner:transfer", "super_owner", "transfer", "Transfer Super Owner role to another user", False),
 
     # ── Attendance Devices (공용 근태 기기 관리) ──
     ("attendance_devices:read",   "attendance_devices", "read",   "View attendance terminal devices", False),
@@ -198,11 +210,19 @@ PERMISSION_DESCRIPTIONS: dict[str, str] = {
 ALL_PERMISSION_CODES: set[str] = {code for code, *_ in PERMISSION_REGISTRY}
 
 
+# Super Owner 전용 권한. Owner/GM/SV/Staff 어디에도 자동 부여되지 않음.
+SUPER_OWNER_ONLY: set[str] = {
+    "org:delete",
+    "owner:assign",
+    "super_owner:transfer",
+}
+
 # ── 기본 역할별 permission 세팅 ────────────────────────────
 # 새 조직 생성(setup) 시 사용. priority 기준.
 DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "owner": ALL_PERMISSION_CODES,  # 전부
-    "gm": ALL_PERMISSION_CODES - {
+    "super_owner": ALL_PERMISSION_CODES,  # 전부 (super_owner 전용 포함)
+    "owner": ALL_PERMISSION_CODES - SUPER_OWNER_ONLY,
+    "gm": ALL_PERMISSION_CODES - SUPER_OWNER_ONLY - {
         "stores:create", "stores:delete",
         "roles:create", "roles:delete",
         "schedule_history:delete",

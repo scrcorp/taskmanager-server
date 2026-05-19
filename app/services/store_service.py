@@ -186,6 +186,14 @@ class StoreService:
                 is_current=True,
             )
             db.add(v0)
+
+            # 신규 매장을 조직의 모든 활성 Owner / Super Owner 에게 자동 배정
+            # (is_manager=true, is_work_assignment=true — manager 면 work 자동).
+            from app.repositories.user_repository import user_repository
+            await user_repository.bulk_assign_store_to_all_owners(
+                db, store.id, organization_id
+            )
+
             await db.commit()
             return self._to_response(store)
         except Exception:

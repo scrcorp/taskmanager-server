@@ -26,7 +26,6 @@ from app.models.communication import Notice
 from app.models.alert import Alert
 from app.models.permission import Permission, RolePermission
 from app.models.schedule import Schedule
-from app.core.permissions import OWNER_PRIORITY
 from app.models.user import Role, User
 from app.repositories.alert_repository import alert_repository
 
@@ -359,9 +358,9 @@ class AlertService:
         from app.models.user import User
         from app.models.user_store import UserStore
 
-        # checklist_review:create 권한 + same store (Owner 제외).
-        # 검토 권한(checklist_review:create)은 GM과 SV에게만 부여되어 있음.
-        # is_manager 조건 없음 — SV는 매장 배정만 받고 is_manager=false인 경우가 정상.
+        # checklist_review:create 권한 + 해당 매장의 manager(is_manager=true) 인 사용자만.
+        # Owner / Super Owner 는 자동 배정 시 is_manager=true → 자연 포함.
+        # GM / SV 는 매장에 manager 로 명시 설정된 경우만 알림. (운영자가 매장별로 manager 지정)
         managers_q = (
             select(User)
             .join(UserStore, User.id == UserStore.user_id)
@@ -370,10 +369,10 @@ class AlertService:
             .join(Permission, RolePermission.permission_id == Permission.id)
             .where(
                 UserStore.store_id == instance.store_id,
+                UserStore.is_manager.is_(True),
                 User.is_active.is_(True),
                 User.deleted_at.is_(None),
                 Permission.code == "checklist_review:create",
-                Role.priority > OWNER_PRIORITY,  # Owner 제외 (비즈니스 규칙)
             )
             .distinct()
         )
