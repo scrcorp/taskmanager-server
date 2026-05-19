@@ -31,17 +31,25 @@ from app.api.app.checklist_instances import router as checklist_instances_router
 
 # Phase 3 — Communication 라우터 임포트
 from app.api.app.notices import router as notices_router
-from app.api.app.tasks import router as tasks_router
 from app.api.app.alerts import router as alerts_router
 
 # Phase 5 — Attendance 라우터 임포트
 from app.api.app.attendances import router as attendance_router
 
-# Phase — Daily Reports 라우터 임포트
+# Phase — Daily Reports 라우터 임포트 (legacy)
 from app.api.app.daily_reports import router as daily_reports_router
+
+# Reports 라우터 임포트 (multi-type)
+from app.api.app.reports import router as reports_router
+
+# Tasks 라우터 임포트 (renamed from additional_tasks → issues → tasks)
+from app.api.app.tasks import router as tasks_router
 
 # 매장 목록 라우터 임포트
 from app.api.app.stores import router as stores_router
+
+# Issue Report LinkPicker 옵션 통합 endpoint
+from app.api.app.issue_link_options import router as issue_link_options_router
 
 # Phase — Storage 라우터 임포트
 from app.api.app.storage import router as storage_router
@@ -87,7 +95,6 @@ app_router.include_router(checklist_instances_router, prefix="/my/checklist-inst
 # Phase 3 라우터 등록 — Register Phase 3 (Communication) routers
 # ---------------------------------------------------------------------------
 app_router.include_router(notices_router, prefix="/my/notices", tags=["My Notices"])
-app_router.include_router(tasks_router, prefix="/my/additional-tasks", tags=["My Tasks"])
 app_router.include_router(alerts_router, prefix="/my/alerts", tags=["My Alerts"])
 
 # ---------------------------------------------------------------------------
@@ -100,9 +107,14 @@ app_router.include_router(attendance_router, prefix="/my/attendance", tags=["My 
 # Daily Reports 라우터 등록 — Register Daily Reports routers
 # ---------------------------------------------------------------------------
 app_router.include_router(daily_reports_router, prefix="/my/daily-reports", tags=["My Daily Reports"])
+app_router.include_router(reports_router, prefix="/my/reports", tags=["My Reports"])
+app_router.include_router(tasks_router, prefix="/my/tasks", tags=["My Tasks"])
 
 # 내 매장: /my/stores (My stores from user_stores)
 app_router.include_router(stores_router, prefix="/my/stores", tags=["My Stores"])
+app_router.include_router(
+    issue_link_options_router, prefix="/my/stores", tags=["My Stores"]
+)
 
 # ---------------------------------------------------------------------------
 # Phase 10 라우터 등록 — Register Phase 10 (Voices) routers

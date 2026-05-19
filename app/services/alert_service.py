@@ -22,7 +22,7 @@ from app.core.alert_categories import (
     is_in_app_enabled,
 )
 from app.models.checklist import ChecklistInstance, ChecklistInstanceItem
-from app.models.communication import AdditionalTask, Notice
+from app.models.communication import Notice
 from app.models.alert import Alert
 from app.models.permission import Permission, RolePermission
 from app.models.schedule import Schedule
@@ -188,42 +188,6 @@ class AlertService:
         return is_email_enabled(prefs, cat)
 
     # --- 자동 생성 (Auto-creation) ---
-
-    async def create_for_task(
-        self,
-        db: AsyncSession,
-        task: AdditionalTask,
-        assignee_ids: list[UUID],
-    ) -> list[Alert]:
-        """추가 업무 생성 시 담당자들에게 알림을 자동 생성합니다.
-
-        Auto-create alerts for assignees when an additional task is created.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            task: 추가 업무 객체 (Additional task object)
-            assignee_ids: 담당자 UUID 목록 (List of assignee UUIDs)
-
-        Returns:
-            list[Alert]: 생성된 알림 목록 (List of created alerts)
-        """
-        message: str = f"New additional task: {task.title}"
-        alerts: list[Alert] = []
-        filtered = await self._filter_in_app_recipients(db, assignee_ids, "additional_task")
-
-        for uid in filtered:
-            alert: Alert = await alert_repository.create_alert(
-                db,
-                organization_id=task.organization_id,
-                user_id=uid,
-                alert_type="additional_task",
-                message=message,
-                reference_type="additional_task",
-                reference_id=task.id,
-            )
-            alerts.append(alert)
-
-        return alerts
 
     async def create_for_schedule_submit(
         self,

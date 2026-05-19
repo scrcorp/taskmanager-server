@@ -100,21 +100,62 @@ class UserService:
         """조직에 속한 사용자 목록을 필터 조건으로 조회합니다.
 
         List users in the organization with optional filters.
-
-        Args:
-            db: 비동기 데이터베이스 세션 (Async database session)
-            organization_id: 조직 ID (Organization UUID)
-            filters: 필터 딕셔너리 (store_id, role_id, is_active)
-                     (Filter dict with optional store_id, role_id, is_active)
-
-        Returns:
-            list[UserListResponse]: 사용자 목록 (List of user list responses)
+        단일 store_id 필터인 경우 응답에 매장별 primary work_role / position 정보를 채움.
         """
         users: list[User] = await user_repository.get_by_org(
             db, organization_id, filters
         )
         org_rate = await self._get_org_rate(db, organization_id)
-        return [self._to_list_response(u, org_rate) for u in users]
+        responses = [self._to_list_response(u, org_rate) for u in users]
+
+        # 단일 매장 필터 시 매장별 primary work_role / position 채우기
+        store_ids = (filters or {}).get("store_ids") if filters else None
+        single_store_id: UUID | None = None
+        if isinstance(store_ids, list) and len(store_ids) == 1:
+            single_store_id = store_ids[0]
+
+        if single_store_id and users:
+            from app.models.user_store import UserStore
+            from app.models.schedule import StoreWorkRole
+            from app.models.work import Position
+            from sqlalchemy import select as _select
+
+            user_ids = [u.id for u in users]
+            us_rows = await db.execute(
+                _select(UserStore).where(
+                    UserStore.store_id == single_store_id,
+                    UserStore.user_id.in_(user_ids),
+                )
+            )
+            us_map: dict[UUID, UserStore] = {us.user_id: us for us in us_rows.scalars().all()}
+
+            role_ids = {us.primary_work_role_id for us in us_map.values() if us.primary_work_role_id}
+            pos_ids = {us.primary_position_id for us in us_map.values() if us.primary_position_id}
+            role_name_map: dict[UUID, str | None] = {}
+            pos_name_map: dict[UUID, str] = {}
+            if role_ids:
+                rows = await db.execute(
+                    _select(StoreWorkRole.id, StoreWorkRole.name).where(StoreWorkRole.id.in_(role_ids))
+                )
+                role_name_map = {row.id: row.name for row in rows.all()}
+            if pos_ids:
+                rows = await db.execute(
+                    _select(Position.id, Position.name).where(Position.id.in_(pos_ids))
+                )
+                pos_name_map = {row.id: row.name for row in rows.all()}
+
+            for resp, u in zip(responses, users):
+                us = us_map.get(u.id)
+                if not us:
+                    continue
+                if us.primary_work_role_id:
+                    resp.primary_work_role_id_in_store = str(us.primary_work_role_id)
+                    resp.primary_work_role_name_in_store = role_name_map.get(us.primary_work_role_id)
+                if us.primary_position_id:
+                    resp.primary_position_id_in_store = str(us.primary_position_id)
+                    resp.primary_position_name_in_store = pos_name_map.get(us.primary_position_id)
+
+        return responses
 
     async def get_user(
         self,
@@ -448,11 +489,31 @@ class UserService:
             raise NotFoundError("User not found")
 
         from app.models.user_store import UserStore
+        from app.models.schedule import StoreWorkRole
+        from app.models.work import Position
+        from sqlalchemy import select as _select
 
         assignments: list[UserStore] = await user_repository.get_user_store_assignments(db, user_id)
         # store 정보가 필요하므로 store 조회
         stores: list[Store] = await user_repository.get_user_stores(db, user_id)
         store_map = {s.id: s for s in stores}
+
+        # primary work_role / position 이름 일괄 조회 (배정 수만큼 호출 없이)
+        role_ids = {a.primary_work_role_id for a in assignments if a.primary_work_role_id}
+        pos_ids = {a.primary_position_id for a in assignments if a.primary_position_id}
+        role_name_map: dict[UUID, str | None] = {}
+        pos_name_map: dict[UUID, str] = {}
+        if role_ids:
+            rows = await db.execute(
+                _select(StoreWorkRole.id, StoreWorkRole.name).where(StoreWorkRole.id.in_(role_ids))
+            )
+            role_name_map = {row.id: row.name for row in rows.all()}
+        if pos_ids:
+            rows = await db.execute(
+                _select(Position.id, Position.name).where(Position.id.in_(pos_ids))
+            )
+            pos_name_map = {row.id: row.name for row in rows.all()}
+
         return [
             UserStoreResponse(
                 id=str(a.store_id),
@@ -462,6 +523,18 @@ class UserService:
                 is_active=store_map[a.store_id].is_active if a.store_id in store_map else False,
                 is_manager=a.is_manager,
                 is_work_assignment=a.is_work_assignment,
+                primary_work_role_id=str(a.primary_work_role_id) if a.primary_work_role_id else None,
+                primary_work_role_name=(
+                    role_name_map.get(a.primary_work_role_id)
+                    if a.primary_work_role_id
+                    else None
+                ),
+                primary_position_id=str(a.primary_position_id) if a.primary_position_id else None,
+                primary_position_name=(
+                    pos_name_map.get(a.primary_position_id)
+                    if a.primary_position_id
+                    else None
+                ),
                 created_at=store_map[a.store_id].created_at if a.store_id in store_map else a.created_at,
             )
             for a in assignments

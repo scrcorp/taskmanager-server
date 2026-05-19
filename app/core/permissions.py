@@ -119,23 +119,30 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     # ── Checklist Log ──
     ("checklist_log:read", "checklist_log", "read", "View checklist completion logs", False),
 
-    # ── Tasks ──
-    ("tasks:read",   "tasks", "read",   "View additional tasks", False),
-    ("tasks:create", "tasks", "create", "Create additional tasks", False),
-    ("tasks:update", "tasks", "update", "Edit additional tasks", False),
-    ("tasks:delete", "tasks", "delete", "Delete additional tasks", False),
-
     # ── Evaluations ──
     ("evaluations:read",   "evaluations", "read",   "View evaluation templates and results", False),
     ("evaluations:create", "evaluations", "create", "Create and submit evaluations", False),
     ("evaluations:update", "evaluations", "update", "Edit evaluations", False),
     ("evaluations:delete", "evaluations", "delete", "Delete evaluation templates", False),
 
-    # ── Daily Reports ──
+    # ── Daily Reports (legacy, multi-type reports로 이관 중) ──
     ("daily_reports:read",   "daily_reports", "read",   "View daily reports", False),
     ("daily_reports:create", "daily_reports", "create", "Write daily reports", False),
     ("daily_reports:update", "daily_reports", "update", "Edit reports and add comments", False),
     ("daily_reports:delete", "daily_reports", "delete", "Delete daily reports", False),
+
+    # ── Reports (multi-type: daily, issue, ...) ──
+    ("reports:read",   "reports", "read",   "View reports (all types)", False),
+    ("reports:create", "reports", "create", "Write reports", False),
+    ("reports:update", "reports", "update", "Edit reports and add comments", False),
+    ("reports:delete", "reports", "delete", "Delete reports", False),
+
+    # ── Tasks (work items — promoted from issue reports or directly created) ──
+    # 명명 변경 이력: additional_tasks → issues → tasks. issue report 와 단어 겹침을 피하려 tasks 로 정리.
+    ("tasks:read",   "tasks", "read",   "View tasks (work items)", False),
+    ("tasks:create", "tasks", "create", "Create tasks", False),
+    ("tasks:update", "tasks", "update", "Edit / complete tasks", False),
+    ("tasks:delete", "tasks", "delete", "Delete tasks", False),
 
     # ── Dashboard ──
     ("dashboard:read", "dashboard", "read", "View dashboard statistics", False),
@@ -207,9 +214,10 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         "notices:read",
         "checklist_review:read", "checklist_review:create",
         "checklist_log:read",
-        "tasks:read",
         "evaluations:read",
         "daily_reports:read", "daily_reports:create", "daily_reports:update",
+        "reports:read", "reports:create", "reports:update",
+        "tasks:read", "tasks:create", "tasks:update",
         "dashboard:read",
         "inventory:read", "inventory:create",
         "org:read",
@@ -220,6 +228,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
     },
     "staff": {
         "daily_reports:read", "daily_reports:create", "daily_reports:update",
+        "reports:read", "reports:create", "reports:update",
+        "tasks:read", "tasks:update",
         "tips:read", "tips:edit_own", "tips:form_view",
     },
 }

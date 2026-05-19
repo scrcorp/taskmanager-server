@@ -47,7 +47,6 @@ from app.api.console.checklist_instances import router as checklist_instances_ro
 
 # Phase 3 — Communication 라우터 임포트
 from app.api.console.notices import router as notices_router
-from app.api.console.tasks import router as tasks_router
 from app.api.console.alerts import router as alerts_router
 from app.api.console.profile import router as profile_router
 
@@ -81,9 +80,16 @@ from app.api.console.break_rules import router as break_rules_router
 from app.api.console.schedule_requests import router as schedule_requests_router
 from app.api.console.schedules import router as schedule_entries_router
 
-# Daily Reports 라우터 임포트
+# Daily Reports 라우터 임포트 (legacy)
 from app.api.console.daily_reports import router as daily_reports_router
 from app.api.console.daily_report_templates import router as daily_report_templates_router
+
+# Reports 라우터 임포트 (multi-type)
+from app.api.console.reports import router as reports_router
+from app.api.console.report_templates import router as report_templates_router
+
+# Tasks 라우터 임포트 (renamed from additional_tasks → issues → tasks)
+from app.api.console.tasks import router as tasks_router
 
 # Storage 라우터 임포트
 from app.api.console.storage import router as storage_router
@@ -132,7 +138,6 @@ console_router.include_router(checklist_instances_router, prefix="/checklist-ins
 # Phase 3 라우터 등록 — Register Phase 3 (Communication) routers
 # ---------------------------------------------------------------------------
 console_router.include_router(notices_router, prefix="/notices", tags=["Notices"])
-console_router.include_router(tasks_router, prefix="/additional-tasks", tags=["Additional Tasks"])
 console_router.include_router(alerts_router, prefix="/alerts", tags=["Admin Alerts"])
 console_router.include_router(profile_router, prefix="/profile", tags=["Admin Profile"])
 
@@ -193,6 +198,9 @@ console_router.include_router(permissions_router, prefix="/permissions", tags=["
 # ---------------------------------------------------------------------------
 console_router.include_router(daily_reports_router, prefix="/daily-reports", tags=["Daily Reports"])
 console_router.include_router(daily_report_templates_router, prefix="/daily-report-templates", tags=["Daily Report Templates"])
+console_router.include_router(reports_router, prefix="/reports", tags=["Reports"])
+console_router.include_router(report_templates_router, prefix="/report-templates", tags=["Report Templates"])
+console_router.include_router(tasks_router, prefix="/tasks", tags=["Tasks"])
 
 # ---------------------------------------------------------------------------
 # Schedule System 라우터 등록 — Work Roles + Break Rules

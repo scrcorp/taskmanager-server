@@ -22,6 +22,10 @@ class UserStore(Base):
         id: 고유 식별자 (Primary key UUID)
         user_id: 사용자 ID (User UUID)
         store_id: 매장 ID (Store UUID)
+        is_manager: 해당 매장의 매니저 여부 (Whether the user is a manager at this store)
+        is_work_assignment: 해당 매장에서 근무 배정을 받는지 (Whether the user can be assigned shifts at this store)
+        primary_work_role_id: 해당 매장에서의 주 work_role (Primary work role at this store; informational, used for LinkPicker/issue context)
+        primary_position_id: 해당 매장에서의 주 position (Primary position at this store)
         created_at: 생성 일시 (Creation timestamp)
     """
 
@@ -45,6 +49,17 @@ class UserStore(Base):
     )
     is_work_assignment: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true", nullable=False
+    )
+    # 주 work_role / position — 매장별 직원의 대표 역할/포지션 (NULL 허용)
+    primary_work_role_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("store_work_roles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    primary_position_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("positions.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

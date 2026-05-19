@@ -263,17 +263,23 @@ class UserRepository(BaseRepository[User]):
         """일괄 저장: 현재 상태와 diff 계산 후 추가/수정/삭제.
 
         Args:
-            assignments: [{"store_id": UUID, "is_manager": bool, "is_work_assignment": bool}, ...]
+            assignments: [
+                {
+                    "store_id": UUID,
+                    "is_manager": bool,
+                    "is_work_assignment": bool,
+                    "primary_work_role_id": UUID | None,
+                    "primary_position_id": UUID | None,
+                },
+                ...,
+            ]
         """
         # 현재 상태 조회
         current = await self.get_user_store_assignments(db, user_id)
         current_map: dict[UUID, UserStore] = {us.store_id: us for us in current}
 
-        # 목표 상태
-        target_map: dict[UUID, tuple[bool, bool]] = {
-            a["store_id"]: (a["is_manager"], a.get("is_work_assignment", True))
-            for a in assignments
-        }
+        # 목표 상태 — store_id로 인덱싱한 원본 dict 보존
+        target_map: dict[UUID, dict] = {a["store_id"]: a for a in assignments}
 
         # 삭제: 현재에 있지만 목표에 없는 것
         to_delete = set(current_map.keys()) - set(target_map.keys())
@@ -286,7 +292,12 @@ class UserRepository(BaseRepository[User]):
             )
 
         # 추가/수정
-        for store_id, (is_manager, is_work) in target_map.items():
+        for store_id, a in target_map.items():
+            is_manager: bool = a["is_manager"]
+            is_work: bool = a.get("is_work_assignment", True)
+            primary_role: UUID | None = a.get("primary_work_role_id")
+            primary_pos: UUID | None = a.get("primary_position_id")
+
             existing = current_map.get(store_id)
             if existing is None:
                 db.add(UserStore(
@@ -294,12 +305,18 @@ class UserRepository(BaseRepository[User]):
                     store_id=store_id,
                     is_manager=is_manager,
                     is_work_assignment=is_work,
+                    primary_work_role_id=primary_role,
+                    primary_position_id=primary_pos,
                 ))
             else:
                 if existing.is_manager != is_manager:
                     existing.is_manager = is_manager
                 if existing.is_work_assignment != is_work:
                     existing.is_work_assignment = is_work
+                if existing.primary_work_role_id != primary_role:
+                    existing.primary_work_role_id = primary_role
+                if existing.primary_position_id != primary_pos:
+                    existing.primary_position_id = primary_pos
 
         await db.flush()
 

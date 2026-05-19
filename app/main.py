@@ -175,6 +175,58 @@ async def seed_settings_registry() -> None:
 # Startup: ensure all organizations have a default daily report template
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
+async def ensure_issue_default_template() -> None:
+    """System default issue template (org_id=NULL, store_id=NULL) 1건 보장.
+
+    매장이 customize 안 한 경우의 fallback. 6개 기본 카테고리 시드.
+    """
+    import logging
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.report import ReportTemplate
+    from app.schemas.report import DEFAULT_ISSUE_CATEGORIES
+
+    logger = logging.getLogger("uvicorn.error")
+    try:
+        async with async_session() as db:
+            existing = await db.execute(
+                select(ReportTemplate).where(
+                    ReportTemplate.type == "issue",
+                    ReportTemplate.organization_id.is_(None),
+                    ReportTemplate.store_id.is_(None),
+                    ReportTemplate.is_default.is_(True),
+                )
+            )
+            if existing.scalar_one_or_none():
+                return
+            categories = [
+                {
+                    "code": code,
+                    "label": code.replace("_", " ").title(),
+                    "color": None,
+                    "sort_order": idx + 1,
+                    "is_active": True,
+                }
+                for idx, code in enumerate(DEFAULT_ISSUE_CATEGORIES)
+            ]
+            db.add(
+                ReportTemplate(
+                    type="issue",
+                    organization_id=None,
+                    store_id=None,
+                    name="Default Issue Form",
+                    is_default=True,
+                    is_active=True,
+                    payload={"categories": categories, "custom_fields": []},
+                )
+            )
+            await db.commit()
+            logger.info("Created system default issue template")
+    except Exception as e:
+        logger.warning(f"Failed to ensure default issue template: {e}")
+
+
+@app.on_event("startup")
 async def ensure_daily_report_templates() -> None:
     """Check all organizations and create default template for those missing one."""
     import logging
