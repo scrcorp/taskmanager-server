@@ -365,9 +365,10 @@ async def collect_cells_and_issues(
 
     rows = (
         await db.execute(
-            select(Schedule, User, Role)
+            select(Schedule, User, Role, StoreWorkRole)
             .outerjoin(User, Schedule.user_id == User.id)
             .outerjoin(Role, User.role_id == Role.id)
+            .outerjoin(StoreWorkRole, Schedule.work_role_id == StoreWorkRole.id)
             .where(
                 Schedule.organization_id == organization_id,
                 Schedule.work_date.in_(target_dates),
@@ -378,10 +379,10 @@ async def collect_cells_and_issues(
 
     # 1) shift_understaffed + sv_missing — (store, shift, date) 그룹
     by_shift: dict[tuple[UUID, UUID, date], list[tuple[Schedule, User | None, Role | None]]] = {}
-    for sch, user, role in rows:
-        if sch.store_id is None or sch.shift_id is None:
+    for sch, user, role, wr in rows:
+        if sch.store_id is None or wr is None or wr.shift_id is None:
             continue
-        by_shift.setdefault((sch.store_id, sch.shift_id, sch.work_date), []).append((sch, user, role))
+        by_shift.setdefault((sch.store_id, wr.shift_id, sch.work_date), []).append((sch, user, role))
 
     for store_uuid, shift_uuid, d, store, shift in pending_cells:
         d_iso = d.isoformat()
@@ -420,7 +421,7 @@ async def collect_cells_and_issues(
     # 2) over_6h + no_break_8h — (user, date) 그룹
     by_user: dict[tuple[UUID, date], list[Schedule]] = {}
     user_map: dict[UUID, User] = {}
-    for sch, user, _ in rows:
+    for sch, user, _, _ in rows:
         if user is None:
             continue
         user_map[user.id] = user
@@ -467,7 +468,7 @@ async def collect_cells_and_issues(
     # ── 3) sv_gap — 매장 운영시간 안에서 SV 미배치 시간 구간 ──────────
     # shift 무관, 실제 schedule.start_time/end_time 기준.
     sv_by_store_date: dict[tuple[UUID, date], list[tuple[int, int]]] = {}
-    for sch, _, role in rows:
+    for sch, _, role, _ in rows:
         if role is None or role.priority != SV_PRIORITY:
             continue
         if sch.store_id is None or sch.start_time is None or sch.end_time is None:

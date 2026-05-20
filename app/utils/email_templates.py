@@ -17,7 +17,7 @@ def build_verification_code_email(code: str) -> tuple[str, str]:
     Returns:
         (subject, html_body) tuple
     """
-    subject = "[HTM] Email Verification Code"
+    subject = "[Verification] Your code"
 
     html = f"""\
 <!DOCTYPE html>
@@ -224,7 +224,7 @@ def build_reply_email(
         excerpt: 답변 내용 일부 (50~120자), None 가능 (사진/영상만 첨부된 경우)
         cta_url: 보러 갈 링크 (옵션)
     """
-    subject = f"[HTM] {author_name} replied on your {context_label.lower()}"
+    subject = f"[Reply] {author_name} on {context_label.lower()}"
     excerpt_html = (
         f'<div style="margin-top:12px;padding:12px 16px;background-color:#F1F5F9;border-left:3px solid #6C5CE7;border-radius:4px;font-size:14px;color:#334155;line-height:1.6;">{escape(excerpt)}</div>'
         if excerpt and excerpt.strip()
@@ -264,7 +264,7 @@ def build_reply_email(
 
 def build_password_reset_code_email(code: str) -> tuple[str, str]:
     """Build password reset verification code email."""
-    subject = "[HTM] Password Reset Code"
+    subject = "[Password] Reset code"
     html = f"""\
 <!DOCTYPE html>
 <html lang="en">
@@ -291,7 +291,7 @@ def build_password_reset_code_email(code: str) -> tuple[str, str]:
 
 def build_temporary_password_email(temp_password: str) -> tuple[str, str]:
     """Build temporary password alert email."""
-    subject = "[HTM] Your Password Has Been Reset"
+    subject = "[Password] Reset complete"
     html = f"""\
 <!DOCTYPE html>
 <html lang="en">
@@ -769,7 +769,7 @@ def build_schedule_daily_report_email(
 ) -> tuple[str, str]:
     """공문서 톤 — 큰 섹션 H2 + 매트릭스/list. 디자인 최소화."""
     period_label = f"{target_dates[0].isoformat()} ~ {target_dates[-1].isoformat()}"
-    subject = f"[HTM] Schedule Report — {org_name} ({sent_date.isoformat()})"
+    subject = f"[Schedule Report] {sent_date.isoformat()} ({org_name})"
     planned_caption = f"Schedule for {period_label} ({len(target_dates)} days)"
     actual_caption = f"{yesterday.isoformat()} attendance — final state (corrections reflected)" if yesterday else "Previous day attendance — final state"
 
