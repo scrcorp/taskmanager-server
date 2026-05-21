@@ -23,7 +23,10 @@ from app.schemas.user import (
     ProfileResponse,
     ProfileUpdate,
 )
-from app.services.attendance_device_service import generate_clockin_pin
+from app.services.attendance_device_service import (
+    commit_pin_or_409,
+    generate_clockin_pin,
+)
 from app.services.profile_service import profile_service
 
 router: APIRouter = APIRouter()
@@ -77,7 +80,7 @@ async def get_my_clockin_pin(
     """내 attendance device PIN 을 조회합니다."""
     if current_user.clockin_pin is None:
         current_user.clockin_pin = generate_clockin_pin()
-        await db.commit()
+        await commit_pin_or_409(db)
     return ClockinPinResponse(user_id=current_user.id, clockin_pin=current_user.clockin_pin)
 
 
@@ -88,7 +91,7 @@ async def regenerate_my_clockin_pin(
 ) -> ClockinPinResponse:
     """내 PIN 을 새 값으로 교체."""
     current_user.clockin_pin = generate_clockin_pin()
-    await db.commit()
+    await commit_pin_or_409(db)
     return ClockinPinResponse(user_id=current_user.id, clockin_pin=current_user.clockin_pin)
 
 
@@ -100,7 +103,7 @@ async def update_my_clockin_pin(
 ) -> ClockinPinResponse:
     """내 PIN 을 직접 지정. 본인만 가능 (JWT 인증)."""
     current_user.clockin_pin = body.clockin_pin
-    await db.commit()
+    await commit_pin_or_409(db)
     return ClockinPinResponse(user_id=current_user.id, clockin_pin=current_user.clockin_pin)
 
 

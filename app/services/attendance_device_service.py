@@ -56,11 +56,32 @@ def generate_device_name(suffix_length: int = 4) -> str:
 
 
 def generate_clockin_pin() -> str:
-    """6자리 숫자 PIN 생성. 조직 내 unique 보장 X (user_id + pin 동시 검증 방식).
+    """6자리 숫자 PIN 생성 (random, uniqueness 미보장).
 
-    user_id 가 함께 전달되므로 PIN 중복은 인증에 영향 없음.
+    호출자가 commit 시 IntegrityError 처리해야 함 — `commit_pin_or_409` 사용.
+    충돌 확률 1/1,000,000 이라 단일 호출 시 거의 발생 안 함.
+    Bulk 케이스(마이그레이션 등) 에선 set 채우기 방식으로 사전 회피.
     """
     return f"{secrets.randbelow(1_000_000):06d}"
+
+
+async def commit_pin_or_409(db: AsyncSession) -> None:
+    """commit. `uq_user_org_clockin_pin` 위반 시 409 'Not available' 로 변환.
+
+    그 외 IntegrityError 는 그대로 raise.
+    """
+    from fastapi import HTTPException, status
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if "uq_user_org_clockin_pin" in str(exc.orig):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Not available"
+            ) from exc
+        raise
 
 
 class AttendanceDeviceService:
