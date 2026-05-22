@@ -4,6 +4,7 @@
 책임별로 파일 분리:
     - device:      /register, /me, /store, /stores, DELETE /me
     - clock:       /clock-in, /clock-out, /break-start, /break-end
+    - identify:    /identify-by-pin  (Phase 3 — PIN 단독 식별)
     - dashboard:   /today-staff, /notices
     - admin:       /admin/* (관리자 모드 — schedule 편집, attendance 상태 변경 등)
     - tip:         /tip-entry, /tip-entry/eligible-receivers
@@ -12,12 +13,13 @@
 
 from fastapi import APIRouter
 
-from . import admin, app_version, clock, dashboard, device, tip
+from . import admin, app_version, clock, dashboard, device, identify, tip
 
 
 router: APIRouter = APIRouter()
 router.include_router(device.router)
 router.include_router(clock.router)
+router.include_router(identify.router)
 router.include_router(dashboard.router)
 router.include_router(admin.router)
 router.include_router(tip.router)

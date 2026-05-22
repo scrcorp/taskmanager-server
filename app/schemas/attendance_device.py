@@ -153,6 +153,25 @@ class AttendanceStoreOption(BaseModel):
     name: str
 
 
+# ── Identify-by-PIN (Phase 3) ─────────────────────────────────
+
+
+class IdentifyByPinRequest(BaseModel):
+    """PIN 단독 식별 요청 — 6자리 숫자만."""
+    pin: str = Field(..., pattern=r"^\d{6}$")
+
+
+class IdentifyByPinResponse(BaseModel):
+    """PIN 식별 응답 — 직원 clock 흐름 entry.
+
+    today_status: 오늘 attendance 가 있으면 dashboard 와 동일한 effective status,
+    스케줄 없으면 None. clock 가능 여부/UI 분기에 사용.
+    """
+    user_id: UUID
+    user_name: str
+    today_status: str | None
+
+
 # ── Kiosk 관리자 모드 ──────────────────────────────────────
 # Settings 화면에서 SV/GM/Owner PIN 으로 진입. 짧은 in-memory 세션 토큰 발급.
 

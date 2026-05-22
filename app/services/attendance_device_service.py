@@ -296,6 +296,118 @@ class AttendanceDeviceService:
             raise BadRequestError("Invalid PIN")
         return user
 
+    async def identify_user_by_pin(
+        self,
+        db: AsyncSession,
+        pin: str,
+        device: AttendanceDevice,
+    ) -> tuple[User, str | None]:
+        """PIN 단독으로 device 의 org 내 user 식별 + 오늘 attendance status 반환.
+
+        PIN-first 키오스크 흐름 entry point (Phase 3). 직원이 PIN 입력하면 본인 식별
+        + 오늘 스케줄 있으면 status (working/upcoming/late/no_show/soon/on_break/clocked_out)
+        반환. 스케줄 없으면 status=None.
+
+        verify_user_pin 과 달리 user_id 필요 없음 — `(organization_id, clockin_pin)` unique
+        제약 (Phase 1) 으로 단일 row 식별 가능.
+
+        매니저 권한 / manage 모드 진입 검증은 본 endpoint 에 포함하지 않음 (Phase 6 에서 별도).
+        """
+        # 1. PIN 형식
+        if not pin or len(pin) != 6 or not pin.isdigit():
+            raise BadRequestError("PIN must be 6 digits")
+
+        # 2. user 조회 — org/active/non-deleted, PIN 일치
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.role))
+            .where(
+                User.organization_id == device.organization_id,
+                User.clockin_pin == pin,
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+            )
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise BadRequestError("Invalid PIN")
+
+        # 3. today_status 계산 — device 에 store 없으면 None
+        if device.store_id is None:
+            return user, None
+
+        today_status = await self._compute_today_status_for_user(
+            db,
+            user_id=user.id,
+            store_id=device.store_id,
+            organization_id=device.organization_id,
+        )
+        return user, today_status
+
+    async def _compute_today_status_for_user(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        store_id: UUID,
+        organization_id: UUID,
+    ) -> str | None:
+        """store work_date 기준 오늘 user 의 attendance status 계산. 없으면 None.
+
+        dashboard `/today-staff` 의 effective_status 와 동일 로직 (모듈-level
+        `compute_effective_status` pure function 사용).
+        """
+        from zoneinfo import ZoneInfo
+
+        from app.models.schedule import Schedule
+        from app.services.attendance_service import compute_effective_status
+        from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
+        from app.utils.timezone import get_store_day_config, get_work_date
+
+        now = datetime.now(timezone.utc)
+        store_tz, store_day_start = await get_store_day_config(db, store_id)
+        today = get_work_date(store_tz, store_day_start, now)
+        tz_info = ZoneInfo(store_tz)
+
+        row = (
+            await db.execute(
+                select(Attendance, Schedule)
+                .outerjoin(Schedule, Schedule.id == Attendance.schedule_id)
+                .where(
+                    Attendance.user_id == user_id,
+                    Attendance.store_id == store_id,
+                    Attendance.work_date == today,
+                    Attendance.status != "cancelled",
+                )
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            return None
+
+        att, schedule = row
+
+        try:
+            late_buf_raw = await resolve_setting(
+                db,
+                key="attendance.late_buffer_minutes",
+                organization_id=organization_id,
+                store_id=store_id,
+            )
+            late_buffer = int(late_buf_raw) if late_buf_raw is not None else 5
+        except (SettingNotRegisteredError, TypeError, ValueError):
+            late_buffer = 5
+
+        return compute_effective_status(
+            att_status=att.status,
+            att_clock_in=att.clock_in,
+            schedule_start_time=schedule.start_time if schedule else None,
+            schedule_end_time=schedule.end_time if schedule else None,
+            schedule_work_date=schedule.work_date if schedule else None,
+            now=now,
+            store_tz=tz_info,
+            late_buffer=late_buffer,
+        )
+
     # ── Clock 동작 ─────────────────────────────────────────
 
     async def _get_open_break(

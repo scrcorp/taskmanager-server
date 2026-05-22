@@ -5,6 +5,7 @@ DB 의존성을 AsyncMock 으로 흉내 — pytest fixture (worktree DB) 와 격
 [작성됨] — 이번 phase
 - generate_clockin_pin (6자리 / zero-pad)
 - verify_user_pin (4 분기: 형식 위반 / user 없음 / PIN 불일치 / 정상)
+- identify_user_by_pin (5 분기: 형식 위반 / user 없음 / device store None / 정상)
 
 [작성 필요] — 추후
 - generate_device_token  (cryptographic 강도, 길이)
@@ -12,6 +13,7 @@ DB 의존성을 AsyncMock 으로 흉내 — pytest fixture (worktree DB) 와 격
 - generate_device_name   (포맷 'Terminal-XXXX')
 - AttendanceDeviceService.register / assign_store / revoke (DB 의존이라 mock 까다로움 — integration 위주가 자연스러움)
 - AttendanceDeviceService.perform_clock_action (복합 흐름, mock 보다 integration)
+- _compute_today_status_for_user (여러 DB query + setting resolve, mock verbose — integration 으로 커버)
 
 DB 사용하는 케이스는 tests/integration/services/test_attendance_device_service.py 에.
 
@@ -132,3 +134,52 @@ async def test_verify_user_pin_returns_user_on_match() -> None:
         db, uuid.uuid4(), "123456", uuid.uuid4()
     )
     assert returned is user
+
+
+# ── identify_user_by_pin (Phase 3 — DB 의존, AsyncMock) ──────────
+
+
+def _mock_device(store_id=None) -> MagicMock:
+    """AttendanceDevice 흉내 — organization_id, store_id 만 사용."""
+    device = MagicMock()
+    device.organization_id = uuid.uuid4()
+    device.store_id = store_id
+    return device
+
+
+@pytest.mark.asyncio
+async def test_identify_user_by_pin_rejects_invalid_format() -> None:
+    """PIN 형식 위반 → BadRequest, DB 조회 skip."""
+    db = AsyncMock()
+    device = _mock_device()
+    for bad_pin in ("", "12345", "1234567", "abcdef", "12abcd"):
+        with pytest.raises(BadRequestError, match="PIN must be 6 digits"):
+            await attendance_device_service.identify_user_by_pin(db, bad_pin, device)
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_identify_user_by_pin_raises_when_user_not_found() -> None:
+    """PIN 매치되는 user 없음 → BadRequest 'Invalid PIN'."""
+    db = _mock_db(scalar_one_or_none_returns=None)
+    device = _mock_device()
+    with pytest.raises(BadRequestError, match="Invalid PIN"):
+        await attendance_device_service.identify_user_by_pin(db, "123456", device)
+    db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_identify_user_by_pin_returns_null_status_when_device_has_no_store() -> None:
+    """device.store_id None → user 정보만, today_status=None (DB query 1번만)."""
+    user = MagicMock()
+    user.id = uuid.uuid4()
+    db = _mock_db(scalar_one_or_none_returns=user)
+    device = _mock_device(store_id=None)
+
+    returned_user, today_status = await attendance_device_service.identify_user_by_pin(
+        db, "123456", device
+    )
+    assert returned_user is user
+    assert today_status is None
+    # _compute_today_status_for_user 호출되지 않음 → db.execute 1회 (user 조회만)
+    assert db.execute.await_count == 1
