@@ -62,8 +62,8 @@ app.include_router(app_router, prefix="/api/v1/app")
 app.include_router(setup_page_router, tags=["Setup Page"])
 
 # Attendance Device 전용 라우터 — JWT 와 별개 auth scope (device token)
-from app.api.attendance_device import router as attendance_device_router  # noqa: E402
-app.include_router(attendance_device_router, prefix="/api/v1/attendance", tags=["Attendance Device"])
+from app.api.attendance import router as attendance_router  # noqa: E402
+app.include_router(attendance_router, prefix="/api/v1/attendance", tags=["Attendance Device"])
 
 # 로컬 버킷 정적 파일 서빙 — Local bucket static file serving
 from app.services.storage_service import BUCKET_DIR  # noqa: E402

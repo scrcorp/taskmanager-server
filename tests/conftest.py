@@ -1,21 +1,19 @@
-"""Attendance Device 테스트 공통 픽스처.
+"""테스트 공통 픽스처.
 
 전략:
-    - 기존 worktree DB 를 그대로 재사용 (별도 DB 생성 안함).
-    - 세션 전체에서 단 하나의 전용 테스트 매장 `__attendance_test_store__` 를
-      생성/재사용하며, `day_start_time={'all':'00:00'}` 으로 UTC 캘린더 날짜 =
-      work_date 이 되도록 고정한다.
-    - 각 테스트 전후에 테스트 유저들의 attendance/attendance_breaks/schedules
-      행을 삭제하여 격리한다. attendance_devices 는 세션 내 생성한 것만 삭제.
-    - access_code 는 startup 시 서버가 보장. conftest 에서 DB 조회해서 그대로 사용.
+    - 빈 DB / 부분 시드 DB / 완전 시드 DB 어디서든 동일하게 동작 (idempotent seed).
+    - `seed_organization` → `seed_roles` → `test_users` → `test_store_id` 순으로
+      필요한 데이터를 ensure. 이미 있으면 재사용, 없으면 생성.
+    - 각 테스트 전후에 attendance/schedule/notice 임시 데이터 정리.
+    - 시드 자체(organization, role, user, store) 는 session scope — 한 번 만들고 재사용.
+    - access_code 는 startup 시 서버가 ensure. 없으면 conftest 가 fallback ensure.
     - httpx.AsyncClient 는 ASGITransport(app) 로 실제 네트워크 없이 호출.
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
-from datetime import date, time, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import AsyncIterator
 from uuid import UUID
 
@@ -28,15 +26,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Prevent scheduler startup noise in tests
 os.environ.setdefault("DEBUG", "false")
 
-from app.main import app  # noqa: E402
 from app.database import async_session  # noqa: E402
+from app.main import app  # noqa: E402
 from app.models.attendance import Attendance  # noqa: E402
-from app.models.attendance_break import AttendanceBreak  # noqa: E402
+from app.models.attendance_break import AttendanceBreak  # noqa: E402  (FK CASCADE 로 자동 삭제, import 만 유지)
 from app.models.attendance_device import AttendanceDevice  # noqa: E402
 from app.models.communication import Notice  # noqa: E402
-from app.models.organization import Store  # noqa: E402
+from app.models.organization import Organization, Store  # noqa: E402
 from app.models.schedule import Schedule  # noqa: E402
-from app.models.user import User  # noqa: E402
+from app.models.user import Role, User  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -52,31 +50,185 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 
 # ---------------------------------------------------------------------------
-# 공용 테스트 매장 — day_start_time 을 UTC 00:00 으로 강제
+# Seed: organization (idempotent)
 # ---------------------------------------------------------------------------
 
 
 @pytest_asyncio.fixture(scope="session")
-async def test_store_id() -> UUID:
-    """`__attendance_test_store__` 매장을 보장하고 그 id 를 반환.
+async def seed_organization() -> dict:
+    """첫 organization. 없으면 만듦. dict 로 반환 (id/name).
 
-    - 조직은 현재 DB 첫 organization 사용
-    - day_start_time={'all':'00:00'}, timezone='UTC' 로 설정 → work_date = 오늘 (UTC)
+    Session scope — 한 번 만들고 모든 테스트에서 재사용.
     """
-    from app.models.organization import Organization
+    async with async_session() as db:
+        org = (
+            await db.execute(
+                select(Organization).order_by(Organization.created_at).limit(1)
+            )
+        ).scalar_one_or_none()
+        if org is None:
+            org = Organization(name="Test Organization")
+            db.add(org)
+            await db.commit()
+            await db.refresh(org)
+        return {"id": org.id, "name": org.name}
+
+
+# ---------------------------------------------------------------------------
+# Seed: roles (5개, idempotent)
+# ---------------------------------------------------------------------------
+
+
+_ROLE_SPECS: list[tuple[str, int]] = [
+    ("super_owner", 5),
+    ("owner", 10),
+    ("general_manager", 20),
+    ("supervisor", 30),
+    ("staff", 40),
+]
+
+
+@pytest_asyncio.fixture(scope="session")
+async def seed_roles(seed_organization: dict) -> dict[str, UUID]:
+    """5개 role 을 ensure. {name: id}."""
+    org_id: UUID = seed_organization["id"]
+    async with async_session() as db:
+        existing = {
+            r.name: r.id
+            for r in (
+                await db.execute(
+                    select(Role).where(Role.organization_id == org_id)
+                )
+            ).scalars().all()
+        }
+        for name, priority in _ROLE_SPECS:
+            if name not in existing:
+                role = Role(organization_id=org_id, name=name, priority=priority)
+                db.add(role)
+                await db.commit()
+                await db.refresh(role)
+                existing[name] = role.id
+        return existing
+
+
+# ---------------------------------------------------------------------------
+# Seed: test users (4개, idempotent)
+# ---------------------------------------------------------------------------
+
+
+_USER_SPECS: list[tuple[str, str, str]] = [
+    # (username, full_name, role_name)
+    ("testadmin", "Test Admin", "super_owner"),
+    ("testgm", "Test GM", "general_manager"),
+    ("testsv", "Test SV", "supervisor"),
+    ("teststaff", "Test Staff", "staff"),
+]
+
+
+@pytest_asyncio.fixture(scope="session")
+async def test_users(seed_organization: dict, seed_roles: dict[str, UUID]) -> dict[str, dict]:
+    """4개 test user idempotent ensure. {username: {id/clockin_pin/...}}.
+
+    이미 있으면 그대로 사용 (단, is_active=true 보장, clockin_pin 없으면 생성).
+    없으면 password='1234' / 새 PIN 로 생성.
+    """
+    from app.services.attendance_device_service import generate_clockin_pin
+    from app.utils.password import hash_password
+
+    org_id: UUID = seed_organization["id"]
+    usernames = [s[0] for s in _USER_SPECS]
 
     async with async_session() as db:
-        org = (await db.execute(select(Organization).order_by(Organization.created_at).limit(1))).scalar_one()
+        existing = {
+            u.username: u
+            for u in (
+                await db.execute(
+                    select(User).where(
+                        User.username.in_(usernames),
+                        User.organization_id == org_id,
+                    )
+                )
+            ).scalars().all()
+        }
+
+        # password_hash 캐시 — 4명 모두 "1234" 라 한 번만 hash
+        password_hash_cache: str | None = None
+
+        for username, full_name, role_name in _USER_SPECS:
+            if username not in existing:
+                if password_hash_cache is None:
+                    password_hash_cache = hash_password("1234")
+                user = User(
+                    organization_id=org_id,
+                    role_id=seed_roles[role_name],
+                    username=username,
+                    full_name=full_name,
+                    password_hash=password_hash_cache,
+                    clockin_pin=generate_clockin_pin(),
+                    is_active=True,
+                )
+                db.add(user)
+                await db.commit()
+                await db.refresh(user)
+                existing[username] = user
+            else:
+                # 활성화/PIN 보장
+                u = existing[username]
+                dirty = False
+                if not u.is_active:
+                    u.is_active = True
+                    dirty = True
+                if not u.clockin_pin:
+                    u.clockin_pin = generate_clockin_pin()
+                    dirty = True
+                if u.deleted_at is not None:
+                    u.deleted_at = None
+                    dirty = True
+                if dirty:
+                    await db.commit()
+                    await db.refresh(u)
+
+    return {
+        u.username: {
+            "id": u.id,
+            "clockin_pin": u.clockin_pin,
+            "organization_id": u.organization_id,
+            "full_name": u.full_name,
+            "password_hash": u.password_hash,
+        }
+        for u in existing.values()
+    }
+
+
+@pytest.fixture
+def test_user(test_users: dict) -> dict:
+    """기본 테스트 유저 = teststaff (staff 권한)."""
+    return test_users["teststaff"]
+
+
+# ---------------------------------------------------------------------------
+# 공용 테스트 매장 — day_start_time UTC 00:00 강제
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture(scope="session")
+async def test_store_id(seed_organization: dict) -> UUID:
+    """`__attendance_test_store__` 매장을 보장하고 id 반환.
+
+    timezone=UTC, day_start_time={'all':'00:00'} — work_date = UTC 캘린더 날짜.
+    """
+    org_id: UUID = seed_organization["id"]
+    async with async_session() as db:
         result = await db.execute(
             select(Store).where(
-                Store.organization_id == org.id,
+                Store.organization_id == org_id,
                 Store.name == "__attendance_test_store__",
             )
         )
         store = result.scalar_one_or_none()
         if store is None:
             store = Store(
-                organization_id=org.id,
+                organization_id=org_id,
                 name="__attendance_test_store__",
                 timezone="UTC",
                 day_start_time={"all": "00:00"},
@@ -95,22 +247,20 @@ async def test_store_id() -> UUID:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def second_store_id() -> UUID:
-    """조직 내 두 번째 매장 — list_stores 테스트 / notices 스코프 테스트용."""
-    from app.models.organization import Organization
-
+async def second_store_id(seed_organization: dict) -> UUID:
+    """조직 내 두 번째 매장 — list_stores / notices 스코프 테스트용."""
+    org_id: UUID = seed_organization["id"]
     async with async_session() as db:
-        org = (await db.execute(select(Organization).order_by(Organization.created_at).limit(1))).scalar_one()
         result = await db.execute(
             select(Store).where(
-                Store.organization_id == org.id,
+                Store.organization_id == org_id,
                 Store.name == "__attendance_test_store_B__",
             )
         )
         store = result.scalar_one_or_none()
         if store is None:
             store = Store(
-                organization_id=org.id,
+                organization_id=org_id,
                 name="__attendance_test_store_B__",
                 timezone="UTC",
                 day_start_time={"all": "00:00"},
@@ -119,43 +269,6 @@ async def second_store_id() -> UUID:
             await db.commit()
             await db.refresh(store)
         return store.id
-
-
-# ---------------------------------------------------------------------------
-# 테스트 유저 — 기존 DB 의 testadmin/testgm/testsv/teststaff 재사용
-# ---------------------------------------------------------------------------
-
-
-@pytest_asyncio.fixture(scope="session")
-async def test_users() -> dict[str, dict]:
-    """유저 정보 (id, clockin_pin, organization_id) 를 dict 로 반환."""
-    async with async_session() as db:
-        result = await db.execute(
-            select(User).where(User.username.in_(["testadmin", "testgm", "testsv", "teststaff"]))
-        )
-        users = result.scalars().all()
-    data: dict[str, dict] = {}
-    for u in users:
-        data[u.username] = {
-            "id": u.id,
-            "clockin_pin": u.clockin_pin,
-            "organization_id": u.organization_id,
-            "full_name": u.full_name,
-            "password_hash": u.password_hash,
-        }
-    missing = {"testadmin", "testgm", "testsv", "teststaff"} - set(data.keys())
-    if missing:
-        raise RuntimeError(f"Missing required test accounts: {missing}")
-    for name, info in data.items():
-        if not info["clockin_pin"]:
-            raise RuntimeError(f"User {name} has no clockin_pin — seed data required")
-    return data
-
-
-@pytest.fixture
-def test_user(test_users) -> dict:
-    """기본 테스트 유저 = teststaff (staff 권한)."""
-    return test_users["teststaff"]
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +286,7 @@ async def async_client(_clean_state) -> AsyncIterator[AsyncClient]:
 
 
 # ---------------------------------------------------------------------------
-# Access code — 서버 startup 이 DB 에 upsert. 여기서는 SELECT.
+# Access code — 서버 startup 이 DB 에 upsert. 없으면 fallback ensure.
 # ---------------------------------------------------------------------------
 
 
@@ -185,7 +298,6 @@ async def attendance_access_code() -> str:
         )
         code = result.scalar_one_or_none()
     if not code:
-        # fallback — 서버 startup 에 의해 이미 존재해야 함
         from app.core.access_code import ensure_code
 
         async with async_session() as db:
@@ -308,17 +420,15 @@ def _tracked_schedule_ids() -> list:
 
 @pytest_asyncio.fixture
 async def test_schedule(make_schedule, test_user) -> UUID:
-    """test_user 의 오늘 confirmed 스케줄 — 가장 흔한 케이스.
+    """test_user 의 오늘 confirmed 스케줄.
 
-    start_time 을 미래 시각으로 설정 — LATE_BUFFER_MINUTES=0 하에서 'late'
-    판정을 피해 기본 케이스가 'working' 이 되도록 보장. 23시 이후 실행 시에는
-    23:59 로 고정 (work_date 가 다음 날로 넘어가지 않는 한 날짜 내 가장 늦은 시각).
+    start_time 을 약간 미래로 (now+30m) — 'working' 상태로 보이게.
+    자정 근처는 23:59 로 고정.
     """
     from datetime import datetime as _dt, time as _time, timedelta as _td, timezone as _tz
 
     now_utc = _dt.now(_tz.utc)
     target = now_utc + _td(minutes=30)
-    # 자정 넘으면 오늘의 23:59 로 고정 (테스트는 'working' 상태만 필요)
     if target.date() != now_utc.date():
         start_t = _time(23, 59)
         end_t = _time(23, 59)
@@ -334,10 +444,6 @@ async def test_schedule(make_schedule, test_user) -> UUID:
 
 # ---------------------------------------------------------------------------
 # Cleanup — 테스트 전후 데이터 정리
-#
-# autouse 와 다른 픽스처의 해결 순서가 일관되지 않아 autouse 대신 명시적
-# "setup 함수" 로 전환. `async_client` 픽스처가 이 함수에 의존 (모든 테스트가
-# async_client 를 쓴다) 해서 항상 선행 실행.
 # ---------------------------------------------------------------------------
 
 
@@ -346,6 +452,7 @@ async def _purge_test_data(
     test_store_id: UUID,
     second_store_id: UUID,
 ) -> None:
+    """attendance / schedule / 테스트 notice 정리. 시드(user/store/org) 는 안 건드림."""
     user_ids: list[UUID] = [info["id"] for info in test_users.values()]
     store_ids: list[UUID] = [test_store_id, second_store_id]
     async with async_session() as db:
@@ -375,7 +482,7 @@ async def _clean_state(
     second_store_id,
     _tracked_schedule_ids,
 ):
-    """테스트 시작 전에 깨끗한 DB 상태를 보장, 종료 시에도 정리."""
+    """테스트 시작 전 깨끗한 상태 보장, 종료 시에도 정리."""
     await _purge_test_data(test_users, test_store_id, second_store_id)
     _tracked_schedule_ids.clear()
     try:
@@ -385,7 +492,7 @@ async def _clean_state(
 
 
 # ---------------------------------------------------------------------------
-# PIN 복원 — regenerate 테스트가 PIN 을 바꾼 경우 원복
+# PIN 복원 — regenerate / update 테스트가 PIN 바꾼 경우 원복
 # ---------------------------------------------------------------------------
 
 
@@ -404,7 +511,7 @@ async def restore_pins(test_users):
 
 
 # ---------------------------------------------------------------------------
-# Session teardown — 만들어진 device 를 정리
+# Session teardown — 만들어진 device 정리
 # ---------------------------------------------------------------------------
 
 
@@ -415,7 +522,9 @@ async def _session_teardown(_session_created_device_ids):
         return
     async with async_session() as db:
         await db.execute(
-            delete(AttendanceDevice).where(AttendanceDevice.id.in_(_session_created_device_ids))
+            delete(AttendanceDevice).where(
+                AttendanceDevice.id.in_(_session_created_device_ids)
+            )
         )
         await db.commit()
 
@@ -426,7 +535,8 @@ async def _session_teardown(_session_created_device_ids):
 
 
 @pytest_asyncio.fixture(scope="session")
-async def admin_token() -> str:
+async def admin_token(test_users) -> str:
+    """testadmin 으로 console login. test_users 의존 — 시드 보장 후 로그인."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
