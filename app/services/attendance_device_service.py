@@ -217,7 +217,7 @@ class AttendanceDeviceService:
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_admin(
+    async def get_manage(
         self,
         db: AsyncSession,
         organization_id: UUID,
@@ -239,7 +239,7 @@ class AttendanceDeviceService:
     async def _get_active_user(
         self, db: AsyncSession, user_id: UUID, organization_id: UUID
     ) -> User:
-        """PIN 검증 없이 active user 조회 (admin override 전용)."""
+        """PIN 검증 없이 active user 조회 (manage override 전용)."""
         result = await db.execute(
             select(User)
             .options(selectinload(User.role))
@@ -255,7 +255,7 @@ class AttendanceDeviceService:
             raise BadRequestError("User not found")
         return user
 
-    async def perform_clock_action_admin(
+    async def perform_clock_action_manage(
         self,
         db: AsyncSession,
         device: AttendanceDevice,
@@ -265,7 +265,7 @@ class AttendanceDeviceService:
         break_type: str | None = None,
         reason: str | None = None,
     ) -> Attendance:
-        """매니저가 admin 모드에서 임의 사용자 attendance 를 처리.
+        """매니저가 manage 모드에서 임의 사용자 attendance 를 처리.
 
         PIN 우회. early clock-in/out 가드 우회. note 에 manager 표시.
         """
@@ -307,6 +307,34 @@ class AttendanceDeviceService:
             # 401 은 device token 문제에만 쓰고, 유저/PIN 오류는 400.
             raise BadRequestError("User not found")
         if user.clockin_pin != pin:
+            raise BadRequestError("Invalid PIN")
+        return user
+
+    async def identify_manager_by_pin(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        pin: str,
+    ) -> User:
+        """매니저 진입용: PIN 으로 organization 안 active user 식별.
+
+        identify_user_by_pin 과 비슷하지만 attendance context 계산 없이 User 만 반환.
+        매니저 자격(SV+) 검증은 호출자가 수행.
+        """
+        if not pin or not pin.isdigit() or not (4 <= len(pin) <= 6):
+            raise BadRequestError("PIN must be 4-6 digits")
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.role))
+            .where(
+                User.organization_id == organization_id,
+                User.clockin_pin == pin,
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+            )
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
             raise BadRequestError("Invalid PIN")
         return user
 

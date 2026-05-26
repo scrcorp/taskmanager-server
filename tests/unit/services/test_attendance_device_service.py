@@ -197,3 +197,48 @@ async def test_identify_user_by_pin_accepts_4_to_5_digits() -> None:
         ctx = await attendance_device_service.identify_user_by_pin(db, pin, device)
         assert ctx.user is user
         assert db.execute.await_count == 1
+
+
+# ── identify_manager_by_pin (Phase 6 — manage 진입 PIN-first) ─────────
+
+
+@pytest.mark.asyncio
+async def test_identify_manager_by_pin_rejects_invalid_format() -> None:
+    """PIN 형식 위반 → BadRequest, DB 조회 skip."""
+    db = AsyncMock()
+    for bad_pin in ("", "123", "1234567", "abcdef", "12abcd"):
+        with pytest.raises(BadRequestError, match="PIN must be 4-6 digits"):
+            await attendance_device_service.identify_manager_by_pin(db, uuid.uuid4(), bad_pin)
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_identify_manager_by_pin_raises_when_user_not_found() -> None:
+    """PIN 매치되는 user 없음 → BadRequest 'Invalid PIN'."""
+    db = _mock_db(scalar_one_or_none_returns=None)
+    with pytest.raises(BadRequestError, match="Invalid PIN"):
+        await attendance_device_service.identify_manager_by_pin(db, uuid.uuid4(), "530025")
+    db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_identify_manager_by_pin_returns_user_on_match() -> None:
+    """PIN 매치 → User 반환 (자격 검증은 호출자 책임)."""
+    user = MagicMock()
+    user.id = uuid.uuid4()
+    db = _mock_db(scalar_one_or_none_returns=user)
+    out = await attendance_device_service.identify_manager_by_pin(db, uuid.uuid4(), "530025")
+    assert out is user
+    db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_identify_manager_by_pin_accepts_4_to_6_digits() -> None:
+    """4 / 5 / 6 자리 모두 형식 통과."""
+    user = MagicMock()
+    db = _mock_db(scalar_one_or_none_returns=user)
+    for pin in ("1234", "12345", "123456"):
+        db.reset_mock()
+        out = await attendance_device_service.identify_manager_by_pin(db, uuid.uuid4(), pin)
+        assert out is user
+        assert db.execute.await_count == 1

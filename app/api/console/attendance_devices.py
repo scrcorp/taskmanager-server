@@ -61,7 +61,7 @@ async def rename_device(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("attendance_devices:update"))],
 ) -> AdminDeviceResponse:
-    device = await attendance_device_service.get_admin(
+    device = await attendance_device_service.get_manage(
         db, current_user.organization_id, device_id
     )
     await attendance_device_service.rename(db, device, data.device_name)
@@ -75,7 +75,7 @@ async def revoke_device(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("attendance_devices:update"))],
 ) -> None:
-    device = await attendance_device_service.get_admin(
+    device = await attendance_device_service.get_manage(
         db, current_user.organization_id, device_id
     )
     await attendance_device_service.revoke(db, device)

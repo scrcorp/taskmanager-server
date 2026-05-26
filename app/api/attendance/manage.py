@@ -1,6 +1,6 @@
 """Attendance kiosk 관리자 모드 라우터.
 
-매장 SV/GM/Owner 가 키오스크 설정에서 PIN 인증 후 사용. admin token 은 in-memory.
+매장 SV/GM/Owner 가 키오스크 설정에서 PIN 인증 후 사용. manage token 은 in-memory.
 별도 라우터로 분리하지 않고 같은 prefix /attendance 아래 /admin/* 로 묶음.
 
 `/api/v1/attendance` 하위에 mount.
@@ -15,12 +15,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
-    get_current_attendance_admin_session,
+    get_current_attendance_manage_session,
     get_current_attendance_device,
 )
-from app.core.attendance_admin_session import (
-    create_session as create_admin_session,
-    revoke_session as revoke_admin_session,
+from app.core.attendance_manage_session import (
+    create_session as create_manage_session,
+    revoke_session as revoke_manage_session,
 )
 from app.core.permissions import is_owner, is_sv_plus
 from app.database import get_db
@@ -29,16 +29,15 @@ from app.models.organization import Store
 from app.models.user import Role, User
 from app.models.user_store import UserStore
 from app.schemas.attendance_device import (
-    AdminAssignableUser,
+    ManageAssignableUser,
     AdminClockActionRequest,
-    AdminManagerOption,
-    AdminScheduleCreateRequest,
-    AdminScheduleRow,
-    AdminScheduleUpdateRequest,
-    AdminSessionRequest,
-    AdminSessionResponse,
+    ManageScheduleCreateRequest,
+    ManageScheduleRow,
+    ManageScheduleUpdateRequest,
+    ManageSessionRequest,
+    ManageSessionResponse,
     AdminStatusChangeRequest,
-    AdminWorkRoleOption,
+    ManageWorkRoleOption,
 )
 from app.services.attendance_device_service import attendance_device_service
 
@@ -46,83 +45,22 @@ from app.services.attendance_device_service import attendance_device_service
 router: APIRouter = APIRouter()
 
 
-@router.get("/admin/managers", response_model=list[AdminManagerOption])
-async def admin_list_managers(
+@router.post("/manage/session", response_model=ManageSessionResponse, status_code=201)
+async def manage_open_session(
+    data: ManageSessionRequest,
     device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[AdminManagerOption]:
-    """현재 디바이스 매장에서 관리자 모드 진입 가능한 사용자 목록.
+) -> ManageSessionResponse:
+    """PIN 으로 user 식별 + 매니저 자격 검증 후 manage session token 발급.
 
-    포함: Owner (조직 내 모든 매장 관리) + 이 매장의 user_stores.is_manager=true 인 SV/GM.
-    PIN 미설정자는 제외 (PIN 검증 불가).
+    user_id 입력 없이 PIN 하나로 user 식별 (organization 안에서 clockin_pin unique).
     """
-    if device.store_id is None:
-        return []
-    # Owners: 조직 내 priority == OWNER_PRIORITY
-    from app.core.permissions import OWNER_PRIORITY, SV_PRIORITY
-
-    owner_stmt = (
-        select(User, Role)
-        .join(Role, User.role_id == Role.id)
-        .where(
-            User.organization_id == device.organization_id,
-            Role.priority == OWNER_PRIORITY,
-            User.is_active.is_(True),
-            User.deleted_at.is_(None),
-            User.clockin_pin.is_not(None),
-        )
-    )
-    # Store managers: SV+ 권한이면서 이 매장의 is_manager=true 인 user_stores
-    manager_stmt = (
-        select(User, Role)
-        .join(Role, User.role_id == Role.id)
-        .join(UserStore, UserStore.user_id == User.id)
-        .where(
-            User.organization_id == device.organization_id,
-            UserStore.store_id == device.store_id,
-            UserStore.is_manager.is_(True),
-            Role.priority < OWNER_PRIORITY + 100,  # placeholder — 실제는 owner 제외 (아래)
-            Role.priority <= SV_PRIORITY,
-            Role.priority != OWNER_PRIORITY,
-            User.is_active.is_(True),
-            User.deleted_at.is_(None),
-            User.clockin_pin.is_not(None),
-        )
-    )
-
-    owners = (await db.execute(owner_stmt)).all()
-    managers = (await db.execute(manager_stmt)).all()
-    seen: set[uuid.UUID] = set()
-    rows: list[AdminManagerOption] = []
-    for user, role in list(owners) + list(managers):
-        if user.id in seen:
-            continue
-        seen.add(user.id)
-        rows.append(
-            AdminManagerOption(
-                user_id=user.id,
-                full_name=user.full_name or user.username,
-                role_name=role.name,
-                role_priority=role.priority,
-            )
-        )
-    rows.sort(key=lambda r: (r.role_priority, r.full_name))
-    return rows
-
-
-@router.post("/admin/session", response_model=AdminSessionResponse, status_code=201)
-async def admin_open_session(
-    data: AdminSessionRequest,
-    device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> AdminSessionResponse:
-    """매니저 user_id + PIN 검증 후 admin session token 발급."""
     if device.store_id is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Device has no store assigned")
 
-    # PIN 검증 — verify_user_pin 은 active+org 체크 포함
-    manager = await attendance_device_service.verify_user_pin(
-        db, data.user_id, data.pin, device.organization_id
+    # PIN 으로 user 식별 (organization 단위)
+    manager = await attendance_device_service.identify_manager_by_pin(
+        db, device.organization_id, data.pin
     )
     # 권한 검증: SV+ 이면서 owner 또는 이 매장 is_manager
     if manager.role is None or not is_sv_plus(manager):
@@ -144,28 +82,28 @@ async def admin_open_session(
                 detail="Not a manager of this store",
             )
 
-    session = create_admin_session(
+    session = create_manage_session(
         device_id=device.id,
         manager_user_id=manager.id,
         organization_id=device.organization_id,
         store_id=device.store_id,
     )
-    return AdminSessionResponse(
-        admin_token=session.token,
+    return ManageSessionResponse(
+        manage_token=session.token,
         manager_user_id=manager.id,
         manager_name=manager.full_name or manager.username,
         expires_at=session.expires_at,
     )
 
 
-@router.delete("/admin/session", status_code=204)
-async def admin_close_session(
+@router.delete("/manage/session", status_code=204)
+async def manage_close_session(
     request: Request,
     device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
 ) -> None:
     """현재 admin session 종료 — UI Logout 버튼."""
-    token = request.headers.get("X-Admin-Session") or request.headers.get("x-admin-session")
-    revoke_admin_session(token)
+    token = request.headers.get("X-Manage-Session") or request.headers.get("x-manage-session")
+    revoke_manage_session(token)
 
 
 # ── Admin Schedule CRUD ───────────────────────────────────
@@ -183,11 +121,11 @@ def _parse_time_hhmm(s: str):
     return _time(int(hh), int(mm))
 
 
-@router.get("/admin/schedules", response_model=list[AdminScheduleRow])
-async def admin_list_today_schedules(
-    auth: Annotated[tuple, Depends(get_current_attendance_admin_session)],
+@router.get("/manage/schedules", response_model=list[ManageScheduleRow])
+async def manage_list_today_schedules(
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[AdminScheduleRow]:
+) -> list[ManageScheduleRow]:
     """현재 디바이스 매장의 오늘 스케줄 (status != cancelled/rejected/deleted)."""
     device, _session, _manager = auth
     from datetime import datetime as _dt, timezone as _tz
@@ -223,10 +161,10 @@ async def admin_list_today_schedules(
         except Exception:
             return None
 
-    result: list[AdminScheduleRow] = []
+    result: list[ManageScheduleRow] = []
     for sched, user, att, shift_name in rows.all():
         result.append(
-            AdminScheduleRow(
+            ManageScheduleRow(
                 schedule_id=sched.id,
                 user_id=user.id,
                 user_name=user.full_name or user.username,
@@ -246,11 +184,11 @@ async def admin_list_today_schedules(
     return result
 
 
-@router.get("/admin/assignable-users", response_model=list[AdminAssignableUser])
-async def admin_list_assignable_users(
-    auth: Annotated[tuple, Depends(get_current_attendance_admin_session)],
+@router.get("/manage/assignable-users", response_model=list[ManageAssignableUser])
+async def manage_list_assignable_users(
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[AdminAssignableUser]:
+) -> list[ManageAssignableUser]:
     """이 매장에 work_assignment 되어있는 직원들 (스케줄 생성 select 옵션)."""
     device, _session, _manager = auth
     rows = await db.execute(
@@ -266,7 +204,7 @@ async def admin_list_assignable_users(
         .order_by(Role.priority.asc(), User.full_name.asc())
     )
     return [
-        AdminAssignableUser(
+        ManageAssignableUser(
             user_id=u.id,
             full_name=u.full_name or u.username,
             role_name=r.name,
@@ -275,11 +213,11 @@ async def admin_list_assignable_users(
     ]
 
 
-@router.get("/admin/work-roles", response_model=list[AdminWorkRoleOption])
-async def admin_list_work_roles(
-    auth: Annotated[tuple, Depends(get_current_attendance_admin_session)],
+@router.get("/manage/work-roles", response_model=list[ManageWorkRoleOption])
+async def manage_list_work_roles(
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[AdminWorkRoleOption]:
+) -> list[ManageWorkRoleOption]:
     """매장 work role 목록 (스케줄 생성/수정 select 옵션).
 
     각 row 에 shift name + position name 도 함께 반환 — 클라이언트가
@@ -300,7 +238,7 @@ async def admin_list_work_roles(
         .order_by(StoreWorkRole.sort_order.asc())
     )
     return [
-        AdminWorkRoleOption(
+        ManageWorkRoleOption(
             work_role_id=wr.id,
             name=wr.name,
             shift_name=shift_name,
@@ -315,7 +253,7 @@ async def admin_list_work_roles(
 async def _ensure_confirmed_today(db: AsyncSession, schedule_id: uuid.UUID, organization_id: uuid.UUID, manager_id: uuid.UUID) -> None:
     """create_entry 가 SV 권한 정책으로 requested 가 되어버린 경우 강제 confirmed.
 
-    Kiosk admin 은 매니저가 직접 매장에서 즉시 운영을 하는 컨텍스트라 항상 confirmed.
+    Kiosk manage 은 매니저가 직접 매장에서 즉시 운영을 하는 컨텍스트라 항상 confirmed.
     """
     from app.models.schedule import Schedule
     from app.services.schedule_service import schedule_service
@@ -329,12 +267,12 @@ async def _ensure_confirmed_today(db: AsyncSession, schedule_id: uuid.UUID, orga
         )
 
 
-@router.post("/admin/schedules", response_model=AdminScheduleRow, status_code=201)
-async def admin_create_schedule(
-    data: AdminScheduleCreateRequest,
-    auth: Annotated[tuple, Depends(get_current_attendance_admin_session)],
+@router.post("/manage/schedules", response_model=ManageScheduleRow, status_code=201)
+async def manage_create_schedule(
+    data: ManageScheduleCreateRequest,
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> AdminScheduleRow:
+) -> ManageScheduleRow:
     """오늘 새 스케줄을 매장에 생성. 항상 confirmed."""
     device, _session, manager = auth
     from datetime import datetime as _dt, timezone as _tz
@@ -364,13 +302,13 @@ async def admin_create_schedule(
     return await _admin_schedule_row(db, uuid.UUID(response.id))
 
 
-@router.patch("/admin/schedules/{schedule_id}", response_model=AdminScheduleRow)
-async def admin_update_schedule(
+@router.patch("/manage/schedules/{schedule_id}", response_model=ManageScheduleRow)
+async def manage_update_schedule(
     schedule_id: uuid.UUID,
-    data: AdminScheduleUpdateRequest,
-    auth: Annotated[tuple, Depends(get_current_attendance_admin_session)],
+    data: ManageScheduleUpdateRequest,
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> AdminScheduleRow:
+) -> ManageScheduleRow:
     """오늘 스케줄 시간/배정 수정. 매장+오늘 한정."""
     device, _session, manager = auth
     from app.models.schedule import Schedule
@@ -403,10 +341,10 @@ async def admin_update_schedule(
     return await _admin_schedule_row(db, schedule_id)
 
 
-@router.delete("/admin/schedules/{schedule_id}", status_code=204)
-async def admin_delete_schedule(
+@router.delete("/manage/schedules/{schedule_id}", status_code=204)
+async def manage_delete_schedule(
     schedule_id: uuid.UUID,
-    auth: Annotated[tuple, Depends(get_current_attendance_admin_session)],
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """오늘 스케줄 삭제 — attendance 도 hard delete.
@@ -449,8 +387,8 @@ async def admin_delete_schedule(
     )
 
 
-async def _admin_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> AdminScheduleRow:
-    """단일 schedule_id → AdminScheduleRow 빌드."""
+async def _manage_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> ManageScheduleRow:
+    """단일 schedule_id → ManageScheduleRow 빌드."""
     from zoneinfo import ZoneInfo
     from app.models.attendance import Attendance
     from app.models.schedule import Schedule, StoreWorkRole
@@ -480,7 +418,7 @@ async def _admin_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> Admin
         except Exception:
             return None
 
-    return AdminScheduleRow(
+    return ManageScheduleRow(
         schedule_id=sched.id,
         user_id=user.id,
         user_name=user.full_name or user.username,
@@ -501,10 +439,10 @@ async def _admin_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> Admin
 # ── Admin Attendance Override ─────────────────────────────
 
 
-@router.post("/admin/clock")
-async def admin_clock_action(
+@router.post("/manage/clock")
+async def manage_clock_action(
     data: AdminClockActionRequest,
-    auth: Annotated[tuple, Depends(get_current_attendance_admin_session)],
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """매니저가 임의 사용자 attendance 를 PIN 없이 처리.
@@ -539,7 +477,7 @@ async def admin_clock_action(
     # service 가 모든 attendance 액션을 attendance_corrections 에 자동 기록.
     # reason 은 service 가 actor 라벨로 생성하지만, 매니저가 textfield 에 입력했으면
     # 그 값을 reason 으로 전달해 service 가 우선 사용.
-    attendance = await attendance_device_service.perform_clock_action_admin(
+    attendance = await attendance_device_service.perform_clock_action_manage(
         db,
         device=device,
         action=action,
@@ -553,10 +491,10 @@ async def admin_clock_action(
     return response
 
 
-@router.post("/admin/attendance/status")
-async def admin_change_attendance_status(
+@router.post("/manage/attendance/status")
+async def manage_change_attendance_status(
     data: AdminStatusChangeRequest,
-    auth: Annotated[tuple, Depends(get_current_attendance_admin_session)],
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """관리자가 attendance status 를 직접 변경 + 필요한 시각 보정.
@@ -729,7 +667,7 @@ async def _ensure_active_schedule_for_user(
         )
 
 
-async def _admin_cancel_clock_in(
+async def _manage_cancel_clock_in(
     db: AsyncSession,
     device: AttendanceDevice,
     user_id: uuid.UUID,
@@ -798,7 +736,7 @@ async def _admin_cancel_clock_in(
     return response
 
 
-async def _admin_cancel_clock_out(
+async def _manage_cancel_clock_out(
     db: AsyncSession,
     device: AttendanceDevice,
     user_id: uuid.UUID,
