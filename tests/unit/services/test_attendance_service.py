@@ -57,8 +57,9 @@ def test_clock_in_present_returns_db_status_even_after_sched_end() -> None:
     assert result == "working"
 
 
-def test_clock_in_present_with_late_status_stays_late() -> None:
-    """clock_in 있는데 status=late 이면 그대로 late (지각 출근)."""
+def test_clock_in_present_with_late_status_promotes_to_working() -> None:
+    """clock_in 있는데 status=late 이면 'working' 으로 승격.
+    effective_status 의 'late' 는 미출근 지각 한정. 출근 후 지각 마킹은 anomalies 로."""
     result = compute_effective_status(
         att_status="late",
         att_clock_in=_now(9, 30),
@@ -69,7 +70,7 @@ def test_clock_in_present_with_late_status_stays_late() -> None:
         store_tz=_UTC,
         late_buffer=5,
     )
-    assert result == "late"
+    assert result == "working"
 
 
 # ── 분기 2: status not in {upcoming, late} → 그대로 ───────────

@@ -56,7 +56,10 @@ def compute_effective_status(
     Pure function — DB / IO 없음. dashboard 와 identify-by-pin 등 여러 곳에서 동일 로직 재사용.
 
     분기:
-        1. clock_in 이 이미 있음 → DB status 그대로 (강등 금지 — 늦게라도 출근했으면 working)
+        1. clock_in 이 이미 있음:
+           - status=='late' 면 'working' 으로 승격 (출근 후 지각 마킹은 anomalies 에 별도 보존,
+             effective_status 의 'late' 는 "미출근 지각" 의미로 한정 — ActionSheet 등 분기 위해)
+           - 그 외 status 그대로 (no_show 강등 금지)
         2. status 가 upcoming/late 아님 (working/on_break/clocked_out 등) → 그대로
         3. schedule 정보 부족 (start_time 없음) → 그대로
         4. schedule end 지났음 → no_show
@@ -66,6 +69,8 @@ def compute_effective_status(
         8. 그 외 → upcoming
     """
     if att_clock_in is not None:
+        if att_status == "late":
+            return "working"
         return att_status
     if att_status not in {"upcoming", "late"} or schedule_start_time is None or schedule_work_date is None:
         return att_status

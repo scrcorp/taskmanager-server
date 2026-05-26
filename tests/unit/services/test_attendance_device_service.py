@@ -149,11 +149,11 @@ def _mock_device(store_id=None) -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_identify_user_by_pin_rejects_invalid_format() -> None:
-    """PIN 형식 위반 → BadRequest, DB 조회 skip."""
+    """PIN 형식 위반 (Stage J: 4~6 자리 외) → BadRequest, DB 조회 skip."""
     db = AsyncMock()
     device = _mock_device()
-    for bad_pin in ("", "12345", "1234567", "abcdef", "12abcd"):
-        with pytest.raises(BadRequestError, match="PIN must be 6 digits"):
+    for bad_pin in ("", "123", "1234567", "abcdef", "12abcd"):
+        with pytest.raises(BadRequestError, match="PIN must be 4-6 digits"):
             await attendance_device_service.identify_user_by_pin(db, bad_pin, device)
     db.execute.assert_not_called()
 
@@ -170,16 +170,30 @@ async def test_identify_user_by_pin_raises_when_user_not_found() -> None:
 
 @pytest.mark.asyncio
 async def test_identify_user_by_pin_returns_null_status_when_device_has_no_store() -> None:
-    """device.store_id None → user 정보만, today_status=None (DB query 1번만)."""
+    """device.store_id None → IdentifyContext 의 today_status/current_break/scheduled_end 모두 None."""
     user = MagicMock()
     user.id = uuid.uuid4()
     db = _mock_db(scalar_one_or_none_returns=user)
     device = _mock_device(store_id=None)
 
-    returned_user, today_status = await attendance_device_service.identify_user_by_pin(
-        db, "123456", device
-    )
-    assert returned_user is user
-    assert today_status is None
-    # _compute_today_status_for_user 호출되지 않음 → db.execute 1회 (user 조회만)
+    ctx = await attendance_device_service.identify_user_by_pin(db, "123456", device)
+    assert ctx.user is user
+    assert ctx.today_status is None
+    assert ctx.current_break is None
+    assert ctx.scheduled_end is None
+    # _compute_identify_context_for_user 호출되지 않음 → db.execute 1회 (user 조회만)
     assert db.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_identify_user_by_pin_accepts_4_to_5_digits() -> None:
+    """Stage J: 4자리/5자리 PIN 도 형식 통과 (DB 조회 진입)."""
+    user = MagicMock()
+    user.id = uuid.uuid4()
+    db = _mock_db(scalar_one_or_none_returns=user)
+    device = _mock_device(store_id=None)
+    for pin in ("1234", "12345"):
+        db.reset_mock()
+        ctx = await attendance_device_service.identify_user_by_pin(db, pin, device)
+        assert ctx.user is user
+        assert db.execute.await_count == 1

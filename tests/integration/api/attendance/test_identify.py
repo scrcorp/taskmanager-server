@@ -42,6 +42,9 @@ async def test_identify_by_pin_returns_user_info_no_schedule(
     assert body["user_id"] == str(test_user["id"])
     assert body["user_name"] == test_user["full_name"]
     assert body["today_status"] is None
+    # Stage J 신규 응답 필드
+    assert body["current_break"] is None
+    assert body["scheduled_end"] is None
 
 
 async def test_identify_by_pin_returns_today_status_when_schedule_exists(
@@ -87,6 +90,10 @@ async def test_identify_by_pin_returns_today_status_when_schedule_exists(
     assert body["user_id"] == str(test_user["id"])
     # status 는 upcoming/soon/late/working 중 하나 (시각에 따라). None 아님.
     assert body["today_status"] is not None
+    # Stage J: scheduled_end 가 schedule.end_time 으로부터 채워져야 함
+    assert body["scheduled_end"] is not None
+    # break 진행 중 아니므로 current_break 는 None
+    assert body["current_break"] is None
 
 
 # ── error path ────────────────────────────────────────────────
@@ -173,19 +180,35 @@ async def test_identify_by_pin_deleted_user_returns_400(
         await db.commit()
 
 
-@pytest.mark.parametrize("bad_pin", ["", "12345", "1234567", "abcdef", "12abcd"])
+@pytest.mark.parametrize("bad_pin", ["", "123", "1234567", "abcdef", "12abcd"])
 async def test_identify_by_pin_invalid_format_returns_422(
     async_client: AsyncClient,
     device_auth_headers: dict,
     bad_pin: str,
 ) -> None:
-    """PIN 형식 위반 (길이/숫자) → 422 (Pydantic validation)."""
+    """PIN 형식 위반 (길이 4~6 외 / 비숫자) → 422 (Pydantic validation)."""
     resp = await async_client.post(
         "/api/v1/attendance/identify-by-pin",
         headers=device_auth_headers,
         json={"pin": bad_pin},
     )
     assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize("variable_pin", ["1234", "12345", "123456"])
+async def test_identify_by_pin_accepts_4_to_6_digits(
+    async_client: AsyncClient,
+    device_auth_headers: dict,
+    variable_pin: str,
+) -> None:
+    """Stage J: PIN 길이 4~6 모두 형식 통과 (등록된 user 가 없으면 400 'Invalid PIN')."""
+    resp = await async_client.post(
+        "/api/v1/attendance/identify-by-pin",
+        headers=device_auth_headers,
+        json={"pin": variable_pin},
+    )
+    # 422 (형식 거부) 가 아니어야 함. 200 (매치) 또는 400 (등록 PIN 없음).
+    assert resp.status_code in (200, 400), resp.text
 
 
 async def test_identify_by_pin_no_device_token_returns_401(

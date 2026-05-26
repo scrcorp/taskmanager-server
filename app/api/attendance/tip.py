@@ -140,3 +140,41 @@ async def device_tip_eligible_receivers(
         asking_user_id=user.id,
         organization_id=device.organization_id,
     )
+
+
+@router.get("/store-employees")
+async def device_store_employees(
+    device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[dict]:
+    """device 매장의 active 직원 전체 — manual tip receiver 추가용 (L5).
+
+    payload 작아서 한 번에 가져온 후 client-side 검색 필터. 100명 이내 매장이면
+    수 KB 수준이라 paging 불필요. 매장 직원이 500+ 인 케이스가 생기면 그때
+    server-side search 도입.
+    """
+    from app.models.user import User
+
+    if device.store_id is None:
+        raise HTTPException(status_code=400, detail="Device has no store assigned")
+
+    # 같은 store 에 user_stores 또는 user.primary_store 로 묶인 직원.
+    # 단순화: same organization + (user_stores 에 store_id 매핑) + active + non-deleted.
+    from app.models.user_store import UserStore
+
+    rows = await db.execute(
+        select(User)
+        .join(UserStore, UserStore.user_id == User.id)
+        .where(
+            UserStore.store_id == device.store_id,
+            User.organization_id == device.organization_id,
+            User.is_active.is_(True),
+            User.deleted_at.is_(None),
+        )
+        .order_by(User.full_name.asc())
+        .distinct()
+    )
+    return [
+        {"id": str(u.id), "full_name": u.full_name or u.username}
+        for u in rows.scalars().all()
+    ]

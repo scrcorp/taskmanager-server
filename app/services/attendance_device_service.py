@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import string
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Literal
 from uuid import UUID
@@ -37,6 +38,19 @@ ClockAction = Literal["clock_in", "break_start", "break_end", "clock_out"]
 
 # device_name 에 사용할 영숫자 (혼동 문자 제외)
 _NAME_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+@dataclass
+class IdentifyContext:
+    """identify_user_by_pin 의 typed 반환값.
+
+    today_status / current_break / scheduled_end 는 device 가 store 미할당이거나
+    오늘 attendance 가 없으면 None.
+    """
+    user: User
+    today_status: str | None = None
+    current_break: dict | None = None  # {break_type, started_at}
+    scheduled_end: datetime | None = None
 
 
 def generate_device_token() -> str:
@@ -301,21 +315,21 @@ class AttendanceDeviceService:
         db: AsyncSession,
         pin: str,
         device: AttendanceDevice,
-    ) -> tuple[User, str | None]:
-        """PIN 단독으로 device 의 org 내 user 식별 + 오늘 attendance status 반환.
+    ) -> "IdentifyContext":
+        """PIN 단독으로 device 의 org 내 user 식별 + 오늘 attendance context 반환.
 
-        PIN-first 키오스크 흐름 entry point (Phase 3). 직원이 PIN 입력하면 본인 식별
-        + 오늘 스케줄 있으면 status (working/upcoming/late/no_show/soon/on_break/clocked_out)
-        반환. 스케줄 없으면 status=None.
+        PIN-first 키오스크 흐름 entry point (Phase 3 + Stage J 확장). 직원이 PIN
+        입력하면 본인 식별 + 오늘 스케줄 있으면 today_status / current_break /
+        scheduled_end 반환. 스케줄 없으면 셋 다 None.
 
         verify_user_pin 과 달리 user_id 필요 없음 — `(organization_id, clockin_pin)` unique
         제약 (Phase 1) 으로 단일 row 식별 가능.
 
         매니저 권한 / manage 모드 진입 검증은 본 endpoint 에 포함하지 않음 (Phase 6 에서 별도).
         """
-        # 1. PIN 형식
-        if not pin or len(pin) != 6 or not pin.isdigit():
-            raise BadRequestError("PIN must be 6 digits")
+        # 1. PIN 형식 — Stage J 부터 4~6자리 가변.
+        if not pin or not pin.isdigit() or not (4 <= len(pin) <= 6):
+            raise BadRequestError("PIN must be 4-6 digits")
 
         # 2. user 조회 — org/active/non-deleted, PIN 일치
         result = await db.execute(
@@ -332,29 +346,32 @@ class AttendanceDeviceService:
         if user is None:
             raise BadRequestError("Invalid PIN")
 
-        # 3. today_status 계산 — device 에 store 없으면 None
+        # 3. context 계산 — device 에 store 없으면 today_status / current_break /
+        #    scheduled_end 모두 None.
         if device.store_id is None:
-            return user, None
+            return IdentifyContext(user=user)
 
-        today_status = await self._compute_today_status_for_user(
+        return await self._compute_identify_context_for_user(
             db,
-            user_id=user.id,
+            user=user,
             store_id=device.store_id,
             organization_id=device.organization_id,
         )
-        return user, today_status
 
-    async def _compute_today_status_for_user(
+    async def _compute_identify_context_for_user(
         self,
         db: AsyncSession,
-        user_id: UUID,
+        user: User,
         store_id: UUID,
         organization_id: UUID,
-    ) -> str | None:
-        """store work_date 기준 오늘 user 의 attendance status 계산. 없으면 None.
+    ) -> "IdentifyContext":
+        """store work_date 기준 오늘 user 의 attendance context 계산.
 
-        dashboard `/today-staff` 의 effective_status 와 동일 로직 (모듈-level
-        `compute_effective_status` pure function 사용).
+        반환 dataclass 의 필드:
+          - today_status: effective status (dashboard 와 동일 로직). 스케줄 없으면 None.
+          - current_break: status='on_break' 일 때 (break_type, started_at) dict. 그 외 None.
+          - scheduled_end: schedule.end_time + work_date 를 store TZ 로 조립한 aware UTC.
+                           스케줄 없으면 None.
         """
         from zoneinfo import ZoneInfo
 
@@ -373,7 +390,7 @@ class AttendanceDeviceService:
                 select(Attendance, Schedule)
                 .outerjoin(Schedule, Schedule.id == Attendance.schedule_id)
                 .where(
-                    Attendance.user_id == user_id,
+                    Attendance.user_id == user.id,
                     Attendance.store_id == store_id,
                     Attendance.work_date == today,
                     Attendance.status != "cancelled",
@@ -382,7 +399,7 @@ class AttendanceDeviceService:
             )
         ).first()
         if row is None:
-            return None
+            return IdentifyContext(user=user)
 
         att, schedule = row
 
@@ -397,7 +414,7 @@ class AttendanceDeviceService:
         except (SettingNotRegisteredError, TypeError, ValueError):
             late_buffer = 5
 
-        return compute_effective_status(
+        today_status = compute_effective_status(
             att_status=att.status,
             att_clock_in=att.clock_in,
             schedule_start_time=schedule.start_time if schedule else None,
@@ -406,6 +423,39 @@ class AttendanceDeviceService:
             now=now,
             store_tz=tz_info,
             late_buffer=late_buffer,
+        )
+
+        # scheduled_end — schedule 의 end_time + work_date 를 store TZ aware → UTC.
+        scheduled_end_utc: datetime | None = None
+        if schedule and schedule.end_time is not None and schedule.work_date is not None:
+            naive_end = datetime.combine(schedule.work_date, schedule.end_time)
+            scheduled_end_utc = naive_end.replace(tzinfo=tz_info).astimezone(timezone.utc)
+
+        # current_break — on_break 일 때만, attendance_breaks 에서 ended_at IS NULL.
+        current_break: dict | None = None
+        if today_status == "on_break":
+            br = (
+                await db.execute(
+                    select(AttendanceBreak)
+                    .where(
+                        AttendanceBreak.attendance_id == att.id,
+                        AttendanceBreak.ended_at.is_(None),
+                    )
+                    .order_by(AttendanceBreak.started_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if br is not None:
+                current_break = {
+                    "break_type": br.break_type,
+                    "started_at": br.started_at,
+                }
+
+        return IdentifyContext(
+            user=user,
+            today_status=today_status,
+            current_break=current_break,
+            scheduled_end=scheduled_end_utc,
         )
 
     # ── Clock 동작 ─────────────────────────────────────────
@@ -653,9 +703,16 @@ class AttendanceDeviceService:
                 attendance.status = "working"
                 await db.flush()
                 raise BadRequestError("No open break record")
+
+            # Stage J: break time 정책 검증 (pure helper)
+            from app.utils.break_end_policy import validate_break_end
+            elapsed_minutes = max(0, int((now - open_break.started_at).total_seconds() / 60))
+            policy_error = validate_break_end(open_break.break_type, elapsed_minutes, reason)
+            if policy_error is not None:
+                raise BadRequestError(policy_error)
+
             open_break.ended_at = now
-            delta = now - open_break.started_at
-            open_break.duration_minutes = max(0, int(delta.total_seconds() / 60))
+            open_break.duration_minutes = elapsed_minutes
             attendance.status = "working"
             attendance.break_end = now
             # 누적 분 — 새 테이블에서 합산

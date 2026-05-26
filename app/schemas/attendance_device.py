@@ -143,8 +143,8 @@ class ClockinPinResponse(BaseModel):
 
 
 class ClockinPinUpdateRequest(BaseModel):
-    """PIN 수동 변경 요청. 6자리 숫자만."""
-    clockin_pin: str = Field(..., pattern=r"^\d{6}$")
+    """PIN 수동 변경 요청. 4~6자리 숫자."""
+    clockin_pin: str = Field(..., pattern=r"^\d{4,6}$")
 
 
 class AttendanceStoreOption(BaseModel):
@@ -157,8 +157,14 @@ class AttendanceStoreOption(BaseModel):
 
 
 class IdentifyByPinRequest(BaseModel):
-    """PIN 단독 식별 요청 — 6자리 숫자만."""
-    pin: str = Field(..., pattern=r"^\d{6}$")
+    """PIN 단독 식별 요청 — 4~6자리 숫자."""
+    pin: str = Field(..., pattern=r"^\d{4,6}$")
+
+
+class IdentifyByPinCurrentBreak(BaseModel):
+    """on_break 일 때 현재 진행 중인 break 정보 — kiosk 가 break info 박스 표시용."""
+    break_type: str
+    started_at: datetime
 
 
 class IdentifyByPinResponse(BaseModel):
@@ -166,10 +172,15 @@ class IdentifyByPinResponse(BaseModel):
 
     today_status: 오늘 attendance 가 있으면 dashboard 와 동일한 effective status,
     스케줄 없으면 None. clock 가능 여부/UI 분기에 사용.
+    current_break: on_break 상태일 때만 채워짐 (그 외 None).
+    scheduled_end: 오늘 schedule 의 종료 시각 (UTC). 클럭아웃 시 early-checkout
+                   threshold 비교용. 스케줄 없으면 None.
     """
     user_id: UUID
     user_name: str
     today_status: str | None
+    current_break: IdentifyByPinCurrentBreak | None = None
+    scheduled_end: datetime | None = None
 
 
 # ── Kiosk 관리자 모드 ──────────────────────────────────────
