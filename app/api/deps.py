@@ -61,23 +61,23 @@ async def get_current_attendance_device(
     return device
 
 
-async def get_current_attendance_admin_session(
+async def get_current_attendance_manage_session(
     request: Request,
     device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Kiosk 관리자 모드 세션 검증.
 
-    `X-Admin-Session` 헤더로 전달된 토큰을 in-memory 세션 캐시에서 조회.
+    `X-Manage-Session` 헤더로 전달된 토큰을 in-memory 세션 캐시에서 조회.
     device token 과 같은 device 에서 발급되었는지 검증한다.
     매니저 user 가 비활성/삭제됐거나 더 이상 store 의 매니저가 아니면 거부.
-    반환: (device, admin_session, manager_user)
+    반환: (device, manage_session, manager_user)
     """
-    from app.core.attendance_admin_session import get_session
+    from app.core.attendance_manage_session import get_session
     from app.core.permissions import is_owner, is_sv_plus
     from app.models.user_store import UserStore
 
-    token = request.headers.get("X-Admin-Session") or request.headers.get("x-admin-session")
+    token = request.headers.get("X-Manage-Session") or request.headers.get("x-manage-session")
     session = get_session(token)
     if session is None:
         raise HTTPException(

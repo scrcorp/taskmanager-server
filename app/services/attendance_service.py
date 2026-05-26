@@ -6,9 +6,10 @@ admin attendance listing, and correction management.
 """
 
 import secrets
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Sequence
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +35,62 @@ from app.utils.exceptions import BadRequestError, NotFoundError
 # no_show: cron 이 scheduled_end 이 지났는데 attendance 없으면 생성
 LATE_BUFFER_MINUTES = 0  # 0 = 1분이라도 늦으면 late
 EARLY_LEAVE_THRESHOLD_MINUTES = 5
+
+# attendance dashboard 의 "soon" 그룹 진입 임계값 (분 단위).
+SOON_THRESHOLD_MINUTES = 5
+
+
+def compute_effective_status(
+    att_status: str,
+    att_clock_in: datetime | None,
+    schedule_start_time: time | None,
+    schedule_end_time: time | None,
+    schedule_work_date: date | None,
+    now: datetime,
+    store_tz: ZoneInfo,
+    late_buffer: int,
+    soon_threshold_minutes: int = SOON_THRESHOLD_MINUTES,
+) -> str:
+    """attendance status + 시각 + late_buffer 로 표시용 effective status 계산.
+
+    Pure function — DB / IO 없음. dashboard 와 identify-by-pin 등 여러 곳에서 동일 로직 재사용.
+
+    분기:
+        1. clock_in 이 이미 있음:
+           - status=='late' 면 'working' 으로 승격 (출근 후 지각 마킹은 anomalies 에 별도 보존,
+             effective_status 의 'late' 는 "미출근 지각" 의미로 한정 — ActionSheet 등 분기 위해)
+           - 그 외 status 그대로 (no_show 강등 금지)
+        2. status 가 upcoming/late 아님 (working/on_break/clocked_out 등) → 그대로
+        3. schedule 정보 부족 (start_time 없음) → 그대로
+        4. schedule end 지났음 → no_show
+        5. 이미 late 로 기록 → late
+        6. start + late_buffer 지났음 → late
+        7. start - soon_threshold 이내 → soon
+        8. 그 외 → upcoming
+    """
+    if att_clock_in is not None:
+        if att_status == "late":
+            return "working"
+        return att_status
+    if att_status not in {"upcoming", "late"} or schedule_start_time is None or schedule_work_date is None:
+        return att_status
+    sched_start = datetime.combine(schedule_work_date, schedule_start_time, tzinfo=store_tz)
+    sched_end = (
+        datetime.combine(schedule_work_date, schedule_end_time, tzinfo=store_tz)
+        if schedule_end_time is not None else None
+    )
+    # Overnight shift: end 가 start 보다 빠르면 다음날로 보정
+    if sched_end is not None and sched_end <= sched_start:
+        sched_end = sched_end + timedelta(days=1)
+    if sched_end is not None and now >= sched_end:
+        return "no_show"
+    if att_status == "late":
+        return "late"
+    if now >= sched_start + timedelta(minutes=late_buffer):
+        return "late"
+    if now >= sched_start - timedelta(minutes=soon_threshold_minutes):
+        return "soon"
+    return "upcoming"
 
 
 async def _find_schedule_for_attendance(

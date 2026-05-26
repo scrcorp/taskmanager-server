@@ -1,0 +1,221 @@
+"""Attendance device 대시보드 데이터 라우터 — today-staff / notices.
+
+`/api/v1/attendance` 하위에 mount.
+"""
+
+import uuid
+from datetime import date as date_cls, datetime, datetime as dt, timedelta, timezone as tz
+from typing import Annotated
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, Depends
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_attendance_device
+from app.database import get_db
+from app.models.attendance import Attendance
+from app.models.attendance_break import (
+    PAID_BREAK_TYPES,
+    UNPAID_BREAK_TYPES,
+    AttendanceBreak,
+)
+from app.models.attendance_device import AttendanceDevice
+from app.models.communication import Notice
+from app.models.schedule import Schedule
+from app.models.user import User
+from app.schemas.attendance_device import (
+    NoticeRow,
+    TodayStaffBreak,
+    TodayStaffRow,
+)
+from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
+from app.utils.timezone import get_store_day_config, get_work_date
+
+
+router: APIRouter = APIRouter()
+
+
+@router.get("/today-staff", response_model=list[TodayStaffRow])
+async def today_staff(
+    device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[TodayStaffRow]:
+    """기기 매장 기준 오늘 스케줄 + 각 유저의 현재 attendance 상태.
+
+    한 번의 호출로 On Shift / Coming Up / Completed 를 모두 반환. 클라이언트가
+    status 로 분기해서 섹션에 배치.
+    """
+    if device.store_id is None:
+        return []
+
+    now = dt.now(tz.utc)
+    store_tz, store_day_start = await get_store_day_config(db, device.store_id)
+    today: date_cls = get_work_date(store_tz, store_day_start, now)
+    tz_info = ZoneInfo(store_tz)
+
+    # ── Eager 모델: attendance row 가 진실원. schedule 은 LEFT JOIN.
+    rows = await db.execute(
+        select(Attendance, Schedule, User)
+        .outerjoin(Schedule, Schedule.id == Attendance.schedule_id)
+        .join(User, User.id == Attendance.user_id)
+        .where(
+            Attendance.store_id == device.store_id,
+            Attendance.work_date == today,
+            Attendance.status != "cancelled",
+        )
+    )
+    triples: list[tuple[Attendance, Schedule | None, User]] = list(rows.all())
+    if not triples:
+        return []
+
+    # break 요약
+    att_ids = [a.id for (a, _s, _u) in triples]
+    break_map: dict[uuid.UUID, list[AttendanceBreak]] = {}
+    if att_ids:
+        br_rows = await db.execute(
+            select(AttendanceBreak).where(AttendanceBreak.attendance_id.in_(att_ids))
+        )
+        for br in br_rows.scalars().all():
+            break_map.setdefault(br.attendance_id, []).append(br)
+
+    # late_buffer 설정 — effective status 계산용
+    organization_id = triples[0][0].organization_id
+    try:
+        late_buf_raw = await resolve_setting(
+            db,
+            key="attendance.late_buffer_minutes",
+            organization_id=organization_id,
+            store_id=device.store_id,
+        )
+        late_buffer = int(late_buf_raw) if late_buf_raw is not None else 5
+    except (SettingNotRegisteredError, TypeError, ValueError):
+        late_buffer = 5
+    SOON_THRESHOLD_MINUTES = 5
+
+    def combine(t):
+        if t is None:
+            return None
+        return dt.combine(today, t, tzinfo=tz_info)
+
+    def display_store_tz(value):
+        if value is None:
+            return None
+        return value.astimezone(tz_info).strftime("%H:%M")
+
+    def effective_status(att: Attendance, schedule: Schedule | None) -> str:
+        """DB attendance.status + 현재 시각 + late_buffer 로 최종 표시 status 계산.
+
+        clock_in 이 이미 기록된 경우는 출근 완료 → DB status 그대로 (강등 금지).
+        그 외 upcoming/late 미출근 상태는 schedule end 가 지나면 no_show 로 강등.
+        """
+        # 출근 후엔 시각과 무관하게 DB status 신뢰 — sched_end 지났다고 no_show로
+        # 강등하면 늦게 clock-in 한 직원이 "Clocked In" 섹션에서 사라진다.
+        if att.clock_in is not None:
+            return att.status
+        if att.status not in {"upcoming", "late"} or schedule is None or schedule.start_time is None:
+            return att.status
+        sched_start = dt.combine(schedule.work_date, schedule.start_time, tzinfo=tz_info)
+        sched_end = (
+            dt.combine(schedule.work_date, schedule.end_time, tzinfo=tz_info)
+            if schedule.end_time is not None else None
+        )
+        if sched_end is not None and sched_end <= sched_start:
+            sched_end = sched_end + timedelta(days=1)
+        # 1) sched_end 지났으면 무조건 no_show
+        if sched_end is not None and now >= sched_end:
+            return "no_show"
+        # 2) 이미 persisted 가 late 면 그대로 (시간이 sched_end 안 지난 경우만 도달)
+        if att.status == "late":
+            return "late"
+        # 3) upcoming 인 경우 시간 비교로 분기
+        if now >= sched_start + timedelta(minutes=late_buffer):
+            return "late"
+        if now >= sched_start - timedelta(minutes=SOON_THRESHOLD_MINUTES):
+            return "soon"
+        return "upcoming"
+
+    result: list[TodayStaffRow] = []
+    for att, schedule, user in triples:
+        paid = unpaid = 0
+        current: TodayStaffBreak | None = None
+        for br in break_map.get(att.id, []):
+            if br.ended_at is None:
+                current = TodayStaffBreak(
+                    started_at=br.started_at, break_type=br.break_type
+                )
+            else:
+                if br.break_type in PAID_BREAK_TYPES:
+                    paid += br.duration_minutes or 0
+                elif br.break_type in UNPAID_BREAK_TYPES:
+                    unpaid += br.duration_minutes or 0
+
+        sched_start = combine(schedule.start_time) if schedule else None
+        sched_end = combine(schedule.end_time) if schedule else None
+        # Overnight shift (예: 21:00–02:00): end_time 이 start_time 보다 빠르면
+        # sched_end 가 today 02:00 으로 만들어지는데 실제로는 다음날 02:00 이어야 한다.
+        # early clock-out 사유 dialog 가 이 차이를 사용하므로 응답에서 보정.
+        if sched_start is not None and sched_end is not None and sched_end <= sched_start:
+            sched_end = sched_end + timedelta(days=1)
+        result.append(
+            TodayStaffRow(
+                user_id=user.id,
+                user_name=user.full_name or user.username,
+                schedule_id=schedule.id if schedule else None,
+                scheduled_start=sched_start,
+                scheduled_end=sched_end,
+                scheduled_start_display=display_store_tz(sched_start),
+                scheduled_end_display=display_store_tz(sched_end),
+                clock_in=att.clock_in,
+                clock_out=att.clock_out,
+                clock_in_display=display_store_tz(att.clock_in),
+                clock_out_display=display_store_tz(att.clock_out),
+                status=effective_status(att, schedule),
+                current_break=current,
+                paid_break_minutes=paid,
+                unpaid_break_minutes=unpaid,
+            )
+        )
+
+    # 정렬: working → on_break → soon → late → upcoming → clocked_out → no_show
+    status_rank = {
+        "working": 0, "on_break": 1, "soon": 2, "late": 3,
+        "upcoming": 4, "clocked_out": 5, "no_show": 6,
+    }
+
+    def sort_key(row: TodayStaffRow):
+        return (status_rank.get(row.status, 99), row.scheduled_start or datetime.max)
+
+    result.sort(key=sort_key)
+    return result
+
+
+@router.get("/notices", response_model=list[NoticeRow])
+async def notices(
+    device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = 10,
+) -> list[NoticeRow]:
+    """기기 store 대상 공지 (최근 N개, 기본 10)."""
+    stmt = (
+        select(Notice)
+        .where(
+            Notice.organization_id == device.organization_id,
+            or_(
+                Notice.store_id.is_(None),
+                Notice.store_id == device.store_id,
+            ),
+        )
+        .order_by(Notice.created_at.desc())
+        .limit(max(1, min(limit, 50)))
+    )
+    result = await db.execute(stmt)
+    return [
+        NoticeRow(
+            id=a.id,
+            title=a.title,
+            body=a.content,
+            created_at=a.created_at,
+        )
+        for a in result.scalars().all()
+    ]

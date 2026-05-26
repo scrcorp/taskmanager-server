@@ -238,6 +238,7 @@ from app.schemas.attendance_device import (  # noqa: E402
     ClockinPinUpdateRequest,
 )
 from app.services.attendance_device_service import (  # noqa: E402
+    commit_pin_or_409,
     generate_clockin_pin,
 )
 from app.utils.exceptions import NotFoundError  # noqa: E402
@@ -273,7 +274,7 @@ async def regenerate_user_clockin_pin(
     """Staff detail — attendance device PIN 재발급."""
     user = await _fetch_org_user(db, user_id, current_user.organization_id)
     user.clockin_pin = generate_clockin_pin()
-    await db.commit()
+    await commit_pin_or_409(db)
     return ClockinPinResponse(user_id=user.id, clockin_pin=user.clockin_pin)
 
 
@@ -287,5 +288,5 @@ async def update_user_clockin_pin(
     """Staff detail — attendance device PIN 직접 지정 (관리자)."""
     user = await _fetch_org_user(db, user_id, current_user.organization_id)
     user.clockin_pin = body.clockin_pin
-    await db.commit()
+    await commit_pin_or_409(db)
     return ClockinPinResponse(user_id=user.id, clockin_pin=user.clockin_pin)
