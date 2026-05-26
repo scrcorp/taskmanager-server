@@ -1,8 +1,8 @@
 """Attendance kiosk 관리자 모드 세션.
 
 매장 매니저(SV/GM/Owner)가 키오스크 설정에서 PIN 으로 관리자 모드를 활성화하면
-짧은 in-memory 세션 토큰을 발급해 후속 admin API 호출 시 그것으로 인증한다.
-device token 과 별개로 X-Admin-Session 헤더로 전달.
+짧은 in-memory 세션 토큰을 발급해 후속 manage API 호출 시 그것으로 인증한다.
+device token 과 별개로 X-Manage-Session 헤더로 전달.
 
 단일 서버 프로세스를 가정 (현재 EC2 1대 운영). 다중 인스턴스로 확장 시 Redis 등으로 옮긴다.
 프로세스 재시작 시 세션은 모두 무효 — kiosk 가 재인증해야 함.
@@ -19,7 +19,7 @@ SESSION_TTL_MINUTES = 30
 
 
 @dataclass
-class AttendanceAdminSession:
+class AttendanceManageSession:
     token: str
     device_id: UUID
     manager_user_id: UUID
@@ -28,7 +28,7 @@ class AttendanceAdminSession:
     expires_at: datetime
 
 
-_sessions: dict[str, AttendanceAdminSession] = {}
+_sessions: dict[str, AttendanceManageSession] = {}
 
 
 def create_session(
@@ -36,9 +36,9 @@ def create_session(
     manager_user_id: UUID,
     organization_id: UUID,
     store_id: UUID,
-) -> AttendanceAdminSession:
+) -> AttendanceManageSession:
     token = secrets.token_urlsafe(32)
-    session = AttendanceAdminSession(
+    session = AttendanceManageSession(
         token=token,
         device_id=device_id,
         manager_user_id=manager_user_id,
@@ -50,7 +50,7 @@ def create_session(
     return session
 
 
-def get_session(token: str | None) -> AttendanceAdminSession | None:
+def get_session(token: str | None) -> AttendanceManageSession | None:
     if not token:
         return None
     session = _sessions.get(token)
@@ -69,7 +69,7 @@ def revoke_session(token: str | None) -> None:
 
 
 def revoke_for_device(device_id: UUID) -> None:
-    """device 가 매장 변경/해제될 때 그 기기의 모든 admin session 폐기."""
+    """device 가 매장 변경/해제될 때 그 기기의 모든 manage session 폐기."""
     to_remove = [t for t, s in _sessions.items() if s.device_id == device_id]
     for t in to_remove:
         _sessions.pop(t, None)

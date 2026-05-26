@@ -140,9 +140,8 @@ class User(Base):
     # JSONB shape: { "<page_storage_key>": { "<param>": "<string>" } }
     # 예: {"users": {"q": "alice", "role": "staff"}, "tasks": {"page": "2"}}
     console_filters: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
-    # 근태 기기 PIN — 매장 공용 기기에서 clock in/out 시 사용하는 개인 6자리 PIN.
-    # Attendance device PIN — 6-digit numeric code for personal auth at shared terminals.
-    # user_id + pin 동시 검증 방식이라 UNIQUE 불필요 (조직 내 중복 허용).
+    # 근태 기기 PIN — 매장 공용 기기에서 clock in/out 시 사용하는 개인 PIN (현재 6자리, 추후 4~6 가변 예정).
+    # Attendance device PIN. 조직 내 unique (NULL 다중 허용) — PIN 단독으로 user 식별 가능하게.
     clockin_pin: Mapped[Optional[str]] = mapped_column(String(6), nullable=True)
     # 저장된 사인 이미지 — Storage key (S3 또는 local bucket).
     # IRS Form 4070 등 폼 서명에 재사용. 직원이 staff app Settings 에서 등록/변경.
@@ -156,6 +155,7 @@ class User(Base):
 
     __table_args__ = (
         UniqueConstraint("organization_id", "username", name="uq_user_org_username"),
+        UniqueConstraint("organization_id", "clockin_pin", name="uq_user_org_clockin_pin"),
     )
 
     # 관계 — Relationships

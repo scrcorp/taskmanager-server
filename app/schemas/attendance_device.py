@@ -143,8 +143,8 @@ class ClockinPinResponse(BaseModel):
 
 
 class ClockinPinUpdateRequest(BaseModel):
-    """PIN 수동 변경 요청. 6자리 숫자만."""
-    clockin_pin: str = Field(..., pattern=r"^\d{6}$")
+    """PIN 수동 변경 요청. 4~6자리 숫자."""
+    clockin_pin: str = Field(..., pattern=r"^\d{4,6}$")
 
 
 class AttendanceStoreOption(BaseModel):
@@ -153,11 +153,41 @@ class AttendanceStoreOption(BaseModel):
     name: str
 
 
+# ── Identify-by-PIN (Phase 3) ─────────────────────────────────
+
+
+class IdentifyByPinRequest(BaseModel):
+    """PIN 단독 식별 요청 — 4~6자리 숫자."""
+    pin: str = Field(..., pattern=r"^\d{4,6}$")
+
+
+class IdentifyByPinCurrentBreak(BaseModel):
+    """on_break 일 때 현재 진행 중인 break 정보 — kiosk 가 break info 박스 표시용."""
+    break_type: str
+    started_at: datetime
+
+
+class IdentifyByPinResponse(BaseModel):
+    """PIN 식별 응답 — 직원 clock 흐름 entry.
+
+    today_status: 오늘 attendance 가 있으면 dashboard 와 동일한 effective status,
+    스케줄 없으면 None. clock 가능 여부/UI 분기에 사용.
+    current_break: on_break 상태일 때만 채워짐 (그 외 None).
+    scheduled_end: 오늘 schedule 의 종료 시각 (UTC). 클럭아웃 시 early-checkout
+                   threshold 비교용. 스케줄 없으면 None.
+    """
+    user_id: UUID
+    user_name: str
+    today_status: str | None
+    current_break: IdentifyByPinCurrentBreak | None = None
+    scheduled_end: datetime | None = None
+
+
 # ── Kiosk 관리자 모드 ──────────────────────────────────────
 # Settings 화면에서 SV/GM/Owner PIN 으로 진입. 짧은 in-memory 세션 토큰 발급.
 
 
-class AdminManagerOption(BaseModel):
+class ManageManagerOption(BaseModel):
     """관리자 모드에 진입 가능한 매장 매니저 1명."""
     user_id: UUID
     full_name: str
@@ -165,21 +195,20 @@ class AdminManagerOption(BaseModel):
     role_priority: int
 
 
-class AdminSessionRequest(BaseModel):
-    """매니저 user_id + 본인 PIN 으로 admin session 발급."""
-    user_id: UUID
-    pin: str = Field(..., min_length=6, max_length=6)
+class ManageSessionRequest(BaseModel):
+    """매니저 PIN 으로 manage session 발급. PIN 으로 user 식별 + 매니저 자격 검증."""
+    pin: str = Field(..., min_length=4, max_length=6)
 
 
-class AdminSessionResponse(BaseModel):
+class ManageSessionResponse(BaseModel):
     """admin session 발급 결과."""
-    admin_token: str
+    manage_token: str
     manager_user_id: UUID
     manager_name: str
     expires_at: datetime
 
 
-class AdminScheduleRow(BaseModel):
+class ManageScheduleRow(BaseModel):
     """오늘 매장 스케줄 1건 (관리자 모드 리스트용)."""
     schedule_id: UUID
     user_id: UUID
@@ -216,14 +245,14 @@ class AdminStatusChangeRequest(BaseModel):
     clock_out_hhmm: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
 
 
-class AdminAssignableUser(BaseModel):
+class ManageAssignableUser(BaseModel):
     """오늘 새 스케줄을 배정할 수 있는 매장 직원."""
     user_id: UUID
     full_name: str
     role_name: str
 
 
-class AdminWorkRoleOption(BaseModel):
+class ManageWorkRoleOption(BaseModel):
     """매장 work role 옵션 (스케줄 생성/수정 select).
 
     shift_name + position_name 조합으로 표시. work role 자체 name 은 비어있는
@@ -237,7 +266,7 @@ class AdminWorkRoleOption(BaseModel):
     default_end_time: str | None
 
 
-class AdminScheduleCreateRequest(BaseModel):
+class ManageScheduleCreateRequest(BaseModel):
     """관리자가 오늘 스케줄을 새로 만들 때."""
     user_id: UUID
     work_role_id: UUID | None = None
@@ -245,7 +274,7 @@ class AdminScheduleCreateRequest(BaseModel):
     end_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
 
 
-class AdminScheduleUpdateRequest(BaseModel):
+class ManageScheduleUpdateRequest(BaseModel):
     """관리자가 오늘 스케줄 시간/배정을 수정할 때."""
     user_id: UUID | None = None
     work_role_id: UUID | None = None
