@@ -404,11 +404,14 @@ class TipService:
         asking_user_id: UUID,
         organization_id: UUID,
     ) -> list[dict]:
-        """주어진 schedule 의 동료 후보 — 같은 매장 + 같은 work_date + status=confirmed.
+        """주어진 schedule 의 동료 후보 — 실제 clock-in 한 동료만.
 
-        본인 제외. 가능하면 본인 attendance 의 clock_in/clock_out 시간대와
-        겹치는 사람만 (attendance 가 있는 경우). 시간 정보가 없으면 schedule
-        의 start_time/end_time 으로 fallback.
+        본인 제외. 신규 정책 (L4): peer 는 반드시 attendance.clock_in 이 있어야 함
+        (= 실제 출근한 동료). schedule 만 있고 clock-in 안 한 사람은 제외.
+        schedule 없이 임시 일한 동료는 client 의 manual add 흐름으로 별도 추가.
+
+        기존 시간 window overlap 검사는 그대로 유지: 본인 clock_in/clock_out
+        구간과 겹친 peer 만.
 
         Returns: [{"id": str, "full_name": str}] — 정렬: 이름 오름차순.
         """
@@ -474,16 +477,20 @@ class TipService:
         }
 
         # 5) 시간 overlap 검사 + 결과 user_id 집합
+        #    L4 정책: peer 는 실제 clock-in 한 사람만 (attendance + clock_in IS NOT NULL).
         eligible_user_ids: list[UUID] = []
         for s in peer_schedules:
+            att = peer_atts.get(s.id)
+            if att is None or att.clock_in is None:
+                continue  # 출근 안 한 동료는 자동 후보에서 제외
             if skip_overlap:
                 eligible_user_ids.append(s.user_id)
                 continue
-            att = peer_atts.get(s.id)
-            other_start = att.clock_in if att and att.clock_in else _to_dt(s.work_date, s.start_time)
-            other_end = att.clock_out if att and att.clock_out else _to_dt(s.work_date, s.end_time)
-            if other_start is None or other_end is None:
-                # 정보 부족 — 보수적으로 같은 날 같은 매장이므로 포함
+            other_start = att.clock_in
+            # peer 가 아직 clock-out 안 했으면 schedule end 또는 현재 시각 추정 대신
+            # 안전하게 포함 (본인은 이미 clock-out 한 시점이므로 overlap 가능성 큼).
+            other_end = att.clock_out or _to_dt(s.work_date, s.end_time)
+            if other_end is None:
                 eligible_user_ids.append(s.user_id)
                 continue
             # 좌-닫힘 개구간 교집합
