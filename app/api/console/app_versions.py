@@ -8,7 +8,7 @@ sideload 분량이 적어 보안 위험 낮다고 판단. 추후 require_permiss
 
 from typing import Annotated, List
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,7 +16,7 @@ from app.api.deps import require_permission
 from app.database import get_db
 from app.models.app_version import AppVersion
 from app.models.user import User
-from app.schemas.app_version import AppVersionCreateRequest, AppVersionRow
+from app.schemas.app_version import AppVersionCreateRequest, AppVersionLatestResponse, AppVersionRow
 from app.services.app_version_service import app_version_service
 
 router: APIRouter = APIRouter()
@@ -51,6 +51,30 @@ async def create_app_version(
         is_min_required=row.is_min_required,
         release_notes=row.release_notes,
         released_at=row.released_at,
+    )
+
+
+@router.get("/attendance/latest", response_model=AppVersionLatestResponse)
+async def get_attendance_latest(
+    _user: Annotated[User, Depends(require_permission("app_versions:read"))],
+) -> AppVersionLatestResponse:
+    """현재 서버 환경 bucket 의 attendance APK 들 중 버전 가장 높은 것 반환.
+
+    S3 list (또는 local bucket dir) → 파일명/path 에서 버전 파싱 → 최신 선택.
+    DB `is_latest` 플래그 의존 X — 새 APK 업로드만 하면 자동으로 최신으로 잡힘.
+    Owner/GM 이상만 호출 가능 (app_versions:read permission).
+    """
+    latest = app_version_service.get_latest_attendance_from_storage()
+    if latest is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No attendance release found",
+        )
+    return AppVersionLatestResponse(
+        version=latest["version"],
+        channel=app_version_service.attendance_channel(),
+        download_url=latest["url"],
+        released_at=latest["uploaded_at"],
     )
 
 
