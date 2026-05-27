@@ -23,6 +23,15 @@ class AppVersionResponse(BaseModel):
     release_notes: Optional[str] = Field(default=None, alias="release_notes")
 
 
+class AppVersionLatestResponse(BaseModel):
+    """콘솔 attendance 다운로드 버튼용 — 최신 APK 버전 + pre-signed URL."""
+
+    version: str
+    channel: str
+    download_url: str
+    released_at: datetime
+
+
 class AppVersionCreateRequest(BaseModel):
     """관리자가 새 릴리스 등록할 때 보내는 페이로드 (CI 또는 admin UI)."""
 

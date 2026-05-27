@@ -1,5 +1,8 @@
 """App version service — 릴리스 카탈로그 조회/등록 + pre-signed URL 발급."""
 
+import re
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import select, update
@@ -8,6 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.app_version import AppVersion
 from app.services.storage_service import storage_service
+
+
+# attendance APK 파일명 패턴: app-releases/attendance/v{X.Y.Z}/htma_{X.Y.Z+N}.apk
+# 우선 파일명에서 +build 까지 포함된 풀버전 추출, 없으면 경로의 v{version} 사용.
+_FULL_VERSION_RE = re.compile(r"_(\d+\.\d+\.\d+(?:\+\d+)?)\.apk$", re.IGNORECASE)
+_PATH_VERSION_RE = re.compile(r"v(\d+\.\d+\.\d+)/", re.IGNORECASE)
 
 
 def _semver_tuple(v: str) -> tuple:
@@ -20,6 +29,35 @@ def _semver_tuple(v: str) -> tuple:
         except ValueError:
             return (v,)
     return tuple(out)
+
+
+def _version_sort_key(version: str) -> tuple:
+    """'1.0.9+27' → (1, 0, 9, 27) 비교용. semver + build number 동시 비교."""
+    semver, _, build = version.partition("+")
+    parts: list[int] = []
+    for p in semver.split("."):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            return (0, 0, 0, 0)
+    while len(parts) < 3:
+        parts.append(0)
+    build_num = int(build) if build.isdigit() else 0
+    return tuple(parts[:3]) + (build_num,)
+
+
+def _extract_version_from_key(key: str) -> Optional[str]:
+    """S3 key 또는 로컬 path 에서 버전 추출.
+
+    파일명 우선 (`htma_1.0.9+27.apk` → `1.0.9+27`), 없으면 경로 (`v1.0.9/` → `1.0.9`).
+    """
+    m = _FULL_VERSION_RE.search(key)
+    if m:
+        return m.group(1)
+    m = _PATH_VERSION_RE.search(key)
+    if m:
+        return m.group(1)
+    return None
 
 
 class AppVersionService:
@@ -53,6 +91,65 @@ class AppVersionService:
 
     def presigned_download_url(self, key: str) -> str:
         return storage_service.generate_presigned_download_url(key, expires=600)
+
+    def get_latest_attendance_from_storage(self) -> Optional[dict]:
+        """현재 환경 bucket 의 attendance APK 들 중 버전 가장 높은 것 반환.
+
+        S3 list (또는 local bucket dir list) → 파일명/path 에서 버전 파싱 → 최신 선택.
+        DB 의 `is_latest` 플래그에 의존하지 않으므로 등록 자동화 누락에 안전.
+
+        파일명 패턴: `app-releases/attendance/v{X.Y.Z}/htma_{X.Y.Z+N}.apk`
+        - `test` 들어간 파일은 제외 (staging fallback 케이스)
+
+        Returns:
+            { version, key, url, uploaded_at } 또는 None (release 없음).
+        """
+        prefix = "app-releases/attendance/"
+        candidates: list[tuple[str, str, datetime]] = []
+
+        if storage_service.is_local:
+            base = Path(settings.LOCAL_BUCKET_DIR) / "app-releases" / "attendance"
+            if not base.exists():
+                return None
+            for apk in base.rglob("*.apk"):
+                if "test" in apk.name.lower():
+                    continue
+                rel_key = str(apk.relative_to(Path(settings.LOCAL_BUCKET_DIR)))
+                version = _extract_version_from_key(rel_key)
+                if version is None:
+                    continue
+                mtime = datetime.fromtimestamp(apk.stat().st_mtime)
+                candidates.append((version, rel_key, mtime))
+        else:
+            client = storage_service.client
+            if client is None:
+                return None
+            bucket = settings.AWS_S3_BUCKET
+            paginator = client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    if not key.endswith(".apk"):
+                        continue
+                    filename = key.rsplit("/", 1)[-1]
+                    if "test" in filename.lower():
+                        continue
+                    version = _extract_version_from_key(key)
+                    if version is None:
+                        continue
+                    candidates.append((version, key, obj["LastModified"]))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda c: _version_sort_key(c[0]), reverse=True)
+        version, key, uploaded_at = candidates[0]
+        return {
+            "version": version,
+            "key": key,
+            "url": self.presigned_download_url(key),
+            "uploaded_at": uploaded_at,
+        }
 
     async def create(
         self,
