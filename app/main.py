@@ -65,6 +65,10 @@ app.include_router(setup_page_router, tags=["Setup Page"])
 from app.api.attendance import router as attendance_router  # noqa: E402
 app.include_router(attendance_router, prefix="/api/v1/attendance", tags=["Attendance Device"])
 
+# Public 라우터 — 인증 없음 (htma-download 등 매장 staff 공유용)
+from app.api.public_releases import router as public_releases_router  # noqa: E402
+app.include_router(public_releases_router, prefix="/api/v1/public", tags=["Public"])
+
 # 로컬 버킷 정적 파일 서빙 — Local bucket static file serving
 from app.services.storage_service import BUCKET_DIR  # noqa: E402
 
