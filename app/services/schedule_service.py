@@ -64,9 +64,13 @@ class ScheduleService:
         return max(total, 0)
 
     async def _to_response(self, db: AsyncSession, entry: Schedule) -> ScheduleResponse:
-        # User name
-        user_result = await db.execute(select(User.full_name).where(User.id == entry.user_id))
-        user_name: str | None = user_result.scalar()
+        # User name + FOH/BOH 분류 (한 쿼리로 함께 조회)
+        user_result = await db.execute(
+            select(User.full_name, User.department).where(User.id == entry.user_id)
+        )
+        user_row = user_result.first()
+        user_name: str | None = user_row[0] if user_row else None
+        user_department: str | None = user_row[1] if user_row else None
         # Store name
         store_result = await db.execute(select(Store.name).where(Store.id == entry.store_id))
         store_name: str | None = store_result.scalar()
@@ -103,6 +107,7 @@ class ScheduleService:
             request_id=str(entry.request_id) if entry.request_id else None,
             user_id=str(entry.user_id),
             user_name=user_name,
+            user_department=user_department,
             store_id=str(entry.store_id),
             store_name=store_name,
             work_role_id=str(entry.work_role_id) if entry.work_role_id else None,

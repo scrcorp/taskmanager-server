@@ -61,6 +61,7 @@ class UserService:
             role_priority=role.priority,
             hourly_rate=raw_rate,
             effective_hourly_rate=self._effective_rate(raw_rate, org_rate),
+            department=user.department,
             is_active=user.is_active,
             created_at=user.created_at,
         )
@@ -79,6 +80,7 @@ class UserService:
             role_priority=role.priority,
             hourly_rate=raw_rate,
             effective_hourly_rate=self._effective_rate(raw_rate, org_rate),
+            department=user.department,
             is_active=user.is_active,
             created_at=user.created_at,
         )
@@ -215,6 +217,9 @@ class UserService:
             }
             if hourly_rate is not None:
                 create_data["hourly_rate"] = hourly_rate
+            # FOH/BOH 분류 — 지정된 경우만 저장 (미지정이면 NULL 유지)
+            if data.department is not None:
+                create_data["department"] = data.department
 
             user: User = await user_repository.create(
                 db,
@@ -351,6 +356,51 @@ class UserService:
             result = self._to_response(loaded, org_rate)
             await db.commit()
             return result
+        except Exception:
+            await db.rollback()
+            raise
+
+    # 일괄 변경 허용 컬럼 — role_id/store 는 가드/부수효과 때문에 제외 (후속 증분)
+    BULK_ALLOWED_FIELDS = frozenset({"department", "is_active", "hourly_rate"})
+
+    async def bulk_update_users(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        user_ids: list[str],
+        changes: dict,
+    ) -> int:
+        """여러 직원의 필드를 일괄 변경합니다 (조직 스코프).
+
+        Bulk-update the given fields for the given users.
+
+        Args:
+            changes: {필드: 값} — 보낸 필드만. 허용 필드만 적용.
+
+        Returns:
+            int: 실제 변경된 사용자 수 (rows updated)
+
+        Raises:
+            BadRequestError: 잘못된 UUID / 허용되지 않은 필드 / 변경 필드 없음
+        """
+        # 허용 필드만 통과 (그 외는 거부 — 조용히 무시하지 않고 명시 에러)
+        unknown = set(changes) - self.BULK_ALLOWED_FIELDS
+        if unknown:
+            raise BadRequestError(f"Fields not allowed for bulk update: {', '.join(sorted(unknown))}")
+        if not changes:
+            raise BadRequestError("No fields to update")
+
+        try:
+            uuids = [UUID(uid) for uid in user_ids]
+        except (ValueError, AttributeError):
+            raise BadRequestError("Invalid user id in user_ids")
+
+        try:
+            count = await user_repository.bulk_update_fields(
+                db, organization_id, uuids, changes
+            )
+            await db.commit()
+            return count
         except Exception:
             await db.rollback()
             raise

@@ -129,6 +129,10 @@ class User(Base):
     must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # 기본 시급 — Default hourly rate for labor cost calculation (nullable)
     hourly_rate: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
+    # FOH/BOH 분류 — 직원의 근무 구역 카테고리 (Front/Back of House).
+    # "FOH" = 홀/고객응대, "BOH" = 주방/후방, NULL = 미지정(오너·매니저 등 양쪽 아닌 경우).
+    # 스케줄 탭 필터 + (향후) FOH/BOH별 인건비 집계용. 값 검증은 schema의 Pydantic Literal.
+    department: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     # 선호 언어 — Preferred UI/alert language (BCP-47 short code: en/es/ko).
     # 현재는 정보 수집용. 실제 UI 다국어화는 추후 별도 작업.
     preferred_language: Mapped[str] = mapped_column(String(8), nullable=False, default="en", server_default="en")
