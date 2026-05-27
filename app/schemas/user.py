@@ -8,7 +8,7 @@ within an organization, and self-service profile management.
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # === 역할 (Role) 스키마 ===
@@ -65,6 +65,7 @@ class UserCreate(BaseModel):
     full_name: str  # 실명 (Full display name)
     email: str | None = None  # 이메일 (Optional email)
     role_id: str  # 역할 UUID 문자열 (Role UUID to assign)
+    department: Literal["FOH", "BOH"] | None = None  # FOH/BOH 분류 (None=미지정)
 
 
 class UserUpdate(BaseModel):
@@ -87,6 +88,31 @@ class UserUpdate(BaseModel):
     role_id: str | None = None  # 변경할 역할 UUID (New role, optional)
     is_active: bool | None = None  # 활성 상태 변경 (Activate/deactivate, optional)
     hourly_rate: float | None = None  # 개인 시급 (Personal hourly rate, optional)
+    department: Literal["FOH", "BOH"] | None = None  # FOH/BOH 분류 변경 (None=미지정으로 해제)
+
+
+class UserBulkUpdate(BaseModel):
+    """여러 직원의 필드를 일괄 변경.
+
+    Bulk-update fields for multiple users in one request.
+    **보낸 필드만 적용** (model_fields_set 기준). 최소 1개 필드는 보내야 함.
+    예) {"user_ids":[...], "department":"FOH", "is_active":false}
+    department/hourly_rate 는 null 을 명시하면 "해제"(미지정/상속) 의미.
+
+    NOTE: role_id / store 배정은 권한 가드·부수효과가 있어 이 스키마/경로에서
+    다루지 않는다 (후속 증분에서 별도 처리).
+    """
+
+    user_ids: list[str] = Field(min_length=1)  # 대상 사용자 UUID 목록 (1개 이상)
+    department: Literal["FOH", "BOH"] | None = None  # 보내면 설정 (None=미지정 해제)
+    is_active: bool | None = None  # 보내면 활성/비활성 일괄 설정
+    hourly_rate: float | None = None  # 보내면 시급 일괄 설정 (None=상속으로 해제)
+
+
+class UserBulkUpdateResult(BaseModel):
+    """일괄 변경 결과."""
+
+    updated_count: int  # 실제 변경된 사용자 수
 
 
 class UserResponse(BaseModel):
@@ -114,6 +140,7 @@ class UserResponse(BaseModel):
     role_priority: int  # 역할 우선순위 — 조인된 값
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속 (None = inherit from store/org)
     effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
+    department: str | None = None  # FOH/BOH 분류 (None=미지정)
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
@@ -141,6 +168,7 @@ class UserListResponse(BaseModel):
     role_priority: int  # 역할 우선순위 — 조인된 값
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속
     effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
+    department: str | None = None  # FOH/BOH 분류 (None=미지정)
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 

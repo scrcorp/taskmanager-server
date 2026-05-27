@@ -324,6 +324,31 @@ class UserRepository(BaseRepository[User]):
         )
         await db.flush()
 
+    async def bulk_update_fields(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        user_ids: list[UUID],
+        changes: dict,
+    ) -> int:
+        """여러 사용자의 컬럼을 일괄 변경 (조직 스코프).
+
+        changes: {컬럼명: 값} — 호출 측에서 화이트리스트 검증 완료된 dict.
+        org 에 속한 user_ids 만 변경. 반환: 실제 변경된 행 수.
+        """
+        if not user_ids or not changes:
+            return 0
+        result = await db.execute(
+            update(User)
+            .where(
+                User.id.in_(user_ids),
+                User.organization_id == organization_id,
+            )
+            .values(**changes)
+        )
+        await db.flush()
+        return result.rowcount or 0
+
     async def bulk_assign_org_stores_to_user(
         self,
         db: AsyncSession,

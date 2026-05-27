@@ -358,6 +358,7 @@ class ScheduleResponse(BaseModel):
     request_id: str | None
     user_id: str
     user_name: str | None = None
+    user_department: str | None = None  # 배정 직원의 FOH/BOH 분류 (스케줄 탭 필터용, None=미지정)
     store_id: str
     store_name: str | None = None
     work_role_id: str | None
