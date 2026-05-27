@@ -17,6 +17,8 @@ from app.models.user import User
 from app.schemas.common import MessageResponse
 from app.schemas.user import (
     SyncUserStoresRequest,
+    UserBulkUpdate,
+    UserBulkUpdateResult,
     UserCreate,
     UserListResponse,
     UserResponse,
@@ -94,6 +96,24 @@ async def create_user(
     if hide_cost_for(current_user):
         scrub_cost_fields(user)
     return user
+
+
+@router.patch("/bulk", response_model=UserBulkUpdateResult)
+async def bulk_update_users(
+    data: UserBulkUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> UserBulkUpdateResult:
+    """여러 직원의 필드를 일괄 변경합니다.
+
+    Bulk-update fields for multiple users. 보낸 필드만 적용
+    (department/is_active/hourly_rate). null 명시 시 해제(미지정/상속) 의미.
+    """
+    org_id: UUID = current_user.organization_id
+    # model_fields_set 으로 "보낸 필드"만 추출 (user_ids 제외)
+    changes = data.model_dump(include=data.model_fields_set - {"user_ids"})
+    count = await user_service.bulk_update_users(db, org_id, data.user_ids, changes)
+    return UserBulkUpdateResult(updated_count=count)
 
 
 @router.put("/{user_id}", response_model=UserResponse)
