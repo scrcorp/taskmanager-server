@@ -98,8 +98,7 @@ class AppVersionService:
         S3 list (또는 local bucket dir list) → 파일명/path 에서 버전 파싱 → 최신 선택.
         DB 의 `is_latest` 플래그에 의존하지 않으므로 등록 자동화 누락에 안전.
 
-        파일명 패턴: `app-releases/attendance/v{X.Y.Z}/htma_{X.Y.Z+N}.apk`
-        - `test` 들어간 파일은 제외 (staging fallback 케이스)
+        버킷이 환경별로 분리돼 있으므로 파일명 필터 없이 버전만 비교.
 
         Returns:
             { version, key, url, uploaded_at } 또는 None (release 없음).
@@ -112,8 +111,6 @@ class AppVersionService:
             if not base.exists():
                 return None
             for apk in base.rglob("*.apk"):
-                if "test" in apk.name.lower():
-                    continue
                 rel_key = str(apk.relative_to(Path(settings.LOCAL_BUCKET_DIR)))
                 version = _extract_version_from_key(rel_key)
                 if version is None:
@@ -130,9 +127,6 @@ class AppVersionService:
                 for obj in page.get("Contents", []):
                     key = obj["Key"]
                     if not key.endswith(".apk"):
-                        continue
-                    filename = key.rsplit("/", 1)[-1]
-                    if "test" in filename.lower():
                         continue
                     version = _extract_version_from_key(key)
                     if version is None:
