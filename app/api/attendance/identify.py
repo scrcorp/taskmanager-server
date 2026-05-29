@@ -15,9 +15,11 @@ from app.api.deps import get_current_attendance_device
 from app.database import get_db
 from app.models.attendance_device import AttendanceDevice
 from app.schemas.attendance_device import (
+    IdentifyByPinAttendanceItem,
     IdentifyByPinCurrentBreak,
     IdentifyByPinRequest,
     IdentifyByPinResponse,
+    StaleAttendanceItem,
 )
 from app.services.attendance_device_service import attendance_device_service
 
@@ -39,16 +41,38 @@ async def identify_by_pin(
     - 정상 → user 정보 + today_status + (on_break 시) current_break + scheduled_end
     """
     ctx = await attendance_device_service.identify_user_by_pin(db, data.pin, device)
-    current_break_payload: IdentifyByPinCurrentBreak | None = None
-    if ctx.current_break is not None:
-        current_break_payload = IdentifyByPinCurrentBreak(
-            break_type=ctx.current_break["break_type"],
-            started_at=ctx.current_break["started_at"],
+
+    def _break(b: dict | None) -> IdentifyByPinCurrentBreak | None:
+        if b is None:
+            return None
+        return IdentifyByPinCurrentBreak(
+            break_type=b["break_type"], started_at=b["started_at"]
         )
+
     return IdentifyByPinResponse(
         user_id=ctx.user.id,
         user_name=ctx.user.full_name or ctx.user.username,
         today_status=ctx.today_status,
-        current_break=current_break_payload,
+        current_break=_break(ctx.current_break),
         scheduled_end=ctx.scheduled_end,
+        today_attendances=[
+            IdentifyByPinAttendanceItem(
+                schedule_id=it["schedule_id"],
+                status=it["status"],
+                scheduled_start=it["scheduled_start"],
+                scheduled_end=it["scheduled_end"],
+                scheduled_start_display=it["scheduled_start_display"],
+                scheduled_end_display=it["scheduled_end_display"],
+                current_break=_break(it["current_break"]),
+            )
+            for it in ctx.today_attendances
+        ],
+        stale_attendances=[
+            StaleAttendanceItem(
+                work_date=it["work_date"],
+                status=it["status"],
+                clock_in_display=it["clock_in_display"],
+            )
+            for it in ctx.stale_attendances
+        ],
     )

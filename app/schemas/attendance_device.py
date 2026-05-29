@@ -4,7 +4,7 @@ Request/response schemas for attendance terminal endpoints and the
 admin device management surface.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -57,11 +57,21 @@ class ClockActionRequest(BaseModel):
     (기존에 PIN → user 역매칭을 하던 방식을 user + PIN 검증으로 변경)
     """
     user_id: UUID
-    pin: str = Field(..., min_length=6, max_length=6)
+    pin: str = Field(..., pattern=r"^\d{4,6}$")
     break_type: str | None = None
     # Early clock-out 사유. clock-out 시점이 schedule end - threshold 이전이면 필수.
     # 그 외엔 무시.
     reason: str | None = None
+    # (Issue 8) 다중 schedule 시 client 가 선택한 schedule 지정. 미지정이면
+    # 서버가 우선순위로 자동 선택 (단일 schedule 케이스 호환).
+    schedule_id: UUID | None = None
+
+
+class ManageBreakEntry(BaseModel):
+    """한 attendance 의 break 한 건 (manage/schedule UI Breaks 존 공용)."""
+    type: str  # paid_10min | unpaid_meal (normalize 됨)
+    start: str  # "HH:mm" (store tz)
+    end: str | None  # null = 진행 중
 
 
 class TodayStaffBreak(BaseModel):
@@ -95,6 +105,10 @@ class TodayStaffRow(BaseModel):
     clock_in_display: str | None = None          # "HH:mm" (store tz)
     clock_out_display: str | None = None
     status: str  # upcoming | soon | working | on_break | late | clocked_out | no_show | cancelled
+    # manage 와 공용 — clock 이벤트 기반 state + anomaly + 전체 break 리스트 (UI 통합용)
+    state: str = "upcoming"  # upcoming | working | breaking | done
+    anomalies: list[str] = Field(default_factory=list)
+    breaks: list[ManageBreakEntry] = Field(default_factory=list)
     current_break: TodayStaffBreak | None = None
     paid_break_minutes: int = 0
     unpaid_break_minutes: int = 0
@@ -167,20 +181,50 @@ class IdentifyByPinCurrentBreak(BaseModel):
     started_at: datetime
 
 
+class IdentifyByPinAttendanceItem(BaseModel):
+    """한 직원의 오늘 attendance(=schedule) 1건 — 다중 schedule 시 picker 표시용.
+
+    (Issue 8) 한 직원이 같은 날 2개 이상 schedule 을 가질 때, client 가
+    각 shift 를 카드로 보여주고 직원이 명시적으로 선택할 수 있게 한다.
+    """
+    schedule_id: UUID | None
+    status: str
+    scheduled_start: datetime | None = None
+    scheduled_end: datetime | None = None
+    scheduled_start_display: str | None = None
+    scheduled_end_display: str | None = None
+    current_break: IdentifyByPinCurrentBreak | None = None
+
+
+class StaleAttendanceItem(BaseModel):
+    """이전 work_date 의 미완료(orphan) attendance 1건 (Issue 11).
+
+    직원이 출근만 하고 퇴근 안 한 채 방치된 기록. 로그인 시 경고 표시용.
+    """
+    work_date: date
+    status: str
+    clock_in_display: str | None = None  # store tz "HH:mm"
+
+
 class IdentifyByPinResponse(BaseModel):
     """PIN 식별 응답 — 직원 clock 흐름 entry.
 
-    today_status: 오늘 attendance 가 있으면 dashboard 와 동일한 effective status,
-    스케줄 없으면 None. clock 가능 여부/UI 분기에 사용.
-    current_break: on_break 상태일 때만 채워짐 (그 외 None).
-    scheduled_end: 오늘 schedule 의 종료 시각 (UTC). 클럭아웃 시 early-checkout
-                   threshold 비교용. 스케줄 없으면 None.
+    today_status: primary attendance 의 effective status (우선순위로 선택).
+                  스케줄 없으면 None. 단일 schedule 케이스 호환 + UI 기본 분기.
+    current_break: primary 가 on_break 일 때만 채워짐 (그 외 None).
+    scheduled_end: primary schedule 의 종료 시각 (UTC). early-checkout threshold 비교용.
+    today_attendances: 오늘 모든 attendance(=schedule) 목록 (Issue 8).
+                       우선순위 정렬. app 은 first(=primary) 자동 선택.
+    stale_attendances: 이전 work_date 미완료(orphan) 기록 (Issue 11). 최신순.
+                       최근 30일, 현재 기기 매장 한정. 로그인 시 경고 표시 (안내만).
     """
     user_id: UUID
     user_name: str
     today_status: str | None
     current_break: IdentifyByPinCurrentBreak | None = None
     scheduled_end: datetime | None = None
+    today_attendances: list[IdentifyByPinAttendanceItem] = []
+    stale_attendances: list[StaleAttendanceItem] = []
 
 
 # ── Kiosk 관리자 모드 ──────────────────────────────────────
@@ -221,6 +265,12 @@ class ManageScheduleRow(BaseModel):
     end_time: str | None
     status: str
     attendance_id: UUID | None
+    # manage UI 재설계(Issue 10): clock 이벤트 기반 state + anomaly 분리 + breaks 리스트
+    state: str = "upcoming"  # upcoming | working | breaking | done
+    anomalies: list[str] = Field(default_factory=list)  # late/no_show/early_leave/overtime/no_break
+    breaks: list[ManageBreakEntry] = Field(default_factory=list)
+    # TODO(state-migration): attendance_status 는 state/anomalies 로 대체됨.
+    #   일반 모드/다른 화면까지 전환된 뒤 제거 (docs 후속 페이즈 cleanup 참조).
     attendance_status: str | None
     clock_in_display: str | None = None   # "HH:mm" (store tz)
     clock_out_display: str | None = None  # "HH:mm" (store tz)
