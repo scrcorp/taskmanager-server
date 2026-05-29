@@ -79,9 +79,9 @@ def _mock_db(scalar_one_or_none_returns) -> AsyncMock:
 
 @pytest.mark.asyncio
 async def test_verify_user_pin_rejects_non_digit_pin() -> None:
-    """PIN 에 숫자 외 문자 → BadRequestError('PIN must be 6 digits')."""
+    """PIN 에 숫자 외 문자 → BadRequestError('PIN must be 4-6 digits')."""
     db = AsyncMock()  # execute 안 호출됨
-    with pytest.raises(BadRequestError, match="PIN must be 6 digits"):
+    with pytest.raises(BadRequestError, match="PIN must be 4-6 digits"):
         await attendance_device_service.verify_user_pin(
             db, uuid.uuid4(), "12abcd", uuid.uuid4()
         )
@@ -91,10 +91,10 @@ async def test_verify_user_pin_rejects_non_digit_pin() -> None:
 
 @pytest.mark.asyncio
 async def test_verify_user_pin_rejects_wrong_length_pin() -> None:
-    """PIN 길이가 6 아님 → BadRequestError. (5자리 / 7자리 / 빈 문자열)."""
+    """PIN 길이가 4~6 밖 → BadRequestError. (빈/3자리/7자리)."""
     db = AsyncMock()
-    for bad_pin in ("", "12345", "1234567"):
-        with pytest.raises(BadRequestError, match="PIN must be 6 digits"):
+    for bad_pin in ("", "123", "1234567"):
+        with pytest.raises(BadRequestError, match="PIN must be 4-6 digits"):
             await attendance_device_service.verify_user_pin(
                 db, uuid.uuid4(), bad_pin, uuid.uuid4()
             )

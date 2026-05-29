@@ -16,7 +16,10 @@ from __future__ import annotations
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
-from app.services.attendance_service import compute_effective_status
+from app.services.attendance_service import (
+    compute_effective_status,
+    compute_state_and_anomalies,
+)
 
 
 # ── 분기 매핑 (compute_effective_status docstring 참조) ──────────
@@ -283,3 +286,131 @@ def test_overnight_shift_within_window_stays_late() -> None:
         late_buffer=5,
     )
     assert result == "late"
+
+
+# ── compute_state_and_anomalies (manage UI 재설계: state + anomaly 분리) ──
+
+
+def _state(
+    *,
+    att_status=None,
+    clock_in=None,
+    clock_out=None,
+    anomalies=None,
+    start=time(9, 0),
+    end=time(17, 0),
+    now=None,
+) -> tuple[str, list[str]]:
+    return compute_state_and_anomalies(
+        att_status=att_status,
+        att_clock_in=clock_in,
+        att_clock_out=clock_out,
+        att_anomalies=anomalies,
+        schedule_start_time=start,
+        schedule_end_time=end,
+        schedule_work_date=_TODAY,
+        now=now or _now(10, 0),
+        store_tz=_UTC,
+        late_buffer=5,
+    )
+
+
+def test_state_done_when_clock_out_present() -> None:
+    state, anomalies = _state(att_status="clocked_out", clock_in=_now(9, 0), clock_out=_now(17, 1))
+    assert state == "done"
+    assert anomalies == []
+
+
+def test_state_breaking_when_on_break() -> None:
+    state, _ = _state(att_status="on_break", clock_in=_now(9, 0))
+    assert state == "breaking"
+
+
+def test_state_working_when_clocked_in() -> None:
+    state, _ = _state(att_status="working", clock_in=_now(9, 2))
+    assert state == "working"
+
+
+def test_state_upcoming_when_no_clock_in() -> None:
+    # 먼 미래 시작 → upcoming, anomaly 없음
+    state, anomalies = _state(att_status="upcoming", start=time(18, 0), end=time(23, 0), now=_now(10, 0))
+    assert state == "upcoming"
+    assert anomalies == []
+
+
+def test_working_keeps_stored_late_anomaly() -> None:
+    """출근-후-지각: state=working 이어도 stored 'late' anomaly 유지."""
+    state, anomalies = _state(att_status="working", clock_in=_now(9, 30), anomalies=["late"])
+    assert state == "working"
+    assert anomalies == ["late"]
+
+
+def test_upcoming_late_anomaly_time_computed() -> None:
+    """미출근 + start+buffer 지남 → late anomaly 병합."""
+    state, anomalies = _state(att_status="upcoming", start=time(9, 0), now=_now(9, 30))
+    assert state == "upcoming"
+    assert "late" in anomalies
+
+
+def test_upcoming_no_show_anomaly_time_computed() -> None:
+    """미출근 + end 지남 → no_show anomaly 병합."""
+    state, anomalies = _state(att_status="upcoming", start=time(9, 0), end=time(13, 0), now=_now(15, 0))
+    assert state == "upcoming"
+    assert "no_show" in anomalies
+
+
+def test_done_passes_through_stored_anomalies() -> None:
+    """done + early_leave/no_break 등 stored anomaly 그대로 노출."""
+    state, anomalies = _state(
+        att_status="clocked_out",
+        clock_in=_now(8, 0),
+        clock_out=_now(11, 30),
+        anomalies=["early_leave", "no_break"],
+    )
+    assert state == "done"
+    assert set(anomalies) == {"early_leave", "no_break"}
+
+
+def test_unknown_anomaly_filtered_out() -> None:
+    """DISPLAY_ANOMALIES 밖의 값은 노출에서 제외."""
+    _, anomalies = _state(att_status="working", clock_in=_now(9, 0), anomalies=["late", "bogus_flag"])
+    assert anomalies == ["late"]
+
+
+# ── anomaly state 일관성 규칙 (no_show 단독 / clock 필요) ──
+
+
+def test_no_show_is_single_even_with_stored_late() -> None:
+    """미출근 + end 지남 → no_show 단독 (저장된 late 흡수)."""
+    state, anomalies = _state(
+        att_status="upcoming", anomalies=["late"], start=time(9, 0), end=time(13, 0), now=_now(15, 0)
+    )
+    assert state == "upcoming"
+    assert anomalies == ["no_show"]
+
+
+def test_overtime_dropped_when_not_clocked_in() -> None:
+    """미출근인데 stored overtime → 제거 (출근해야 overtime)."""
+    _, anomalies = _state(att_status="upcoming", anomalies=["overtime"], start=time(9, 0), now=_now(9, 30))
+    assert "overtime" not in anomalies
+
+
+def test_no_break_dropped_when_not_clocked_out() -> None:
+    """근무 중(clock_out 없음) stored no_break → 제거 (퇴근해야 판정)."""
+    _, anomalies = _state(att_status="working", clock_in=_now(9, 0), anomalies=["no_break"])
+    assert "no_break" not in anomalies
+
+
+def test_working_keeps_late_and_overtime() -> None:
+    """working + late + overtime (clock_in 있음) → 둘 다 유지."""
+    state, anomalies = _state(att_status="working", clock_in=_now(9, 30), anomalies=["late", "overtime"])
+    assert state == "working"
+    assert set(anomalies) == {"late", "overtime"}
+
+
+def test_done_keeps_no_break_and_early_leave() -> None:
+    """done(clock_out 있음) + no_break + early_leave → 유지."""
+    _, anomalies = _state(
+        att_status="clocked_out", clock_in=_now(8, 0), clock_out=_now(14, 0), anomalies=["no_break", "early_leave"]
+    )
+    assert set(anomalies) == {"no_break", "early_leave"}

@@ -45,12 +45,15 @@ class IdentifyContext:
     """identify_user_by_pin 의 typed 반환값.
 
     today_status / current_break / scheduled_end 는 device 가 store 미할당이거나
-    오늘 attendance 가 없으면 None.
+    오늘 attendance 가 없으면 None. (primary attendance 기준)
+    today_attendances 는 오늘 모든 attendance(=schedule) 목록 (Issue 8 다중 schedule).
     """
     user: User
     today_status: str | None = None
     current_break: dict | None = None  # {break_type, started_at}
     scheduled_end: datetime | None = None
+    today_attendances: list[dict] = field(default_factory=list)
+    stale_attendances: list[dict] = field(default_factory=list)  # Issue 11
 
 
 def generate_device_token() -> str:
@@ -290,8 +293,8 @@ class AttendanceDeviceService:
         기존 PIN → user 매핑 대신 user + PIN 검증 방식. 유저 없음/PIN 불일치
         모두 400 (device token 은 유효하므로 401 로 반환하지 않는다).
         """
-        if not pin or len(pin) != 6 or not pin.isdigit():
-            raise BadRequestError("PIN must be 6 digits")
+        if not pin or not pin.isdigit() or not (4 <= len(pin) <= 6):
+            raise BadRequestError("PIN must be 4-6 digits")
         result = await db.execute(
             select(User)
             .options(selectinload(User.role))
@@ -395,11 +398,15 @@ class AttendanceDeviceService:
     ) -> "IdentifyContext":
         """store work_date 기준 오늘 user 의 attendance context 계산.
 
+        (Issue 8) 한 직원이 같은 날 2+ schedule 을 가질 수 있으므로 모든 row 를 가져와
+        우선순위로 정렬한 list 를 반환. primary (정렬 첫 번째) 가 today_status 등 단일
+        필드 채움 (단일 schedule 케이스 호환).
+
         반환 dataclass 의 필드:
-          - today_status: effective status (dashboard 와 동일 로직). 스케줄 없으면 None.
-          - current_break: status='on_break' 일 때 (break_type, started_at) dict. 그 외 None.
-          - scheduled_end: schedule.end_time + work_date 를 store TZ 로 조립한 aware UTC.
-                           스케줄 없으면 None.
+          - today_status: primary attendance 의 effective status. 스케줄 없으면 None.
+          - current_break: primary 가 on_break 일 때 (break_type, started_at) dict.
+          - scheduled_end: primary schedule end_time → store TZ aware UTC.
+          - today_attendances: 오늘 모든 attendance dict 목록 (우선순위 정렬).
         """
         from zoneinfo import ZoneInfo
 
@@ -413,23 +420,50 @@ class AttendanceDeviceService:
         today = get_work_date(store_tz, store_day_start, now)
         tz_info = ZoneInfo(store_tz)
 
-        row = (
-            await db.execute(
-                select(Attendance, Schedule)
-                .outerjoin(Schedule, Schedule.id == Attendance.schedule_id)
-                .where(
-                    Attendance.user_id == user.id,
-                    Attendance.store_id == store_id,
-                    Attendance.work_date == today,
-                    Attendance.status != "cancelled",
-                )
-                .limit(1)
-            )
-        ).first()
-        if row is None:
-            return IdentifyContext(user=user)
+        def _tz_hhmm(value: datetime | None) -> str | None:
+            return value.astimezone(tz_info).strftime("%H:%M") if value else None
 
-        att, schedule = row
+        # (Issue 11) 이전 work_date 미완료(orphan) — 오늘 attendance 유무와 무관하게
+        # 항상 조회 (오늘 schedule 없어도 어제 미완료 있으면 경고). 최근 30일, 기기 매장.
+        from datetime import timedelta as _td_stale
+        stale_rows = list(
+            (
+                await db.execute(
+                    select(Attendance.work_date, Attendance.status, Attendance.clock_in)
+                    .where(
+                        Attendance.user_id == user.id,
+                        Attendance.store_id == store_id,
+                        Attendance.clock_in.isnot(None),
+                        Attendance.clock_out.is_(None),
+                        Attendance.status.in_(["working", "on_break", "late"]),
+                        Attendance.work_date < today,
+                        Attendance.work_date >= today - _td_stale(days=30),
+                    )
+                    .order_by(Attendance.work_date.desc())
+                )
+            ).all()
+        )
+        stale = [
+            {"work_date": wd, "status": st, "clock_in_display": _tz_hhmm(ci)}
+            for (wd, st, ci) in stale_rows
+        ]
+
+        rows = list(
+            (
+                await db.execute(
+                    select(Attendance, Schedule)
+                    .outerjoin(Schedule, Schedule.id == Attendance.schedule_id)
+                    .where(
+                        Attendance.user_id == user.id,
+                        Attendance.store_id == store_id,
+                        Attendance.work_date == today,
+                        Attendance.status != "cancelled",
+                    )
+                )
+            ).all()
+        )
+        if not rows:
+            return IdentifyContext(user=user, stale_attendances=stale)
 
         try:
             late_buf_raw = await resolve_setting(
@@ -442,48 +476,84 @@ class AttendanceDeviceService:
         except (SettingNotRegisteredError, TypeError, ValueError):
             late_buffer = 5
 
-        today_status = compute_effective_status(
-            att_status=att.status,
-            att_clock_in=att.clock_in,
-            schedule_start_time=schedule.start_time if schedule else None,
-            schedule_end_time=schedule.end_time if schedule else None,
-            schedule_work_date=schedule.work_date if schedule else None,
-            now=now,
-            store_tz=tz_info,
-            late_buffer=late_buffer,
-        )
+        def _display(value: datetime | None) -> str | None:
+            if value is None:
+                return None
+            return value.astimezone(tz_info).strftime("%H:%M")
 
-        # scheduled_end — schedule 의 end_time + work_date 를 store TZ aware → UTC.
-        scheduled_end_utc: datetime | None = None
-        if schedule and schedule.end_time is not None and schedule.work_date is not None:
-            naive_end = datetime.combine(schedule.work_date, schedule.end_time)
-            scheduled_end_utc = naive_end.replace(tzinfo=tz_info).astimezone(timezone.utc)
+        # 각 row → item dict (effective status + scheduled times + current_break)
+        items: list[dict] = []
+        for att, schedule in rows:
+            eff_status = compute_effective_status(
+                att_status=att.status,
+                att_clock_in=att.clock_in,
+                schedule_start_time=schedule.start_time if schedule else None,
+                schedule_end_time=schedule.end_time if schedule else None,
+                schedule_work_date=schedule.work_date if schedule else None,
+                now=now,
+                store_tz=tz_info,
+                late_buffer=late_buffer,
+            )
 
-        # current_break — on_break 일 때만, attendance_breaks 에서 ended_at IS NULL.
-        current_break: dict | None = None
-        if today_status == "on_break":
-            br = (
-                await db.execute(
-                    select(AttendanceBreak)
-                    .where(
-                        AttendanceBreak.attendance_id == att.id,
-                        AttendanceBreak.ended_at.is_(None),
+            sched_start_utc: datetime | None = None
+            sched_end_utc: datetime | None = None
+            if schedule and schedule.work_date is not None:
+                if schedule.start_time is not None:
+                    sched_start_utc = datetime.combine(
+                        schedule.work_date, schedule.start_time
+                    ).replace(tzinfo=tz_info).astimezone(timezone.utc)
+                if schedule.end_time is not None:
+                    sched_end_utc = datetime.combine(
+                        schedule.work_date, schedule.end_time
+                    ).replace(tzinfo=tz_info).astimezone(timezone.utc)
+
+            cur_break: dict | None = None
+            if eff_status == "on_break":
+                br = (
+                    await db.execute(
+                        select(AttendanceBreak)
+                        .where(
+                            AttendanceBreak.attendance_id == att.id,
+                            AttendanceBreak.ended_at.is_(None),
+                        )
+                        .order_by(AttendanceBreak.started_at.desc())
+                        .limit(1)
                     )
-                    .order_by(AttendanceBreak.started_at.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            if br is not None:
-                current_break = {
-                    "break_type": br.break_type,
-                    "started_at": br.started_at,
-                }
+                ).scalar_one_or_none()
+                if br is not None:
+                    cur_break = {
+                        "break_type": br.break_type,
+                        "started_at": br.started_at,
+                    }
 
+            items.append({
+                "schedule_id": att.schedule_id,
+                "status": eff_status,
+                "scheduled_start": sched_start_utc,
+                "scheduled_end": sched_end_utc,
+                "scheduled_start_display": _display(sched_start_utc),
+                "scheduled_end_display": _display(sched_end_utc),
+                "current_break": cur_break,
+            })
+
+        # 우선순위 정렬: working > on_break > late > soon > upcoming > no_show > clocked_out
+        rank = {
+            "working": 0, "on_break": 1, "late": 2, "soon": 3,
+            "upcoming": 4, "no_show": 5, "clocked_out": 6,
+        }
+        items.sort(key=lambda it: (
+            rank.get(it["status"], 99),
+            it["scheduled_start"] or datetime.max.replace(tzinfo=timezone.utc),
+        ))
+
+        primary = items[0]
         return IdentifyContext(
             user=user,
-            today_status=today_status,
-            current_break=current_break,
-            scheduled_end=scheduled_end_utc,
+            today_status=primary["status"],
+            current_break=primary["current_break"],
+            scheduled_end=primary["scheduled_end"],
+            today_attendances=items,
+            stale_attendances=stale,
         )
 
     # ── Clock 동작 ─────────────────────────────────────────
@@ -515,6 +585,7 @@ class AttendanceDeviceService:
         skip_pin_check: bool = False,
         skip_early_guards: bool = False,
         manager_user_id: UUID | None = None,
+        schedule_id: UUID | None = None,
     ) -> Attendance:
         """기기 + user_id + PIN 으로 clock in/out/break 처리.
 
@@ -607,14 +678,24 @@ class AttendanceDeviceService:
                     return None
                 return datetime.combine(today, s.end_time, tzinfo=tz)
 
-            # 우선순위 1: 현재 window (start <= now <= end) 안에 있는 스케줄
             schedule = None
-            for s in candidates:
-                sd = _start_dt(s)
-                ed = _end_dt(s)
-                if sd is not None and ed is not None and sd <= now <= ed:
-                    schedule = s
-                    break
+            # (Issue 8) client 가 명시적으로 schedule 을 선택한 경우 그것을 사용.
+            # 단 candidates (= clock-in 가능한 미완료 shift) 에 있어야 함.
+            # clocked_out 등으로 candidates 에 없으면 명시 거부 (우선순위 fallback 안 함).
+            if schedule_id is not None:
+                schedule = next((s for s in candidates if s.id == schedule_id), None)
+                if schedule is None:
+                    raise BadRequestError(
+                        "Selected shift is not available for clock-in"
+                    )
+            # 우선순위 1: 현재 window (start <= now <= end) 안에 있는 스케줄
+            if schedule is None:
+                for s in candidates:
+                    sd = _start_dt(s)
+                    ed = _end_dt(s)
+                    if sd is not None and ed is not None and sd <= now <= ed:
+                        schedule = s
+                        break
             # 우선순위 2: 가장 가까운 미래 (start > now)
             if schedule is None:
                 future = [s for s in candidates if (_start_dt(s) or datetime.min.replace(tzinfo=tz)) > now]
