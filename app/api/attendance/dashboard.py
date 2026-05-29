@@ -24,11 +24,14 @@ from app.models.attendance_device import AttendanceDevice
 from app.models.communication import Notice
 from app.models.schedule import Schedule
 from app.models.user import User
+from app.models.attendance_break import normalize_break_type
 from app.schemas.attendance_device import (
+    ManageBreakEntry,
     NoticeRow,
     TodayStaffBreak,
     TodayStaffRow,
 )
+from app.services.attendance_service import compute_effective_status, compute_state_and_anomalies
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 from app.utils.timezone import get_store_day_config, get_work_date
 
@@ -104,42 +107,37 @@ async def today_staff(
         return value.astimezone(tz_info).strftime("%H:%M")
 
     def effective_status(att: Attendance, schedule: Schedule | None) -> str:
-        """DB attendance.status + 현재 시각 + late_buffer 로 최종 표시 status 계산.
+        """compute_effective_status (attendance_service) 의 thin wrapper.
 
-        clock_in 이 이미 기록된 경우는 출근 완료 → DB status 그대로 (강등 금지).
-        그 외 upcoming/late 미출근 상태는 schedule end 가 지나면 no_show 로 강등.
+        Issue 3 (2026-05-28): 기존엔 inline 으로 같은 로직을 또 구현했는데,
+        compute_effective_status 와 'late' 처리가 drift 함 (저쪽은 clock_in 있으면
+        'late' → 'working' 으로 승격, 여기는 DB status 그대로 'late'). 단일 출처로 통일.
         """
-        # 출근 후엔 시각과 무관하게 DB status 신뢰 — sched_end 지났다고 no_show로
-        # 강등하면 늦게 clock-in 한 직원이 "Clocked In" 섹션에서 사라진다.
-        if att.clock_in is not None:
-            return att.status
-        if att.status not in {"upcoming", "late"} or schedule is None or schedule.start_time is None:
-            return att.status
-        sched_start = dt.combine(schedule.work_date, schedule.start_time, tzinfo=tz_info)
-        sched_end = (
-            dt.combine(schedule.work_date, schedule.end_time, tzinfo=tz_info)
-            if schedule.end_time is not None else None
+        return compute_effective_status(
+            att_status=att.status,
+            att_clock_in=att.clock_in,
+            schedule_start_time=schedule.start_time if schedule else None,
+            schedule_end_time=schedule.end_time if schedule else None,
+            schedule_work_date=schedule.work_date if schedule else None,
+            now=now,
+            store_tz=tz_info,
+            late_buffer=late_buffer,
+            soon_threshold_minutes=SOON_THRESHOLD_MINUTES,
         )
-        if sched_end is not None and sched_end <= sched_start:
-            sched_end = sched_end + timedelta(days=1)
-        # 1) sched_end 지났으면 무조건 no_show
-        if sched_end is not None and now >= sched_end:
-            return "no_show"
-        # 2) 이미 persisted 가 late 면 그대로 (시간이 sched_end 안 지난 경우만 도달)
-        if att.status == "late":
-            return "late"
-        # 3) upcoming 인 경우 시간 비교로 분기
-        if now >= sched_start + timedelta(minutes=late_buffer):
-            return "late"
-        if now >= sched_start - timedelta(minutes=SOON_THRESHOLD_MINUTES):
-            return "soon"
-        return "upcoming"
 
     result: list[TodayStaffRow] = []
     for att, schedule, user in triples:
         paid = unpaid = 0
         current: TodayStaffBreak | None = None
-        for br in break_map.get(att.id, []):
+        break_entries: list[ManageBreakEntry] = []
+        for br in sorted(break_map.get(att.id, []), key=lambda b: b.started_at):
+            start_disp = display_store_tz(br.started_at)
+            if start_disp is not None:
+                break_entries.append(ManageBreakEntry(
+                    type=normalize_break_type(br.break_type),
+                    start=start_disp,
+                    end=display_store_tz(br.ended_at),
+                ))
             if br.ended_at is None:
                 current = TodayStaffBreak(
                     started_at=br.started_at, break_type=br.break_type
@@ -149,6 +147,19 @@ async def today_staff(
                     paid += br.duration_minutes or 0
                 elif br.break_type in UNPAID_BREAK_TYPES:
                     unpaid += br.duration_minutes or 0
+
+        state, anomalies = compute_state_and_anomalies(
+            att_status=att.status,
+            att_clock_in=att.clock_in,
+            att_clock_out=att.clock_out,
+            att_anomalies=att.anomalies,
+            schedule_start_time=schedule.start_time if schedule else None,
+            schedule_end_time=schedule.end_time if schedule else None,
+            schedule_work_date=schedule.work_date if schedule else None,
+            now=now,
+            store_tz=tz_info,
+            late_buffer=late_buffer,
+        )
 
         sched_start = combine(schedule.start_time) if schedule else None
         sched_end = combine(schedule.end_time) if schedule else None
@@ -171,6 +182,9 @@ async def today_staff(
                 clock_in_display=display_store_tz(att.clock_in),
                 clock_out_display=display_store_tz(att.clock_out),
                 status=effective_status(att, schedule),
+                state=state,
+                anomalies=anomalies,
+                breaks=break_entries,
                 current_break=current,
                 paid_break_minutes=paid,
                 unpaid_break_minutes=unpaid,

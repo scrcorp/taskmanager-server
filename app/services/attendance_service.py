@@ -93,6 +93,85 @@ def compute_effective_status(
     return "upcoming"
 
 
+# manage UI 재설계(Issue 10) 가 쓰는 anomaly 표시 후보 — server 판정 예외만.
+# (soon 은 anomaly 아님 → 앱이 start_time 으로 자체 계산, 여기서 안 냄)
+DISPLAY_ANOMALIES = ("late", "no_show", "early_leave", "overtime", "no_break")
+
+
+def compute_state_and_anomalies(
+    att_status: str | None,
+    att_clock_in: datetime | None,
+    att_clock_out: datetime | None,
+    att_anomalies: list[str] | None,
+    schedule_start_time: time | None,
+    schedule_end_time: time | None,
+    schedule_work_date: date | None,
+    now: datetime,
+    store_tz: ZoneInfo,
+    late_buffer: int,
+) -> tuple[str, list[str]]:
+    """clock 이벤트 기반 state + anomaly 목록 계산 (manage UI 재설계용).
+
+    Pure function. state 와 anomaly 를 분리한다 (clock in/out 은 이벤트일 뿐 상태 아님):
+      - state: upcoming / working / breaking / done
+      - anomalies: DISPLAY_ANOMALIES 중 state 와 일관된 것만
+
+    anomaly 유효성 규칙 (출퇴근 사실과 모순되는 건 제거):
+      - no_show: 미출근(clock_in 없음)에서만 + **단독** (출근 안 했으니 다른 anomaly 공존 불가)
+      - overtime: clock_in 있어야 (출근해야 초과근무)
+      - no_break / early_leave: clock_out 있어야 (퇴근해야 휴식없음/조기퇴근 판정 가능)
+      - late: 미출근 지각 / 늦은 출근 모두 가능 (no_show 와만 배타)
+
+    soon 은 여기서 내지 않는다 (앱이 자체 판단).
+    """
+    has_clock_in = att_clock_in is not None
+    has_clock_out = att_clock_out is not None
+
+    # state — clock 이벤트 기반
+    if has_clock_out:
+        state = "done"
+    elif has_clock_in:
+        state = "breaking" if att_status == "on_break" else "working"
+    else:
+        state = "upcoming"
+
+    # 미출근 시각 판정 — no_show 면 단독 반환
+    eff: str | None = None
+    if not has_clock_in:
+        eff = compute_effective_status(
+            att_status=att_status or "upcoming",
+            att_clock_in=None,
+            schedule_start_time=schedule_start_time,
+            schedule_end_time=schedule_end_time,
+            schedule_work_date=schedule_work_date,
+            now=now,
+            store_tz=store_tz,
+            late_buffer=late_buffer,
+        )
+        if eff == "no_show":
+            return state, ["no_show"]
+
+    # 저장된 anomaly 를 state 일관성으로 필터
+    anomalies: list[str] = []
+    for a in att_anomalies or []:
+        if a not in DISPLAY_ANOMALIES:
+            continue
+        if a == "no_show":
+            continue  # 출근 기록 있는데 no_show 면 모순 → 제거 (no_show 는 위에서 단독 처리)
+        if a == "overtime" and not has_clock_in:
+            continue  # 출근 안 했으면 overtime 불가
+        if a in ("no_break", "early_leave") and not has_clock_out:
+            continue  # 퇴근 안 했으면 판정 불가
+        if a not in anomalies:
+            anomalies.append(a)
+
+    # 미출근 지각 — 저장된 게 없을 때 시각 계산으로 보강
+    if eff == "late" and "late" not in anomalies:
+        anomalies.append("late")
+
+    return state, anomalies
+
+
 async def _find_schedule_for_attendance(
     db: AsyncSession,
     user_id: UUID,
@@ -779,9 +858,12 @@ class AttendanceService:
         user_result = await db.execute(select(User.full_name).where(User.id == attendance.user_id))
         user_name: str = user_result.scalar() or "Unknown"
 
-        # 연결된 스케줄 조회 (있으면) — scheduled_start/end 채움
+        # 연결된 스케줄 조회 (있으면) — scheduled_start/end + effective_status 계산용 raw 값
         scheduled_start: datetime | None = None
         scheduled_end: datetime | None = None
+        s_start_time = None
+        s_end_time = None
+        s_work_date = None
         if attendance.schedule_id is not None:
             sch_result = await db.execute(
                 select(Schedule.start_time, Schedule.end_time, Schedule.work_date)
@@ -897,6 +979,16 @@ class AttendanceService:
             "scheduled_end": scheduled_end,
             "scheduled_end_display": _display_store_tz(scheduled_end),
             "status": attendance.status,
+            "effective_status": compute_effective_status(
+                att_status=attendance.status,
+                att_clock_in=attendance.clock_in,
+                schedule_start_time=s_start_time,
+                schedule_end_time=s_end_time,
+                schedule_work_date=s_work_date,
+                now=datetime.now(timezone.utc),
+                store_tz=display_tz,
+                late_buffer=LATE_BUFFER_MINUTES,
+            ),
             "anomalies": attendance.anomalies,
             "total_work_minutes": attendance.total_work_minutes,
             "total_break_minutes": total_break_minutes,

@@ -31,6 +31,7 @@ from app.models.user_store import UserStore
 from app.schemas.attendance_device import (
     ManageAssignableUser,
     AdminClockActionRequest,
+    ManageBreakEntry,
     ManageScheduleCreateRequest,
     ManageScheduleRow,
     ManageScheduleUpdateRequest,
@@ -40,6 +41,8 @@ from app.schemas.attendance_device import (
     ManageWorkRoleOption,
 )
 from app.services.attendance_device_service import attendance_device_service
+from app.services.attendance_service import attendance_service, compute_state_and_anomalies
+from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 
 
 router: APIRouter = APIRouter()
@@ -121,6 +124,45 @@ def _parse_time_hhmm(s: str):
     return _time(int(hh), int(mm))
 
 
+async def _resolve_late_buffer(db: AsyncSession, organization_id, store_id) -> int:
+    """attendance.late_buffer_minutes 설정 (없으면 5분)."""
+    if organization_id is None:
+        return 5
+    try:
+        raw = await resolve_setting(
+            db,
+            key="attendance.late_buffer_minutes",
+            organization_id=organization_id,
+            store_id=store_id,
+        )
+        return int(raw) if raw is not None else 5
+    except (SettingNotRegisteredError, TypeError, ValueError):
+        return 5
+
+
+def _break_entries(breaks, tz_info) -> list[ManageBreakEntry]:
+    """AttendanceBreak 목록 → ManageBreakEntry (store tz HH:mm, type normalize)."""
+    from app.models.attendance_break import normalize_break_type
+
+    def _hhmm(value):
+        if value is None:
+            return None
+        try:
+            return value.astimezone(tz_info).strftime("%H:%M")
+        except Exception:
+            return None
+
+    out: list[ManageBreakEntry] = []
+    for b in breaks:
+        start = _hhmm(b.started_at)
+        if start is None:
+            continue
+        out.append(
+            ManageBreakEntry(type=normalize_break_type(b.break_type), start=start, end=_hhmm(b.ended_at))
+        )
+    return out
+
+
 @router.get("/manage/schedules", response_model=list[ManageScheduleRow])
 async def manage_list_today_schedules(
     auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
@@ -131,12 +173,14 @@ async def manage_list_today_schedules(
     from datetime import datetime as _dt, timezone as _tz
     from zoneinfo import ZoneInfo
     from app.models.attendance import Attendance
+    from app.models.attendance_break import AttendanceBreak
     from app.models.schedule import Schedule, StoreWorkRole
     from app.models.work import Shift
     from app.utils.timezone import get_store_day_config, get_work_date
 
     store_tz, day_start = await get_store_day_config(db, device.store_id)
-    today = get_work_date(store_tz, day_start, _dt.now(_tz.utc))
+    now_utc = _dt.now(_tz.utc)
+    today = get_work_date(store_tz, day_start, now_utc)
     tz_info = ZoneInfo(store_tz)
 
     rows = await db.execute(
@@ -152,6 +196,7 @@ async def manage_list_today_schedules(
         )
         .order_by(Schedule.start_time.asc().nulls_last(), User.full_name.asc())
     )
+    all_rows = rows.all()
 
     def _display_tz(value):
         if value is None:
@@ -161,8 +206,37 @@ async def manage_list_today_schedules(
         except Exception:
             return None
 
+    # late_buffer (state/anomaly 시각 계산용)
+    org_id = all_rows[0][0].organization_id if all_rows else None
+    late_buffer = await _resolve_late_buffer(db, org_id, device.store_id)
+
+    # breaks 일괄 조회 (attendance_id 별)
+    att_ids = [att.id for _s, _u, att, _sh in all_rows if att is not None]
+    breaks_by_att: dict = {}
+    if att_ids:
+        br_rows = await db.execute(
+            select(AttendanceBreak)
+            .where(AttendanceBreak.attendance_id.in_(att_ids))
+            .order_by(AttendanceBreak.started_at.asc())
+        )
+        for b in br_rows.scalars().all():
+            breaks_by_att.setdefault(b.attendance_id, []).append(b)
+
     result: list[ManageScheduleRow] = []
-    for sched, user, att, shift_name in rows.all():
+    for sched, user, att, shift_name in all_rows:
+        state, anomalies = compute_state_and_anomalies(
+            att_status=att.status if att else None,
+            att_clock_in=att.clock_in if att else None,
+            att_clock_out=att.clock_out if att else None,
+            att_anomalies=att.anomalies if att else None,
+            schedule_start_time=sched.start_time,
+            schedule_end_time=sched.end_time,
+            schedule_work_date=sched.work_date,
+            now=now_utc,
+            store_tz=tz_info,
+            late_buffer=late_buffer,
+        )
+        breaks = _break_entries(breaks_by_att.get(att.id, []), tz_info) if att else []
         result.append(
             ManageScheduleRow(
                 schedule_id=sched.id,
@@ -176,6 +250,9 @@ async def manage_list_today_schedules(
                 end_time=_format_time_hhmm(sched.end_time),
                 status=sched.status,
                 attendance_id=att.id if att else None,
+                state=state,
+                anomalies=anomalies,
+                breaks=breaks,
                 attendance_status=att.status if att else None,
                 clock_in_display=_display_tz(att.clock_in) if att else None,
                 clock_out_display=_display_tz(att.clock_out) if att else None,
@@ -299,7 +376,7 @@ async def manage_create_schedule(
     # SV 매니저 권한이면 requested 로 떨어졌을 수 있음 → 강제 confirmed
     await _ensure_confirmed_today(db, uuid.UUID(response.id), device.organization_id, manager.id)
     # 재조회하여 응답 빌드
-    return await _admin_schedule_row(db, uuid.UUID(response.id))
+    return await _manage_schedule_row(db, uuid.UUID(response.id))
 
 
 @router.patch("/manage/schedules/{schedule_id}", response_model=ManageScheduleRow)
@@ -338,7 +415,7 @@ async def manage_update_schedule(
     await schedule_service.update_entry(
         db, schedule_id, device.organization_id, payload, actor=manager
     )
-    return await _admin_schedule_row(db, schedule_id)
+    return await _manage_schedule_row(db, schedule_id)
 
 
 @router.delete("/manage/schedules/{schedule_id}", status_code=204)
@@ -389,8 +466,10 @@ async def manage_delete_schedule(
 
 async def _manage_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> ManageScheduleRow:
     """단일 schedule_id → ManageScheduleRow 빌드."""
+    from datetime import datetime as _dt, timezone as _tz
     from zoneinfo import ZoneInfo
     from app.models.attendance import Attendance
+    from app.models.attendance_break import AttendanceBreak
     from app.models.schedule import Schedule, StoreWorkRole
     from app.models.work import Shift
     from app.utils.timezone import get_store_day_config
@@ -409,6 +488,8 @@ async def _manage_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> Mana
 
     tz_name, _ = await get_store_day_config(db, sched.store_id)
     tz_info = ZoneInfo(tz_name)
+    now_utc = _dt.now(_tz.utc)
+    late_buffer = await _resolve_late_buffer(db, sched.organization_id, sched.store_id)
 
     def _display_tz(value):
         if value is None:
@@ -417,6 +498,28 @@ async def _manage_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> Mana
             return value.astimezone(tz_info).strftime("%H:%M")
         except Exception:
             return None
+
+    state, anomalies = compute_state_and_anomalies(
+        att_status=att.status if att else None,
+        att_clock_in=att.clock_in if att else None,
+        att_clock_out=att.clock_out if att else None,
+        att_anomalies=att.anomalies if att else None,
+        schedule_start_time=sched.start_time,
+        schedule_end_time=sched.end_time,
+        schedule_work_date=sched.work_date,
+        now=now_utc,
+        store_tz=tz_info,
+        late_buffer=late_buffer,
+    )
+
+    breaks: list[ManageBreakEntry] = []
+    if att is not None:
+        br_rows = await db.execute(
+            select(AttendanceBreak)
+            .where(AttendanceBreak.attendance_id == att.id)
+            .order_by(AttendanceBreak.started_at.asc())
+        )
+        breaks = _break_entries(br_rows.scalars().all(), tz_info)
 
     return ManageScheduleRow(
         schedule_id=sched.id,
@@ -430,6 +533,9 @@ async def _manage_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> Mana
         end_time=_format_time_hhmm(sched.end_time),
         status=sched.status,
         attendance_id=att.id if att else None,
+        state=state,
+        anomalies=anomalies,
+        breaks=breaks,
         attendance_status=att.status if att else None,
         clock_in_display=_display_tz(att.clock_in) if att else None,
         clock_out_display=_display_tz(att.clock_out) if att else None,
@@ -466,9 +572,9 @@ async def manage_clock_action(
     await _ensure_active_schedule_for_user(db, device, data.user_id)
 
     if action == "cancel_clock_in":
-        return await _admin_cancel_clock_in(db, device, data.user_id, manager, reason)
+        return await _manage_cancel_clock_in(db, device, data.user_id, manager, reason)
     if action == "cancel_clock_out":
-        return await _admin_cancel_clock_out(db, device, data.user_id, manager, reason)
+        return await _manage_cancel_clock_out(db, device, data.user_id, manager, reason)
 
     valid_actions = {"clock_in", "clock_out", "break_start", "break_end"}
     if action not in valid_actions:

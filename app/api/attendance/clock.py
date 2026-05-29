@@ -28,6 +28,7 @@ async def _perform_action(
     action: str,
     break_type: str | None = None,
     reason: str | None = None,
+    schedule_id: uuid.UUID | None = None,
 ) -> dict:
     attendance = await attendance_device_service.perform_clock_action(
         db,
@@ -37,6 +38,7 @@ async def _perform_action(
         user_id=user_id,
         break_type=break_type,
         reason=reason,
+        schedule_id=schedule_id,
     )
     return await attendance_service.build_response(db, attendance)
 
@@ -47,7 +49,10 @@ async def clock_in(
     device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    return await _perform_action(db, device, data.pin, data.user_id, "clock_in")
+    return await _perform_action(
+        db, device, data.pin, data.user_id, "clock_in",
+        schedule_id=data.schedule_id,
+    )
 
 
 @router.post("/clock-out")
