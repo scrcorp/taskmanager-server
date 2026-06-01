@@ -14,10 +14,12 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.api.deps import (
     check_store_access,
+    get_accessible_store_ids,
     get_db,
     require_permission,
 )
@@ -307,6 +309,151 @@ async def list_applications(
     return {"items": items, "counts": counts}
 
 
+# ────────────────────────────────────────────────────────────────
+# Cross-store aggregate list (Inbox)
+# ────────────────────────────────────────────────────────────────
+async def _avg_score_map(
+    db: AsyncSession, app_ids: list[UUID]
+) -> dict[UUID, tuple[Optional[float], int]]:
+    """application_id → (평균 score, review 수) 배치 조회."""
+    out: dict[UUID, tuple[Optional[float], int]] = {}
+    if not app_ids:
+        return out
+    agg_res = await db.execute(
+        select(
+            ApplicationReview.application_id,
+            func.avg(ApplicationReview.score).label("avg_score"),
+            func.count(ApplicationReview.id).label("cnt"),
+        )
+        .where(
+            ApplicationReview.application_id.in_(app_ids),
+            ApplicationReview.score.is_not(None),
+        )
+        .group_by(ApplicationReview.application_id)
+    )
+    for app_id, avg_s, cnt in agg_res.all():
+        out[app_id] = (float(avg_s) if avg_s is not None else None, int(cnt))
+    return out
+
+
+@router.get("/applications")
+async def list_applications_all(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("hiring:read"))],
+    store_id: Optional[UUID] = None,
+    stage: Optional[str] = None,
+    q: Optional[str] = None,
+    sort: str = "recent",
+    page: int = 1,
+    per_page: int = 20,
+) -> dict:
+    """접근 가능한 모든 매장의 지원자를 가로질러 조회 (Inbox).
+
+    스코프는 권한 기반 자동 한정 — Owner는 조직 전체 매장, GM은 관리(is_manager) 매장만.
+    각 항목에 store 정보(id/name/code)를 포함해 어느 매장 지원인지 표시한다.
+
+    Query:
+      store_id  특정 매장으로 필터 (접근 가능한 매장이어야 함)
+      stage     'active'(new+reviewing+interview) 또는 특정 stage
+      q         지원자 이름/이메일/username 부분일치 검색
+      sort      'recent'(submitted_at desc, 기본) | 'updated'(updated_at desc)
+      page/per_page  페이지네이션 (1-base)
+
+    counts 는 store/q 필터는 반영하되 stage 필터·페이지네이션과 무관한 전체 단계별 집계
+    (Inbox 상단 summary strip 용).
+    """
+    org_id = current_user.organization_id
+    accessible = await get_accessible_store_ids(db, current_user)
+
+    # GM/SV 인데 관리 매장이 하나도 없으면 즉시 빈 결과
+    if accessible is not None and len(accessible) == 0:
+        empty_counts = {s: 0 for s in APPLICATION_STAGES}
+        return {"items": [], "total": 0, "page": page, "per_page": per_page, "pages": 0, "counts": empty_counts}
+
+    # 특정 매장 필터 시 접근 권한 검증 (403 → 누수 방지)
+    if store_id is not None:
+        await check_store_access(db, current_user, store_id)
+
+    def _scoped(stmt):
+        stmt = (
+            stmt.join(Store, Store.id == Application.store_id)
+            .where(Store.organization_id == org_id, Store.deleted_at.is_(None))
+        )
+        if accessible is not None:
+            stmt = stmt.where(Application.store_id.in_(accessible))
+        if store_id is not None:
+            stmt = stmt.where(Application.store_id == store_id)
+        if q:
+            like = f"%{q.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    Candidate.full_name.ilike(like),
+                    Candidate.email.ilike(like),
+                    Candidate.username.ilike(like),
+                )
+            )
+        return stmt
+
+    base = _scoped(
+        select(Application, Candidate, Store)
+        .join(Candidate, Candidate.id == Application.candidate_id)
+    )
+
+    # stage 필터 (counts 에는 적용 안 함)
+    filtered = base
+    if stage == "active":
+        filtered = filtered.where(Application.stage.in_(("new", "reviewing", "interview")))
+    elif stage and stage in APPLICATION_STAGES:
+        filtered = filtered.where(Application.stage == stage)
+
+    # 정렬
+    order_col = desc(Application.updated_at) if sort == "updated" else desc(Application.submitted_at)
+    filtered = filtered.order_by(order_col)
+
+    # total
+    total: int = (await db.execute(select(func.count()).select_from(filtered.subquery()))).scalar() or 0
+
+    # 페이지 항목
+    page = max(1, page)
+    per_page = max(1, min(per_page, 100))
+    offset = (page - 1) * per_page
+    rows = (await db.execute(filtered.offset(offset).limit(per_page))).all()
+
+    avg_map = await _avg_score_map(db, [app.id for app, _c, _s in rows])
+    items = []
+    for app, cand, store in rows:
+        item = _serialize_application(
+            app,
+            cand,
+            include_data=False,
+            avg_score=avg_map.get(app.id, (None, 0))[0],
+            review_count=avg_map.get(app.id, (None, 0))[1],
+        )
+        item["store"] = {"id": str(store.id), "name": store.name, "code": store.code}
+        items.append(item)
+
+    # counts — stage 무관, store/q 필터 반영한 전체 단계별 집계
+    counts: dict[str, int] = {s: 0 for s in APPLICATION_STAGES}
+    count_rows = await db.execute(
+        _scoped(
+            select(Application.stage, func.count(Application.id))
+            .join(Candidate, Candidate.id == Application.candidate_id)
+        ).group_by(Application.stage)
+    )
+    for st, cnt in count_rows.all():
+        counts[st] = int(cnt)
+
+    pages = (total + per_page - 1) // per_page
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+        "counts": counts,
+    }
+
+
 @router.get("/applications/{application_id}")
 async def get_application(
     application_id: UUID,
@@ -336,10 +483,12 @@ async def get_application(
         if form is not None:
             form_config = form.config
 
-    # reviews — 평가자별 점수+코멘트
+    # reviews — 평가자별 점수+코멘트. reviewer.role 는 아래에서 priority 를 읽으므로
+    # selectinload 로 eager load (async 컨텍스트 밖 lazy load → MissingGreenlet 방지).
     reviews_res = await db.execute(
         select(ApplicationReview, User)
         .join(User, User.id == ApplicationReview.reviewer_id)
+        .options(selectinload(User.role))
         .where(ApplicationReview.application_id == app_obj.id)
         .order_by(ApplicationReview.created_at)
     )
