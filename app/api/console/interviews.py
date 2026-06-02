@@ -295,7 +295,8 @@ async def confirm_interview(
     if body.interviewer_id is not None:
         iv_obj = (await db.execute(select(User).where(User.id == body.interviewer_id))).scalar_one_or_none()
         iv_name = iv_obj.full_name if iv_obj else None
-    if prev_slot_id and prev_slot_id != body.slot_id:
+    is_reschedule = bool(prev_slot_id and prev_slot_id != body.slot_id)
+    if is_reschedule:
         prev_slot = (await db.execute(select(InterviewSlot).where(InterviewSlot.id == prev_slot_id))).scalar_one_or_none()
         before_when = f"{prev_slot.slot_date.isoformat()} {_hhmm(prev_slot.start_time)}" if prev_slot else None
         _append_interview_history(app_obj, current_user, "interview_rescheduled", before=before_when, after=new_when, interviewer=iv_name)
@@ -304,9 +305,12 @@ async def confirm_interview(
 
     await db.commit()
 
-    # 확정 메일 (best-effort)
-    from app.services.interview_email_service import send_confirmation
-    await send_confirmation(db, app_obj, slot)
+    # 메일 (best-effort) — 시간 변경이면 "변경됨", 신규 확정이면 "확정" 메일
+    from app.services.interview_email_service import send_confirmation, send_reschedule
+    if is_reschedule:
+        await send_reschedule(db, app_obj, slot)
+    else:
+        await send_confirmation(db, app_obj, slot)
 
     return {
         "application_id": str(application_id),
@@ -326,14 +330,21 @@ async def cancel_interview(
     app_obj = await _load_app(db, application_id)
     await check_store_access(db, current_user, app_obj.store_id)
     prev_when = None
+    prev_slot = None
     if app_obj.confirmed_slot_id:
-        ps = (await db.execute(select(InterviewSlot).where(InterviewSlot.id == app_obj.confirmed_slot_id))).scalar_one_or_none()
-        prev_when = f"{ps.slot_date.isoformat()} {_hhmm(ps.start_time)}" if ps else None
+        prev_slot = (await db.execute(select(InterviewSlot).where(InterviewSlot.id == app_obj.confirmed_slot_id))).scalar_one_or_none()
+        prev_when = f"{prev_slot.slot_date.isoformat()} {_hhmm(prev_slot.start_time)}" if prev_slot else None
     app_obj.confirmed_slot_id = None
     app_obj.interviewer_id = None
     app_obj.interview_at = None
     _append_interview_history(app_obj, current_user, "interview_cancelled", before=prev_when)
     await db.commit()
+
+    # 취소 메일 (best-effort) — 확정됐던 인터뷰가 있을 때만
+    if prev_slot is not None:
+        from app.services.interview_email_service import send_cancellation
+        await send_cancellation(db, app_obj, prev_slot)
+
     return {"application_id": str(application_id), "confirmed_slot_id": None}
 
 
@@ -344,7 +355,7 @@ async def update_interviewer(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("hiring:update"))],
 ) -> dict:
-    """인터뷰어만 변경 (시간/확정은 그대로, 메일 발송 없음)."""
+    """인터뷰어만 변경 (시간/확정은 그대로). 새 면접관이 배정되면 지원자에게 변경 메일 발송."""
     app_obj = await _load_app(db, application_id)
     await check_store_access(db, current_user, app_obj.store_id)
     prev_id = app_obj.interviewer_id
@@ -361,6 +372,16 @@ async def update_interviewer(
     app_obj.interviewer_id = body.interviewer_id
     _append_interview_history(app_obj, current_user, "interviewer", before=prev_name, after=new_name)
     await db.commit()
+
+    # 인터뷰어 변경 메일 (best-effort) — 실제로 새 면접관이 배정됐고, 값이 바뀐 경우만
+    changed = body.interviewer_id is not None and body.interviewer_id != prev_id
+    if changed:
+        slot = None
+        if app_obj.confirmed_slot_id:
+            slot = (await db.execute(select(InterviewSlot).where(InterviewSlot.id == app_obj.confirmed_slot_id))).scalar_one_or_none()
+        from app.services.interview_email_service import send_interviewer_update
+        await send_interviewer_update(db, app_obj, slot)
+
     return {"application_id": str(application_id), "interviewer_id": str(body.interviewer_id) if body.interviewer_id else None}
 
 
