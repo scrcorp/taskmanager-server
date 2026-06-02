@@ -52,14 +52,14 @@ def _mk_candidate(tag: str, full_name: str) -> Candidate:
 async def seeded_apps(test_store_id: UUID, second_store_id: UUID):
     """store A(test_store_id) 3건 + store B(second_store_id) 2건 지원자 시드.
 
-    A: new / reviewing / interview, B: new / hired. 테스트 후 모두 정리.
+    A: new / screen / interview, B: new / hired. 테스트 후 모두 정리.
     """
     created_candidate_ids: list[UUID] = []
     created_app_ids: list[UUID] = []
     async with async_session() as db:
         plan = [
             (test_store_id, "a1", "Alice Anderson", "new"),
-            (test_store_id, "a2", "Aaron Avery", "reviewing"),
+            (test_store_id, "a2", "Aaron Avery", "screen"),
             (test_store_id, "a3", "Amy Adams", "interview"),
             (second_store_id, "b1", "Bob Brown", "new"),
             (second_store_id, "b2", "Bella Banks", "hired"),
@@ -134,8 +134,8 @@ async def test_counts_are_stage_independent(async_client: AsyncClient, admin_hea
     resp = await async_client.get(URL, params={"stage": "active"}, headers=admin_headers)
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # items 는 active(new/reviewing/interview)만
-    assert all(it["stage"] in ("new", "reviewing", "interview") for it in body["items"])
+    # items 는 active(new/screen/interview/review)만
+    assert all(it["stage"] in ("new", "screen", "interview", "review") for it in body["items"])
     # counts 에는 hired 도 집계됨 (store B 의 Bella)
     assert body["counts"]["hired"] >= 1
 

@@ -66,7 +66,7 @@ async def gm_can_review(test_store_id: UUID, test_users: dict):
             await db.execute(select(Permission).where(Permission.code == "hiring:write"))
         ).scalar_one_or_none()
         if perm is None:
-            perm = Permission(code="hiring:write")
+            perm = Permission(code="hiring:write", resource="hiring", action="write")
             db.add(perm)
             await db.flush()
             created["perm_id"] = perm.id

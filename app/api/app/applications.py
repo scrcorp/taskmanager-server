@@ -106,7 +106,7 @@ async def candidate_login(
         )
 
     # 가장 최근 application 가져옴 — 어느 stage든 status 화면에 보여줄 수 있도록.
-    # (pending_form: 이어서 폼 작성 / new/reviewing/interview: 진행 상태 표시 /
+    # (pending_form: 이어서 폼 작성 / new/screen/interview/review: 진행 상태 표시 /
     #  hired/rejected/withdrawn: 결과 표시)
     latest_res = await db.execute(
         select(Application)

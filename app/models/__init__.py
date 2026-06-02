@@ -42,6 +42,7 @@ from app.models.email_verification import EmailVerificationCode
 from app.models.inventory import InventoryCategory, InventorySubUnit, InventoryProduct, StoreInventory, InventoryTransaction, InventoryAudit, InventoryAuditItem, InventoryAuditSetting
 from app.models.settings import SettingsRegistry, OrgSetting, StoreSetting, StaffSetting
 from app.models.hiring import StoreHiringForm, Candidate, Application, CandidateBlock
+from app.models.interview import InterviewSlot, InterviewSlotPreference
 from app.models.app_version import AppVersion
 from app.models.tip import TipEntry, TipDistribution, TipAuditLog, TipPeriod, Form4070Document
 from app.models.schedule_report import ScheduleReportSnapshot
@@ -68,6 +69,7 @@ __all__ = [
     "InventoryCategory", "InventorySubUnit", "InventoryProduct", "StoreInventory", "InventoryTransaction", "InventoryAudit", "InventoryAuditItem", "InventoryAuditSetting",
     "SettingsRegistry", "OrgSetting", "StoreSetting", "StaffSetting",
     "StoreHiringForm", "Candidate", "Application", "CandidateBlock",
+    "InterviewSlot", "InterviewSlotPreference",
     "AppVersion",
     "TipEntry", "TipDistribution", "TipAuditLog", "TipPeriod", "Form4070Document",
     "ScheduleReportSnapshot",
