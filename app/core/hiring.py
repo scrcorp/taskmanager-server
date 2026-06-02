@@ -191,11 +191,14 @@ class ApplicantData(BaseModel):
 # ── Stage ────────────────────────────────────────────────────
 # pending_form: 회원가입은 됐으나 폼 미작성. 매니저 인박스에는 안 보임.
 #               candidate 로그인 시 이 application 이어서 작성 가능.
+# 단계 흐름: pending_form → new → screen(서류검토) → interview → review(검수/최종결정)
+#            → hired / rejected / withdrawn.  (2026-06-01 모델 변경: reviewing→screen, review 신규)
 ApplicationStage = Literal[
     "pending_form",
     "new",
-    "reviewing",
+    "screen",
     "interview",
+    "review",
     "hired",
     "rejected",
     "withdrawn",
@@ -203,8 +206,9 @@ ApplicationStage = Literal[
 APPLICATION_STAGES: tuple[ApplicationStage, ...] = (
     "pending_form",
     "new",
-    "reviewing",
+    "screen",
     "interview",
+    "review",
     "hired",
     "rejected",
     "withdrawn",
@@ -214,14 +218,16 @@ APPLICATION_STAGES: tuple[ApplicationStage, ...] = (
 ACTIVE_STAGES: tuple[ApplicationStage, ...] = (
     "pending_form",
     "new",
-    "reviewing",
+    "screen",
     "interview",
+    "review",
 )
 # 매니저 인박스/Pipeline에 표시되는 단계 (pending_form 제외)
 MANAGER_VISIBLE_STAGES: tuple[ApplicationStage, ...] = (
     "new",
-    "reviewing",
+    "screen",
     "interview",
+    "review",
     "hired",
     "rejected",
     "withdrawn",

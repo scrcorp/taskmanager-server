@@ -5,7 +5,7 @@ Hiring domain: per-store signup form, candidate (person), application (per-store
 설계 원칙:
 - candidate = 사람 (한 번 가입하면 row 1개, 여러 매장 지원해도 동일 row)
 - application = 한 매장 지원 1건 (후보자 × 매장 × 시도)
-- 활성 application(new/reviewing/interview)은 후보자×매장당 1개로 제한
+- 활성 application(new/screen/interview/review)은 후보자×매장당 1개로 제한
 - 떨어지거나(rejected) 본인 철회(withdrawn)는 재지원 가능
 - 모든 가변 구조는 JSONB로 격리. 스키마는 app/core/hiring.py.
 """
@@ -125,7 +125,7 @@ class Candidate(Base):
 class Application(Base):
     """한 사람이 한 매장에 지원한 1건. 같은 매장 재지원이면 새 row(attempt_no 증가).
 
-    활성 application(new/reviewing/interview)은 후보자×매장당 1개만 허용.
+    활성 application(new/screen/interview/review)은 후보자×매장당 1개만 허용.
     rejected/withdrawn/hired 후엔 재지원 가능.
     """
 
@@ -148,6 +148,14 @@ class Application(Base):
     stage: Mapped[str] = mapped_column(String(20), nullable=False, default="new", index=True)
     score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     interview_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 인터뷰 스케줄링 (#2) — 확정 슬롯 + 인터뷰어 + 공개 링크 토큰 nonce(jti, 회전/무효화용)
+    confirmed_slot_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, ForeignKey("interview_slots.id", ondelete="SET NULL"), nullable=True
+    )
+    interviewer_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    interview_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # 변경 히스토리 — [{action, before, after, by_user_id, by_username, at}, ...]
     history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
@@ -168,7 +176,7 @@ class Application(Base):
             "candidate_id",
             "store_id",
             unique=True,
-            postgresql_where=text("stage IN ('new','reviewing','interview')"),
+            postgresql_where=text("stage IN ('new','screen','interview','review')"),
         ),
     )
 

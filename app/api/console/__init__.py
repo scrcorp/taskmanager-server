@@ -241,6 +241,8 @@ console_router.include_router(bulk_upload_router, prefix="/bulk", tags=["Bulk Up
 # ---------------------------------------------------------------------------
 from app.api.console.hiring import router as hiring_router  # noqa: E402
 console_router.include_router(hiring_router, tags=["Admin Hiring"])
+from app.api.console.interviews import router as interviews_router  # noqa: E402
+console_router.include_router(interviews_router, tags=["Admin Hiring Interviews"])
 
 # ---------------------------------------------------------------------------
 # App Versions 라우터 등록 — sideload APK 릴리스 카탈로그

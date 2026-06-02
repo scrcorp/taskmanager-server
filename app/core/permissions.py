@@ -184,6 +184,7 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     # ── Hiring (Form builder + applications) ──
     ("hiring:read",   "hiring", "read",   "View hiring form and applications", False),
     ("hiring:update", "hiring", "update", "Edit hiring form, change application stage", False),
+    ("hiring:write",  "hiring", "write",  "Add or edit your own applicant review", False),
     ("hiring:hire",   "hiring", "hire",   "Convert applicant into staff", True),
     ("hiring:block",  "hiring", "block",  "Block candidates from a store", True),
 
