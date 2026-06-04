@@ -106,7 +106,7 @@ async def candidate_login(
         )
 
     # 가장 최근 application 가져옴 — 어느 stage든 status 화면에 보여줄 수 있도록.
-    # (pending_form: 이어서 폼 작성 / new/reviewing/interview: 진행 상태 표시 /
+    # (pending_form: 이어서 폼 작성 / new/screen/interview/review: 진행 상태 표시 /
     #  hired/rejected/withdrawn: 결과 표시)
     latest_res = await db.execute(
         select(Application)
@@ -133,6 +133,21 @@ async def candidate_login(
     db.add(dummy)
     await db.commit()
 
+    # 확정된 인터뷰가 있으면 status 화면에 보여줄 일정 정보 (store-local 라벨)
+    interview_info = None
+    if pending_app and pending_app.confirmed_slot_id:
+        from app.models.interview import InterviewSlot
+        from app.services.interview_email_service import _interviewer_label, _slot_when_label
+
+        slot = (
+            await db.execute(select(InterviewSlot).where(InterviewSlot.id == pending_app.confirmed_slot_id))
+        ).scalar_one_or_none()
+        if slot is not None:
+            interview_info = {
+                "at_label": await _slot_when_label(db, pending_app.store_id, slot),
+                "interviewer": await _interviewer_label(db, pending_app),
+            }
+
     return {
         "candidate_id": str(candidate.id),
         "username": candidate.username,
@@ -144,6 +159,7 @@ async def candidate_login(
                 "id": str(pending_app.id),
                 "store_id": str(pending_app.store_id),
                 "stage": pending_app.stage,
+                "interview": interview_info,
             }
             if pending_app
             else None

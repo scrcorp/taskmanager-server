@@ -317,6 +317,129 @@ def build_temporary_password_email(temp_password: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Interview scheduling (#2)
+# ---------------------------------------------------------------------------
+def _interview_shell(store_name: str, heading: str, intro: str, inner: str) -> str:
+    return f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background-color:#F8FAFC;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F8FAFC;">
+    <tr><td align="center" style="padding:32px 16px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+        <tr><td style="background-color:#3B8DD9;padding:24px 28px;"><div style="font-size:22px;font-weight:700;color:#FFFFFF;">{escape(store_name)}</div></td></tr>
+        <tr><td style="padding:32px 28px;">
+          <div style="font-size:20px;font-weight:700;color:#1E293B;margin-bottom:8px;">{escape(heading)}</div>
+          <div style="font-size:14px;line-height:1.6;color:#475569;margin-bottom:24px;">{intro}</div>
+          {inner}
+        </td></tr>
+        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">{escape(store_name)} hiring</div></td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def build_interview_invite_email(
+    first_name: str, store_name: str, link: str, tz_label: str = ""
+) -> tuple[str, str]:
+    """인터뷰 요청 메일 — 지원자가 희망 시간을 고르는 링크. interview 단계 도달 시 발송."""
+    subject = f"You're invited to schedule your interview at {store_name}"
+    tz = f" All times are in {escape(tz_label)} (store time)." if tz_label else ""
+    intro = (
+        f"Hi {escape(first_name)},<br><br>"
+        f"Great news — you've reached the <strong>interview</strong> stage at {escape(store_name)}. "
+        f"Please pick up to <strong>3 times</strong> that work for you. We'll confirm one of them and email you the final time.{tz}"
+    )
+    inner = f"""\
+<div style="text-align:center;margin:8px 0 20px;">
+  <a href="{escape(link)}" style="display:inline-block;padding:14px 28px;background-color:#3B8DD9;color:#FFFFFF;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;">Select your interview time →</a>
+</div>
+<div style="font-size:12px;color:#94A3B8;">This scheduling link is unique to you and expires in 14 days. If none of the times work, reply to this email.</div>"""
+    return subject, _interview_shell(store_name, "Schedule your interview", intro, inner)
+
+
+def build_interview_confirmation_email(
+    first_name: str, store_name: str, when_label: str, interviewer_name: str | None = None
+) -> tuple[str, str]:
+    """확정 메일 — 어드민이 시간 확정 후 발송."""
+    subject = f"Your interview at {store_name} is confirmed"
+    intro = f"Hi {escape(first_name)},<br><br>Your interview is confirmed. Here are the details:"
+    with_who = f"<div style=\"font-size:13px;color:#475569;margin-top:4px;\">with {escape(interviewer_name)}</div>" if interviewer_name else ""
+    inner = f"""\
+<div style="border:1px solid #E2E8F0;border-radius:8px;padding:16px 20px;background-color:#F8FAFC;">
+  <div style="font-size:18px;font-weight:700;color:#1E293B;">{escape(when_label)}</div>
+  <div style="font-size:13px;color:#475569;margin-top:2px;">{escape(store_name)}</div>
+  {with_who}
+</div>
+<div style="font-size:12px;color:#94A3B8;margin-top:20px;">Need to reschedule? Reply to this email.</div>"""
+    return subject, _interview_shell(store_name, "Interview confirmed", intro, inner)
+
+
+def build_interview_reschedule_email(
+    first_name: str, store_name: str, when_label: str, interviewer_name: str | None = None
+) -> tuple[str, str]:
+    """일정 변경 메일 — 어드민이 확정된 인터뷰 시간을 다른 슬롯으로 바꿨을 때 발송."""
+    subject = f"Your interview time at {store_name} has changed"
+    intro = (
+        f"Hi {escape(first_name)},<br><br>"
+        f"Your interview time has been updated. Here are the new details:"
+    )
+    with_who = f"<div style=\"font-size:13px;color:#475569;margin-top:4px;\">with {escape(interviewer_name)}</div>" if interviewer_name else ""
+    inner = f"""\
+<div style="border:1px solid #F59E0B;border-radius:8px;padding:16px 20px;background-color:#FFFBEB;">
+  <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#B45309;">New time</div>
+  <div style="font-size:18px;font-weight:700;color:#1E293B;margin-top:4px;">{escape(when_label)}</div>
+  <div style="font-size:13px;color:#475569;margin-top:2px;">{escape(store_name)}</div>
+  {with_who}
+</div>
+<div style="font-size:12px;color:#94A3B8;margin-top:20px;">This replaces any time you were given earlier. Can't make it? Reply to this email.</div>"""
+    return subject, _interview_shell(store_name, "Interview time updated", intro, inner)
+
+
+def build_interview_cancellation_email(
+    first_name: str, store_name: str, when_label: str | None = None
+) -> tuple[str, str]:
+    """취소 메일 — 어드민이 확정된 인터뷰를 취소했을 때 발송."""
+    subject = f"Your interview at {store_name} has been cancelled"
+    was = f" that was scheduled for <strong>{escape(when_label)}</strong>" if when_label else ""
+    intro = (
+        f"Hi {escape(first_name)},<br><br>"
+        f"Your interview at {escape(store_name)}{was} has been cancelled."
+    )
+    inner = """\
+<div style="font-size:13px;color:#475569;">If this is unexpected, or you'd like to reschedule, just reply to this email and we'll sort it out.</div>"""
+    return subject, _interview_shell(store_name, "Interview cancelled", intro, inner)
+
+
+def build_interview_interviewer_email(
+    first_name: str, store_name: str, interviewer_label: str, when_label: str | None = None
+) -> tuple[str, str]:
+    """인터뷰어 변경 메일 — 시간은 그대로, 면접관만 바뀌었을 때 발송. interviewer_label 예: "Mina Park (GM)"."""
+    subject = f"Your interviewer for the {store_name} interview has changed"
+    intro = (
+        f"Hi {escape(first_name)},<br><br>"
+        f"The person who'll be interviewing you has been updated. Here are the details:"
+    )
+    when_row = (
+        f"<div style=\"font-size:13px;color:#475569;margin-top:2px;\">{escape(when_label)}</div>"
+        if when_label
+        else ""
+    )
+    inner = f"""\
+<div style="border:1px solid #E2E8F0;border-radius:8px;padding:16px 20px;background-color:#F8FAFC;">
+  <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#64748B;">Interviewer</div>
+  <div style="font-size:18px;font-weight:700;color:#1E293B;margin-top:4px;">{escape(interviewer_label)}</div>
+  <div style="font-size:13px;color:#475569;margin-top:2px;">{escape(store_name)}</div>
+  {when_row}
+</div>
+<div style="font-size:12px;color:#94A3B8;margin-top:20px;">Your interview time hasn't changed. Questions? Reply to this email.</div>"""
+    return subject, _interview_shell(store_name, "Interviewer updated", intro, inner)
+
+
+# ---------------------------------------------------------------------------
 # Schedule daily report
 # ---------------------------------------------------------------------------
 

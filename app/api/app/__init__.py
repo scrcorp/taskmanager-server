@@ -150,3 +150,5 @@ app_router.include_router(app_inventory_router, tags=["App Inventory"])
 # ---------------------------------------------------------------------------
 from app.api.app.applications import router as app_applications_router  # noqa: E402
 app_router.include_router(app_applications_router, tags=["App Applications"])
+from app.api.app.interview_schedule import router as interview_schedule_router  # noqa: E402
+app_router.include_router(interview_schedule_router, tags=["Public Interview Scheduling"])

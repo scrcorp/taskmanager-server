@@ -14,10 +14,12 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.api.deps import (
     check_store_access,
+    get_accessible_store_ids,
     get_db,
     require_permission,
 )
@@ -252,7 +254,7 @@ async def list_applications(
     current_user: Annotated[User, Depends(require_permission("hiring:read"))],
     stage: Optional[str] = None,
 ) -> dict:
-    """매장 지원자 목록. stage 쿼리로 필터링 가능 ('active' = new+reviewing+interview)."""
+    """매장 지원자 목록. stage 쿼리로 필터링 가능 ('active' = new+screen+interview+review)."""
     await check_store_access(db, current_user, store_id)
 
     # 'all' (default) 은 pending_form 까지 포함 — 회원가입만 하고 폼 미제출인 사람도 표시.
@@ -264,7 +266,7 @@ async def list_applications(
         .order_by(desc(Application.submitted_at))
     )
     if stage == "active":
-        stmt = stmt.where(Application.stage.in_(("new", "reviewing", "interview")))
+        stmt = stmt.where(Application.stage.in_(("new", "screen", "interview", "review")))
     elif stage and stage in APPLICATION_STAGES:
         stmt = stmt.where(Application.stage == stage)
     # else: default — 모든 stage 포함 (pending_form 도 보이도록)
@@ -307,6 +309,179 @@ async def list_applications(
     return {"items": items, "counts": counts}
 
 
+# ────────────────────────────────────────────────────────────────
+# Cross-store aggregate list (Inbox)
+# ────────────────────────────────────────────────────────────────
+async def _avg_score_map(
+    db: AsyncSession, app_ids: list[UUID]
+) -> dict[UUID, tuple[Optional[float], int]]:
+    """application_id → (평균 score, review 수) 배치 조회."""
+    out: dict[UUID, tuple[Optional[float], int]] = {}
+    if not app_ids:
+        return out
+    agg_res = await db.execute(
+        select(
+            ApplicationReview.application_id,
+            func.avg(ApplicationReview.score).label("avg_score"),
+            func.count(ApplicationReview.id).label("cnt"),
+        )
+        .where(
+            ApplicationReview.application_id.in_(app_ids),
+            ApplicationReview.score.is_not(None),
+        )
+        .group_by(ApplicationReview.application_id)
+    )
+    for app_id, avg_s, cnt in agg_res.all():
+        out[app_id] = (float(avg_s) if avg_s is not None else None, int(cnt))
+    return out
+
+
+@router.get("/applications")
+async def list_applications_all(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("hiring:read"))],
+    store_id: Optional[UUID] = None,
+    stage: Optional[str] = None,
+    q: Optional[str] = None,
+    sort: str = "recent",
+    page: int = 1,
+    per_page: int = 20,
+) -> dict:
+    """접근 가능한 모든 매장의 지원자를 가로질러 조회 (Inbox).
+
+    스코프는 권한 기반 자동 한정 — Owner는 조직 전체 매장, GM은 관리(is_manager) 매장만.
+    각 항목에 store 정보(id/name/code)를 포함해 어느 매장 지원인지 표시한다.
+
+    Query:
+      store_id  특정 매장으로 필터 (접근 가능한 매장이어야 함)
+      stage     'active'(new+screen+interview+review) 또는 특정 stage
+      q         지원자 이름/이메일/username 부분일치 검색
+      sort      'recent'(submitted_at desc, 기본) | 'updated'(updated_at desc)
+      page/per_page  페이지네이션 (1-base)
+
+    counts 는 store/q 필터는 반영하되 stage 필터·페이지네이션과 무관한 전체 단계별 집계
+    (Inbox 상단 summary strip 용).
+    """
+    org_id = current_user.organization_id
+    accessible = await get_accessible_store_ids(db, current_user)
+
+    # GM/SV 인데 관리 매장이 하나도 없으면 즉시 빈 결과
+    if accessible is not None and len(accessible) == 0:
+        empty_counts = {s: 0 for s in APPLICATION_STAGES}
+        return {"items": [], "total": 0, "page": page, "per_page": per_page, "pages": 0, "counts": empty_counts}
+
+    # 특정 매장 필터 시 접근 권한 검증 (403 → 누수 방지)
+    if store_id is not None:
+        await check_store_access(db, current_user, store_id)
+
+    def _scoped(stmt):
+        stmt = (
+            stmt.join(Store, Store.id == Application.store_id)
+            .where(Store.organization_id == org_id, Store.deleted_at.is_(None))
+        )
+        if accessible is not None:
+            stmt = stmt.where(Application.store_id.in_(accessible))
+        if store_id is not None:
+            stmt = stmt.where(Application.store_id == store_id)
+        if q:
+            like = f"%{q.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    Candidate.full_name.ilike(like),
+                    Candidate.email.ilike(like),
+                    Candidate.username.ilike(like),
+                )
+            )
+        return stmt
+
+    base = _scoped(
+        select(Application, Candidate, Store)
+        .join(Candidate, Candidate.id == Application.candidate_id)
+    )
+
+    # stage 필터 (counts 에는 적용 안 함)
+    filtered = base
+    if stage == "active":
+        filtered = filtered.where(Application.stage.in_(("new", "screen", "interview", "review")))
+    elif stage and stage in APPLICATION_STAGES:
+        filtered = filtered.where(Application.stage == stage)
+
+    # 정렬
+    order_col = desc(Application.updated_at) if sort == "updated" else desc(Application.submitted_at)
+    filtered = filtered.order_by(order_col)
+
+    # total
+    total: int = (await db.execute(select(func.count()).select_from(filtered.subquery()))).scalar() or 0
+
+    # 페이지 항목
+    page = max(1, page)
+    per_page = max(1, min(per_page, 100))
+    offset = (page - 1) * per_page
+    rows = (await db.execute(filtered.offset(offset).limit(per_page))).all()
+
+    avg_map = await _avg_score_map(db, [app.id for app, _c, _s in rows])
+    # 인터뷰 4스텝 진행표시용 — 페이지 내 application 중 희망 슬롯을 제출한 것 (batch)
+    from app.models.interview import InterviewSlotPreference
+    page_ids = [app.id for app, _c, _s in rows]
+    picked_ids: set = set()
+    if page_ids:
+        pref_res = await db.execute(
+            select(InterviewSlotPreference.application_id)
+            .where(InterviewSlotPreference.application_id.in_(page_ids))
+            .distinct()
+        )
+        picked_ids = {r[0] for r in pref_res.all()}
+    # 인터뷰어 이름 batch (확정된 application 표시용)
+    iv_ids = [app.interviewer_id for app, _c, _s in rows if app.interviewer_id]
+    iv_name_map: dict = {}
+    if iv_ids:
+        iv_rows = await db.execute(select(User.id, User.full_name).where(User.id.in_(iv_ids)))
+        iv_name_map = {uid: name for uid, name in iv_rows.all()}
+    items = []
+    for app, cand, store in rows:
+        item = _serialize_application(
+            app,
+            cand,
+            include_data=False,
+            avg_score=avg_map.get(app.id, (None, 0))[0],
+            review_count=avg_map.get(app.id, (None, 0))[1],
+        )
+        item["store"] = {"id": str(store.id), "name": store.name, "code": store.code}
+        # 인터뷰 sub-status: requested(토큰발급) → picked(희망제출) → confirmed(확정)
+        item["interview_substatus"] = (
+            "confirmed" if app.confirmed_slot_id
+            else "picked" if app.id in picked_ids
+            else "requested" if app.interview_token
+            else "not_requested"
+        )
+        item["interviewer_name"] = iv_name_map.get(app.interviewer_id) if app.interviewer_id else None
+        items.append(item)
+
+    # counts — stage 무관, store/q 필터 반영한 전체 단계별 집계
+    counts: dict[str, int] = {s: 0 for s in APPLICATION_STAGES}
+    count_rows = await db.execute(
+        _scoped(
+            select(Application.stage, func.count(Application.id))
+            .join(Candidate, Candidate.id == Application.candidate_id)
+        ).group_by(Application.stage)
+    )
+    for st, cnt in count_rows.all():
+        counts[st] = int(cnt)
+
+    pages = (total + per_page - 1) // per_page
+    from app.utils.timezone import get_org_timezone
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+        "counts": counts,
+        # 확정 인터뷰 시각을 org timezone 으로 표시하기 위함 (브라우저 tz 아님)
+        "org_timezone": await get_org_timezone(db, org_id),
+    }
+
+
 @router.get("/applications/{application_id}")
 async def get_application(
     application_id: UUID,
@@ -336,10 +511,12 @@ async def get_application(
         if form is not None:
             form_config = form.config
 
-    # reviews — 평가자별 점수+코멘트
+    # reviews — 평가자별 점수+코멘트. reviewer.role 는 아래에서 priority 를 읽으므로
+    # selectinload 로 eager load (async 컨텍스트 밖 lazy load → MissingGreenlet 방지).
     reviews_res = await db.execute(
         select(ApplicationReview, User)
         .join(User, User.id == ApplicationReview.reviewer_id)
+        .options(selectinload(User.role))
         .where(ApplicationReview.application_id == app_obj.id)
         .order_by(ApplicationReview.created_at)
     )
@@ -479,7 +656,12 @@ async def patch_application(
                 "after": body.stage,
                 **actor,
             })
+            entered_interview = body.stage == "interview" and app_obj.stage != "interview"
             app_obj.stage = body.stage
+            if entered_interview:
+                # interview 진입 → 토큰 발급 + 지원자에게 시간 선택 초대 메일 (best-effort)
+                from app.services.interview_email_service import issue_and_send_invite
+                await issue_and_send_invite(db, app_obj)
     if body.score is not None and body.score != app_obj.score:
         _append_history(app_obj, {
             "action": "score",
@@ -676,7 +858,7 @@ async def unhire_application(
 ) -> dict:
     """잘못 hire한 application을 되돌린다.
 
-    - application.stage = 'reviewing'
+    - application.stage = 'review' (인터뷰까지 거쳤으므로 검수 단계로 복귀)
     - 해당 매장과의 user_stores 연결 삭제 (그 매장 staff 아님)
     - user 계정 자체는 유지 (다른 매장 hire 가능성 + candidate.promoted_user_id 참조 보존)
     """
@@ -716,14 +898,14 @@ async def unhire_application(
     _append_history(app_obj, {
         "action": "stage",
         "before": "hired",
-        "after": "reviewing",
+        "after": "review",
         "by_user_id": str(current_user.id),
         "by_username": current_user.username,
         "by_full_name": current_user.full_name,
         "at": _now_iso(),
         "note": "Unhired — staff connection to this store removed",
     })
-    app_obj.stage = "reviewing"
+    app_obj.stage = "review"
     await db.commit()
 
     return {
