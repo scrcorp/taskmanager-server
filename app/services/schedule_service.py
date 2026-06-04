@@ -64,6 +64,10 @@ class ScheduleService:
         return max(total, 0)
 
     async def _to_response(self, db: AsyncSession, entry: Schedule) -> ScheduleResponse:
+        """단일 entry → 응답. 행별 조회 (단건 호출용).
+
+        목록 변환은 N+1을 피하기 위해 `_list_to_responses`를 사용한다.
+        """
         # User name + FOH/BOH 분류 (한 쿼리로 함께 조회)
         user_result = await db.execute(
             select(User.full_name, User.department).where(User.id == entry.user_id)
@@ -90,9 +94,8 @@ class ScheduleService:
                     work_role_name = f"{sn} - {pn}"
 
         # effective_rate: schedule.hourly_rate가 있으면 그대로, 없으면 cascade로 계산
-        stored_rate = float(entry.hourly_rate) if entry.hourly_rate is not None else 0.0
         if entry.hourly_rate is not None and entry.hourly_rate > 0:
-            effective_rate: float | None = stored_rate
+            effective_rate: float | None = float(entry.hourly_rate)
             effective_source: str | None = "schedule"
         else:
             rate, source = await self._resolve_hourly_rate_with_source(
@@ -101,6 +104,154 @@ class ScheduleService:
             effective_rate = rate if source else None
             effective_source = source
 
+        return self._build_response(
+            entry,
+            user_name=user_name,
+            user_department=user_department,
+            store_name=store_name,
+            work_role_name=work_role_name,
+            effective_rate=effective_rate,
+            effective_source=effective_source,
+        )
+
+    async def _list_to_responses(
+        self, db: AsyncSession, entries: list[Schedule],
+    ) -> list[ScheduleResponse]:
+        """목록 → 응답. 관련 테이블을 IN 쿼리로 일괄 prefetch하여 N+1 제거.
+
+        단건 `_to_response`가 행마다 5~8개 쿼리를 날리던 것을, 등장하는
+        user/store/work_role/org id를 모아 테이블당 1쿼리로 처리한다.
+        """
+        if not entries:
+            return []
+
+        user_ids = {e.user_id for e in entries if e.user_id}
+        store_ids = {e.store_id for e in entries if e.store_id}
+        work_role_ids = {e.work_role_id for e in entries if e.work_role_id}
+        org_ids = {e.organization_id for e in entries if e.organization_id}
+
+        # User: full_name / department / hourly_rate
+        users: dict[UUID, Any] = {}
+        if user_ids:
+            rows = await db.execute(
+                select(User.id, User.full_name, User.department, User.hourly_rate)
+                .where(User.id.in_(user_ids))
+            )
+            users = {r.id: r for r in rows}
+
+        # Store: name / default_hourly_rate
+        stores: dict[UUID, Any] = {}
+        if store_ids:
+            rows = await db.execute(
+                select(Store.id, Store.name, Store.default_hourly_rate)
+                .where(Store.id.in_(store_ids))
+            )
+            stores = {r.id: r for r in rows}
+
+        # Organization: default_hourly_rate
+        orgs: dict[UUID, Any] = {}
+        if org_ids:
+            rows = await db.execute(
+                select(Organization.id, Organization.default_hourly_rate)
+                .where(Organization.id.in_(org_ids))
+            )
+            orgs = {r.id: r for r in rows}
+
+        # StoreWorkRole + (name 없는 role 한정) Shift / Position 이름
+        work_roles: dict[UUID, StoreWorkRole] = {}
+        shift_ids: set[UUID] = set()
+        position_ids: set[UUID] = set()
+        if work_role_ids:
+            rows = await db.execute(
+                select(StoreWorkRole).where(StoreWorkRole.id.in_(work_role_ids))
+            )
+            for wr in rows.scalars():
+                work_roles[wr.id] = wr
+                if not wr.name:
+                    shift_ids.add(wr.shift_id)
+                    position_ids.add(wr.position_id)
+        shifts: dict[UUID, str | None] = {}
+        if shift_ids:
+            rows = await db.execute(select(Shift.id, Shift.name).where(Shift.id.in_(shift_ids)))
+            shifts = {r.id: r.name for r in rows}
+        positions: dict[UUID, str | None] = {}
+        if position_ids:
+            rows = await db.execute(select(Position.id, Position.name).where(Position.id.in_(position_ids)))
+            positions = {r.id: r.name for r in rows}
+
+        responses: list[ScheduleResponse] = []
+        for entry in entries:
+            u = users.get(entry.user_id) if entry.user_id else None
+            user_name = u.full_name if u else None
+            user_department = u.department if u else None
+            store_row = stores.get(entry.store_id) if entry.store_id else None
+            store_name = store_row.name if store_row else None
+
+            work_role_name: str | None = None
+            if entry.work_role_id:
+                wr = work_roles.get(entry.work_role_id)
+                if wr:
+                    if wr.name:
+                        work_role_name = wr.name
+                    else:
+                        sn = shifts.get(wr.shift_id) or ""
+                        pn = positions.get(wr.position_id) or ""
+                        work_role_name = f"{sn} - {pn}"
+
+            if entry.hourly_rate is not None and entry.hourly_rate > 0:
+                effective_rate: float | None = float(entry.hourly_rate)
+                effective_source: str | None = "schedule"
+            else:
+                effective_rate, effective_source = self._resolve_rate_from_maps(
+                    entry, users, stores, orgs,
+                )
+
+            responses.append(self._build_response(
+                entry,
+                user_name=user_name,
+                user_department=user_department,
+                store_name=store_name,
+                work_role_name=work_role_name,
+                effective_rate=effective_rate,
+                effective_source=effective_source,
+            ))
+        return responses
+
+    @staticmethod
+    def _resolve_rate_from_maps(
+        entry: Schedule,
+        users: dict[UUID, Any],
+        stores: dict[UUID, Any],
+        orgs: dict[UUID, Any],
+    ) -> tuple[float | None, str | None]:
+        """prefetch된 map으로 user→store→org cascade 시급 결정.
+
+        `_resolve_hourly_rate_with_source`와 동일 규칙. 어디서도 없으면 (None, None).
+        """
+        u = users.get(entry.user_id) if entry.user_id else None
+        if u is not None and u.hourly_rate is not None:
+            return float(u.hourly_rate), "user"
+        st = stores.get(entry.store_id) if entry.store_id else None
+        if st is not None and st.default_hourly_rate is not None:
+            return float(st.default_hourly_rate), "store"
+        o = orgs.get(entry.organization_id) if entry.organization_id else None
+        if o is not None and o.default_hourly_rate is not None:
+            return float(o.default_hourly_rate), "org"
+        return None, None
+
+    def _build_response(
+        self,
+        entry: Schedule,
+        *,
+        user_name: str | None,
+        user_department: str | None,
+        store_name: str | None,
+        work_role_name: str | None,
+        effective_rate: float | None,
+        effective_source: str | None,
+    ) -> ScheduleResponse:
+        """resolve된 값들 + entry → ScheduleResponse. 단건/목록 경로 공용 빌더."""
+        stored_rate = float(entry.hourly_rate) if entry.hourly_rate is not None else 0.0
         return ScheduleResponse(
             id=str(entry.id),
             organization_id=str(entry.organization_id),
@@ -317,7 +468,7 @@ class ScheduleService:
             exclude_cancelled=(status is None),
             accessible_store_ids=accessible_store_ids,
         )
-        responses = [await self._to_response(db, e) for e in entries]
+        responses = await self._list_to_responses(db, list(entries))
         return responses, total
 
     async def create_entry(
