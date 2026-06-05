@@ -54,6 +54,7 @@ class StoreService:
             state_code=store.state_code,
             timezone=store.timezone,
             default_hourly_rate=float(store.default_hourly_rate) if store.default_hourly_rate is not None else None,
+            accepting_signups=store.accepting_signups,
             created_at=store.created_at,
         )
 
@@ -122,6 +123,7 @@ class StoreService:
             state_code=store.state_code,
             timezone=store.timezone,
             default_hourly_rate=float(store.default_hourly_rate) if store.default_hourly_rate is not None else None,
+            accepting_signups=store.accepting_signups,
             created_at=store.created_at,
             shifts=[
                 ShiftResponse(id=str(s.id), name=s.name, sort_order=s.sort_order)

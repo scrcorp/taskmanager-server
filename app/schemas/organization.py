@@ -133,6 +133,7 @@ class StoreResponse(BaseModel):
     state_code: str | None = None  # 주(State) 코드 (US state code)
     timezone: str | None = None  # IANA 타임존 (Store timezone override)
     default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate)
+    accepting_signups: bool = True  # 가입/지원 접수 여부 (Hiring signups open flag)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 
