@@ -415,3 +415,44 @@ async def sync_default_role_permissions() -> None:
                 )
     except Exception as e:
         logger.warning(f"Failed to sync default role_permissions: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Startup: Evaluation Basic template bootstrap
+# ---------------------------------------------------------------------------
+# 모든 조직에 is_default Basic 평가 템플릿 1개를 보장 (없는 조직만 backfill).
+# v1 에서 템플릿이 생성되는 유일한 경로(startup 시드 + 신규 org setup).
+@app.on_event("startup")
+async def ensure_evaluation_basic_template() -> None:
+    """모든 조직에 Basic 평가 템플릿(is_default)을 보장. Idempotent.
+
+    이미 default 가 있는 조직은 skip. evaluation_service.ensure_basic_template
+    단일 소스를 호출. 시드 실패가 startup 을 막지 않도록 try/except + warning.
+    """
+    import logging
+
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.organization import Organization
+    from app.services.evaluation_service import evaluation_service
+
+    logger = logging.getLogger("uvicorn.error")
+    try:
+        async with async_session() as db:
+            org_ids = [
+                row[0]
+                for row in (await db.execute(select(Organization.id))).fetchall()
+            ]
+            created = 0
+            for org_id in org_ids:
+                template = await evaluation_service.ensure_basic_template(db, org_id)
+                # ensure_basic_template 은 flush 만 — 새로 add 된 경우 created 표시.
+                if template is not None and template.created_at is None:
+                    created += 1
+            await db.commit()
+            if org_ids:
+                logger.info(
+                    f"[evaluation_template] Ensured Basic template for {len(org_ids)} org(s)"
+                )
+    except Exception as e:
+        logger.warning(f"Failed to ensure evaluation Basic templates: {e}")
