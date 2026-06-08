@@ -222,7 +222,11 @@ class DashboardService:
                 func.sum(case((Evaluation.status == "draft", 1), else_=0)).label("draft"),
                 func.sum(case((Evaluation.status == "submitted", 1), else_=0)).label("submitted"),
             )
-            .where(Evaluation.organization_id == organization_id)
+            .where(
+                Evaluation.organization_id == organization_id,
+                # soft-deleted 평가는 집계에서 제외 (v1 redesign)
+                Evaluation.deleted_at.is_(None),
+            )
         )
         row = result.one()
         return {

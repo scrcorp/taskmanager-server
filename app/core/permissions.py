@@ -60,6 +60,25 @@ def hide_cost_for_priority(priority: int) -> bool:
     return priority > GM_PRIORITY
 
 
+def role_priority(user: User) -> int:
+    """User 의 role priority 를 반환하는 공개 accessor (role 없으면 999).
+
+    `_priority` 의 지원되는 public wrapper. evaluation 등 외부 모듈은
+    private `_priority` 대신 이 헬퍼를 import 한다.
+    """
+    return _priority(user)
+
+
+def can_evaluate(evaluator: User, evaluatee: User) -> bool:
+    """evaluator 가 evaluatee 를 평가할 수 있는지 (방향 검증).
+
+    엄격히 더 낮은 권한(= 더 큰 priority number)만 평가 가능.
+    자기 평가(같은 user), 동급 peer 는 False. 두 user 는 호출 전에
+    같은 조직으로 org-scope 되어 있어야 한다.
+    """
+    return role_priority(evaluatee) > role_priority(evaluator)
+
+
 # ── Permission Registry ──────────────────────────────────────
 # 유일한 진실의 원천(Single Source of Truth).
 # 새 기능에 권한이 필요하면:
@@ -130,7 +149,7 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     ("evaluations:read",   "evaluations", "read",   "View evaluation templates and results", False),
     ("evaluations:create", "evaluations", "create", "Create and submit evaluations", False),
     ("evaluations:update", "evaluations", "update", "Edit evaluations", False),
-    ("evaluations:delete", "evaluations", "delete", "Delete evaluation templates", False),
+    ("evaluations:delete", "evaluations", "delete", "Delete evaluations", False),
 
     # ── Daily Reports (legacy, multi-type reports로 이관 중) ──
     ("daily_reports:read",   "daily_reports", "read",   "View daily reports", False),
@@ -235,7 +254,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         "notices:read",
         "checklist_review:read", "checklist_review:create",
         "checklist_log:read",
-        "evaluations:read",
+        # SV 는 하위(Staff) 평가 작성·수정·삭제 가능 (방향 검증으로 동급/상위 차단).
+        "evaluations:read", "evaluations:create", "evaluations:update", "evaluations:delete",
         "daily_reports:read", "daily_reports:create", "daily_reports:update",
         "reports:read", "reports:create", "reports:update",
         "tasks:read", "tasks:create", "tasks:update",

@@ -12,7 +12,7 @@ Tables:
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, Integer, Numeric, ForeignKey, UniqueConstraint, Uuid
+from sqlalchemy import String, Boolean, DateTime, Index, Integer, Numeric, ForeignKey, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -150,6 +150,10 @@ class User(Base):
     # 저장된 사인 이미지 — Storage key (S3 또는 local bucket).
     # IRS Form 4070 등 폼 서명에 재사용. 직원이 staff app Settings 에서 등록/변경.
     signature_image_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # 사번 — Employee number (조직 내 non-null 값은 고유, NULL 다중 허용).
+    # v1 은 read-only 표시 전용 (입력 UI / 자동 생성 없음, 기존 사용자는 전부 NULL).
+    # 고유성은 partial unique index(uq_user_org_employee_no, WHERE employee_no IS NOT NULL).
+    employee_no: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     # 소프트 삭제 일시 — Timestamp when user was soft-deleted (NULL = active)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
@@ -160,6 +164,14 @@ class User(Base):
     __table_args__ = (
         UniqueConstraint("organization_id", "username", name="uq_user_org_username"),
         UniqueConstraint("organization_id", "clockin_pin", name="uq_user_org_clockin_pin"),
+        # 사번 — 조직 내 non-null 값만 고유. NULL 은 다중 허용 (partial unique).
+        Index(
+            "uq_user_org_employee_no",
+            "organization_id",
+            "employee_no",
+            unique=True,
+            postgresql_where=text("employee_no IS NOT NULL"),
+        ),
     )
 
     # 관계 — Relationships
