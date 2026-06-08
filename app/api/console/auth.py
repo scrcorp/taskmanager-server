@@ -120,6 +120,10 @@ async def admin_setup(
     from app.services.daily_report_service import daily_report_service
     await daily_report_service.create_default_template_for_org(db, org.id)
 
+    # 기본 평가 Basic 템플릿 생성 (신규 org 도 즉시 보유)
+    from app.services.evaluation_service import evaluation_service
+    await evaluation_service.ensure_basic_template(db, org.id)
+
     # 첫 관리자 계정 — Super Owner role 로 생성 (조직의 진짜 대장).
     # 다수 super_owner 는 추후 super_owner 가 직접 추가 가능.
     user = User(
