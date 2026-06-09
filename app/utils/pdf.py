@@ -11,13 +11,16 @@ _FONT_CANDIDATES = [
 ]
 
 
-def create_pdf() -> tuple[FPDF, str]:
+def create_pdf(fmt: str = "A4") -> tuple[FPDF, str]:
     """Create a new FPDF instance with unicode font configured.
+
+    Args:
+        fmt: page format ("A4" default, "Letter", etc.)
 
     Returns:
         (pdf, font_name) tuple
     """
-    pdf = FPDF()
+    pdf = FPDF(format=fmt)
     pdf.set_auto_page_break(auto=True, margin=20)
 
     font_path = next((p for p in _FONT_CANDIDATES if p.exists()), None)
