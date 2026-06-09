@@ -79,6 +79,16 @@ def can_evaluate(evaluator: User, evaluatee: User) -> bool:
     return role_priority(evaluatee) > role_priority(evaluator)
 
 
+def can_warn(issuer: User, subject: User) -> bool:
+    """issuer 가 subject 에게 경고를 발행할 수 있는지 (방향 검증).
+
+    can_evaluate 와 동일 규칙 — 엄격히 더 낮은 권한(= 더 큰 priority)만 대상.
+    자기/동급 peer 는 False. 두 user 는 호출 전에 같은 조직으로 org-scope 되어
+    있어야 한다.
+    """
+    return role_priority(subject) > role_priority(issuer)
+
+
 # ── Permission Registry ──────────────────────────────────────
 # 유일한 진실의 원천(Single Source of Truth).
 # 새 기능에 권한이 필요하면:
@@ -150,6 +160,12 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     ("evaluations:create", "evaluations", "create", "Create and submit evaluations", False),
     ("evaluations:update", "evaluations", "update", "Edit evaluations", False),
     ("evaluations:delete", "evaluations", "delete", "Delete evaluations", False),
+
+    # ── Warnings (직원 경고 — GM 이상. 발행은 방향 검증으로 하급자만) ──
+    ("warnings:read",   "warnings", "read",   "View staff warnings", False),
+    ("warnings:create", "warnings", "create", "Issue staff warnings", False),
+    ("warnings:update", "warnings", "update", "Edit or resolve warnings", False),
+    ("warnings:delete", "warnings", "delete", "Delete warnings", False),
 
     # ── Daily Reports (legacy, multi-type reports로 이관 중) ──
     ("daily_reports:read",   "daily_reports", "read",   "View daily reports", False),
