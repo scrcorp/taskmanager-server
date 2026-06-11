@@ -68,6 +68,7 @@ from app.api.console.evaluations import router as evaluations_router
 
 # Staff Warnings 라우터 임포트
 from app.api.console.warnings import router as warnings_router
+from app.api.console.warning_categories import router as warning_categories_router
 
 # Phase 8 — Dashboard 라우터 임포트
 from app.api.console.dashboard import router as dashboard_router
@@ -178,6 +179,9 @@ console_router.include_router(evaluations_router, prefix="/evaluations", tags=["
 
 # 경고: /warnings 하위 (Staff warnings)
 console_router.include_router(warnings_router, prefix="/warnings", tags=["Warnings"])
+console_router.include_router(
+    warning_categories_router, prefix="/warning-categories", tags=["Warnings"]
+)
 
 # ---------------------------------------------------------------------------
 # Phase 8 라우터 등록 — Register Phase 8 (Dashboard) routers

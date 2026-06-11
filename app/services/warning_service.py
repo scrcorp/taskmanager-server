@@ -23,11 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.permissions import can_warn, is_owner, role_priority
-from app.models.organization import Organization, Store
+from app.models.organization import Store
 from app.models.user import User
 from app.models.user_store import UserStore
 from app.models.warning import Warning
 from app.repositories.warning_repository import warning_repository
+from app.repositories.warning_category_repository import warning_category_repository
+from app.services.warning_category_service import warning_category_service
 from app.utils.exceptions import BadRequestError, NotFoundError
 
 
@@ -227,13 +229,34 @@ class WarningService:
         subject_id = UUID(data.subject_user_id)
         store_id = UUID(data.store_id)
 
-        # 방향 검증 — 발행자보다 엄격히 낮은 권한만.
         subject = await self._load_subject(db, subject_id, organization_id)
-        if not can_warn(issuer, subject):
+
+        # 발행자(매니저) 결정 — 기본 = 작성자 본인. Owner 만 다른 매니저로 override 가능.
+        # 방향 검증은 '실제 발행자(선택된 매니저)' 기준으로 한다.
+        issued_by_id = issuer.id
+        direction_issuer = issuer
+        override_id = getattr(data, "issued_by_id", None)
+        if override_id and UUID(override_id) != issuer.id:
+            if not is_owner(issuer):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only an Owner can issue a warning on behalf of another manager",
+                )
+            selected = await self._load_subject(db, UUID(override_id), organization_id)
+            issued_by_id = selected.id
+            direction_issuer = selected
+
+        # 방향 검증 — 발행자보다 엄격히 낮은 권한만.
+        if not can_warn(direction_issuer, subject):
             raise HTTPException(
                 status_code=403,
                 detail="You can only warn users with lower authority",
             )
+
+        # 사유 카테고리 검증 — org 의 비삭제 카테고리여야 함.
+        await warning_category_service.validate_codes(
+            db, organization_id, list(data.categories)
+        )
 
         # store org 격리 + subject 배정 매장 검증.
         await self._validate_subject_store(db, subject_id, store_id, organization_id)
@@ -245,13 +268,17 @@ class WarningService:
             warning = Warning(
                 organization_id=organization_id,
                 seq=seq,
-                issued_by_id=issuer.id,
+                issued_by_id=issued_by_id,
                 subject_user_id=subject_id,
                 store_id=store_id,
                 title=data.title,
                 categories=list(data.categories),
                 details=data.details,
                 corrective_action=data.corrective_action,
+                other_text=data.other_text,
+                deadline=data.deadline,
+                follow_up_date=data.follow_up_date,
+                follow_up_time=data.follow_up_time,
                 status="active",
                 warning_date=data.warning_date,
             )
@@ -303,13 +330,49 @@ class WarningService:
             if "title" in fields and fields["title"] is not None:
                 warning.title = fields["title"]
             if "categories" in fields and fields["categories"] is not None:
+                # 수정 시엔 그 경고가 이미 가진 코드(legacy=삭제된 카테고리)도 허용.
+                await warning_category_service.validate_codes(
+                    db,
+                    organization_id,
+                    fields["categories"],
+                    existing_codes=list(warning.categories or []),
+                )
                 warning.categories = list(fields["categories"])
             if "details" in fields:
                 warning.details = fields["details"]
             if "corrective_action" in fields:
                 warning.corrective_action = fields["corrective_action"]
+            if "other_text" in fields:
+                warning.other_text = fields["other_text"]
+            if "deadline" in fields:
+                warning.deadline = fields["deadline"]
+            if "follow_up_date" in fields:
+                warning.follow_up_date = fields["follow_up_date"]
+            if "follow_up_time" in fields:
+                warning.follow_up_time = fields["follow_up_time"]
             if "warning_date" in fields and fields["warning_date"] is not None:
                 warning.warning_date = fields["warning_date"]
+
+            # 발행자(매니저) 변경 — Owner only + 방향 검증(새 발행자가 대상보다 상위).
+            if fields.get("issued_by_id") is not None:
+                new_issuer_id = UUID(fields["issued_by_id"])
+                if new_issuer_id != warning.issued_by_id:
+                    if not is_owner(current_user):
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Only an Owner can change the issuing manager",
+                        )
+                    selected = await self._load_subject(db, new_issuer_id, organization_id)
+                    if warning.subject_user_id is not None:
+                        subj = await self._load_subject(
+                            db, warning.subject_user_id, organization_id
+                        )
+                        if not can_warn(selected, subj):
+                            raise HTTPException(
+                                status_code=403,
+                                detail="Selected manager does not outrank the subject",
+                            )
+                    warning.issued_by_id = new_issuer_id
 
             if "status" in fields and fields["status"] is not None:
                 new_status = fields["status"]
@@ -360,12 +423,18 @@ class WarningService:
     # ====================================================================
 
     async def build_warning_response(
-        self, db: AsyncSession, warning: Warning, *, include_ordinal: bool = False
+        self,
+        db: AsyncSession,
+        warning: Warning,
+        *,
+        include_ordinal: bool = False,
+        category_labels: dict[str, str] | None = None,
     ) -> dict:
-        """Warning → WarningResponse dict (joined names + ref_no).
+        """Warning → WarningResponse dict (joined names + ref_no + category labels).
 
         include_ordinal=True 면 그 직원의 경고 순번(First/Second/Other 표시용)을
         계산해 담는다. 목록에선 N+1 을 피하려 생략(None), 상세에서만 True.
+        category_labels: org 의 code→label 맵(주입 시 list N+1 회피). None 이면 조회.
         """
         subject_name: str | None = None
         employee_no: str | None = None
@@ -393,6 +462,14 @@ class WarningService:
             if store:
                 store_name = store.name
 
+        # 카테고리 라벨 live resolve (삭제된 legacy 코드 포함). 미주입 시 조회.
+        if category_labels is None:
+            category_labels = await warning_category_repository.labels_by_code(
+                db, warning.organization_id
+            )
+        codes = list(warning.categories or [])
+        labels = {c: category_labels.get(c, c) for c in codes}
+
         return {
             "id": str(warning.id),
             "ref_no": _ref_no(warning.seq),
@@ -405,60 +482,20 @@ class WarningService:
             "store_id": str(warning.store_id) if warning.store_id else None,
             "store_name": store_name,
             "title": warning.title,
-            "categories": list(warning.categories or []),
+            "categories": codes,
+            "category_labels": labels,
             "details": warning.details,
             "corrective_action": warning.corrective_action,
+            "other_text": warning.other_text,
+            "deadline": warning.deadline,
+            "follow_up_date": warning.follow_up_date,
+            "follow_up_time": warning.follow_up_time,
             "warning_date": warning.warning_date,
             "ordinal": ordinal,
             "withdrawn_at": warning.withdrawn_at,
             "created_at": warning.created_at,
             "updated_at": warning.updated_at,
         }
-
-
-    # ====================================================================
-    # PDF (EMPLOYEE WARNING NOTICE FORM)
-    # ====================================================================
-
-    async def build_pdf(
-        self, db: AsyncSession, warning: Warning, organization_id: UUID
-    ) -> tuple[bytes, str]:
-        """경고 → 종이 양식 PDF bytes + 파일명. 이름/회사/순번 resolve.
-
-        First/Second/Other 는 그 직원의 경고 순번으로 서버가 자동 결정한다.
-        Deadline/Follow-up/서명은 양식에 빈 줄로만 둔다(우리가 안 받는 칸).
-        """
-        from app.utils.warning_pdf import build_warning_notice_pdf
-
-        org = await db.get(Organization, organization_id)
-        subject = (
-            await db.get(User, warning.subject_user_id)
-            if warning.subject_user_id
-            else None
-        )
-        manager = (
-            await db.get(User, warning.issued_by_id) if warning.issued_by_id else None
-        )
-
-        ordinal = 1
-        if warning.subject_user_id:
-            ordinal = await warning_repository.subject_warning_ordinal(
-                db, organization_id, warning.subject_user_id, warning.created_at
-            )
-
-        pdf_bytes = build_warning_notice_pdf(
-            company_name=org.name if org else "",
-            ref_no=_ref_no(warning.seq),
-            employee_name=subject.full_name if subject else "",
-            manager_name=manager.full_name if manager else "",
-            warning_date=warning.warning_date.isoformat(),
-            ordinal=ordinal,
-            categories=list(warning.categories or []),
-            details=warning.details or "",
-            corrective_action=warning.corrective_action or "",
-        )
-        filename = f"Warning_{_ref_no(warning.seq)}.pdf"
-        return pdf_bytes, filename
 
 
 # 싱글턴 인스턴스

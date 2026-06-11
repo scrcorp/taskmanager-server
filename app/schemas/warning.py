@@ -10,12 +10,10 @@ Schemas:
     - WarningCountItem: 직원별 경고 갯수 (Staff 목록 칼럼용)
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Literal
 
 from pydantic import BaseModel, field_validator
-
-from app.core.warning import WARNING_CATEGORY_CODES
 
 __all__ = [
     "WarningCreate",
@@ -29,12 +27,13 @@ __all__ = [
 
 
 def _validate_categories(v: list[str]) -> list[str]:
-    """비어있지 않고, 모든 코드가 유효하며, 중복 제거(입력 순서 보존)."""
+    """비어있지 않고 중복 제거(입력 순서 보존).
+
+    코드 유효성(org 카테고리 존재/비삭제)은 서비스가 검증한다
+    (app.services.warning_category_service.validate_codes — 수정 시 legacy 코드 허용).
+    """
     if not v:
         raise ValueError("At least one reason category is required")
-    unknown = [c for c in v if c not in WARNING_CATEGORY_CODES]
-    if unknown:
-        raise ValueError(f"Unknown reason category code(s): {', '.join(sorted(set(unknown)))}")
     seen: set[str] = set()
     deduped: list[str] = []
     for c in v:
@@ -65,6 +64,12 @@ class WarningCreate(BaseModel):
     categories: list[str]
     details: str | None = None
     corrective_action: str | None = None
+    other_text: str | None = None  # 'other' 카테고리 체크 시 자유텍스트
+    deadline: date | None = None  # 시정 마감일
+    follow_up_date: date | None = None  # 후속 미팅 날짜
+    follow_up_time: time | None = None  # 후속 시간 (None=미정/TBD)
+    # 발행자(매니저) override — Owner 만 다른 매니저 대신 발행 가능 (service 강제)
+    issued_by_id: str | None = None
     warning_date: date
 
     @field_validator("title")
@@ -98,6 +103,11 @@ class WarningUpdate(BaseModel):
     categories: list[str] | None = None
     details: str | None = None
     corrective_action: str | None = None
+    other_text: str | None = None
+    deadline: date | None = None
+    follow_up_date: date | None = None
+    follow_up_time: time | None = None
+    issued_by_id: str | None = None  # Owner 만 발행자 변경 가능 (service 강제)
     status: Literal["active", "withdrawn"] | None = None
     warning_date: date | None = None
 
@@ -146,8 +156,15 @@ class WarningResponse(BaseModel):
     store_name: str | None
     title: str
     categories: list[str]
+    # code → label 맵 (live resolve, 삭제된 legacy 코드 포함). 프론트가 라벨 표시 +
+    # active 목록과 비교해 '(removed)' legacy 판별.
+    category_labels: dict[str, str]
     details: str | None
     corrective_action: str | None
+    other_text: str | None
+    deadline: date | None
+    follow_up_date: date | None
+    follow_up_time: time | None
     warning_date: date
     # 그 직원의 경고 순번 (1=First, 2=Second, ≥3=Other) — 상세에서만 채워짐.
     ordinal: int | None = None
