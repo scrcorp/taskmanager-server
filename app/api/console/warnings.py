@@ -20,7 +20,7 @@ Store scoping:
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -163,39 +163,6 @@ async def get_warning(
             raise NotFoundError("Warning not found")
 
     return await warning_service.build_warning_response(db, warning, include_ordinal=True)
-
-
-@router.get("/{warning_id}/pdf")
-async def export_warning_pdf(
-    warning_id: UUID,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("warnings:read"))],
-) -> Response:
-    """경고를 종이 양식(EMPLOYEE WARNING NOTICE FORM) PDF 로 출력.
-
-    상세와 동일한 org-scope + cross-store 누설 차단. 미입력 칸(Deadline/Follow-up/서명)은
-    양식에 빈 줄로 둔다. First/Second/Other 는 그 직원의 경고 순번으로 자동 결정.
-    """
-    warning = await warning_service.get_warning(
-        db, warning_id=warning_id, organization_id=current_user.organization_id
-    )
-    if not is_owner(current_user) and warning.issued_by_id != current_user.id:
-        accessible = await get_accessible_store_ids(db, current_user)
-        if (
-            accessible is not None
-            and warning.store_id is not None
-            and warning.store_id not in accessible
-        ):
-            raise NotFoundError("Warning not found")
-
-    pdf_bytes, filename = await warning_service.build_pdf(
-        db, warning, current_user.organization_id
-    )
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{filename}"'},
-    )
 
 
 @router.post("/", response_model=WarningResponse, status_code=201)

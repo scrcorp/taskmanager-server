@@ -124,6 +124,10 @@ async def admin_setup(
     from app.services.evaluation_service import evaluation_service
     await evaluation_service.ensure_basic_template(db, org.id)
 
+    # 기본 경고 사유 카테고리 시드 (12종 — refusal hidden, other system)
+    from app.services.warning_category_service import warning_category_service
+    await warning_category_service.seed_defaults(db, org.id)
+
     # 첫 관리자 계정 — Super Owner role 로 생성 (조직의 진짜 대장).
     # 다수 super_owner 는 추후 super_owner 가 직접 추가 가능.
     user = User(

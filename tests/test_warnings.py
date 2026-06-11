@@ -282,7 +282,11 @@ async def test_create_store_scope_denied(
 async def test_create_invalid_category(
     async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
 ):
-    """알 수 없는 카테고리 코드 → 422 (schema)."""
+    """알 수 없는 카테고리 코드 → 400 (service 가 org 카테고리로 검증, v1.1).
+
+    v1 에선 schema frozenset 검증(422)이었으나, v1.1 부터 카테고리가 org별 DB라
+    검증이 서비스로 이동(BadRequestError=400). 빈 배열은 여전히 schema 422.
+    """
     token = await _login("testgm")
     subject = test_users["teststaff"]["id"]
     resp = await async_client.post(
@@ -290,7 +294,7 @@ async def test_create_invalid_category(
         json=_payload(subject, test_store_id, categories=["not_a_real_code"]),
         headers=_hdr(token),
     )
-    assert resp.status_code == 422, resp.text
+    assert resp.status_code == 400, resp.text
 
 
 @pytest.mark.asyncio
@@ -579,15 +583,15 @@ async def test_warnable_users_direction_and_stores(
 
 
 # ===================================================================
-# 7. API — corrective action + PDF export
+# 7. API — corrective action
 # ===================================================================
 
 
 @pytest.mark.asyncio
-async def test_corrective_action_and_pdf(
+async def test_corrective_action(
     async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
 ):
-    """corrective_action 저장/응답 + PDF export 가 application/pdf 로 떨어진다."""
+    """corrective_action 저장/응답 검증. (PDF 는 클라이언트 프린트로 이전 — 서버 PDF 제거)"""
     gm = await _login("testgm")
     subject = test_users["teststaff"]["id"]
     payload = _payload(subject, test_store_id, categories=["tardiness", "policy_violation"])
@@ -597,9 +601,83 @@ async def test_corrective_action_and_pdf(
     ).json()
     assert created["corrective_action"] == payload["corrective_action"]
 
-    wid = created["id"]
-    resp = await async_client.get(f"{BASE}/{wid}/pdf", headers=_hdr(gm))
-    assert resp.status_code == 200, resp.text
-    assert resp.headers["content-type"] == "application/pdf"
-    assert resp.content[:5] == b"%PDF-"
-    assert len(resp.content) > 1000  # non-trivial document
+
+# ===================================================================
+# v1.1 — 새 필드 / 발행자 override / 카테고리 라벨
+# ===================================================================
+
+
+@pytest.mark.asyncio
+async def test_create_with_new_fields_and_labels(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """other_text / deadline / follow-up(날짜+시간) 저장 + category_labels live resolve."""
+    token = await _login("testgm")
+    subject = test_users["teststaff"]["id"]
+    payload = _payload(subject, test_store_id, categories=["other", "tardiness"])
+    payload.update(
+        {
+            "other_text": "Used phone during service",
+            "corrective_action": "Keep phone in locker",
+            "deadline": "2026-06-20",
+            "follow_up_date": "2026-06-25",
+            "follow_up_time": "14:30:00",
+        }
+    )
+    resp = await async_client.post(f"{BASE}/", json=payload, headers=_hdr(token))
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["other_text"] == "Used phone during service"
+    assert body["deadline"] == "2026-06-20"
+    assert body["follow_up_date"] == "2026-06-25"
+    assert body["follow_up_time"] == "14:30:00"
+    # 라벨 live resolve (org 카테고리에서)
+    assert body["category_labels"]["other"] == "Other"
+    assert body["category_labels"]["tardiness"] == "Tardiness"
+
+
+@pytest.mark.asyncio
+async def test_create_followup_tbd_time_null(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """Follow-up 날짜만, 시간 미정(TBD) → follow_up_time None 허용."""
+    token = await _login("testgm")
+    subject = test_users["teststaff"]["id"]
+    payload = _payload(subject, test_store_id)
+    payload.update({"follow_up_date": "2026-06-25", "follow_up_time": None})
+    resp = await async_client.post(f"{BASE}/", json=payload, headers=_hdr(token))
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["follow_up_date"] == "2026-06-25"
+    assert body["follow_up_time"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_issuer_override_owner(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """Owner 가 다른 매니저(GM)를 발행자로 지정 → issued_by = GM, 방향검증=GM 기준."""
+    owner = await _login("testadmin")  # super_owner
+    subject = test_users["teststaff"]["id"]
+    gm_id = test_users["testgm"]["id"]
+    payload = _payload(subject, test_store_id)
+    payload["issued_by_id"] = str(gm_id)
+    resp = await async_client.post(f"{BASE}/", json=payload, headers=_hdr(owner))
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["issued_by_id"] == str(gm_id)
+    assert body["issued_by_name"] == "Test GM"
+
+
+@pytest.mark.asyncio
+async def test_create_issuer_override_nonowner_forbidden(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """non-owner(GM) 가 발행자 override 시도 → 403."""
+    gm = await _login("testgm")
+    subject = test_users["teststaff"]["id"]
+    other_manager = test_users["testsv"]["id"]
+    payload = _payload(subject, test_store_id)
+    payload["issued_by_id"] = str(other_manager)
+    resp = await async_client.post(f"{BASE}/", json=payload, headers=_hdr(gm))
+    assert resp.status_code == 403, resp.text

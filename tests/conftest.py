@@ -74,6 +74,20 @@ async def seed_organization() -> dict:
         return {"id": org.id, "name": org.name}
 
 
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def seed_warning_categories(seed_organization: dict) -> None:
+    """테스트 org 에 기본 경고 카테고리 12종 시드 (idempotent).
+
+    경고 발행 시 카테고리 검증이 org 의 warning_categories 를 본다(v1.1).
+    autouse — 모든 경고 테스트가 유효한 카테고리를 갖도록 세션당 1회 시드.
+    """
+    from app.services.warning_category_service import warning_category_service
+
+    async with async_session() as db:
+        await warning_category_service.seed_defaults(db, seed_organization["id"])
+        await db.commit()
+
+
 # ---------------------------------------------------------------------------
 # Seed: roles (5개, idempotent)
 # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ Tables:
 """
 
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Optional
 
 from sqlalchemy import (
@@ -27,6 +27,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Time,
     UniqueConstraint,
     Uuid,
 )
@@ -103,6 +104,14 @@ class Warning(Base):
     # 시정 조치 — Corrective action the employee must take (free text, PDF §2).
     # 종이 양식의 "corrective action" 칸. 미입력 시 PDF 에선 빈 줄로 표시.
     corrective_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Other 자유텍스트 사유 — 'other' 카테고리 체크 시에만 사용 (별도 컬럼, details 와 분리)
+    other_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 시정 마감일 — Deadline for the corrective action (date only, nullable)
+    deadline: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # 후속 미팅 날짜 — Follow-up meeting date (nullable)
+    follow_up_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # 후속 미팅 시간 — Follow-up time (NULL = TBD/미정: 날짜만 잡고 시간 미정)
+    follow_up_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     # 상태 — 'active'(유효) | 'withdrawn'(철회됨, 기록 유지)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="active", server_default="active"
