@@ -210,9 +210,13 @@ class TipService:
         form: Form4070Document,
         period: TipPeriod,
         signature_png: Optional[bytes] = None,
+        signature_strokes: Optional[dict] = None,
         signed_at_iso: Optional[str] = None,
     ) -> None:
-        """PDF 생성 + storage 저장 + form.pdf_key 갱신."""
+        """PDF 생성 + storage 저장 + form.pdf_key 갱신.
+
+        서명 렌더는 벡터(signature_strokes) 우선, 없으면 레거시 이미지(signature_png).
+        """
         from app.services.storage_service import storage_service
         from app.utils.form_4070_pdf import build_form_4070_pdf
 
@@ -234,6 +238,7 @@ class TipService:
             net_tips=f"{Decimal(str(form.net_tips)):.2f}",
             signed_at=signed_at_iso,
             signature_png=signature_png,
+            signature_strokes=signature_strokes,
         )
         key = f"forms/4070/{form.employee_id}/{form.id}.pdf"
         storage_service.save_local(key, pdf_bytes)
@@ -307,9 +312,19 @@ class TipService:
         *,
         actor: User,
         form_id: UUID,
-        signature_image_key: str,
+        signature_strokes: Optional[dict] = None,
+        signature_image_key: Optional[str] = None,
         save_for_future: bool = False,
     ) -> Form4070Document:
+        """4070 폼에 서명 적용 — 벡터 strokes 우선, 레거시 image_key fallback.
+
+        signature_strokes 가 주어지면 그 벡터를 form 에 박제(스냅샷)하고 PDF 를
+        벡터로 렌더한다. 없으면 signature_image_key(레거시) 경로로 이미지 렌더.
+        save_for_future=True 면 users.signature_strokes(벡터 우선) 또는
+        signature_image_key(레거시) 를 갱신해 다음 폼에서 재사용.
+        """
+        if not signature_strokes and not signature_image_key:
+            raise BadRequestError("Either strokes or signature_image_key is required")
         form = await db.scalar(
             select(Form4070Document).where(Form4070Document.id == form_id)
         )
@@ -319,30 +334,45 @@ class TipService:
             raise ForbiddenError("Cannot sign another employee's form")
         if form.status == "signed":
             raise BadRequestError("Form is already signed")
-        form.signature_image_key = signature_image_key
+
+        if signature_strokes:
+            # 벡터 스냅샷 박제 — 유저 저장 서명이 나중에 바뀌어도 불변.
+            form.signature_strokes = signature_strokes
+            form.signature_image_key = None
+        else:
+            # 레거시 경로 — strokes 없이 이미지 키만.
+            form.signature_image_key = signature_image_key
         form.signed_at = datetime.now(timezone.utc)
         form.status = "signed"
+
         if save_for_future:
             user = await db.scalar(select(User).where(User.id == actor.id))
             if user is not None:
-                user.signature_image_key = signature_image_key
+                if signature_strokes:
+                    user.signature_strokes = signature_strokes
+                elif signature_image_key:
+                    user.signature_image_key = signature_image_key
         self._log(
             db,
             entity_type="form_4070",
             entity_id=form.id,
             action="sign",
             actor_id=actor.id,
-            after={"status": "signed"},
+            after={"status": "signed", "method": "vector" if signature_strokes else "image"},
         )
-        # PDF 재생성 — 사인 overlay 적용.
+        # PDF 재생성 — 서명 overlay 적용 (벡터 우선, 없으면 레거시 이미지).
         period = await db.scalar(select(TipPeriod).where(TipPeriod.id == form.period_id))
-        sig_png = self._read_signature_bytes(signature_image_key)
+        sig_png = (
+            None if signature_strokes
+            else self._read_signature_bytes(signature_image_key)
+        )
         if period is not None:
             await self._generate_form_pdf(
                 db,
                 form=form,
                 period=period,
                 signature_png=sig_png,
+                signature_strokes=signature_strokes,
                 signed_at_iso=form.signed_at.isoformat(),
             )
         await db.commit()

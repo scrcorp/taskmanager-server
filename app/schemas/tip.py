@@ -15,7 +15,10 @@ from decimal import Decimal
 from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+# 벡터 서명 검증은 warning 스키마와 단일 원천 공유 (0..1 정규화 + 상한).
+from app.schemas.warning import _validate_strokes
 
 
 # ── Distribution ────────────────────────────────────────────────
@@ -241,21 +244,79 @@ class Form4070Response(BaseModel):
     status: Literal["generated", "downloaded", "signed", "unsigned"]
     generated_at: datetime
     signed_at: Optional[datetime]
-    signature_image_key: Optional[str]
+    # 레거시 서명 이미지 (이미 서명된 구 폼). 신규는 None.
+    signature_image_key: Optional[str] = None
     signature_url: Optional[str] = None
+    # 벡터 서명 스냅샷 — 신규 서명. 없으면 None (구 폼은 image_key 사용).
+    signature_strokes: Optional[dict] = None
 
 
 class SignFormRequest(BaseModel):
-    signature_image_key: str
+    """4070 폼 서명 요청 — 벡터 strokes 우선. 레거시 호환을 위해 image_key 도 허용.
+
+    신규 클라이언트는 strokes(0..1 정규화) 를 보낸다. method='saved' 면 저장 서명
+    재사용, 'drawn' 이면 새로 그림. save_for_future=True 면 users.signature_strokes
+    로도 저장. strokes 가 없고 signature_image_key 만 있으면 레거시 이미지 경로.
+    """
+
+    strokes: Optional[list[list[list[float]]]] = None
+    aspect: Optional[float] = None
+    method: Literal["drawn", "saved"] = "drawn"
+    # [LEGACY] 구 클라이언트 호환 — strokes 없을 때만 사용.
+    signature_image_key: Optional[str] = None
     save_for_future: bool = False
+
+    @field_validator("strokes")
+    @classmethod
+    def _check_strokes(
+        cls, v: Optional[list[list[list[float]]]]
+    ) -> Optional[list[list[list[float]]]]:
+        if v is None:
+            return v
+        return _validate_strokes(v)
+
+    @model_validator(mode="after")
+    def _require_one(self) -> "SignFormRequest":
+        if not self.strokes and not self.signature_image_key:
+            raise ValueError("Either strokes or signature_image_key is required")
+        return self
+
+    def to_strokes_payload(self) -> Optional[dict]:
+        """벡터 strokes 가 있으면 DB 저장용 스냅샷 dict, 없으면 None."""
+        if not self.strokes:
+            return None
+        return {"strokes": self.strokes, "aspect": self.aspect}
 
 
 class SignatureUpdateRequest(BaseModel):
+    """[LEGACY] 이미지 키 기반 저장 서명 갱신 — 구 클라이언트 호환 전용."""
+
     signature_image_key: str
 
 
+class SavedSignatureUpdateRequest(BaseModel):
+    """벡터 저장 서명 설정 — users.signature_strokes 갱신 (경고와 공용 서명)."""
+
+    strokes: list[list[list[float]]]
+    aspect: Optional[float] = None
+
+    @field_validator("strokes")
+    @classmethod
+    def _check_strokes(cls, v: list[list[list[float]]]) -> list[list[list[float]]]:
+        return _validate_strokes(v)
+
+    def to_strokes_payload(self) -> dict:
+        return {"strokes": self.strokes, "aspect": self.aspect}
+
+
 class SignatureResponse(BaseModel):
-    signature_image_key: Optional[str]
+    """저장 서명 조회 응답 — 벡터(signature_strokes) 우선, 레거시 image 도 노출.
+
+    signature_strokes 가 있으면 그게 진실. signature_image_key 는 레거시 호환.
+    """
+
+    signature_strokes: Optional[dict] = None
+    signature_image_key: Optional[str] = None
     signature_url: Optional[str] = None
 
 

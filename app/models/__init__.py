@@ -36,6 +36,7 @@ from app.models.access_code import AccessCode
 from app.models.evaluation import EvalTemplate, Evaluation
 from app.models.warning import Warning
 from app.models.warning_category import WarningCategory
+from app.models.warning_signature import WarningSignature
 from app.models.permission import Permission, RolePermission
 from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSection, DailyReport, DailyReportSection, DailyReportComment
 from app.models.report import Report, ReportTemplate, ReportComment
@@ -65,6 +66,7 @@ __all__ = [
     "EvalTemplate", "Evaluation",
     "Warning",
     "WarningCategory",
+    "WarningSignature",
     "Permission", "RolePermission",
     "DailyReportTemplate", "DailyReportTemplateSection", "DailyReport", "DailyReportSection", "DailyReportComment",
     "Report", "ReportTemplate", "ReportComment",

@@ -154,6 +154,85 @@ class WarningRepository(BaseRepository[Warning]):
         )
         return int(result.scalar() or 1)
 
+    async def list_my_active(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        subject_user_id: UUID,
+        *,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> tuple[Sequence[Warning], int]:
+        """대상 직원 본인의 active 경고 목록 (paginated). created_at DESC.
+
+        org-scope + soft-delete 제외 + status='active' + subject == 본인.
+        앱(직원)이 자기 경고만 본다 — withdrawn 은 노출하지 않는다.
+        """
+        base = select(Warning).where(
+            Warning.organization_id == organization_id,
+            Warning.subject_user_id == subject_user_id,
+            Warning.deleted_at.is_(None),
+            Warning.status == "active",
+        )
+        count_result = await db.execute(select(func.count()).select_from(base.subquery()))
+        total: int = count_result.scalar() or 0
+        query = (
+            base.order_by(Warning.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+        result = await db.execute(query)
+        return list(result.scalars().all()), total
+
+    async def get_my_active(
+        self,
+        db: AsyncSession,
+        warning_id: UUID,
+        organization_id: UUID,
+        subject_user_id: UUID,
+    ) -> Warning | None:
+        """대상 직원 본인의 단일 active 경고 (org-scope + soft-delete 제외 + 본인 소유)."""
+        result = await db.execute(
+            select(Warning).where(
+                Warning.id == warning_id,
+                Warning.organization_id == organization_id,
+                Warning.subject_user_id == subject_user_id,
+                Warning.deleted_at.is_(None),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def count_my_unsigned(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        subject_user_id: UUID,
+    ) -> int:
+        """본인의 active 경고 중 employee 서명 행이 없는 갯수 (badge 용).
+
+        LEFT JOIN warning_signatures (party='employee') 후 NULL 인 행 count.
+        """
+        from app.models.warning_signature import WarningSignature
+
+        sig_subq = (
+            select(WarningSignature.warning_id)
+            .where(WarningSignature.party == "employee")
+            .subquery()
+        )
+        result = await db.execute(
+            select(func.count())
+            .select_from(Warning)
+            .outerjoin(sig_subq, sig_subq.c.warning_id == Warning.id)
+            .where(
+                Warning.organization_id == organization_id,
+                Warning.subject_user_id == subject_user_id,
+                Warning.deleted_at.is_(None),
+                Warning.status == "active",
+                sig_subq.c.warning_id.is_(None),
+            )
+        )
+        return int(result.scalar() or 0)
+
     async def list_warnable_users(
         self,
         db: AsyncSession,

@@ -21,14 +21,31 @@ from sqlalchemy import delete, select
 from app.core.permissions import DEFAULT_ROLE_PERMISSIONS, can_warn
 from app.core.warning import WARNING_CATEGORY_CODES
 from app.database import async_session
+from app.models.alert import Alert
 from app.models.permission import Permission, RolePermission
 from app.models.user import Role, User
 from app.models.user_store import UserStore
 from app.models.warning import Warning
+from app.models.warning_signature import WarningSignature
 from app.services.warning_service import _ref_no, warning_service
 
 BASE = "/api/v1/console/warnings"
+APP_BASE = "/api/v1/app/my/warnings"
 WARNING_CODES = ["warnings:read", "warnings:create", "warnings:update", "warnings:delete"]
+
+
+def _strokes(*, n: int = 1) -> list[list[list[float]]]:
+    """정규화(0..1) 벡터 스트로크 — 테스트용 단순 서명."""
+    return [[[0.1 * i, 0.2 * i] for i in range(1, 4)] for _ in range(n)]
+
+
+def _sign_body(method: str = "drawn", save_as_default: bool = False) -> dict:
+    return {
+        "strokes": _strokes(),
+        "aspect": 2.0,
+        "method": method,
+        "save_as_default": save_as_default,
+    }
 
 
 # ===================================================================
@@ -681,3 +698,442 @@ async def test_create_issuer_override_nonowner_forbidden(
     payload["issued_by_id"] = str(other_manager)
     resp = await async_client.post(f"{BASE}/", json=payload, headers=_hdr(gm))
     assert resp.status_code == 403, resp.text
+
+
+# ===================================================================
+# 8. confirm + sign — fixtures / helpers
+# ===================================================================
+
+
+@pytest_asyncio.fixture
+async def staff_app_token() -> str:
+    """teststaff app JWT (직접 mint). app+console 공용."""
+    return await _login("teststaff")
+
+
+async def _create_warning_for_staff(
+    async_client, *, issuer: str, subject_id: UUID, store_id: UUID
+) -> str:
+    """issuer 가 teststaff 에게 경고 발행 → warning id."""
+    token = await _login(issuer)
+    resp = await async_client.post(
+        f"{BASE}/", json=_payload(subject_id, store_id), headers=_hdr(token)
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+async def _reset_saved_signature(username: str) -> None:
+    async with async_session() as db:
+        u = (await db.execute(select(User).where(User.username == username))).scalar_one()
+        u.signature_strokes = None
+        await db.commit()
+
+
+# ===================================================================
+# 9. Alert on issue
+# ===================================================================
+
+
+@pytest.mark.asyncio
+async def test_alert_created_on_issue(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """경고 발행 시 대상 직원에게 type='warning' in-app 알림 생성."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    # 사전 정리 — 이 직원의 기존 warning 알림 제거.
+    async with async_session() as db:
+        await db.execute(
+            delete(Alert).where(Alert.user_id == subject_id, Alert.type == "warning")
+        )
+        await db.commit()
+
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+
+    async with async_session() as db:
+        alerts = (
+            await db.execute(
+                select(Alert).where(
+                    Alert.user_id == subject_id,
+                    Alert.type == "warning",
+                    Alert.reference_type == "warning",
+                    Alert.reference_id == UUID(wid),
+                )
+            )
+        ).scalars().all()
+    assert len(alerts) == 1, "exactly one warning alert to subject"
+
+
+# ===================================================================
+# 10. App — auto-acknowledge / self-scope / unsigned-count
+# ===================================================================
+
+
+@pytest.mark.asyncio
+async def test_app_auto_acknowledge_on_detail(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """앱 상세 GET 시 acknowledged_at 자동 stamp (idempotent — 재요청해도 시각 유지)."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    staff = await _login("teststaff")
+
+    # 발행 직후엔 미확인.
+    async with async_session() as db:
+        w = (await db.execute(select(Warning).where(Warning.id == UUID(wid)))).scalar_one()
+        assert w.acknowledged_at is None
+
+    # 첫 상세 GET → stamp.
+    resp = await async_client.get(f"{APP_BASE}/{wid}", headers=_hdr(staff))
+    assert resp.status_code == 200, resp.text
+    first_ack = resp.json()["acknowledged_at"]
+    assert first_ack is not None
+
+    # 재요청 → 같은 시각 유지 (idempotent).
+    resp2 = await async_client.get(f"{APP_BASE}/{wid}", headers=_hdr(staff))
+    assert resp2.json()["acknowledged_at"] == first_ack
+
+
+@pytest.mark.asyncio
+async def test_app_only_own_warnings(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """직원은 본인 경고만 조회/서명. 남의 것은 404 (목록에도 안 보임)."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+
+    # testsv 는 이 경고의 subject 가 아님 → 404 (상세 + 서명).
+    sv = await _login("testsv")
+    assert (await async_client.get(f"{APP_BASE}/{wid}", headers=_hdr(sv))).status_code == 404
+    resp = await async_client.post(
+        f"{APP_BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(sv)
+    )
+    assert resp.status_code == 404, resp.text
+
+    # 목록에도 sv 것은 없음 (subject != sv).
+    listing = (await async_client.get(f"{APP_BASE}", headers=_hdr(sv))).json()
+    assert all(item["id"] != wid for item in listing["items"])
+
+    # 본인(staff)은 목록에 보임.
+    staff = await _login("teststaff")
+    listing = (await async_client.get(f"{APP_BASE}", headers=_hdr(staff))).json()
+    assert any(item["id"] == wid for item in listing["items"])
+
+
+@pytest.mark.asyncio
+async def test_app_unsigned_count(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """unsigned-count — employee 서명 전 1, 서명 후 0."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    staff = await _login("teststaff")
+
+    cnt = (await async_client.get(f"{APP_BASE}/unsigned-count", headers=_hdr(staff))).json()
+    assert cnt["unsigned_count"] == 1
+
+    resp = await async_client.post(
+        f"{APP_BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(staff)
+    )
+    assert resp.status_code == 200, resp.text
+
+    cnt = (await async_client.get(f"{APP_BASE}/unsigned-count", headers=_hdr(staff))).json()
+    assert cnt["unsigned_count"] == 0
+
+
+# ===================================================================
+# 11. Employee sign / manager sign / identity gate
+# ===================================================================
+
+
+@pytest.mark.asyncio
+async def test_employee_sign_creates_employee_signature(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """직원 서명 → employee party 서명 생성 + 응답 signatures.employee 채워짐."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    staff = await _login("teststaff")
+    resp = await async_client.post(
+        f"{APP_BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(staff)
+    )
+    assert resp.status_code == 200, resp.text
+    sigs = resp.json()["signatures"]
+    assert sigs["employee"] is not None
+    assert sigs["employee"]["signer_user_id"] == str(subject_id)
+    assert sigs["employee"]["signer_name"] == "Test Staff"
+    assert sigs["employee"]["method"] == "drawn"
+    assert sigs["manager"] is None
+
+
+@pytest.mark.asyncio
+async def test_manager_sign_by_issuer(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """발행 매니저(issuer) 본인 → manager 서명 생성 성공."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    gm = await _login("testgm")  # issued_by = testgm
+    resp = await async_client.post(
+        f"{BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(gm)
+    )
+    assert resp.status_code == 200, resp.text
+    sigs = resp.json()["signatures"]
+    assert sigs["manager"] is not None
+    assert sigs["manager"]["signer_user_id"] == str(test_users["testgm"]["id"])
+    assert sigs["manager"]["signer_name"] == "Test GM"
+
+
+@pytest.mark.asyncio
+async def test_different_gm_cannot_manager_sign(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """발행자가 아닌 다른 매니저(여기선 owner override 로 sv 가 발행자) → 발행자 아닌 GM 은 403.
+
+    issued_by = testsv 인 경고를 testgm 이 manager-sign 시도 → 403 (대리 금지).
+    """
+    subject_id: UUID = test_users["teststaff"]["id"]
+    sv_id: UUID = test_users["testsv"]["id"]
+    # super_owner 가 발행자를 testsv 로 지정해 발행 (방향: sv > staff OK).
+    owner = await _login("testadmin")
+    payload = _payload(subject_id, test_store_id)
+    payload["issued_by_id"] = str(sv_id)
+    created = await async_client.post(f"{BASE}/", json=payload, headers=_hdr(owner))
+    assert created.status_code == 201, created.text
+    wid = created.json()["id"]
+
+    # 발행자가 아닌 testgm 이 manager-sign → 403.
+    gm = await _login("testgm")
+    resp = await async_client.post(
+        f"{BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(gm)
+    )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_owner_not_issuer_cannot_manager_sign(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """발행자가 아닌 Owner/super-owner 도 manager-sign 불가 → 403 (대리 금지 핵심).
+
+    issued_by = testgm 인 경고를 testadmin(super_owner)이 서명 시도 → 403.
+    Owner 는 발행자를 바꿀 수는 있어도 남의 이름으로 서명할 수 없다.
+    """
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    owner = await _login("testadmin")  # super_owner, issued_by 아님
+    resp = await async_client.post(
+        f"{BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(owner)
+    )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_re_sign_upserts(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """재서명 — 같은 (warning, party) 행 upsert (중복 생성 없음, strokes/시각 갱신)."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    staff = await _login("teststaff")
+
+    r1 = await async_client.post(f"{APP_BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(staff))
+    assert r1.status_code == 200, r1.text
+    first_signed = r1.json()["signatures"]["employee"]["signed_at"]
+
+    # 다른 strokes 로 재서명.
+    body2 = {"strokes": _strokes(n=2), "aspect": 1.5, "method": "saved", "save_as_default": False}
+    r2 = await async_client.post(f"{APP_BASE}/{wid}/sign", json=body2, headers=_hdr(staff))
+    assert r2.status_code == 200, r2.text
+    second = r2.json()["signatures"]["employee"]
+    assert second["method"] == "saved"
+
+    # DB 에 employee 서명 행은 정확히 1개 (upsert).
+    async with async_session() as db:
+        rows = (
+            await db.execute(
+                select(WarningSignature).where(
+                    WarningSignature.warning_id == UUID(wid),
+                    WarningSignature.party == "employee",
+                )
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_cannot_sign_withdrawn_warning(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """철회(withdrawn)된 경고는 서명 불가 → 400 (active 만 서명 가능)."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    gm = await _login("testgm")
+    await async_client.put(f"{BASE}/{wid}", json={"status": "withdrawn"}, headers=_hdr(gm))
+
+    # 직원이 철회된 경고 서명 시도 → 400.
+    staff = await _login("teststaff")
+    resp = await async_client.post(
+        f"{APP_BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(staff)
+    )
+    assert resp.status_code == 400, resp.text
+
+
+# ===================================================================
+# 12. Saved signature (get/set) + method='saved' + snapshot independence
+# ===================================================================
+
+
+@pytest.mark.asyncio
+async def test_app_saved_signature_get_set(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """저장 서명 — 초기 None, PUT 후 GET 으로 동일 반환."""
+    await _reset_saved_signature("teststaff")
+    staff = await _login("teststaff")
+
+    got = (await async_client.get(f"{APP_BASE}/saved-signature", headers=_hdr(staff))).json()
+    assert got["signature"] is None
+
+    body = {"strokes": _strokes(), "aspect": 2.0}
+    put = await async_client.put(f"{APP_BASE}/saved-signature", json=body, headers=_hdr(staff))
+    assert put.status_code == 200, put.text
+    assert put.json()["signature"]["aspect"] == 2.0
+
+    got = (await async_client.get(f"{APP_BASE}/saved-signature", headers=_hdr(staff))).json()
+    assert got["signature"] is not None
+    assert got["signature"]["strokes"] == _strokes()
+
+
+@pytest.mark.asyncio
+async def test_sign_save_as_default_updates_saved(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """save_as_default=True 로 서명 → users.signature_strokes 도 갱신 + method='saved'."""
+    await _reset_saved_signature("teststaff")
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    staff = await _login("teststaff")
+    resp = await async_client.post(
+        f"{APP_BASE}/{wid}/sign",
+        json=_sign_body(method="saved", save_as_default=True),
+        headers=_hdr(staff),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["signatures"]["employee"]["method"] == "saved"
+
+    # 저장 서명도 갱신됨.
+    got = (await async_client.get(f"{APP_BASE}/saved-signature", headers=_hdr(staff))).json()
+    assert got["signature"] is not None
+    assert got["signature"]["strokes"] == _strokes()
+
+
+@pytest.mark.asyncio
+async def test_signature_snapshot_independence(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """스냅샷 독립성 — 서명 후 users.signature_strokes 를 바꿔도 기존 warning_signature 불변."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    staff = await _login("teststaff")
+
+    # 원본 strokes 로 서명 (save_as_default → 저장 서명에도 같은 값).
+    original = _strokes()
+    body = {"strokes": original, "aspect": 2.0, "method": "saved", "save_as_default": True}
+    resp = await async_client.post(f"{APP_BASE}/{wid}/sign", json=body, headers=_hdr(staff))
+    assert resp.status_code == 200, resp.text
+
+    # 이후 저장 서명을 완전히 다른 값으로 변경.
+    changed = [[[0.9, 0.9], [0.8, 0.8]]]
+    put = await async_client.put(
+        f"{APP_BASE}/saved-signature",
+        json={"strokes": changed, "aspect": 1.0},
+        headers=_hdr(staff),
+    )
+    assert put.status_code == 200, put.text
+
+    # 기존 warning_signature 의 스냅샷은 여전히 원본.
+    detail = (await async_client.get(f"{APP_BASE}/{wid}", headers=_hdr(staff))).json()
+    snap = detail["signatures"]["employee"]["signature_strokes"]
+    assert snap["strokes"] == original
+    assert snap["strokes"] != changed
+
+
+@pytest.mark.asyncio
+async def test_console_my_signature_get_set(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users
+):
+    """콘솔 매니저 저장 서명 get/set (users.signature_strokes 공용 컬럼)."""
+    await _reset_saved_signature("testgm")
+    gm = await _login("testgm")
+
+    got = (await async_client.get(f"{BASE}/my-signature", headers=_hdr(gm))).json()
+    assert got["signature"] is None
+
+    body = {"strokes": _strokes(), "aspect": 3.0}
+    put = await async_client.put(f"{BASE}/my-signature", json=body, headers=_hdr(gm))
+    assert put.status_code == 200, put.text
+    got = (await async_client.get(f"{BASE}/my-signature", headers=_hdr(gm))).json()
+    assert got["signature"]["aspect"] == 3.0
+
+
+# ===================================================================
+# 13. Unit — identity gate / validation
+# ===================================================================
+
+
+def test_required_signer_id_mapping():
+    """party 별 required signer — employee=subject, manager=issuer."""
+    from app.services.warning_signature_service import (
+        PARTY_EMPLOYEE,
+        PARTY_MANAGER,
+        warning_signature_service,
+    )
+    import uuid as _uuid
+
+    subj, issuer = _uuid.uuid4(), _uuid.uuid4()
+    w = type("W", (), {"subject_user_id": subj, "issued_by_id": issuer})()
+    assert warning_signature_service._required_signer_id(w, PARTY_EMPLOYEE) == subj
+    assert warning_signature_service._required_signer_id(w, PARTY_MANAGER) == issuer
+    assert warning_signature_service._required_signer_id(w, "bogus") is None
+
+
+def test_sign_request_validates_strokes():
+    """WarningSignRequest — 빈 strokes / 범위초과 좌표 거부, 정상 통과."""
+    from pydantic import ValidationError
+
+    from app.schemas.warning import WarningSignRequest
+
+    # 정상.
+    ok = WarningSignRequest(strokes=_strokes(), aspect=2.0)
+    assert ok.to_strokes_payload() == {"strokes": _strokes(), "aspect": 2.0}
+
+    # 빈 strokes.
+    with pytest.raises(ValidationError):
+        WarningSignRequest(strokes=[])
+
+    # 0..1 범위 초과.
+    with pytest.raises(ValidationError):
+        WarningSignRequest(strokes=[[[1.5, 0.2]]])

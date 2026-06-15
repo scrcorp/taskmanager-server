@@ -241,6 +241,7 @@ async def list_store_forms(
             "signed_at": f.signed_at,
             "signature_image_key": f.signature_image_key,
             "signature_url": storage_service.resolve_url(f.signature_image_key) if f.signature_image_key else None,
+            "signature_strokes": f.signature_strokes,
         }
         for f in forms
     ]
