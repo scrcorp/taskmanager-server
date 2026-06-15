@@ -112,6 +112,11 @@ class Warning(Base):
     follow_up_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     # 후속 미팅 시간 — Follow-up time (NULL = TBD/미정: 날짜만 잡고 시간 미정)
     follow_up_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    # 직원 확인(읽음) 일시 — 직원이 앱에서 경고 상세를 처음 열면 자동 기록 (NULL=미확인).
+    # 확인 != 서명: 확인만 하고 미서명일 수 있다. 서명은 warning_signatures 에 별도.
+    acknowledged_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # 상태 — 'active'(유효) | 'withdrawn'(철회됨, 기록 유지)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="active", server_default="active"

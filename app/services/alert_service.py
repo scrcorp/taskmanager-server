@@ -465,6 +465,33 @@ class AlertService:
             alerts.append(alert)
         return alerts
 
+    async def create_for_warning(
+        self,
+        db: AsyncSession,
+        *,
+        organization_id: UUID,
+        subject_user_id: UUID,
+        warning_id: UUID,
+        title: str,
+    ) -> Alert | None:
+        """경고 발행 시 대상 직원에게 in-app 알림을 생성합니다. 선호 비활성 시 None.
+
+        Auto-create an alert for the subject when a warning is issued.
+        type='warning', reference_type='warning'.
+        """
+        if not await self._is_in_app_enabled_for_user(db, subject_user_id, "warning"):
+            return None
+        message = f"You have received a warning: {title}"
+        return await alert_repository.create_alert(
+            db,
+            organization_id=organization_id,
+            user_id=subject_user_id,
+            alert_type="warning",
+            message=message,
+            reference_type="warning",
+            reference_id=warning_id,
+        )
+
     async def create_for_substitute(
         self,
         db: AsyncSession,

@@ -19,11 +19,20 @@ __all__ = [
     "WarningCreate",
     "WarningUpdate",
     "WarningResponse",
+    "SignatureInfo",
+    "WarningSignaturesResponse",
+    "WarningSignRequest",
+    "SavedSignatureResponse",
+    "SavedSignatureUpdate",
     "StoreRef",
     "WarnableUserResponse",
     "WarnableUsersPage",
     "WarningCountItem",
 ]
+
+# 벡터 서명 입력 상한 — 악의/사고성 거대 페이로드 방어.
+MAX_STROKES = 500
+MAX_POINTS = 10000
 
 
 def _validate_categories(v: list[str]) -> list[str]:
@@ -169,8 +178,113 @@ class WarningResponse(BaseModel):
     # 그 직원의 경고 순번 (1=First, 2=Second, ≥3=Other) — 상세에서만 채워짐.
     ordinal: int | None = None
     withdrawn_at: datetime | None
+    # 직원 확인(읽음) 일시 — 직원이 앱에서 상세를 처음 열면 자동 stamp (NULL=미확인).
+    # 확인 != 서명: signatures 와 독립.
+    acknowledged_at: datetime | None = None
+    # party 별 적용 서명 — {"employee": SigInfo|None, "manager": SigInfo|None}.
+    # 미서명 party 는 None. SigInfo 는 적용 순간 박제된 벡터 스냅샷.
+    signatures: dict[str, "SignatureInfo | None"] = {}
     created_at: datetime
     updated_at: datetime
+
+
+# === 서명 ===
+
+
+class SignatureInfo(BaseModel):
+    """적용된 서명 1개 정보 — WarningResponse.signatures[party] 값.
+
+    signature_strokes 는 적용 순간 박제된 벡터 스냅샷(유저의 현재 저장 서명과 무관).
+    """
+
+    signer_user_id: str | None
+    signer_name: str | None
+    signed_at: datetime
+    method: str  # 'drawn' | 'saved'
+    signature_strokes: dict  # {"strokes":[[[x,y]..]..],"aspect":w/h}
+
+
+class WarningSignaturesResponse(BaseModel):
+    """party 별 서명 묶음 — {"employee": SigInfo|None, "manager": SigInfo|None}."""
+
+    employee: SignatureInfo | None = None
+    manager: SignatureInfo | None = None
+
+
+def _validate_strokes(strokes: list[list[list[float]]]) -> list[list[list[float]]]:
+    """벡터 스트로크 검증 — 비어있지 않고, 0..1 정규화, 상한 이내.
+
+    - strokes 비어있으면 거부 (실제 서명 강제)
+    - 각 point 는 [x, y] (정확히 2 좌표), 0.0 ≤ x,y ≤ 1.0
+    - strokes 수 ≤ MAX_STROKES, 총 point 수 ≤ MAX_POINTS
+    """
+    if not isinstance(strokes, list) or not strokes:
+        raise ValueError("Signature strokes cannot be empty")
+    if len(strokes) > MAX_STROKES:
+        raise ValueError(f"Too many strokes (max {MAX_STROKES})")
+    total_points = 0
+    for stroke in strokes:
+        if not isinstance(stroke, list) or not stroke:
+            raise ValueError("Each stroke must be a non-empty list of points")
+        total_points += len(stroke)
+        if total_points > MAX_POINTS:
+            raise ValueError(f"Too many points (max {MAX_POINTS})")
+        for pt in stroke:
+            if not isinstance(pt, list) or len(pt) != 2:
+                raise ValueError("Each point must be [x, y]")
+            x, y = pt
+            if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+                raise ValueError("Point coordinates must be numbers")
+            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                raise ValueError("Point coordinates must be normalized to 0..1")
+    return strokes
+
+
+class WarningSignRequest(BaseModel):
+    """경고 서명 요청 — POST /{id}/sign (app=employee, console=manager).
+
+    strokes 는 정규화(0..1) 벡터. method='saved' 면 저장 서명에서 적용한 것(감사용),
+    'drawn' 이면 새로 그린 것. save_as_default=True 면 이 서명을 users.signature_strokes
+    로도 저장(재사용 템플릿 갱신).
+    """
+
+    strokes: list[list[list[float]]]
+    aspect: float | None = None
+    method: Literal["drawn", "saved"] = "drawn"
+    save_as_default: bool = False
+
+    @field_validator("strokes")
+    @classmethod
+    def _check_strokes(cls, v: list[list[list[float]]]) -> list[list[list[float]]]:
+        return _validate_strokes(v)
+
+    def to_strokes_payload(self) -> dict:
+        """DB 저장용 스냅샷 dict — {"strokes": ..., "aspect": ...}."""
+        return {"strokes": self.strokes, "aspect": self.aspect}
+
+
+class SavedSignatureResponse(BaseModel):
+    """저장 서명 조회 응답 — {"signature": {strokes, aspect} | None}.
+
+    signature=None 이면 아직 저장 서명 없음.
+    """
+
+    signature: dict | None = None
+
+
+class SavedSignatureUpdate(BaseModel):
+    """저장 서명 설정 요청 — {strokes, aspect}. users.signature_strokes 갱신."""
+
+    strokes: list[list[list[float]]]
+    aspect: float | None = None
+
+    @field_validator("strokes")
+    @classmethod
+    def _check_strokes(cls, v: list[list[list[float]]]) -> list[list[list[float]]]:
+        return _validate_strokes(v)
+
+    def to_strokes_payload(self) -> dict:
+        return {"strokes": self.strokes, "aspect": self.aspect}
 
 
 # === 경고 대상 직원 (picker) ===
@@ -221,3 +335,7 @@ class WarningCountItem(BaseModel):
     user_id: str
     total: int
     active: int
+
+
+# WarningResponse.signatures 가 SignatureInfo 를 forward-ref 하므로 rebuild.
+WarningResponse.model_rebuild()

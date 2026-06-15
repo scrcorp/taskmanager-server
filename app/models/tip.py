@@ -175,7 +175,13 @@ class Form4070Document(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     signed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 레거시 서명 이미지 storage key — 이미 서명된 구 폼 호환용 (이행 대상).
+    # 신규 서명은 signature_strokes(벡터)로 박제. resolve_url 로 런타임 변환.
     signature_image_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # 벡터 서명 스냅샷 — {"strokes":[[[x,y]..]..],"aspect":w/h} (정규화 0..1).
+    # 서명 순간 users.signature_strokes 를 박제. 나중에 유저 저장 서명이 바뀌어도 불변.
+    # PDF 렌더는 strokes 우선, 없으면 signature_image_key(레거시) fallback.
+    signature_strokes: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("employee_id", "period_id", name="uq_form_employee_period"),

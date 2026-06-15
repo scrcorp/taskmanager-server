@@ -19,6 +19,105 @@ from typing import Optional
 
 from app.utils.pdf import create_pdf
 
+# 서명 박스 좌표 (mm) — strokes/이미지 모두 같은 rect 안에 그린다.
+_SIG_BOX_X = 14.0
+_SIG_BOX_W = 120.0
+_SIG_BOX_H = 30.0
+# 박스 내부 패딩 — stroke 가 테두리에 붙지 않게.
+_SIG_PAD = 3.0
+
+
+def _draw_signature_strokes(pdf, signature_strokes: dict, box_top: float) -> bool:
+    """벡터 서명 stroke 를 서명 박스 안에 그린다 (정규화 0..1 → mm 매핑).
+
+    signature_strokes = {"strokes": [[[x,y]..]..], "aspect": w/h}.
+    aspect 를 유지하며 (xMidYMid meet) 박스 안쪽 패딩 영역에 맞춘다.
+    유효한 stroke 를 하나라도 그렸으면 True, 아니면 False.
+    """
+    strokes = (signature_strokes or {}).get("strokes")
+    if not isinstance(strokes, list) or not strokes:
+        return False
+
+    avail_w = _SIG_BOX_W - 2 * _SIG_PAD
+    avail_h = _SIG_BOX_H - 2 * _SIG_PAD
+    if avail_w <= 0 or avail_h <= 0:
+        return False
+
+    aspect = (signature_strokes or {}).get("aspect") or 1.0
+    try:
+        aspect = float(aspect)
+    except (TypeError, ValueError):
+        aspect = 1.0
+    if aspect <= 0:
+        aspect = 1.0
+
+    # aspect 유지하며 박스 안에 맞추기 (meet).
+    draw_w = avail_w
+    draw_h = draw_w / aspect
+    if draw_h > avail_h:
+        draw_h = avail_h
+        draw_w = draw_h * aspect
+    origin_x = _SIG_BOX_X + _SIG_PAD + (avail_w - draw_w) / 2
+    origin_y = box_top + _SIG_PAD + (avail_h - draw_h) / 2
+
+    # 잉크 중앙배치 — stroke bbox 중심을 그리기 영역 중심으로 (크기 유지, translate).
+    min_x = min_y = 1.0
+    max_x = max_y = 0.0
+    seen = False
+    for stroke in strokes:
+        if not isinstance(stroke, list):
+            continue
+        for pt in stroke:
+            if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                continue
+            try:
+                bx, by = float(pt[0]), float(pt[1])
+            except (TypeError, ValueError):
+                continue
+            bx = min(1.0, max(0.0, bx))
+            by = min(1.0, max(0.0, by))
+            min_x = min(min_x, bx)
+            max_x = max(max_x, bx)
+            min_y = min(min_y, by)
+            max_y = max(max_y, by)
+            seen = True
+    ox = (0.5 - (min_x + max_x) / 2) if seen else 0.0
+    oy = (0.5 - (min_y + max_y) / 2) if seen else 0.0
+
+    pdf.set_draw_color(20, 20, 24)
+    pdf.set_line_width(0.4)
+    drew = False
+    for stroke in strokes:
+        if not isinstance(stroke, list) or not stroke:
+            continue
+        pts: list[tuple[float, float]] = []
+        for pt in stroke:
+            if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                continue
+            x, y = pt
+            try:
+                fx, fy = float(x), float(y)
+            except (TypeError, ValueError):
+                continue
+            # 0..1 clamp 후 박스 좌표로 매핑.
+            fx = min(1.0, max(0.0, fx))
+            fy = min(1.0, max(0.0, fy))
+            pts.append((origin_x + (fx + ox) * draw_w, origin_y + (fy + oy) * draw_h))
+        if not pts:
+            continue
+        if len(pts) == 1:
+            # 점 하나 — 보이도록 아주 짧은 선.
+            x0, y0 = pts[0]
+            pdf.line(x0, y0, x0 + 0.3, y0)
+            drew = True
+            continue
+        for i in range(len(pts) - 1):
+            pdf.line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1])
+        drew = True
+    # 기본 선폭 복원 (이후 rect/테두리 그리기 영향 방지).
+    pdf.set_line_width(0.2)
+    return drew
+
 
 def build_form_4070_pdf(
     *,
@@ -33,6 +132,7 @@ def build_form_4070_pdf(
     net_tips: str,
     signed_at: Optional[str] = None,
     signature_png: Optional[bytes] = None,
+    signature_strokes: Optional[dict] = None,
 ) -> bytes:
     """Form 4070 PDF bytes 반환."""
     pdf, font = create_pdf()
@@ -83,16 +183,29 @@ def build_form_4070_pdf(
     # ── Signature area ───────────────────────────────────────
     pdf.set_font(font, "B", 11)
     pdf.cell(0, 6, "Employee signature", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_draw_color(180, 180, 180)
-    pdf.rect(14, pdf.get_y(), 120, 30)
-    sig_top = pdf.get_y() + 2
-    if signature_png:
-        # signature image (in-memory)
+    box_top = pdf.get_y()
+    # 우선순위: 벡터 strokes → 레거시 이미지(이미 서명된 구 폼) fallback.
+    drew_vector = False
+    if signature_strokes:
         try:
-            pdf.image(BytesIO(signature_png), x=18, y=sig_top, w=110, h=24, keep_aspect_ratio=True)
+            drew_vector = _draw_signature_strokes(pdf, signature_strokes, box_top)
+        except Exception:
+            drew_vector = False
+    if not drew_vector and signature_png:
+        # 레거시 서명 이미지 (in-memory) — strokes 없는 구 폼만.
+        try:
+            pdf.image(
+                BytesIO(signature_png),
+                x=_SIG_BOX_X + 4, y=box_top + 2,
+                w=_SIG_BOX_W - 10, h=_SIG_BOX_H - 6,
+                keep_aspect_ratio=True,
+            )
         except Exception:
             pass
-    pdf.set_y(pdf.get_y() + 32)
+    # 테두리는 서명 위에 그린다 (선폭/색 복원 후).
+    pdf.set_draw_color(180, 180, 180)
+    pdf.rect(_SIG_BOX_X, box_top, _SIG_BOX_W, _SIG_BOX_H)
+    pdf.set_y(box_top + _SIG_BOX_H + 2)
     pdf.set_font(font, "", 9)
     if signed_at:
         pdf.cell(0, 5, f"Date signed: {signed_at}", new_x="LMARGIN", new_y="NEXT")

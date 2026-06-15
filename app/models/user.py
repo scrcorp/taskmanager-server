@@ -147,9 +147,13 @@ class User(Base):
     # 근태 기기 PIN — 매장 공용 기기에서 clock in/out 시 사용하는 개인 PIN (현재 6자리, 추후 4~6 가변 예정).
     # Attendance device PIN. 조직 내 unique (NULL 다중 허용) — PIN 단독으로 user 식별 가능하게.
     clockin_pin: Mapped[Optional[str]] = mapped_column(String(6), nullable=True)
-    # 저장된 사인 이미지 — Storage key (S3 또는 local bucket).
-    # IRS Form 4070 등 폼 서명에 재사용. 직원이 staff app Settings 에서 등록/변경.
+    # 저장된 사인 이미지 — Storage key (S3 또는 local bucket). [LEGACY/이행대상]
+    # IRS Form 4070 등 폼 서명에 재사용. 벡터 서명(signature_strokes)으로 통일 예정.
     signature_image_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # 저장된 사인 — 벡터 스트로크 {"strokes":[[[x,y]..]..],"aspect":w/h} (정규화 0..1).
+    # 사람당 서명 1개(재사용 템플릿). 경고·4070 등 모든 폼 서명에 공통 사용.
+    # 이미지(signature_image_key) 대신 벡터로 통일 — 가볍고 인쇄 시 SVG 벡터 렌더.
+    signature_strokes: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     # 사번 — Employee number (조직 내 non-null 값은 고유, NULL 다중 허용).
     # v1 은 read-only 표시 전용 (입력 UI / 자동 생성 없음, 기존 사용자는 전부 NULL).
     # 고유성은 partial unique index(uq_user_org_employee_no, WHERE employee_no IS NOT NULL).

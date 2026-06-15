@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import (
     check_store_access,
     get_accessible_store_ids,
+    get_current_user,
     require_permission,
 )
 from app.core.permissions import is_owner
@@ -33,13 +34,20 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse, PaginatedResponse
 from app.schemas.warning import (
+    SavedSignatureResponse,
+    SavedSignatureUpdate,
     WarnableUsersPage,
     WarningCountItem,
     WarningCreate,
     WarningResponse,
+    WarningSignRequest,
     WarningUpdate,
 )
 from app.services.warning_service import warning_service
+from app.services.warning_signature_service import (
+    PARTY_MANAGER,
+    warning_signature_service,
+)
 from app.utils.exceptions import NotFoundError
 
 router: APIRouter = APIRouter()
@@ -88,6 +96,30 @@ async def warning_counts(
     return await warning_service.get_counts(
         db, current_user.organization_id, store_ids=store_ids
     )
+
+
+@router.get("/my-signature", response_model=SavedSignatureResponse)
+async def get_my_signature(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """콘솔 사용자(매니저) 본인의 저장 서명 조회 — manager 서명 재사용용.
+
+    users.signature_strokes (employee/app 와 동일 컬럼). 없으면 signature=None.
+    """
+    return {"signature": warning_signature_service.get_saved_signature(current_user)}
+
+
+@router.put("/my-signature", response_model=SavedSignatureResponse)
+async def set_my_signature(
+    data: SavedSignatureUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """콘솔 사용자(매니저) 본인의 저장 서명 설정/갱신."""
+    saved = await warning_signature_service.set_saved_signature(
+        db, current_user, data.to_strokes_payload()
+    )
+    return {"signature": saved}
 
 
 # ====================================================================
@@ -163,6 +195,40 @@ async def get_warning(
             raise NotFoundError("Warning not found")
 
     return await warning_service.build_warning_response(db, warning, include_ordinal=True)
+
+
+@router.post("/{warning_id}/sign", response_model=WarningResponse)
+async def sign_warning_as_manager(
+    warning_id: UUID,
+    data: WarningSignRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("warnings:read"))],
+) -> dict:
+    """경고에 manager 서명 적용 (party='manager').
+
+    Identity gate (대리 금지 — 권한/priority 체크 아님):
+        service 가 signer == warning.issued_by_id 를 강제한다. 따라서 발행자가
+        아닌 GM 도, 발행자가 아닌 Owner/super-owner 도 403. (Owner 는 발행자를
+        reassign 할 수 있을 뿐, 남의 이름으로 서명할 수는 없다.)
+
+    active 경고만 서명 가능. 부재/org 밖/soft-deleted → 404.
+    """
+    warning = await warning_service.get_warning(
+        db, warning_id=warning_id, organization_id=current_user.organization_id
+    )
+    await warning_signature_service.sign(
+        db,
+        warning=warning,
+        party=PARTY_MANAGER,
+        signer=current_user,
+        strokes_payload=data.to_strokes_payload(),
+        method=data.method,
+        save_as_default=data.save_as_default,
+    )
+    fresh = await warning_service.get_warning(
+        db, warning_id=warning_id, organization_id=current_user.organization_id
+    )
+    return await warning_service.build_warning_response(db, fresh, include_ordinal=True)
 
 
 @router.post("/", response_model=WarningResponse, status_code=201)
