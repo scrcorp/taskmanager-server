@@ -29,6 +29,7 @@ from app.models.user_store import UserStore
 from app.models.warning import Warning
 from app.repositories.warning_repository import warning_repository
 from app.repositories.warning_category_repository import warning_category_repository
+from app.services.alert_service import alert_service
 from app.services.warning_category_service import warning_category_service
 from app.utils.exceptions import BadRequestError, NotFoundError
 
@@ -144,6 +145,73 @@ class WarningService:
         if warning is None:
             raise NotFoundError("Warning not found")
         return warning
+
+    # ====================================================================
+    # 직원 본인(app) — 내 경고 조회 / 확인(acknowledge) / 미서명 카운트
+    # ====================================================================
+
+    async def list_my_warnings(
+        self,
+        db: AsyncSession,
+        *,
+        organization_id: UUID,
+        subject_user_id: UUID,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> tuple[Sequence[Warning], int]:
+        """직원 본인의 active 경고 목록 (app). withdrawn/삭제 제외."""
+        return await warning_repository.list_my_active(
+            db, organization_id, subject_user_id, page=page, per_page=per_page
+        )
+
+    async def get_my_warning(
+        self,
+        db: AsyncSession,
+        *,
+        warning_id: UUID,
+        organization_id: UUID,
+        subject_user_id: UUID,
+    ) -> Warning:
+        """직원 본인의 단일 경고 (app). 본인 소유 아니거나 부재면 404.
+
+        존재 누설 방지를 위해 '내 것이 아님'과 '없음'을 동일하게 404 처리한다.
+        """
+        warning = await warning_repository.get_my_active(
+            db, warning_id, organization_id, subject_user_id
+        )
+        if warning is None:
+            raise NotFoundError("Warning not found")
+        return warning
+
+    async def acknowledge_warning(
+        self, db: AsyncSession, warning: Warning
+    ) -> Warning:
+        """경고를 확인(읽음) 처리 — acknowledged_at 을 최초 1회 stamp (idempotent).
+
+        이미 확인된 경고는 no-op (기존 시각 유지). 확인 != 서명.
+        """
+        if warning.acknowledged_at is None:
+            try:
+                warning.acknowledged_at = datetime.now(timezone.utc)
+                await db.flush()
+                await db.refresh(warning)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return warning
+
+    async def count_my_unsigned(
+        self,
+        db: AsyncSession,
+        *,
+        organization_id: UUID,
+        subject_user_id: UUID,
+    ) -> int:
+        """본인의 active 경고 중 employee 서명이 없는 갯수 (badge)."""
+        return await warning_repository.count_my_unsigned(
+            db, organization_id, subject_user_id
+        )
 
     async def get_counts(
         self,
@@ -286,6 +354,15 @@ class WarningService:
             try:
                 await db.flush()
                 await db.refresh(warning)
+                # 대상 직원에게 in-app 알림 (선호 비활성 시 내부에서 skip).
+                # flush 후 동일 트랜잭션에서 생성 — commit 으로 함께 영속.
+                await alert_service.create_for_warning(
+                    db,
+                    organization_id=organization_id,
+                    subject_user_id=subject_id,
+                    warning_id=warning.id,
+                    title=warning.title,
+                )
                 await db.commit()
                 return warning
             except IntegrityError as exc:
@@ -428,14 +505,18 @@ class WarningService:
         warning: Warning,
         *,
         include_ordinal: bool = False,
+        include_signatures: bool = True,
         category_labels: dict[str, str] | None = None,
     ) -> dict:
         """Warning → WarningResponse dict (joined names + ref_no + category labels).
 
         include_ordinal=True 면 그 직원의 경고 순번(First/Second/Other 표시용)을
         계산해 담는다. 목록에선 N+1 을 피하려 생략(None), 상세에서만 True.
-        category_labels: org 의 code→label 맵(주입 시 list N+1 회피). None 이면 조회.
+        include_signatures=True 면 acknowledged_at + party 별 서명을 채운다
+        (employee/manager). category_labels: org 의 code→label 맵(주입 시 list N+1
+        회피). None 이면 조회.
         """
+        from app.services.warning_signature_service import warning_signature_service
         subject_name: str | None = None
         employee_no: str | None = None
         if warning.subject_user_id:
@@ -470,6 +551,10 @@ class WarningService:
         codes = list(warning.categories or [])
         labels = {c: category_labels.get(c, c) for c in codes}
 
+        signatures: dict[str, dict | None] = {"employee": None, "manager": None}
+        if include_signatures:
+            signatures = await warning_signature_service.get_signatures(db, warning.id)
+
         return {
             "id": str(warning.id),
             "ref_no": _ref_no(warning.seq),
@@ -493,6 +578,8 @@ class WarningService:
             "warning_date": warning.warning_date,
             "ordinal": ordinal,
             "withdrawn_at": warning.withdrawn_at,
+            "acknowledged_at": warning.acknowledged_at,
+            "signatures": signatures,
             "created_at": warning.created_at,
             "updated_at": warning.updated_at,
         }

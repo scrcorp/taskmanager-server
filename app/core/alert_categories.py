@@ -62,6 +62,13 @@ CATEGORIES: list[dict[str, Any]] = [
         "types": ["attendance_corrected"],
         "email_available": False,
     },
+    {
+        "code": "warning",
+        "label": "Warning",
+        "description": "Disciplinary warnings issued to you",
+        "types": ["warning"],
+        "email_available": False,
+    },
 ]
 
 # 카테고리 코드 set — 빠른 검증용

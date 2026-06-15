@@ -26,6 +26,7 @@ from app.models.organization import Store
 from app.models.user import User
 from app.schemas.tip import (
     Form4070Response,
+    SavedSignatureUpdateRequest,
     SignatureResponse,
     SignatureUpdateRequest,
     SignFormRequest,
@@ -194,6 +195,7 @@ async def list_my_forms(
             "signed_at": f.signed_at,
             "signature_image_key": f.signature_image_key,
             "signature_url": storage_service.resolve_url(f.signature_image_key) if f.signature_image_key else None,
+            "signature_strokes": f.signature_strokes,
         })
     return out
 
@@ -211,6 +213,7 @@ async def sign_form(
         db,
         actor=current_user,
         form_id=form_id,
+        signature_strokes=payload.to_strokes_payload(),
         signature_image_key=payload.signature_image_key,
         save_for_future=payload.save_for_future,
     )
@@ -238,6 +241,7 @@ async def sign_form(
         "signed_at": form.signed_at,
         "signature_image_key": form.signature_image_key,
         "signature_url": storage_service.resolve_url(form.signature_image_key) if form.signature_image_key else None,
+        "signature_strokes": form.signature_strokes,
     }
 
 
@@ -249,13 +253,34 @@ async def get_my_signature(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("tips:read"))],
 ) -> dict:
+    """저장 서명 조회 — 벡터(signature_strokes) 우선 + 레거시 이미지 호환.
+
+    경고 기능과 동일한 users.signature_strokes 를 읽는다 (사람당 통일 서명).
+    """
     from app.services.storage_service import storage_service
     user = await db.scalar(select(User).where(User.id == current_user.id))
+    strokes = user.signature_strokes if user else None
     key = user.signature_image_key if user else None
     return {
+        "signature_strokes": strokes,
         "signature_image_key": key,
         "signature_url": storage_service.resolve_url(key) if key else None,
     }
+
+
+@router.put("/saved-signature", response_model=SignatureResponse)
+async def update_my_saved_signature(
+    payload: SavedSignatureUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("tips:read"))],
+) -> dict:
+    """벡터 저장 서명 설정/갱신 — users.signature_strokes (경고와 공용 통일 서명)."""
+    user = await db.scalar(select(User).where(User.id == current_user.id))
+    if user is None:
+        return {"signature_strokes": None}
+    user.signature_strokes = payload.to_strokes_payload()
+    await db.commit()
+    return {"signature_strokes": user.signature_strokes}
 
 
 @router.post("/signature/blob", response_model=SignatureResponse)
@@ -308,6 +333,8 @@ async def clear_my_signature(
 ) -> Response:
     user = await db.scalar(select(User).where(User.id == current_user.id))
     if user is not None:
+        # 통일 서명 제거 — 벡터 + 레거시 이미지 둘 다 클리어.
+        user.signature_strokes = None
         user.signature_image_key = None
         await db.commit()
     return Response(status_code=204)
