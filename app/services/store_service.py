@@ -44,6 +44,7 @@ class StoreService:
             id=str(store.id),
             organization_id=str(store.organization_id),
             name=store.name,
+            code=store.code,
             address=store.address,
             is_active=store.is_active,
             require_approval=store.require_approval,
@@ -113,6 +114,7 @@ class StoreService:
             id=str(store.id),
             organization_id=str(store.organization_id),
             name=store.name,
+            code=store.code,
             address=store.address,
             is_active=store.is_active,
             require_approval=store.require_approval,
@@ -164,11 +166,21 @@ class StoreService:
         if exists:
             raise DuplicateError("A store with this name already exists")
 
+        # 코드 중복 확인 (org 내 유일) — Check store code uniqueness within org
+        if data.code is not None:
+            code_exists: bool = await store_repository.exists(
+                db, {"organization_id": organization_id, "code": data.code}
+            )
+            if code_exists:
+                raise DuplicateError("A store with this code already exists")
+
         create_data: dict = {
             "organization_id": organization_id,
             "name": data.name,
             "address": data.address,
         }
+        if data.code is not None:
+            create_data["code"] = data.code
         if data.timezone is not None:
             create_data["timezone"] = data.timezone
         if data.default_hourly_rate is not None:
@@ -227,17 +239,25 @@ class StoreService:
             DuplicateError: 같은 이름의 매장이 이미 존재할 때
                             (When a store with the same name already exists)
         """
-        # 이름 변경 시 중복 확인 — Check name uniqueness if changing name
+        # 이름/코드 변경 시 중복 확인 — Check name/code uniqueness if changing.
+        fields = data.model_dump(exclude_unset=True)
+        existing: Store | None = None
+        if "name" in fields or "code" in fields:
+            existing = await store_repository.get_by_id(db, store_id, organization_id)
         if data.name is not None:
-            existing: Store | None = await store_repository.get_by_id(
-                db, store_id, organization_id
-            )
             if existing is not None and existing.name != data.name:
                 name_exists: bool = await store_repository.exists(
                     db, {"organization_id": organization_id, "name": data.name}
                 )
                 if name_exists:
                     raise DuplicateError("A store with this name already exists")
+        if "code" in fields and data.code is not None:
+            if existing is not None and existing.code != data.code:
+                code_exists: bool = await store_repository.exists(
+                    db, {"organization_id": organization_id, "code": data.code}
+                )
+                if code_exists:
+                    raise DuplicateError("A store with this code already exists")
 
         update_data: dict = data.model_dump(exclude_unset=True)
         try:

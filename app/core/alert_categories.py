@@ -66,7 +66,8 @@ CATEGORIES: list[dict[str, Any]] = [
         "code": "warning",
         "label": "Warning",
         "description": "Disciplinary warnings issued to you",
-        "types": ["warning"],
+        # warning(발행) + warning_resign(방식 전환으로 재서명 필요) — 토글 1개로 묶음.
+        "types": ["warning", "warning_resign"],
         "email_available": False,
     },
 ]

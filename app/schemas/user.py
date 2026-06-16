@@ -5,10 +5,26 @@ Covers CRUD operations for roles (permission levels), users
 within an organization, and self-service profile management.
 """
 
+import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# 사번(employee_no) — 회사 사번. 문자열 유지(선행0 보존), org 내 유일(partial unique).
+_EMPLOYEE_NO_RE = re.compile(r"^[A-Za-z0-9-]{1,50}$")
+
+
+def _normalize_employee_no(v: str | None) -> str | None:
+    """trim → 빈문자는 None. 영숫자+하이픈만, 선행0 보존(정수화 금지)."""
+    if v is None:
+        return None
+    v = v.strip()
+    if not v:
+        return None
+    if not _EMPLOYEE_NO_RE.match(v):
+        raise ValueError("Employee number must be 1-50 alphanumeric/hyphen characters")
+    return v
 
 
 # === 역할 (Role) 스키마 ===
@@ -66,6 +82,9 @@ class UserCreate(BaseModel):
     email: str | None = None  # 이메일 (Optional email)
     role_id: str  # 역할 UUID 문자열 (Role UUID to assign)
     department: Literal["FOH", "BOH"] | None = None  # FOH/BOH 분류 (None=미지정)
+    employee_no: str | None = None  # 사번 (Company employee number, optional)
+
+    _norm_emp = field_validator("employee_no")(_normalize_employee_no)
 
 
 class UserUpdate(BaseModel):
@@ -89,6 +108,9 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None  # 활성 상태 변경 (Activate/deactivate, optional)
     hourly_rate: float | None = None  # 개인 시급 (Personal hourly rate, optional)
     department: Literal["FOH", "BOH"] | None = None  # FOH/BOH 분류 변경 (None=미지정으로 해제)
+    employee_no: str | None = None  # 사번 변경 (New employee number, optional)
+
+    _norm_emp = field_validator("employee_no")(_normalize_employee_no)
 
 
 class UserBulkUpdate(BaseModel):
@@ -141,6 +163,7 @@ class UserResponse(BaseModel):
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속 (None = inherit from store/org)
     effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
     department: str | None = None  # FOH/BOH 분류 (None=미지정)
+    employee_no: str | None = None  # 사번 (Company employee number, nullable)
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
@@ -169,6 +192,7 @@ class UserListResponse(BaseModel):
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속
     effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
     department: str | None = None  # FOH/BOH 분류 (None=미지정)
+    employee_no: str | None = None  # 사번 (Company employee number, nullable)
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 

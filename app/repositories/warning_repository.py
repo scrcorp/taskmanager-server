@@ -154,6 +154,27 @@ class WarningRepository(BaseRepository[Warning]):
         )
         return int(result.scalar() or 1)
 
+    async def next_ordinal(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        subject_user_id: UUID,
+    ) -> int:
+        """대상 직원의 다음 차수(ordinal_snapshot) = max(기존)+1.
+
+        soft-delete/철회 행도 모두 포함해 max 를 잡는다(차수 단조 증가 + 번호 재사용
+        금지 → 불변성·서류 무결성). 같은 직원 첫 경고면 1.
+        동시 발행 시 둘 다 같은 N 을 받을 수 있으나 partial-unique 가 막아
+        create_warning 의 재시도 루프가 흡수한다.
+        """
+        result = await db.execute(
+            select(func.coalesce(func.max(Warning.ordinal_snapshot), 0)).where(
+                Warning.organization_id == organization_id,
+                Warning.subject_user_id == subject_user_id,
+            )
+        )
+        return int(result.scalar() or 0) + 1
+
     async def list_my_active(
         self,
         db: AsyncSession,
@@ -228,6 +249,8 @@ class WarningRepository(BaseRepository[Warning]):
                 Warning.subject_user_id == subject_user_id,
                 Warning.deleted_at.is_(None),
                 Warning.status == "active",
+                # wet 경고는 직원이 앱에서 서명 불가 → 미서명 독촉/배지에서 제외.
+                Warning.signature_method == "digital",
                 sig_subq.c.warning_id.is_(None),
             )
         )

@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     STORAGE_FOLDER_PROFILES: str = "profiles"
     STORAGE_FOLDER_ANNOUNCEMENTS: str = "notices"
     STORAGE_FOLDER_ISSUES: str = "issues"
+    STORAGE_FOLDER_WARNINGS: str = "warnings"
 
     # 체크리스트 사진 최대 장수 — 플랫폼 전체 상수
     MAX_PHOTOS_PER_ITEM: int = 5

@@ -80,6 +80,8 @@ class WarningCreate(BaseModel):
     # 발행자(매니저) override — Owner 만 다른 매니저 대신 발행 가능 (service 강제)
     issued_by_id: str | None = None
     warning_date: date
+    # 서명 방식 — 'digital'(기본) | 'wet'. 종이 운영 매장은 발행 시 wet 선택.
+    signature_method: Literal["digital", "wet"] = "digital"
 
     @field_validator("title")
     @classmethod
@@ -184,6 +186,19 @@ class WarningResponse(BaseModel):
     # party 별 적용 서명 — {"employee": SigInfo|None, "manager": SigInfo|None}.
     # 미서명 party 는 None. SigInfo 는 적용 순간 박제된 벡터 스냅샷.
     signatures: dict[str, "SignatureInfo | None"] = {}
+    # === wet 서명 ===
+    # 'digital'(앱/콘솔 벡터) | 'wet'(출력→실물 서명→PDF 업로드).
+    signature_method: str = "digital"
+    # 스토어 코드 — 파일명/표시용 (stores.code). subject 매장 기준.
+    store_code: str | None = None
+    # wet PDF 업로드 여부 + 메타 (실제 파일은 별도 다운로드 엔드포인트로 인증 후 제공).
+    signed_pdf_present: bool = False
+    wet_signed_on: date | None = None
+    wet_uploaded_at: datetime | None = None
+    # 서명완료 파생 bool — 콘솔/앱/배지가 모두 이 단일 값을 소비.
+    # digital: warning_signatures 행 유무. wet: signed_pdf_key 유무(양쪽 갈음).
+    employee_signed: bool = False
+    manager_signed: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -261,6 +276,16 @@ class WarningSignRequest(BaseModel):
     def to_strokes_payload(self) -> dict:
         """DB 저장용 스냅샷 dict — {"strokes": ..., "aspect": ...}."""
         return {"strokes": self.strokes, "aspect": self.aspect}
+
+
+class WarningMethodSwitchRequest(BaseModel):
+    """서명 방식 전환 요청 — PUT /{id}/method.
+
+    digital↔wet 양방향. 기존 서명/PDF 가 있으면 무효화되고 재서명 대기로 리셋된다
+    (service 에서 처리, 재서명 알림 발송). 전환은 철회가 아님(status 유지).
+    """
+
+    method: Literal["digital", "wet"]
 
 
 class SavedSignatureResponse(BaseModel):

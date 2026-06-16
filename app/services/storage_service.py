@@ -42,6 +42,7 @@ FOLDER_MAP: dict[str, str] = {
     "profiles": settings.STORAGE_FOLDER_PROFILES,
     "notices": settings.STORAGE_FOLDER_ANNOUNCEMENTS,
     "issues": settings.STORAGE_FOLDER_ISSUES,
+    "warnings": settings.STORAGE_FOLDER_WARNINGS,
 }
 
 
@@ -355,6 +356,27 @@ class StorageService:
             return True
         except Exception:
             return False
+
+    def read_bytes(self, key: str | None) -> bytes | None:
+        """key 의 파일 바이트를 읽어 반환 (인증된 서버 다운로드 서빙용).
+
+        현재 버킷에 없으면 fallback 버킷에서 복사 시도(resolve_url 과 동일 정책).
+        끝내 없으면 None.
+        """
+        if not key:
+            return None
+        if not self._exists(key) and not self._copy_from_fallback(key):
+            return None
+        if self.is_local:
+            try:
+                return (BUCKET_DIR / key).read_bytes()
+            except Exception:
+                return None
+        try:
+            obj = self.client.get_object(Bucket=settings.AWS_S3_BUCKET, Key=key)
+            return obj["Body"].read()
+        except Exception:
+            return None
 
     # ── 파일 삭제 ─────────────────────────────────────────────
 

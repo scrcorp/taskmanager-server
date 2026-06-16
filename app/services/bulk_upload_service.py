@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.organization import Store
 from app.models.user import Role, User
 from app.models.user_store import UserStore
-from app.schemas.schedule import ScheduleCreate
+from app.schemas.schedule import SCHEDULE_STEP_MINUTES, ScheduleCreate
 from app.schemas.user import UserCreate
 from app.services.schedule_service import schedule_service
 from app.services.user_service import user_service
@@ -256,6 +256,10 @@ class BulkUploadService:
                         continue
 
                     start_24, end_24, break_start_24, break_end_24 = parsed
+                    if self._is_off_30min_grid(start_24, end_24, break_start_24, break_end_24):
+                        day_name = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][day_idx]
+                        errors.append(f"Sheet '{sheet_name}', row {row_idx + 1}, {day_name}: times must be on :00 or :30 ('{cell}')")
+                        continue
                     entries.append(ScheduleCreate(
                         user_id=str(user.id),
                         store_id=str(store.id),
@@ -397,6 +401,10 @@ class BulkUploadService:
                         errors.append(f"Line {abs_line}, {day_name}: invalid '{cell}'")
                         continue
                     start_24, end_24, bs24, be24 = parsed
+                    if self._is_off_30min_grid(start_24, end_24, bs24, be24):
+                        day_name = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day_idx]
+                        errors.append(f"Line {abs_line}, {day_name}: times must be on :00 or :30 ('{cell}')")
+                        continue
                     entries.append(ScheduleCreate(
                         user_id=str(user.id), store_id=str(store.id),
                         work_date=work_date, start_time=start_24, end_time=end_24,
@@ -441,6 +449,14 @@ class BulkUploadService:
             )
         )
         return {u.username.lower(): u for u in result.scalars().all()}
+
+    @staticmethod
+    def _is_off_30min_grid(*times: str | None) -> bool:
+        """주어진 "HH:MM" 중 하나라도 30분 grid(:00/:30)를 벗어나면 True."""
+        for t in times:
+            if t and int(t.split(":")[1]) % SCHEDULE_STEP_MINUTES != 0:
+                return True
+        return False
 
     def _parse_schedule_cell(self, cell: str) -> tuple[str, str, str | None, str | None] | None:
         """Parse '09:00AM-06:00PM' or '09:00AM-06:00PM(12:00PM-01:00PM)'.

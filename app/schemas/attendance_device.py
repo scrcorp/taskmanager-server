@@ -7,7 +7,9 @@ admin device management surface.
 from datetime import date, datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.schemas.schedule import validate_30min_grid
 
 
 # ── 앱/기기 측 요청 ────────────────────────────────────────
@@ -323,6 +325,9 @@ class ManageScheduleCreateRequest(BaseModel):
     start_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")  # "HH:mm"
     end_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
 
+    # 스케줄 시간은 30분 grid만 허용 (console 과 동일 규칙).
+    _validate_times = field_validator("start_time", "end_time")(validate_30min_grid)
+
 
 class ManageScheduleUpdateRequest(BaseModel):
     """관리자가 오늘 스케줄 시간/배정을 수정할 때."""
@@ -330,6 +335,8 @@ class ManageScheduleUpdateRequest(BaseModel):
     work_role_id: UUID | None = None
     start_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
     end_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+
+    _validate_times = field_validator("start_time", "end_time")(validate_30min_grid)
 
 
 class AdminClockActionRequest(BaseModel):
