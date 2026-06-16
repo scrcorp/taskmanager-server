@@ -17,12 +17,14 @@ Routing order: 정적 경로(/unsigned-count, /saved-signature)를 동적 /{warn
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.database import get_db
+from app.models.organization import Store
 from app.models.user import User
+from app.repositories.warning_category_repository import warning_category_repository
 from app.schemas.common import PaginatedResponse
 from app.schemas.warning import (
     SavedSignatureResponse,
@@ -30,11 +32,13 @@ from app.schemas.warning import (
     WarningResponse,
     WarningSignRequest,
 )
+from app.services.storage_service import storage_service
 from app.services.warning_service import warning_service
 from app.services.warning_signature_service import (
     PARTY_EMPLOYEE,
     warning_signature_service,
 )
+from app.utils.exceptions import NotFoundError
 
 router: APIRouter = APIRouter()
 
@@ -124,6 +128,40 @@ async def get_my_warning(
     warning = await warning_service.acknowledge_warning(db, warning)
     return await warning_service.build_warning_response(
         db, warning, include_ordinal=True
+    )
+
+
+@router.get("/{warning_id}/signed-pdf")
+async def download_my_signed_pdf(
+    warning_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    """내 wet 서명 PDF 다운로드 — 본인 소유만(아니면 404), 표시용 파일명으로 서빙."""
+    warning = await warning_service.get_my_warning(
+        db,
+        warning_id=warning_id,
+        organization_id=current_user.organization_id,
+        subject_user_id=current_user.id,
+    )
+    if not warning.signed_pdf_key:
+        raise NotFoundError("No signed PDF for this warning")
+    pdf_bytes = storage_service.read_bytes(warning.signed_pdf_key)
+    if pdf_bytes is None:
+        raise NotFoundError("Signed PDF file not found")
+    store = await db.get(Store, warning.store_id) if warning.store_id else None
+    labels = await warning_category_repository.labels_by_code(db, warning.organization_id)
+    filename = warning_service.build_warning_filename(
+        warning,
+        subject_name=current_user.full_name,
+        employee_no=current_user.employee_no,
+        store_code=store.code if store else None,
+        category_labels=labels,
+    )
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

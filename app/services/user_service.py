@@ -16,7 +16,13 @@ from app.repositories.store_repository import store_repository
 from app.repositories.role_repository import role_repository
 from app.repositories.user_repository import user_repository
 from app.schemas.organization import StoreResponse
-from app.core.permissions import OWNER_PRIORITY, STAFF_PRIORITY, SUPER_OWNER_PRIORITY, SV_PRIORITY
+from app.core.permissions import (
+    OWNER_PRIORITY,
+    STAFF_PRIORITY,
+    SUPER_OWNER_PRIORITY,
+    SV_PRIORITY,
+    is_owner,
+)
 from app.schemas.user import (
     UserCreate,
     UserListResponse,
@@ -62,6 +68,7 @@ class UserService:
             hourly_rate=raw_rate,
             effective_hourly_rate=self._effective_rate(raw_rate, org_rate),
             department=user.department,
+            employee_no=user.employee_no,
             is_active=user.is_active,
             created_at=user.created_at,
         )
@@ -81,6 +88,7 @@ class UserService:
             hourly_rate=raw_rate,
             effective_hourly_rate=self._effective_rate(raw_rate, org_rate),
             department=user.department,
+            employee_no=user.employee_no,
             is_active=user.is_active,
             created_at=user.created_at,
         )
@@ -221,6 +229,18 @@ class UserService:
             if data.department is not None:
                 create_data["department"] = data.department
 
+            # 사번 — 지정 시 org 내 중복 확인 후 저장 (validator 로 normalize 완료)
+            if data.employee_no is not None:
+                emp_exists: bool = await user_repository.exists(
+                    db,
+                    {"organization_id": organization_id, "employee_no": data.employee_no},
+                )
+                if emp_exists:
+                    raise DuplicateError(
+                        "Employee number already exists in this organization"
+                    )
+                create_data["employee_no"] = data.employee_no
+
             user: User = await user_repository.create(
                 db,
                 create_data,
@@ -302,6 +322,32 @@ class UserService:
             )
             if current_user_obj_for_email and update_data["email"] != current_user_obj_for_email.email:
                 update_data["email_verified"] = False
+
+        # 사번 변경 — 파일명·법적 문서(경고 PDF)에 발행시점 스냅샷되므로 보호.
+        # '이미 부여된 사번'의 변경/삭제는 Owner 만 (신규 부여는 users:update 로 가능). org 내 중복 확인.
+        if "employee_no" in update_data:
+            new_emp: str | None = update_data["employee_no"]  # validator 로 normalize 완료
+            emp_target: User | None = await user_repository.get_by_id(
+                db, user_id, organization_id
+            )
+            if emp_target is None:
+                raise NotFoundError("User not found")
+            if emp_target.employee_no != new_emp:
+                if emp_target.employee_no is not None and not (
+                    caller is not None and is_owner(caller)
+                ):
+                    raise ForbiddenError(
+                        "Only an Owner can change an existing employee number"
+                    )
+                if new_emp is not None:
+                    emp_dup: bool = await user_repository.exists(
+                        db,
+                        {"organization_id": organization_id, "employee_no": new_emp},
+                    )
+                    if emp_dup:
+                        raise DuplicateError(
+                            "Employee number already exists in this organization"
+                        )
 
         # role_id를 문자열에서 UUID로 변환 — Convert role_id from string to UUID
         if "role_id" in update_data and update_data["role_id"] is not None:

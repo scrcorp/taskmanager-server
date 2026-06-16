@@ -17,21 +17,25 @@ Store scoping:
     - GET /{id}: 경고의 store 접근 가능 / Owner / issuer 본인만 (아니면 404)
 """
 
+from datetime import date
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     check_store_access,
     get_accessible_store_ids,
     get_current_user,
+    get_user_permissions,
     require_permission,
 )
 from app.core.permissions import is_owner
 from app.database import get_db
+from app.models.organization import Store
 from app.models.user import User
+from app.repositories.warning_category_repository import warning_category_repository
 from app.schemas.common import MessageResponse, PaginatedResponse
 from app.schemas.warning import (
     SavedSignatureResponse,
@@ -39,16 +43,21 @@ from app.schemas.warning import (
     WarnableUsersPage,
     WarningCountItem,
     WarningCreate,
+    WarningMethodSwitchRequest,
     WarningResponse,
     WarningSignRequest,
     WarningUpdate,
 )
+from app.services.storage_service import storage_service
 from app.services.warning_service import warning_service
 from app.services.warning_signature_service import (
     PARTY_MANAGER,
     warning_signature_service,
 )
-from app.utils.exceptions import NotFoundError
+from app.utils.exceptions import BadRequestError, NotFoundError
+
+# wet 서명 PDF 업로드 상한 (hiring 첨부와 동일 20MB).
+MAX_WARNING_PDF_BYTES = 20 * 1024 * 1024
 
 router: APIRouter = APIRouter()
 
@@ -229,6 +238,124 @@ async def sign_warning_as_manager(
         db, warning_id=warning_id, organization_id=current_user.organization_id
     )
     return await warning_service.build_warning_response(db, fresh, include_ordinal=True)
+
+
+@router.put("/{warning_id}/method", response_model=WarningResponse)
+async def switch_warning_method(
+    warning_id: UUID,
+    data: WarningMethodSwitchRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("warnings:update"))],
+) -> dict:
+    """서명 방식 전환 (digital↔wet).
+
+    기존 서명/PDF 가 있으면 무효화되고(벡터 서명행 삭제 + PDF key 클리어, 파일은 보존)
+    재서명 대기로 리셋된다. wet→digital 은 직원에게 재서명 알림. 전환은 철회 아님.
+    """
+
+    async def _check_store_access(store_id: UUID) -> None:
+        await check_store_access(db, current_user, store_id)
+
+    warning = await warning_service.switch_method(
+        db,
+        warning_id=warning_id,
+        organization_id=current_user.organization_id,
+        new_method=data.method,
+        check_store_access=_check_store_access,
+    )
+    return await warning_service.build_warning_response(db, warning, include_ordinal=True)
+
+
+@router.post("/{warning_id}/signed-pdf", response_model=WarningResponse)
+async def upload_signed_pdf(
+    warning_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("warnings:update"))],
+    file: Annotated[UploadFile, File()],
+    signed_on: Annotated[str | None, Form()] = None,
+) -> dict:
+    """wet 서명 PDF 업로드 = 서명완료.
+
+    권한: 발행 매니저 본인은 본인 발행 건만, 오너/`warnings:upload` 는 타인 발행 건도.
+    PDF 만(20MB 상한 + 매직바이트). signed_on(YYYY-MM-DD)=문서상 서명일(파일명 날짜).
+    """
+    if file.content_type not in ("application/pdf", "application/x-pdf"):
+        raise BadRequestError("Only PDF files are allowed")
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) > MAX_WARNING_PDF_BYTES:
+        raise BadRequestError("File too large (max 20MB)")
+
+    # 2-tier 권한 — 타인 발행 건 업로드 = 오너 OR warnings:upload.
+    perms = await get_user_permissions(db, current_user.role_id)
+    can_upload_others = is_owner(current_user) or ("warnings:upload" in perms)
+
+    parsed_signed_on: date | None = None
+    if signed_on:
+        try:
+            parsed_signed_on = date.fromisoformat(signed_on)
+        except ValueError:
+            raise BadRequestError("signed_on must be YYYY-MM-DD")
+
+    async def _check_store_access(store_id: UUID) -> None:
+        await check_store_access(db, current_user, store_id)
+
+    warning = await warning_service.upload_wet_pdf(
+        db,
+        warning_id=warning_id,
+        organization_id=current_user.organization_id,
+        uploader=current_user,
+        can_upload_others=can_upload_others,
+        pdf_bytes=pdf_bytes,
+        filename=file.filename or "signed.pdf",
+        signed_on=parsed_signed_on,
+        check_store_access=_check_store_access,
+    )
+    return await warning_service.build_warning_response(db, warning, include_ordinal=True)
+
+
+@router.get("/{warning_id}/signed-pdf")
+async def download_signed_pdf(
+    warning_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("warnings:read"))],
+) -> Response:
+    """wet 서명 PDF 다운로드 — 권한 + store-scope 검증 후 표시용 파일명으로 서빙.
+
+    응답 본문에 공개 URL 을 노출하지 않고(IDOR 방지) 인증된 엔드포인트가 직접 바이트 서빙.
+    """
+    warning = await warning_service.get_warning(
+        db, warning_id=warning_id, organization_id=current_user.organization_id
+    )
+    # store-scope (get_warning 상세와 동일 IDOR 방지).
+    if not is_owner(current_user) and warning.issued_by_id != current_user.id:
+        accessible = await get_accessible_store_ids(db, current_user)
+        if (
+            accessible is not None
+            and warning.store_id is not None
+            and warning.store_id not in accessible
+        ):
+            raise NotFoundError("Warning not found")
+    if not warning.signed_pdf_key:
+        raise NotFoundError("No signed PDF for this warning")
+    pdf_bytes = storage_service.read_bytes(warning.signed_pdf_key)
+    if pdf_bytes is None:
+        raise NotFoundError("Signed PDF file not found")
+
+    subject = await db.get(User, warning.subject_user_id) if warning.subject_user_id else None
+    store = await db.get(Store, warning.store_id) if warning.store_id else None
+    labels = await warning_category_repository.labels_by_code(db, warning.organization_id)
+    filename = warning_service.build_warning_filename(
+        warning,
+        subject_name=subject.full_name if subject else None,
+        employee_no=subject.employee_no if subject else None,
+        store_code=store.code if store else None,
+        category_labels=labels,
+    )
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/", response_model=WarningResponse, status_code=201)

@@ -30,6 +30,7 @@ from sqlalchemy import (
     Time,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
@@ -81,6 +82,11 @@ class Warning(Base):
     )
     # 조직 내 일련번호 — Per-org sequence for the human-readable id "W-{seq:05d}"
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 직원별 차수(발행순서) 스냅샷 — 발행 시점 1-based 로 고정, 불변.
+    # 파일명/PDF/앱·콘솔의 "N차" 표시 단일 원천. 철회·복구로 변하지 않는다(서류 무결성).
+    # 계산: 같은 직원의 기존 경고(soft-delete 포함) 중 max(ordinal_snapshot)+1.
+    # 운영용 "유효 횟수"(목록·철회 차감)는 counts_by_subject 의 active 로 별도 산출.
+    ordinal_snapshot: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # 발행자 FK — Issuer (set = current user at create, SET NULL on user delete)
     issued_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -117,6 +123,24 @@ class Warning(Base):
     acknowledged_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # 서명 방식 — 'digital'(앱/콘솔 벡터 서명) | 'wet'(출력→실물 서명→PDF 업로드).
+    # 경고당 1개(배타). 기존 행은 server_default 로 자동 'digital'.
+    signature_method: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="digital", server_default="digital"
+    )
+    # wet 서명 PDF 상대 key — 'warnings/YYYY/MM/DD/{uuid}.pdf' (resolve_url 로 변환).
+    # 절대 URL 저장 금지. 존재 = wet 서명완료. 교체 시 기존 key 삭제 후 재저장.
+    signed_pdf_key: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    # 문서상 서명일 — 업로더가 입력(종이에 실제 서명한 날). 파일명 날짜로 사용.
+    wet_signed_on: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # wet PDF 업로더 — audit (대리 업로드 가능: 오너/upload권한자). SET NULL.
+    wet_uploaded_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # wet PDF 업로드 시각 — audit (서명일과 별개일 수 있음). UTC.
+    wet_uploaded_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # 상태 — 'active'(유효) | 'withdrawn'(철회됨, 기록 유지)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="active", server_default="active"
@@ -148,4 +172,14 @@ class Warning(Base):
         Index("ix_warnings_subject_user_id", "subject_user_id"),
         # 상시 켜지는 soft-delete + org 필터 커버
         Index("ix_warnings_org_deleted", "organization_id", "deleted_at"),
+        # 직원별 차수 유일 — 동시 발행 race 를 IntegrityError 로 직렬화(재시도 흡수).
+        # partial: ordinal_snapshot 이 NULL 인 행(backfill 전/직원 삭제됨)은 다수 허용.
+        Index(
+            "uq_warning_subject_ordinal",
+            "organization_id",
+            "subject_user_id",
+            "ordinal_snapshot",
+            unique=True,
+            postgresql_where=text("ordinal_snapshot IS NOT NULL"),
+        ),
     )

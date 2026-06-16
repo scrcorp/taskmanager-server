@@ -14,7 +14,7 @@ import string
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, Integer, Numeric, Text, Time, ForeignKey, Uuid
+from sqlalchemy import String, Boolean, DateTime, Index, Integer, Numeric, Text, Time, ForeignKey, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -154,6 +154,18 @@ class Store(Base):
     shifts = relationship("Shift", back_populates="store", cascade="all, delete-orphan")
     positions = relationship("Position", back_populates="store", cascade="all, delete-orphan")
     user_stores = relationship("UserStore", back_populates="store", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        # 스토어 코드는 org 내 유일 (파일명 식별자 충돌 방지). partial:
+        # code NULL(미부여) 다수 허용 + soft-delete 된 스토어는 코드 반납.
+        Index(
+            "uq_store_org_code",
+            "organization_id",
+            "code",
+            unique=True,
+            postgresql_where=text("code IS NOT NULL AND deleted_at IS NULL"),
+        ),
+    )
 
 
 class ShiftPreset(Base):

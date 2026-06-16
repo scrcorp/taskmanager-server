@@ -12,7 +12,8 @@ seq 발급, 소유권(Owner 전체 / GM 본인) 수정·삭제, 직원별 카운
     - soft delete: deleted_at. 읽기는 항상 deleted_at IS NULL.
 """
 
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, timezone
 from typing import Sequence
 from uuid import UUID
 
@@ -30,8 +31,9 @@ from app.models.warning import Warning
 from app.repositories.warning_repository import warning_repository
 from app.repositories.warning_category_repository import warning_category_repository
 from app.services.alert_service import alert_service
+from app.services.storage_service import storage_service
 from app.services.warning_category_service import warning_category_service
-from app.utils.exceptions import BadRequestError, NotFoundError
+from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 
 
 def _ref_no(seq: int) -> str:
@@ -329,13 +331,18 @@ class WarningService:
         # store org 격리 + subject 배정 매장 검증.
         await self._validate_subject_store(db, subject_id, store_id, organization_id)
 
-        # seq 발급 + insert (UNIQUE(org, seq) 충돌 시 재시도).
+        # seq + 차수(ordinal_snapshot) 발급 + insert.
+        # UNIQUE(org, seq) 또는 (org, subject, ordinal) 충돌 시 재시도 — 동시 발행 직렬화.
         last_exc: Exception | None = None
         for _ in range(5):
             seq = await warning_repository.next_seq(db, organization_id)
+            ordinal_snapshot = await warning_repository.next_ordinal(
+                db, organization_id, subject_id
+            )
             warning = Warning(
                 organization_id=organization_id,
                 seq=seq,
+                ordinal_snapshot=ordinal_snapshot,
                 issued_by_id=issued_by_id,
                 subject_user_id=subject_id,
                 store_id=store_id,
@@ -349,6 +356,7 @@ class WarningService:
                 follow_up_time=data.follow_up_time,
                 status="active",
                 warning_date=data.warning_date,
+                signature_method=getattr(data, "signature_method", "digital") or "digital",
             )
             db.add(warning)
             try:
@@ -499,6 +507,160 @@ class WarningService:
     # 응답 빌드
     # ====================================================================
 
+    # ====================================================================
+    # Wet 서명 (출력→실물 서명→PDF 업로드) + 방식 전환
+    # ====================================================================
+
+    @staticmethod
+    def _sanitize_token(value: str | None, *, fallback: str = "NA") -> str:
+        """파일명 토큰 정규화 — 영숫자만, 공백/특수문자→'_', 비ASCII 제거."""
+        if not value:
+            return fallback
+        cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value.strip()).strip("_")
+        return cleaned or fallback
+
+    def build_warning_filename(
+        self,
+        warning: Warning,
+        *,
+        subject_name: str | None,
+        employee_no: str | None,
+        store_code: str | None,
+        category_labels: dict[str, str] | None = None,
+    ) -> str:
+        """다운로드 표시용 파일명.
+
+        {YYYY.MM.DD}-{STORECODE}-{EMPID}-{CATEGORIES}-{N}-{First_Last}.pdf
+        결손(코드/사번/이름)은 placeholder. 카테고리는 전부 '_' 로 연결.
+        N = ordinal_snapshot(통산 차수). 날짜 = wet_signed_on 우선, 없으면 warning_date.
+        """
+        d: date = warning.wet_signed_on or warning.warning_date
+        date_str = d.strftime("%Y.%m.%d")
+        store = self._sanitize_token(store_code, fallback="NA")
+        emp = self._sanitize_token(
+            employee_no, fallback=str(warning.id).replace("-", "")[:8]
+        )
+        cats = list(warning.categories or [])
+        if category_labels:
+            cat_tokens = [self._sanitize_token(category_labels.get(c, c), fallback="") for c in cats]
+        else:
+            cat_tokens = [self._sanitize_token(c, fallback="") for c in cats]
+        cat_tokens = [t for t in cat_tokens if t]
+        cat_str = "_".join(cat_tokens) if cat_tokens else "NA"
+        n = warning.ordinal_snapshot if warning.ordinal_snapshot is not None else "NA"
+        name = self._sanitize_token(subject_name, fallback="NA")
+        return f"{date_str}-{store}-{emp}-{cat_str}-{n}-{name}.pdf"
+
+    async def upload_wet_pdf(
+        self,
+        db: AsyncSession,
+        *,
+        warning_id: UUID,
+        organization_id: UUID,
+        uploader: User,
+        can_upload_others: bool,
+        pdf_bytes: bytes,
+        filename: str,
+        signed_on: date | None,
+        check_store_access,
+    ) -> Warning:
+        """wet 서명 PDF 업로드 = 서명완료. 교체 시 기존 key 삭제 후 재저장.
+
+        Gate: method=='wet' + active + 비삭제. 발행자 본인 OR can_upload_others(오너/upload권한).
+        """
+        warning = await self.get_warning(db, warning_id, organization_id)
+        await check_store_access(warning.store_id)
+        if warning.signature_method != "wet":
+            raise BadRequestError("Warning is not in wet-signature mode")
+        if warning.status != "active":
+            raise BadRequestError("Only active warnings can be signed")
+        if warning.issued_by_id != uploader.id and not can_upload_others:
+            raise ForbiddenError(
+                "You can only upload signed PDFs for warnings you issued"
+            )
+        if not pdf_bytes.startswith(b"%PDF-"):
+            raise BadRequestError("Uploaded file is not a valid PDF")
+
+        # 교체 — 기존 key 삭제 (orphan 방지, best-effort).
+        if warning.signed_pdf_key:
+            try:
+                storage_service.delete_file(warning.signed_pdf_key)
+            except Exception:
+                pass
+
+        key = storage_service.upload_bytes(
+            pdf_bytes, filename or "signed.pdf", "warnings", content_type="application/pdf"
+        )
+        now = datetime.now(timezone.utc)
+        try:
+            warning.signed_pdf_key = key
+            warning.wet_signed_on = signed_on
+            warning.wet_uploaded_by_id = uploader.id
+            warning.wet_uploaded_at = now
+            await db.flush()
+            await db.refresh(warning)
+            await db.commit()
+            return warning
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def switch_method(
+        self,
+        db: AsyncSession,
+        *,
+        warning_id: UUID,
+        organization_id: UUID,
+        new_method: str,
+        check_store_access,
+    ) -> Warning:
+        """서명 방식 전환 (digital↔wet). 기존 서명/PDF 무효화 + 재서명 알림.
+
+        전환 != 철회 (status active 유지). 무효화: 벡터 서명행 삭제 + PDF key 클리어
+        (S3 파일은 보존 — 법적 기록). wet→digital 만 직원에게 재서명 알림(앱 행동 필요).
+        digital→wet 은 직원이 앱에서 할 게 없어 알림 생략.
+        """
+        from app.services.warning_signature_service import warning_signature_service
+
+        if new_method not in ("digital", "wet"):
+            raise BadRequestError("Invalid signature method")
+        warning = await self.get_warning(db, warning_id, organization_id)
+        await check_store_access(warning.store_id)
+        if warning.status != "active":
+            raise BadRequestError("Only active warnings can change signature method")
+        if warning.signature_method == new_method:
+            return warning  # no-op
+
+        had_vector = await warning_signature_service.delete_all(db, warning.id)
+        had_wet = warning.signed_pdf_key is not None
+        warning.signed_pdf_key = None
+        warning.wet_signed_on = None
+        warning.wet_uploaded_by_id = None
+        warning.wet_uploaded_at = None
+        warning.signature_method = new_method
+
+        try:
+            await db.flush()
+            if (
+                new_method == "digital"
+                and (had_vector or had_wet)
+                and warning.subject_user_id
+            ):
+                await alert_service.create_for_warning(
+                    db,
+                    organization_id=organization_id,
+                    subject_user_id=warning.subject_user_id,
+                    warning_id=warning.id,
+                    title=warning.title,
+                    alert_type="warning_resign",
+                )
+            await db.refresh(warning)
+            await db.commit()
+            return warning
+        except Exception:
+            await db.rollback()
+            raise
+
     async def build_warning_response(
         self,
         db: AsyncSession,
@@ -525,11 +687,15 @@ class WarningService:
                 subject_name = subject.full_name
                 employee_no = subject.employee_no
 
+        # 차수 = 발행 시점 스냅샷(불변). 철회/복구로 변하지 않는다.
+        # backfill 전 legacy 행은 NULL → live 계산으로 폴백(점진 이행 안전).
         ordinal: int | None = None
         if include_ordinal and warning.subject_user_id:
-            ordinal = await warning_repository.subject_warning_ordinal(
-                db, warning.organization_id, warning.subject_user_id, warning.created_at
-            )
+            ordinal = warning.ordinal_snapshot
+            if ordinal is None:
+                ordinal = await warning_repository.subject_warning_ordinal(
+                    db, warning.organization_id, warning.subject_user_id, warning.created_at
+                )
 
         issued_by_name: str | None = None
         if warning.issued_by_id:
@@ -538,10 +704,12 @@ class WarningService:
                 issued_by_name = issuer.full_name
 
         store_name: str | None = None
+        store_code: str | None = None
         if warning.store_id:
             store = await db.get(Store, warning.store_id)
             if store:
                 store_name = store.name
+                store_code = store.code
 
         # 카테고리 라벨 live resolve (삭제된 legacy 코드 포함). 미주입 시 조회.
         if category_labels is None:
@@ -554,6 +722,16 @@ class WarningService:
         signatures: dict[str, dict | None] = {"employee": None, "manager": None}
         if include_signatures:
             signatures = await warning_signature_service.get_signatures(db, warning.id)
+
+        # 서명완료 파생 bool — 단일 원천. wet 은 PDF 가 양쪽 갈음, digital 은 party 행 유무.
+        is_wet = warning.signature_method == "wet"
+        has_wet_pdf = warning.signed_pdf_key is not None
+        if is_wet:
+            employee_signed = has_wet_pdf
+            manager_signed = has_wet_pdf
+        else:
+            employee_signed = signatures.get("employee") is not None
+            manager_signed = signatures.get("manager") is not None
 
         return {
             "id": str(warning.id),
@@ -580,6 +758,13 @@ class WarningService:
             "withdrawn_at": warning.withdrawn_at,
             "acknowledged_at": warning.acknowledged_at,
             "signatures": signatures,
+            "signature_method": warning.signature_method,
+            "store_code": store_code,
+            "signed_pdf_present": has_wet_pdf,
+            "wet_signed_on": warning.wet_signed_on,
+            "wet_uploaded_at": warning.wet_uploaded_at,
+            "employee_signed": employee_signed,
+            "manager_signed": manager_signed,
             "created_at": warning.created_at,
             "updated_at": warning.updated_at,
         }

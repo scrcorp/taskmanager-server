@@ -4,9 +4,25 @@ Organization and Store Pydantic request/response schema definitions.
 Covers CRUD operations for organizations (tenants) and stores (locations).
 """
 
+import re
 from datetime import datetime
 from typing import Any
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+# 스토어 코드 — 파일명/식별용 짧은 약어 (예: IFO, SWC). org 내 유일(partial unique).
+_STORE_CODE_RE = re.compile(r"^[A-Z0-9]{2,5}$")
+
+
+def _normalize_store_code(v: str | None) -> str | None:
+    """trim → 대문자 → 빈문자는 None. 2~5 영숫자만 허용."""
+    if v is None:
+        return None
+    v = v.strip().upper()
+    if not v:
+        return None
+    if not _STORE_CODE_RE.match(v):
+        raise ValueError("Store code must be 2-5 alphanumeric characters")
+    return v
 
 
 # === 조직 (Organization) 스키마 ===
@@ -80,9 +96,12 @@ class StoreCreate(BaseModel):
     """
 
     name: str  # 매장 이름 (Store name)
+    code: str | None = None  # 매장 코드 (Short code for filenames/identity, 2-5 alnum, optional)
     address: str | None = None  # 매장 주소 (Physical address, optional)
     timezone: str | None = None  # IANA 타임존 (Store timezone override, optional)
     default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate, optional)
+
+    _norm_code = field_validator("code")(_normalize_store_code)
 
 
 class StoreUpdate(BaseModel):
@@ -97,6 +116,7 @@ class StoreUpdate(BaseModel):
     """
 
     name: str | None = None  # 변경할 매장 이름 (New name, optional)
+    code: str | None = None  # 변경할 매장 코드 (New short code, 2-5 alnum, optional)
     address: str | None = None  # 변경할 주소 (New address, optional)
     is_active: bool | None = None  # 활성 상태 변경 (Activate/deactivate, optional)
     operating_hours: dict[str, Any] | None = None  # 운영시간 JSONB (Operating hours, optional)
@@ -105,6 +125,8 @@ class StoreUpdate(BaseModel):
     state_code: str | None = None  # 주(State) 코드 (US state code, optional)
     timezone: str | None = None  # IANA 타임존 (Store timezone override, optional)
     default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate, optional)
+
+    _norm_code = field_validator("code")(_normalize_store_code)
 
 
 class StoreResponse(BaseModel):
@@ -124,6 +146,7 @@ class StoreResponse(BaseModel):
     id: str  # 매장 UUID 문자열 (Store UUID as string)
     organization_id: str  # 소속 조직 UUID 문자열 (Organization UUID as string)
     name: str  # 매장 이름 (Store name)
+    code: str | None = None  # 매장 코드 (Short code for filenames/identity)
     address: str | None  # 매장 주소 (Address, may be null)
     is_active: bool  # 활성 상태 (Active flag)
     require_approval: bool = True  # 승인 필요 여부 (Schedule approval required)

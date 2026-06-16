@@ -1137,3 +1137,84 @@ def test_sign_request_validates_strokes():
     # 0..1 범위 초과.
     with pytest.raises(ValidationError):
         WarningSignRequest(strokes=[[[1.5, 0.2]]])
+
+
+# ===================================================================
+# 8. Phase 1 — ordinal_snapshot (직원별 차수, 발행 시점 불변)
+# ===================================================================
+
+
+async def _create_get_ordinal(async_client, token, subject, store_id):
+    """경고 발행 후 상세에서 ordinal 반환 (id, ordinal)."""
+    resp = await async_client.post(
+        f"{BASE}/", json=_payload(subject, store_id), headers=_hdr(token)
+    )
+    assert resp.status_code == 201, resp.text
+    wid = resp.json()["id"]
+    detail = await async_client.get(f"{BASE}/{wid}", headers=_hdr(token))
+    assert detail.status_code == 200, detail.text
+    return wid, detail.json()["ordinal"]
+
+
+@pytest.mark.asyncio
+async def test_ordinal_snapshot_increments(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """같은 직원 연속 발행 → 차수 1,2,3 으로 증가."""
+    token = await _login("testgm")
+    subject = test_users["teststaff"]["id"]
+    ordinals = []
+    for _ in range(3):
+        _, ordinal = await _create_get_ordinal(async_client, token, subject, test_store_id)
+        ordinals.append(ordinal)
+    assert ordinals == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_ordinal_snapshot_immutable_on_withdraw(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """중간 경고 철회해도 뒤 차수는 당겨지지 않는다(서류 무결성).
+    단 운영 카운트(active)는 줄어든다.
+    """
+    token = await _login("testgm")
+    subject = test_users["teststaff"]["id"]
+    ids = []
+    for _ in range(3):
+        wid, _ = await _create_get_ordinal(async_client, token, subject, test_store_id)
+        ids.append(wid)
+
+    # 2번째 경고 철회.
+    resp = await async_client.put(
+        f"{BASE}/{ids[1]}", json={"status": "withdrawn"}, headers=_hdr(token)
+    )
+    assert resp.status_code == 200, resp.text
+
+    # 3번째 차수는 여전히 3 (당김 없음, 불변).
+    detail3 = await async_client.get(f"{BASE}/{ids[2]}", headers=_hdr(token))
+    assert detail3.json()["ordinal"] == 3
+    # 철회한 2번째도 차수 2 유지(동결).
+    detail2 = await async_client.get(f"{BASE}/{ids[1]}", headers=_hdr(token))
+    assert detail2.json()["ordinal"] == 2
+
+    # 운영 카운트: active 는 2 로 줄고 total 은 3 유지.
+    counts = await async_client.get(f"{BASE}/counts", headers=_hdr(token))
+    row = next(c for c in counts.json() if c["user_id"] == str(subject))
+    assert row["total"] == 3
+    assert row["active"] == 2
+
+
+@pytest.mark.asyncio
+async def test_ordinal_snapshot_per_subject_independent(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+):
+    """차수는 직원별로 독립 — 다른 직원은 다시 1 부터."""
+    token = await _login("testgm")
+    staff = test_users["teststaff"]["id"]
+    sv = test_users["testsv"]["id"]
+
+    _, a1 = await _create_get_ordinal(async_client, token, staff, test_store_id)
+    _, a2 = await _create_get_ordinal(async_client, token, staff, test_store_id)
+    _, b1 = await _create_get_ordinal(async_client, token, sv, test_store_id)
+    assert (a1, a2) == (1, 2)
+    assert b1 == 1  # 다른 직원은 독립적으로 1 부터

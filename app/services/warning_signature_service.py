@@ -155,6 +155,21 @@ class WarningSignatureService:
             }
         return out
 
+    async def delete_all(self, db: AsyncSession, warning_id: UUID) -> int:
+        """경고의 모든 party 벡터 서명 행 삭제 (방식 전환 시 무효화).
+
+        커밋은 호출자(전환 트랜잭션)가 한다. 삭제된 행 수 반환.
+        PDF/파일은 여기서 손대지 않는다(보존 — 법적 기록).
+        """
+        from sqlalchemy import delete as sa_delete
+
+        result = await db.execute(
+            sa_delete(WarningSignature).where(
+                WarningSignature.warning_id == warning_id
+            )
+        )
+        return result.rowcount or 0
+
     async def has_employee_signature(
         self, db: AsyncSession, warning_id: UUID
     ) -> bool:
