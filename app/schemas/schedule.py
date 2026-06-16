@@ -3,9 +3,26 @@
 Schedule system Pydantic schemas for work roles, break rules, periods, requests, and entries.
 """
 
+import re
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# 스케줄 시간은 30분 grid(:00/:30)만 허용. 어긋나면 reject (반올림하지 않음).
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+SCHEDULE_STEP_MINUTES = 30
+
+
+def validate_30min_grid(value: str | None) -> str | None:
+    """"HH:MM" 가 30분 단위(:00/:30)인지 검증. None/"" 은 통과 (optional 필드)."""
+    if value is None or value == "":
+        return value
+    m = _HHMM_RE.match(value)
+    if not m:
+        raise ValueError("Time must be in HH:MM format.")
+    if int(m.group(2)) % SCHEDULE_STEP_MINUTES != 0:
+        raise ValueError("Time must be on the hour or half-hour (:00 or :30).")
+    return value
 
 
 # ─── Work Role ───────────────────────────────────────
@@ -333,6 +350,10 @@ class ScheduleCreate(BaseModel):
     status: str = "confirmed"  # "requested" for app submissions, "confirmed" for direct admin creation
     force: bool = False  # Override warnings
 
+    _validate_times = field_validator(
+        "start_time", "end_time", "break_start_time", "break_end_time"
+    )(validate_30min_grid)
+
 
 class ScheduleUpdate(BaseModel):
     user_id: str | None = None
@@ -350,6 +371,10 @@ class ScheduleUpdate(BaseModel):
     # None  = 충돌(in_progress/completed) 시 에러 반환 (프론트가 선택 후 재요청)
     # True  = 체크리스트 초기화
     # False = 진행 상태 그대로 유지
+
+    _validate_times = field_validator(
+        "start_time", "end_time", "break_start_time", "break_end_time"
+    )(validate_30min_grid)
 
 
 class ScheduleResponse(BaseModel):

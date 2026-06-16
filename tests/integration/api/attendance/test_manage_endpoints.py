@@ -108,6 +108,25 @@ async def test_manage_create_schedule_returns_row(
     assert body["start_time"] == "10:00"
 
 
+async def test_manage_create_schedule_rejects_off_30min_grid(
+    async_client: AsyncClient,
+    manage_headers: dict,
+    test_user: dict,
+    staff_in_store: None,
+) -> None:
+    """30분 grid(:00/:30) 벗어난 시간은 422 로 거부 — 콘솔과 동일 규칙."""
+    resp = await async_client.post(
+        "/api/v1/attendance/manage/schedules",
+        headers=manage_headers,
+        json={
+            "user_id": str(test_user["id"]),
+            "start_time": "10:15",  # off-grid
+            "end_time": "14:00",
+        },
+    )
+    assert resp.status_code == 422, resp.text
+
+
 # ── PATCH /manage/schedules/{id} (update) — _manage_schedule_row ──
 
 

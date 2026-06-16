@@ -166,6 +166,9 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     ("warnings:create", "warnings", "create", "Issue staff warnings", False),
     ("warnings:update", "warnings", "update", "Edit or resolve warnings", False),
     ("warnings:delete", "warnings", "delete", "Delete warnings", False),
+    # wet 서명 PDF 업로드 — 발행자 본인 건은 warnings:create 로 가능, '타인 발행 건'은
+    # 이 권한(또는 오너)이 있어야 한다(서비스에서 게이트). owner/gm 기본 부여.
+    ("warnings:upload", "warnings", "upload", "Upload signed (wet) warning PDFs for others", False),
 
     # ── Daily Reports (legacy, multi-type reports로 이관 중) ──
     ("daily_reports:read",   "daily_reports", "read",   "View daily reports", False),
@@ -263,6 +266,9 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         "roles:create", "roles:delete",
         "schedule_history:delete",
         "org:update",
+        # 일반 GM 은 본인 발행 건만 wet PDF 업로드(서비스 issuer 체크). '타인 발행 건'
+        # 업로드는 오너 또는 이 권한을 개별 부여받은 사람만 → GM 기본에서 제외.
+        "warnings:upload",
     },
     "sv": {
         "stores:read", "users:read",

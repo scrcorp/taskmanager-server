@@ -473,20 +473,26 @@ class AlertService:
         subject_user_id: UUID,
         warning_id: UUID,
         title: str,
+        alert_type: str = "warning",
     ) -> Alert | None:
-        """경고 발행 시 대상 직원에게 in-app 알림을 생성합니다. 선호 비활성 시 None.
+        """경고 관련 in-app 알림 생성. 선호 비활성('warning' 카테고리) 시 None.
 
-        Auto-create an alert for the subject when a warning is issued.
-        type='warning', reference_type='warning'.
+        alert_type:
+            'warning'        — 발행 ("You have received a warning").
+            'warning_resign' — 방식 전환(wet→digital)으로 앱 재서명 필요.
+        둘 다 'warning' 카테고리 토글을 따른다(category_for_type).
         """
         if not await self._is_in_app_enabled_for_user(db, subject_user_id, "warning"):
             return None
-        message = f"You have received a warning: {title}"
+        if alert_type == "warning_resign":
+            message = f"Please re-sign your warning in the app: {title}"
+        else:
+            message = f"You have received a warning: {title}"
         return await alert_repository.create_alert(
             db,
             organization_id=organization_id,
             user_id=subject_user_id,
-            alert_type="warning",
+            alert_type=alert_type,
             message=message,
             reference_type="warning",
             reference_id=warning_id,
