@@ -65,6 +65,41 @@ class ScheduleRepository(BaseRepository[Schedule]):
             query = query.order_by(Schedule.work_date, Schedule.start_time)
         return await self.get_paginated(db, query, page, per_page)
 
+    async def get_all_in_period(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        date_from: date,
+        date_to: date,
+        *,
+        store_ids: list[UUID] | None = None,
+        user_ids: list[UUID] | None = None,
+        accessible_store_ids: list[UUID] | None = None,
+    ) -> Sequence[Schedule]:
+        """기간 내 confirmed/requested 스케줄 전부 (무페이지) — roster 집계용.
+
+        cancelled/rejected/deleted 는 제외 (그리드 집계 대상과 동일). status/position/shift
+        칩 필터는 서비스단에서 Python으로 적용 (filter_domain 추출 위해 여기선 미적용).
+        """
+        query: Select = select(Schedule).where(
+            Schedule.organization_id == organization_id,
+            Schedule.work_date >= date_from,
+            Schedule.work_date <= date_to,
+            Schedule.status.in_(["confirmed", "requested"]),
+        )
+        if accessible_store_ids is not None:
+            if not accessible_store_ids:
+                return []
+            query = query.where(Schedule.store_id.in_(accessible_store_ids))
+        if store_ids:
+            query = query.where(Schedule.store_id.in_(store_ids))
+        if user_ids is not None:
+            if not user_ids:
+                return []
+            query = query.where(Schedule.user_id.in_(user_ids))
+        result = await db.execute(query)
+        return result.scalars().all()
+
     async def check_time_overlap(
         self,
         db: AsyncSession,
