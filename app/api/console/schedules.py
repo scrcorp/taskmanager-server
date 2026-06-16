@@ -27,8 +27,21 @@ from app.schemas.schedule import (
     ScheduleConfirm, ScheduleReject, ScheduleBulkConfirm, ScheduleBulkConfirmResult,
     ScheduleHistoryListResponse,
     ScheduleAssignChecklist, ScheduleAssignChecklistResult,
+    RosterResponse,
 )
 from app.services.schedule_service import schedule_service
+
+
+def _csv_uuids(raw: str | None) -> list[UUID] | None:
+    if not raw:
+        return None
+    return [UUID(x.strip()) for x in raw.split(",") if x.strip()]
+
+
+def _csv_strs(raw: str | None) -> list[str] | None:
+    if not raw:
+        return None
+    return [x.strip() for x in raw.split(",") if x.strip()]
 
 router: APIRouter = APIRouter()
 
@@ -77,6 +90,47 @@ async def list_entries(
         for item in items:
             scrub_cost_fields(item)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
+
+
+@router.get("/roster", response_model=RosterResponse)
+async def get_roster(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
+    date_from: date,
+    date_to: date,
+    granularity: str = "week",  # week | month | day
+    store_ids: str | None = None,  # CSV
+    staff_ids: str | None = None,  # CSV
+    roles: str | None = None,  # CSV (owner/gm/sv/staff)
+    departments: str | None = None,  # CSV (FOH/BOH/unassigned)
+    statuses: str | None = None,  # CSV (confirmed/requested)
+    positions: str | None = None,  # CSV (position_snapshot)
+    shifts: str | None = None,  # CSV (work_role_name)
+) -> RosterResponse:
+    """Windowed roster — 정렬된 staff 로스터 + 필터 반영 행/컬럼 요약 (셀 제외).
+
+    cost는 GM+ 만. 일간 컬럼은 30분 점유 0.5 환산, TEAM은 스케줄 수.
+    """
+    if granularity not in ("week", "month", "day"):
+        granularity = "week"
+    parsed_stores = _csv_uuids(store_ids)
+    if parsed_stores:
+        for sid in parsed_stores:
+            await check_store_access(db, current_user, sid)
+    accessible = await get_accessible_store_ids(db, current_user)
+    return await schedule_service.build_roster(
+        db, current_user.organization_id,
+        date_from=date_from, date_to=date_to, granularity=granularity,
+        store_ids=parsed_stores,
+        accessible_store_ids=accessible,
+        staff_ids=_csv_uuids(staff_ids),
+        roles=_csv_strs(roles),
+        departments=_csv_strs(departments),
+        statuses=_csv_strs(statuses),
+        positions=_csv_strs(positions),
+        shifts=_csv_strs(shifts),
+        hide_cost=hide_cost_for(current_user),
+    )
 
 
 @router.post("", response_model=ScheduleResponse, status_code=201)

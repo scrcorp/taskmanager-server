@@ -652,3 +652,54 @@ class BulkDeleteResult(BaseModel):
     deleted: int = 0
     failed: int = 0
     errors: list[str] = []
+
+
+# ─── Windowed Roster (Phase 1) ───────────────────────
+# 정렬된 staff 로스터 + 필터 반영 행/컬럼 요약. 셀(블록)은 별도(Phase 2 B 엔드포인트).
+# 집계단위: TEAM=스케줄 수, 일간 컬럼=30분 점유 0.5 환산, cost=schedule.hourly_rate (GM+ 만).
+
+
+class RosterRow(BaseModel):
+    user_id: str
+    user_name: str | None = None
+    user_department: str | None = None
+    role_priority: int
+    # 신규 스케줄 default 표시용 effective rate (GM+ 만; SV 이하는 None 마스킹)
+    effective_hourly_rate: float | None = None
+    has_schedule_in_period: bool = False
+    confirmed_hours: float = 0.0
+    pending_hours: float = 0.0
+    confirmed_cost: float | None = None  # GM+ 만
+    pending_cost: float | None = None
+
+
+class RosterColumn(BaseModel):
+    key: str  # 날짜 "YYYY-MM-DD" (week/month) 또는 "h{n}" (day, n=0..47 overnight 포함)
+    team_confirmed: float = 0.0
+    team_pending: float = 0.0
+    hours_confirmed: float = 0.0
+    hours_pending: float = 0.0
+    cost_confirmed: float | None = None
+    cost_pending: float | None = None
+
+
+class RosterTotals(BaseModel):
+    team_confirmed: float = 0.0
+    team_pending: float = 0.0
+    hours_confirmed: float = 0.0
+    hours_pending: float = 0.0
+    cost_confirmed: float | None = None
+    cost_pending: float | None = None
+    staff_count: int = 0
+
+
+class RosterFilterDomain(BaseModel):
+    positions: list[str] = []
+    shifts: list[str] = []
+
+
+class RosterResponse(BaseModel):
+    roster: list[RosterRow] = []
+    columns: list[RosterColumn] = []
+    totals: RosterTotals
+    filter_domain: RosterFilterDomain
