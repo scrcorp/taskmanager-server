@@ -1,6 +1,7 @@
 """스케줄 서비스 — 확정 스케줄 비즈니스 로직."""
 
-from datetime import date, datetime, time, timezone
+import math
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -21,8 +22,9 @@ from app.schemas.schedule import (
     ScheduleValidation, FinalizeResult,
     ScheduleReject, ScheduleBulkConfirmResult,
     ScheduleHistoryItem, ScheduleHistoryListResponse,
+    RosterResponse, RosterRow, RosterColumn, RosterTotals, RosterFilterDomain,
 )
-from app.core.permissions import GM_PRIORITY, OWNER_PRIORITY, hide_cost_for_priority
+from app.core.permissions import GM_PRIORITY, OWNER_PRIORITY, SV_PRIORITY, hide_cost_for_priority
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 
@@ -470,6 +472,212 @@ class ScheduleService:
         )
         responses = await self._list_to_responses(db, list(entries))
         return responses, total
+
+    # ─── Windowed Roster (Phase 1) ───────────────────────────────────
+
+    @staticmethod
+    def _role_badge(priority: int) -> str:
+        """role_priority → 프론트 FilterBar 와 동일한 badge 문자열(lowercase)."""
+        if priority <= OWNER_PRIORITY:
+            return "owner"
+        if priority <= GM_PRIORITY:
+            return "gm"
+        if priority <= SV_PRIORITY:
+            return "sv"
+        return "staff"
+
+    @staticmethod
+    def _hour_occupancy(start: time | None, end: time | None, hour: int) -> float:
+        """스케줄이 [hour, hour+1) 1시간 슬롯에서 차지하는 비율(0~1). overnight 대응."""
+        if start is None or end is None:
+            return 0.0
+        s = start.hour + start.minute / 60.0
+        e = end.hour + end.minute / 60.0
+        eff_end = e + 24 if e <= s else e
+        overlap = min(eff_end, hour + 1) - max(s, hour)
+        return max(0.0, min(1.0, overlap))
+
+    def _roster_columns(
+        self,
+        scheds: list[Schedule],
+        granularity: str,
+        date_from: date,
+        date_to: date,
+        hide_cost: bool,
+    ) -> list[RosterColumn]:
+        cols: list[RosterColumn] = []
+        if granularity == "day":
+            if not scheds:
+                return []
+            starts: list[float] = []
+            ends: list[float] = []
+            for s in scheds:
+                st = (s.start_time.hour + s.start_time.minute / 60.0) if s.start_time else 0.0
+                en = (s.end_time.hour + s.end_time.minute / 60.0) if s.end_time else 0.0
+                eff = en + 24 if en <= st else en
+                starts.append(st)
+                ends.append(eff)
+            h_lo = int(math.floor(min(starts)))
+            h_hi = int(math.ceil(max(ends)))
+            for h in range(h_lo, h_hi):
+                conf = [s for s in scheds if s.status == "confirmed"]
+                pend = [s for s in scheds if s.status == "requested"]
+                conf_occ = sum(self._hour_occupancy(s.start_time, s.end_time, h) for s in conf)
+                pend_occ = sum(self._hour_occupancy(s.start_time, s.end_time, h) for s in pend)
+                conf_cost = sum(self._hour_occupancy(s.start_time, s.end_time, h) * float(s.hourly_rate or 0.0) for s in conf)
+                pend_cost = sum(self._hour_occupancy(s.start_time, s.end_time, h) * float(s.hourly_rate or 0.0) for s in pend)
+                cols.append(RosterColumn(
+                    key=f"h{h}",
+                    team_confirmed=round(conf_occ, 2), team_pending=round(pend_occ, 2),
+                    hours_confirmed=round(conf_occ, 2), hours_pending=round(pend_occ, 2),
+                    cost_confirmed=None if hide_cost else round(conf_cost, 2),
+                    cost_pending=None if hide_cost else round(pend_cost, 2),
+                ))
+            return cols
+
+        # week / month — 날짜별 컬럼. TEAM = 스케줄 수.
+        by_date: dict[str, dict[str, float]] = {}
+        d = date_from
+        while d <= date_to:
+            by_date[d.isoformat()] = {"cn": 0, "pn": 0, "ch": 0.0, "ph": 0.0, "cc": 0.0, "pc": 0.0}
+            d = d + timedelta(days=1)
+        for s in scheds:
+            slot = by_date.get(s.work_date.isoformat())
+            if slot is None:
+                continue
+            hrs = (s.net_work_minutes or 0) / 60.0
+            cost = hrs * float(s.hourly_rate or 0.0)
+            if s.status == "confirmed":
+                slot["cn"] += 1; slot["ch"] += hrs; slot["cc"] += cost
+            elif s.status == "requested":
+                slot["pn"] += 1; slot["ph"] += hrs; slot["pc"] += cost
+        for key, slot in by_date.items():
+            cols.append(RosterColumn(
+                key=key,
+                team_confirmed=slot["cn"], team_pending=slot["pn"],
+                hours_confirmed=round(slot["ch"], 2), hours_pending=round(slot["ph"], 2),
+                cost_confirmed=None if hide_cost else round(slot["cc"], 2),
+                cost_pending=None if hide_cost else round(slot["pc"], 2),
+            ))
+        return cols
+
+    async def build_roster(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        *,
+        date_from: date,
+        date_to: date,
+        granularity: str,
+        store_ids: list[UUID] | None,
+        accessible_store_ids: list[UUID] | None,
+        staff_ids: list[UUID] | None = None,
+        roles: list[str] | None = None,
+        departments: list[str] | None = None,
+        statuses: list[str] | None = None,
+        positions: list[str] | None = None,
+        shifts: list[str] | None = None,
+        hide_cost: bool = False,
+    ) -> RosterResponse:
+        """정렬된 staff 로스터 + 필터 반영 행/컬럼 요약. 셀(블록)은 미포함."""
+        from app.services.user_service import user_service
+
+        # 1) 후보 staff — 그리드와 동일하게 store-scoped users 재사용
+        user_filters: dict[str, Any] = {"store_ids": store_ids, "is_active": True}
+        users = await user_service.list_users(db, organization_id, user_filters)
+        if staff_ids:
+            sset = {str(u) for u in staff_ids}
+            users = [u for u in users if u.id in sset]
+        if roles:
+            rset = {r.lower() for r in roles}
+            users = [u for u in users if self._role_badge(u.role_priority) in rset]
+        if departments:
+            dset = set(departments)
+            users = [u for u in users if (u.department or "unassigned") in dset]
+
+        candidate_ids = [UUID(u.id) for u in users]
+
+        # 2) 기간 스케줄 (confirmed+requested, 후보 user 한정)
+        scheds = list(await schedule_repository.get_all_in_period(
+            db, organization_id, date_from, date_to,
+            store_ids=store_ids, user_ids=candidate_ids,
+            accessible_store_ids=accessible_store_ids,
+        ))
+
+        # 3) filter_domain — 칩 필터 적용 전 도메인 (FilterBar 옵션)
+        pos_domain = sorted({s.position_snapshot for s in scheds if s.position_snapshot})
+        shift_domain = sorted({
+            s.work_role_name_snapshot for s in scheds if s.work_role_name_snapshot
+        })
+
+        # 4) 칩 필터 (status/position/shift) — Python
+        status_set = set(statuses) if statuses else None
+        pos_set = set(positions) if positions else None
+        shift_set = set(shifts) if shifts else None
+
+        def _passes(s: Schedule) -> bool:
+            if status_set and s.status not in status_set:
+                return False
+            if pos_set and s.position_snapshot not in pos_set:
+                return False
+            if shift_set:
+                if s.work_role_name_snapshot not in shift_set:
+                    return False
+            return True
+
+        filtered = [s for s in scheds if _passes(s)]
+        schedule_level_filter = bool(status_set or pos_set or shift_set)
+
+        # 5) per-user 행 요약
+        per_user: dict[str, dict[str, float]] = {}
+        for s in filtered:
+            uid = str(s.user_id)
+            agg = per_user.setdefault(uid, {"ch": 0.0, "ph": 0.0, "cc": 0.0, "pc": 0.0})
+            hrs = (s.net_work_minutes or 0) / 60.0
+            cost = hrs * float(s.hourly_rate or 0.0)
+            if s.status == "confirmed":
+                agg["ch"] += hrs; agg["cc"] += cost
+            elif s.status == "requested":
+                agg["ph"] += hrs; agg["pc"] += cost
+
+        rows: list[RosterRow] = []
+        for u in users:
+            agg = per_user.get(u.id)
+            has = agg is not None
+            if schedule_level_filter and not has:
+                continue  # 스케줄 레벨 필터 활성 시 매칭 없는 행 숨김
+            rows.append(RosterRow(
+                user_id=u.id, user_name=u.full_name, user_department=u.department,
+                role_priority=u.role_priority,
+                effective_hourly_rate=None if hide_cost else u.effective_hourly_rate,
+                has_schedule_in_period=has,
+                confirmed_hours=round(agg["ch"], 2) if agg else 0.0,
+                pending_hours=round(agg["ph"], 2) if agg else 0.0,
+                confirmed_cost=None if hide_cost else (round(agg["cc"], 2) if agg else 0.0),
+                pending_cost=None if hide_cost else (round(agg["pc"], 2) if agg else 0.0),
+            ))
+        # 정렬: empty-bottom + 이름순
+        rows.sort(key=lambda r: (not r.has_schedule_in_period, (r.user_name or "").lower()))
+
+        # 6) 컬럼 + 7) totals
+        columns = self._roster_columns(filtered, granularity, date_from, date_to, hide_cost)
+        conf = [s for s in filtered if s.status == "confirmed"]
+        pend = [s for s in filtered if s.status == "requested"]
+        tot_ch = sum((s.net_work_minutes or 0) / 60.0 for s in conf)
+        tot_ph = sum((s.net_work_minutes or 0) / 60.0 for s in pend)
+        tot_cc = sum((s.net_work_minutes or 0) / 60.0 * float(s.hourly_rate or 0.0) for s in conf)
+        tot_pc = sum((s.net_work_minutes or 0) / 60.0 * float(s.hourly_rate or 0.0) for s in pend)
+        totals = RosterTotals(
+            team_confirmed=len(conf), team_pending=len(pend),
+            hours_confirmed=round(tot_ch, 2), hours_pending=round(tot_ph, 2),
+            cost_confirmed=None if hide_cost else round(tot_cc, 2),
+            cost_pending=None if hide_cost else round(tot_pc, 2),
+            staff_count=len({str(s.user_id) for s in filtered}),
+        )
+        return RosterResponse(
+            roster=rows, columns=columns, totals=totals,
+            filter_domain=RosterFilterDomain(positions=pos_domain, shifts=shift_domain),
+        )
 
     async def create_entry(
         self,
