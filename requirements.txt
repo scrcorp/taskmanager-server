@@ -36,5 +36,12 @@ aiosmtplib==3.0.2
 boto3==1.35.0
 fpdf2==2.8.7
 
+# PDF document rendering (HTML/CSS → PDF for warning documents)
+# NOTE: WeasyPrint needs native libs on the host — pango, cairo, gdk-pixbuf
+#       (macOS: `brew install pango gdk-pixbuf`; Debian/EC2: libpango-1.0-0
+#        libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 libffi-dev). See deploy notes.
+weasyprint==69.0
+jinja2==3.1.6
+
 # Scheduler (cron jobs for attendance state transitions)
 APScheduler==3.10.4

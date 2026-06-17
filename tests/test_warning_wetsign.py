@@ -322,7 +322,7 @@ async def test_download_signed_pdf(
     assert r.headers["content-type"] == "application/pdf"
     cd = r.headers["content-disposition"]
     assert "attachment" in cd and cd.endswith('.pdf"')
-    assert "2026.06.12" in cd  # 서명일 기반 파일명
+    assert "2026-06-12" in cd  # 서명일 기반 파일명 (YYYY-MM-DD)
     assert r.content.startswith(b"%PDF-")
 
 
