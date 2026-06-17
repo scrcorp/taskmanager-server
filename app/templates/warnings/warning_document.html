@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  /* 콘솔 폼(WarningFormDoc)을 그대로 재현 — 같은 색/테두리/밴드/체크박스.
+     화면은 CSS Grid라 인쇄 분할이 안 돼서, 여기선 같은 모양을 table+block 으로
+     재현(분할되고 빠름). Subject(제목)는 화면 전용이라 PDF 에선 뺀다. */
+  :root {
+    --ink:#1A1C22; --ink-soft:#3C4049; --label:#7A8090; --muted:#9AA0AD;
+    --rule:#C7CBD4; --rule-thick:#1A1C22; --fill:#F6F7F9;
+  }
+  @page {
+    size: A4;
+    margin: 14mm 13mm 14mm 13mm;
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font-size: 8pt; color: #9a9a9a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--ink); font-family: "Helvetica Neue", Helvetica, Arial, "DejaVu Sans", sans-serif; font-size: 10pt; line-height: 1.4; -weasy-hyphens: none; }
+
+  /* ── Banner ── */
+  table.banner { width: 100%; border-collapse: collapse; border: 2px solid var(--rule-thick); border-bottom: 0; }
+  table.banner td { padding: 13px 17px 11px; vertical-align: bottom; }
+  table.banner h1 { font-size: 16pt; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; margin: 0; line-height: 1.12; }
+  table.banner h1 .ref { font-weight: 600; color: var(--ink-soft); letter-spacing: .02em; text-transform: none; }
+  .subtitle { margin-top: 5px; font-size: 7.5pt; letter-spacing: .2em; text-transform: uppercase; color: var(--label); font-weight: 600; }
+  td.br { text-align: right; white-space: nowrap; }
+  .br .mark { font-size: 11pt; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+  .br .lhdate { margin-top: 6px; }
+  .br .lhdate-lbl { font-size: 7pt; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--label); }
+  .br .lhdate-val { font-size: 10.5pt; font-weight: 700; color: var(--ink-soft); }
+
+  /* ── Grid (outer frame; each direct child = a horizontal rule) ──
+     box-decoration-break:clone → 페이지에서 잘릴 때 프레임을 외부 테두리로 닫고
+     다음 페이지에서 외부 테두리로 다시 연다(옆선만 흘러내리는 현상 방지). */
+  .grid { border: 2px solid var(--rule-thick); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+  .grid > * { border-bottom: 1px solid var(--rule); }
+  .grid > *:last-child { border-bottom: 0; }
+
+  table.row { width: 100%; border-collapse: collapse; }
+  table.row td.cell { border-right: 1px solid var(--rule); padding: 9px 13px 10px; vertical-align: top; }
+  table.row td.cell:last-child { border-right: 0; }
+  td.fill { background: var(--fill); }
+  .r3 .empid { width: 17%; } .r3 .name { width: 41%; }
+  .r2 td.cell { width: 50%; }
+
+  .full { padding: 9px 13px 10px; }
+  .lbl { font-size: 7.5pt; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--label); margin-bottom: 5px; }
+  .lbl .hint { letter-spacing: .03em; text-transform: none; color: var(--muted); font-weight: 500; }
+  .val { font-size: 12pt; font-weight: 600; color: var(--ink-soft); }
+  .val.st { color: var(--ink); font-weight: 700; }
+  .val.empty { color: var(--muted); font-weight: 600; }
+  .rotext { font-size: 10.5pt; line-height: 1.5; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; min-height: 20px; }
+  .rotext.empty { color: var(--muted); font-style: italic; }
+  /* 본문 1·2번 빈 높이는 서버가 measure-and-fit 으로 채운다(inline min-height). */
+
+  /* ── Band (section header) ── */
+  .band { padding: 7px 13px; background: var(--fill); font-size: 11pt; font-weight: 800; color: var(--ink); break-after: avoid; page-break-after: avoid; }
+
+  /* ── Checkboxes (warning type + reasons) ── */
+  .box { display: inline-block; width: 13px; height: 13px; border: 1.5px solid var(--ink); text-align: center; line-height: 11px; font-size: 10px; color: #fff; vertical-align: -2px; }
+  .on > .box { background: var(--ink); }
+  .wrow { margin-top: 2px; }
+  .opt { display: inline-block; margin-right: 24px; }
+  .opt .otx { font-size: 10.5pt; font-weight: 700; color: var(--muted); margin-left: 7px; }
+  .opt.on .otx { color: var(--ink); }
+
+  .rgrid { column-count: 3; column-gap: 16px; margin-top: 2px; }
+  .ropt { break-inside: avoid; padding: 1px 0 3px; }
+  .ropt .rtx { font-size: 10pt; font-weight: 600; color: var(--ink-soft); margin-left: 7px; }
+  .ropt.on .rtx { color: var(--ink); font-weight: 700; }
+  .ropt.removed .rtx { color: var(--muted); text-decoration: line-through; }
+
+  /* ── Signatures ── */
+  .sigs td.cell { min-height: 70px; }
+  .sigline { height: 26px; border-bottom: 1px solid var(--ink); margin: 12px 0 4px; }
+  .sigink { height: 42px; border-bottom: 1px solid var(--ink); margin: 8px 0 4px; text-align: center; }
+  .sigmeta { font-size: 8pt; color: var(--label); font-weight: 600; }
+  .sigmeta .signedby { color: var(--ink); font-weight: 700; }
+  .sigmeta .r { float: right; }
+  .awaiting { margin-top: 5px; font-size: 7.5pt; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+
+  .ccval { font-size: 9.5pt; font-weight: 700; color: var(--ink); }
+</style>
+</head>
+<body>
+  <table class="banner">
+    <tr>
+      <td class="bl">
+        <h1>Employee Warning Notice Form{% if ref_no %} <span class="ref">({{ ref_no }})</span>{% endif %}</h1>
+        <div class="subtitle">Human Resources · Disciplinary Record</div>
+      </td>
+      <td class="br">
+        <div class="mark">{{ store_name or "" }}</div>
+        <div class="lhdate"><span class="lhdate-lbl">Date</span> <span class="lhdate-val">{{ warning_date or "—" }}</span></div>
+      </td>
+    </tr>
+  </table>
+
+  <div class="grid">
+    <!-- Emp ID | Employee Name | Manager Name -->
+    <table class="row r3">
+      <tr>
+        <td class="cell fill empid"><div class="lbl">Emp ID</div><div class="val st{% if not employee_no %} empty{% endif %}">{{ employee_no or "-" }}</div></td>
+        <td class="cell name"><div class="lbl">Employee Name</div><div class="val st">{{ employee_name or "—" }}</div></td>
+        <td class="cell mgr"><div class="lbl">Manager Name</div><div class="val st">{{ manager_name or "—" }}</div></td>
+      </tr>
+    </table>
+
+    <!-- Warning Type -->
+    <div class="full">
+      <div class="lbl">Warning Type <span class="hint">— auto by warning count</span></div>
+      <div class="wrow">
+        <span class="opt{% if ordinal == 1 %} on{% endif %}"><span class="box">{% if ordinal == 1 %}✓{% endif %}</span><span class="otx">First Warning</span></span>
+        <span class="opt{% if ordinal == 2 %} on{% endif %}"><span class="box">{% if ordinal == 2 %}✓{% endif %}</span><span class="otx">Second Warning</span></span>
+        <span class="opt{% if ordinal and ordinal >= 3 %} on{% endif %}"><span class="box">{% if ordinal and ordinal >= 3 %}✓{% endif %}</span><span class="otx">Other</span></span>
+      </div>
+    </div>
+
+    <!-- Section 1: reasons -->
+    <div class="band">1. Behavior / actions found unsatisfactory — reasons</div>
+    {% if reasons %}
+    <div class="full">
+      <div class="rgrid">
+        {% for r in reasons %}
+        <div class="ropt{% if r.on %} on{% endif %}{% if r.removed %} removed{% endif %}">
+          <span class="box">{% if r.on %}✓{% endif %}</span><span class="rtx">{{ r.label }}{% if r.removed %} (removed){% endif %}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+    <div class="full">
+      <div class="lbl">Details of unsatisfactory behavior / actions</div>
+      <div class="rotext{% if not details %} empty{% endif %}" style="min-height: {{ grow1 }}mm">{{ details or "No details." }}</div>
+    </div>
+
+    <!-- Section 2: corrective -->
+    <div class="band">2. Corrective action required — failure to comply may lead to further disciplinary action up to termination</div>
+    <div class="full">
+      <div class="rotext{% if not corrective_action %} empty{% endif %}" style="min-height: {{ grow2 }}mm">{{ corrective_action or "None specified." }}</div>
+    </div>
+
+    <!-- Deadline | Follow-up -->
+    <table class="row r2">
+      <tr>
+        <td class="cell"><div class="lbl">3. Deadline <span class="hint">— optional</span></div><div class="val st{% if not deadline %} empty{% endif %}">{{ deadline or "—" }}</div></td>
+        <td class="cell"><div class="lbl">4. Follow-up — date &amp; time <span class="hint">— optional</span></div><div class="val st{% if not follow_up %} empty{% endif %}">{{ follow_up or "—" }}</div></td>
+      </tr>
+    </table>
+
+    <!-- Signatures -->
+    <table class="row r2 sigs">
+      <tr>
+        <td class="cell">
+          <div class="lbl">Employee Signature</div>
+          {% if emp_sig %}
+          <div class="sigink">{{ emp_sig.svg }}</div>
+          <div class="sigmeta"><span class="signedby">{{ emp_sig.name }}</span><span class="r">{{ emp_sig.date }}</span></div>
+          {% else %}
+          <div class="sigline"></div>
+          <div class="sigmeta"><span>{{ employee_name or "—" }}</span><span class="r">Date</span></div>
+          {% if is_wet %}<div class="awaiting">{% if wet_signed %}Signed on paper — see PDF{% else %}To be signed on paper{% endif %}</div>{% endif %}
+          {% endif %}
+        </td>
+        <td class="cell">
+          <div class="lbl">Manager Signature</div>
+          {% if mgr_sig %}
+          <div class="sigink">{{ mgr_sig.svg }}</div>
+          <div class="sigmeta"><span class="signedby">{{ mgr_sig.name }}</span><span class="r">{{ mgr_sig.date }}</span></div>
+          {% else %}
+          <div class="sigline"></div>
+          <div class="sigmeta"><span>{{ manager_name or "—" }}</span><span class="r">Date</span></div>
+          {% if is_wet %}<div class="awaiting">{% if wet_signed %}Signed on paper — see PDF{% else %}To be signed on paper{% endif %}</div>{% endif %}
+          {% endif %}
+        </td>
+      </tr>
+    </table>
+
+    <!-- cc -->
+    <div class="full">
+      <div class="lbl">cc</div>
+      <div class="ccval">Employee&nbsp;&nbsp;/&nbsp;&nbsp;Manager&nbsp;&nbsp;/&nbsp;&nbsp;Human Resources&nbsp;&nbsp;/&nbsp;&nbsp;Personnel File</div>
+    </div>
+  </div>
+</body>
+</html>

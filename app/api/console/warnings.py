@@ -23,6 +23,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import (
     check_store_access,
@@ -49,6 +50,7 @@ from app.schemas.warning import (
     WarningUpdate,
 )
 from app.services.storage_service import storage_service
+from app.services.warning_pdf_service import warning_pdf_service
 from app.services.warning_service import warning_service
 from app.services.warning_signature_service import (
     PARTY_MANAGER,
@@ -349,6 +351,55 @@ async def download_signed_pdf(
         subject_name=subject.full_name if subject else None,
         employee_no=subject.employee_no if subject else None,
         store_code=store.code if store else None,
+        category_labels=labels,
+    )
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{warning_id}/pdf")
+async def download_warning_pdf(
+    warning_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("warnings:read"))],
+) -> Response:
+    """경고 문서 PDF — 콘솔 폼(WarningFormDoc)을 서버가 그대로 렌더(페이지 분할 가능).
+
+    digital: 이 PDF 가 곧 문서. wet: 이 PDF 를 출력→서명→스캔 업로드(스캔은
+    /signed-pdf 로 별도 보관). 권한 + store-scope IDOR 가드는 signed-pdf 와 동일.
+    """
+    warning = await warning_service.get_warning(
+        db, warning_id=warning_id, organization_id=current_user.organization_id
+    )
+    if not is_owner(current_user) and warning.issued_by_id != current_user.id:
+        accessible = await get_accessible_store_ids(db, current_user)
+        if (
+            accessible is not None
+            and warning.store_id is not None
+            and warning.store_id not in accessible
+        ):
+            raise NotFoundError("Warning not found")
+
+    labels = await warning_category_repository.labels_by_code(db, warning.organization_id)
+    data = await warning_service.build_warning_response(
+        db, warning, include_ordinal=True, category_labels=labels
+    )
+    # 사유 체크리스트용 — org 활성 카테고리 옵션(폼처럼 전체 표시 + 선택 체크).
+    options = await warning_category_repository.list_for_org(
+        db, warning.organization_id, include_hidden=False
+    )
+    categories = [{"code": c.code, "label": c.label} for c in options]
+    # WeasyPrint 는 CPU-bound(sync) — 이벤트루프 안 막게 threadpool 로.
+    pdf_bytes = await run_in_threadpool(warning_pdf_service.render_pdf, data, categories)
+
+    filename = warning_service.build_warning_filename(
+        warning,
+        subject_name=data["subject_name"],
+        employee_no=data["employee_no"],
+        store_code=data["store_code"],
         category_labels=labels,
     )
     return Response(
