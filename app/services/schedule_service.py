@@ -497,6 +497,18 @@ class ScheduleService:
         overlap = min(eff_end, hour + 1) - max(s, hour)
         return max(0.0, min(1.0, overlap))
 
+    @staticmethod
+    def _occupies_slot(start: time | None, end: time | None, slot_start: float) -> bool:
+        """스케줄이 [slot_start, slot_start+0.5) 30분 슬롯과 겹치는지(overlap>0). overnight 대응.
+        _hour_occupancy 와 동일한 시간/overnight 규약을 사용한다."""
+        if start is None or end is None:
+            return False
+        s = start.hour + start.minute / 60.0
+        e = end.hour + end.minute / 60.0
+        eff_end = e + 24 if e <= s else e
+        overlap = min(eff_end, slot_start + 0.5) - max(s, slot_start)
+        return overlap > 0
+
     def _roster_columns(
         self,
         scheds: list[Schedule],
@@ -519,19 +531,26 @@ class ScheduleService:
                 ends.append(eff)
             h_lo = int(math.floor(min(starts)))
             h_hi = int(math.ceil(max(ends)))
+            conf = [s for s in scheds if s.status == "confirmed"]
+            pend = [s for s in scheds if s.status == "requested"]
             for h in range(h_lo, h_hi):
-                conf = [s for s in scheds if s.status == "confirmed"]
-                pend = [s for s in scheds if s.status == "requested"]
                 conf_occ = sum(self._hour_occupancy(s.start_time, s.end_time, h) for s in conf)
                 pend_occ = sum(self._hour_occupancy(s.start_time, s.end_time, h) for s in pend)
                 conf_cost = sum(self._hour_occupancy(s.start_time, s.end_time, h) * float(s.hourly_rate or 0.0) for s in conf)
                 pend_cost = sum(self._hour_occupancy(s.start_time, s.end_time, h) * float(s.hourly_rate or 0.0) for s in pend)
+                # 첫/둘째 30분 슬롯 인원 (overlap>0 카운트). team_*(점유합)=(slot0+slot1)/2 와 일관.
+                conf_s0 = sum(1 for s in conf if self._occupies_slot(s.start_time, s.end_time, h))
+                conf_s1 = sum(1 for s in conf if self._occupies_slot(s.start_time, s.end_time, h + 0.5))
+                pend_s0 = sum(1 for s in pend if self._occupies_slot(s.start_time, s.end_time, h))
+                pend_s1 = sum(1 for s in pend if self._occupies_slot(s.start_time, s.end_time, h + 0.5))
                 cols.append(RosterColumn(
                     key=f"h{h}",
                     team_confirmed=round(conf_occ, 2), team_pending=round(pend_occ, 2),
                     hours_confirmed=round(conf_occ, 2), hours_pending=round(pend_occ, 2),
                     cost_confirmed=None if hide_cost else round(conf_cost, 2),
                     cost_pending=None if hide_cost else round(pend_cost, 2),
+                    slots_confirmed=[conf_s0, conf_s1],
+                    slots_pending=[pend_s0, pend_s1],
                 ))
             return cols
 
