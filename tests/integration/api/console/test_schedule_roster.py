@@ -163,6 +163,55 @@ async def test_roster_day_half_hour_is_half_person(
     assert cols["h9"]["team_confirmed"] == 0.5
 
 
+async def test_roster_day_slots_half_hour_first_only(
+    async_client, admin_headers, staff_in_test_store, test_store_id, _clear_future
+):
+    # 9:00~9:30 confirmed 1건 → h9 첫 30분만 인원. slots=[1,0], team(점유합)=0.5
+    await _insert(test_store_id, staff_in_test_store, start=time(9, 0), end=time(9, 30),
+                  net_work_minutes=30)
+    resp = await async_client.get(ROSTER_URL, headers=admin_headers, params={
+        "date_from": FUTURE.isoformat(), "date_to": FUTURE.isoformat(),
+        "granularity": "day", "store_ids": str(test_store_id),
+    })
+    assert resp.status_code == 200, resp.text
+    cols = {c["key"]: c for c in resp.json()["columns"]}
+    assert cols["h9"]["slots_confirmed"] == [1, 0]
+    assert cols["h9"]["slots_pending"] == [0, 0]
+    assert cols["h9"]["team_confirmed"] == 0.5
+
+
+async def test_roster_day_slots_full_hour_both(
+    async_client, admin_headers, staff_in_test_store, test_store_id, _clear_future
+):
+    # 9:00~10:00 confirmed 1건 → 두 슬롯 모두 인원. slots=[1,1], team(점유합)=1.0
+    await _insert(test_store_id, staff_in_test_store, start=time(9, 0), end=time(10, 0),
+                  net_work_minutes=60)
+    resp = await async_client.get(ROSTER_URL, headers=admin_headers, params={
+        "date_from": FUTURE.isoformat(), "date_to": FUTURE.isoformat(),
+        "granularity": "day", "store_ids": str(test_store_id),
+    })
+    assert resp.status_code == 200, resp.text
+    cols = {c["key"]: c for c in resp.json()["columns"]}
+    assert cols["h9"]["slots_confirmed"] == [1, 1]
+    assert cols["h9"]["team_confirmed"] == 1.0
+
+
+async def test_roster_week_slots_empty(
+    async_client, admin_headers, staff_in_test_store, test_store_id, _clear_future
+):
+    # week granularity 에서는 slots 빈 배열 유지
+    await _insert(test_store_id, staff_in_test_store, start=time(9, 0), end=time(10, 0),
+                  net_work_minutes=60)
+    resp = await async_client.get(ROSTER_URL, headers=admin_headers, params={
+        "date_from": FUTURE.isoformat(), "date_to": FUTURE.isoformat(),
+        "granularity": "week", "store_ids": str(test_store_id),
+    })
+    assert resp.status_code == 200, resp.text
+    col = next(c for c in resp.json()["columns"] if c["key"] == FUTURE.isoformat())
+    assert col["slots_confirmed"] == []
+    assert col["slots_pending"] == []
+
+
 async def test_roster_position_filter_excludes_nonmatching(
     async_client, admin_headers, staff_in_test_store, test_store_id, _clear_future
 ):

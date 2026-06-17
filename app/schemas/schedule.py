@@ -681,6 +681,10 @@ class RosterColumn(BaseModel):
     hours_pending: float = 0.0
     cost_confirmed: float | None = None
     cost_pending: float | None = None
+    # day granularity 전용 — 시간당 30분 슬롯 인원. [첫30분(:00–:30), 둘째30분(:30–:00)].
+    # week/month 에서는 빈 배열. "슬롯 인원" = 그 30분과 overlap>0 인 스케줄 수(30분 grid라 풀/0).
+    slots_confirmed: list[int] = []
+    slots_pending: list[int] = []
 
 
 class RosterTotals(BaseModel):
