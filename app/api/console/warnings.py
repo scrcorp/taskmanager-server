@@ -17,11 +17,12 @@ Store scoping:
     - GET /{id}: 경고의 store 접근 가능 / Owner / issuer 본인만 (아니면 404)
 """
 
+import logging
 from datetime import date
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -62,6 +63,7 @@ from app.utils.exceptions import BadRequestError, NotFoundError
 MAX_WARNING_PDF_BYTES = 20 * 1024 * 1024
 
 router: APIRouter = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # ====================================================================
@@ -392,16 +394,21 @@ async def download_warning_pdf(
         db, warning.organization_id, include_hidden=False
     )
     categories = [{"code": c.code, "label": c.label} for c in options]
-    # WeasyPrint 는 CPU-bound(sync) — 이벤트루프 안 막게 threadpool 로.
-    pdf_bytes = await run_in_threadpool(warning_pdf_service.render_pdf, data, categories)
-
-    filename = warning_service.build_warning_filename(
-        warning,
-        subject_name=data["subject_name"],
-        employee_no=data["employee_no"],
-        store_code=data["store_code"],
-        category_labels=labels,
-    )
+    try:
+        # WeasyPrint 는 CPU-bound(sync) — 이벤트루프 안 막게 threadpool 로.
+        pdf_bytes = await run_in_threadpool(warning_pdf_service.render_pdf, data, categories)
+        filename = warning_service.build_warning_filename(
+            warning,
+            subject_name=data["subject_name"],
+            employee_no=data["employee_no"],
+            store_code=data["store_code"],
+            category_labels=labels,
+        )
+    except Exception as e:  # PDF 렌더 실패를 명확히: 서버 로그(traceback) + 응답에 예외 노출
+        logger.exception("warning PDF render failed for %s", warning_id)
+        raise HTTPException(
+            status_code=500, detail=f"PDF render failed: {type(e).__name__}: {e}"
+        ) from e
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

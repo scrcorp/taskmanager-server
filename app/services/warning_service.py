@@ -534,8 +534,8 @@ class WarningService:
         결손(코드/사번/이름)은 placeholder. 카테고리는 전부 '_' 로 연결.
         N = ordinal_snapshot(통산 차수). 날짜 = wet_signed_on 우선, 없으면 warning_date.
         """
-        d: date = warning.wet_signed_on or warning.warning_date
-        date_str = d.strftime("%Y-%m-%d")
+        d: date | None = warning.wet_signed_on or warning.warning_date
+        date_str = d.strftime("%Y-%m-%d") if d else "NA"
         store = self._sanitize_token(store_code, fallback="NA")
         emp = self._sanitize_token(
             employee_no, fallback=str(warning.id).replace("-", "")[:8]
