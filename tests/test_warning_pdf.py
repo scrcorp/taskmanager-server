@@ -276,6 +276,57 @@ def test_render_digital_signed_embeds_signature():
     assert pdf.startswith(b"%PDF-")
 
 
+def test_signature_svg_never_crashes_on_bad_data():
+    """깨진/형식오류 stroke 에도 예외 없이 빈 문자열 폴백 (prod 500 회귀 방지).
+    JS(SignatureView)는 `?? 0` 으로 관대했는데 Python 포팅이 엄격해 터졌던 케이스."""
+    from app.services.warning_pdf_service import _signature_svg
+
+    bad = [
+        {"strokes": "notalist", "aspect": 2.6},
+        {"strokes": [["x", "y"]], "aspect": 2.6},            # 좌표가 숫자 아님
+        {"strokes": [[[0.1], [0.2, 0.3]]], "aspect": None},  # 좌표 결손 + aspect None
+        {"strokes": [[None, 5]], "aspect": 0},               # None 점 + aspect 0
+        {"strokes": [42]},                                   # stroke 가 리스트 아님
+        {"aspect": 2.6},                                     # strokes 없음
+        None, [], "str", 123,                                # payload 자체가 비정상
+    ]
+    for b in bad:
+        assert isinstance(_signature_svg(b), str)  # 예외 없이 문자열
+
+
+def test_render_with_malformed_signature_does_not_crash():
+    """경고에 깨진 서명 데이터가 있어도 PDF 렌더가 죽지 않는다(prod 500 회귀 방지)."""
+    data = _doc_data("Brief.")
+    data["signatures"] = {
+        "employee": {
+            "signer_name": "X",
+            "signed_at": datetime(2026, 6, 18, 9, 30),
+            "signature_strokes": {"strokes": [["bad", "data"]], "aspect": None},
+        },
+        "manager": None,
+    }
+    pdf = warning_pdf_service.render_pdf(data, [{"code": "tardiness", "label": "Tardiness"}])
+    assert pdf.startswith(b"%PDF-")
+
+
+def test_build_warning_filename_handles_none_date():
+    """warning_date/wet_signed_on 둘 다 None 이어도 파일명 생성 무오류(날짜=NA)."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from app.services.warning_service import warning_service as ws
+
+    w = SimpleNamespace(
+        wet_signed_on=None, warning_date=None, id=uuid4(),
+        categories=["tardiness"], ordinal_snapshot=1,
+    )
+    fn = ws.build_warning_filename(
+        w, subject_name="A B", employee_no=None, store_code=None,
+        category_labels={"tardiness": "Tardiness"},
+    )
+    assert fn.endswith(".pdf") and "NA" in fn
+
+
 def test_render_long_warning_multi_page():
     """긴 details → 여러 페이지로 나뉜다 (grid 인쇄로는 안 되던 핵심)."""
     long_details = "\n\n".join(

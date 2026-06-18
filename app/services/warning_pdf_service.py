@@ -51,43 +51,69 @@ def _fmt_dt(dt) -> str:
     return _fmt_date(dt) if isinstance(dt, date) else ""
 
 
-def _stroke_to_path(stroke: list, w: float, h: float) -> str:
-    if not stroke:
+def _coord(p, i: int) -> float:
+    """point p 의 i번째 좌표를 float 로 안전 추출. JS(SignatureView)의 `?? 0` 처럼
+    관대하게 — 점이 [x,y] 가 아니거나 좌표가 None/비숫자여도 0 으로(크래시 금지)."""
+    try:
+        v = p[i]
+    except (TypeError, IndexError, KeyError):
+        return 0.0
+    try:
+        return float(v) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _stroke_to_path(stroke, w: float, h: float) -> str:
+    if not isinstance(stroke, list) or not stroke:
         return ""
-    def _x(p):
-        return (p[0] if len(p) > 0 else 0) * w
-    def _y(p):
-        return (p[1] if len(p) > 1 else 0) * h
     if len(stroke) == 1:
-        x, y = _x(stroke[0]), _y(stroke[0])
+        x, y = _coord(stroke[0], 0) * w, _coord(stroke[0], 1) * h
         return f"M {x:.2f} {y:.2f} L {x + 0.5:.2f} {y:.2f}"
-    return " ".join(f"{'M' if i == 0 else 'L'} {_x(p):.2f} {_y(p):.2f}" for i, p in enumerate(stroke))
+    return " ".join(
+        f"{'M' if i == 0 else 'L'} {_coord(p, 0) * w:.2f} {_coord(p, 1) * h:.2f}"
+        for i, p in enumerate(stroke)
+    )
 
 
-def _signature_svg(payload: dict | None, *, color: str = "#1A1C22", stroke_width: float = 2.6) -> str:
-    """정규화 벡터 서명({strokes, aspect}) → inline SVG 문자열. SignatureView 포팅."""
-    if not payload:
-        return ""
-    strokes = payload.get("strokes") or []
-    aspect = payload.get("aspect") or 2.6
-    if aspect <= 0:
-        aspect = 2.6
-    vb_h = _VB_W / aspect
+def _signature_svg(payload, *, color: str = "#1A1C22", stroke_width: float = 2.6) -> str:
+    """정규화 벡터 서명({strokes, aspect}) → inline SVG. SignatureView 포팅.
+    어떤 stroke 데이터(결손/형식오류)에도 절대 예외를 던지지 않는다(빈 문자열 폴백)."""
+    try:
+        if not isinstance(payload, dict):
+            return ""
+        strokes = payload.get("strokes")
+        if not isinstance(strokes, list) or not strokes:
+            return ""
+        try:
+            aspect = float(payload.get("aspect"))
+        except (TypeError, ValueError):
+            aspect = 2.6
+        if aspect <= 0:
+            aspect = 2.6
+        vb_h = _VB_W / aspect
 
-    min_x = min_y = float("inf")
-    max_x = max_y = float("-inf")
-    for s in strokes:
-        for p in s:
-            x = p[0] if len(p) > 0 else 0
-            y = p[1] if len(p) > 1 else 0
-            min_x, max_x = min(min_x, x), max(max_x, x)
-            min_y, max_y = min(min_y, y), max(max_y, y)
-    has_ink = min_x != float("inf")
-    dx = (0.5 - (min_x + max_x) / 2) * _VB_W if has_ink else 0.0
-    dy = (0.5 - (min_y + max_y) / 2) * vb_h if has_ink else 0.0
+        xs: list[float] = []
+        ys: list[float] = []
+        for s in strokes:
+            if not isinstance(s, list):
+                continue
+            for p in s:
+                xs.append(_coord(p, 0))
+                ys.append(_coord(p, 1))
+        if not xs:
+            return ""
+        dx = (0.5 - (min(xs) + max(xs)) / 2) * _VB_W
+        dy = (0.5 - (min(ys) + max(ys)) / 2) * vb_h
 
-    paths = "".join(f'<path d="{_stroke_to_path(s, _VB_W, vb_h)}" />' for s in strokes if s)
-    if not paths:
+        paths = "".join(
+            f'<path d="{_stroke_to_path(s, _VB_W, vb_h)}" />'
+            for s in strokes
+            if isinstance(s, list) and s
+        )
+        if not paths:
+            return ""
+    except Exception:
         return ""
     return (
         f'<svg viewBox="0 0 {_VB_W} {vb_h:.2f}" preserveAspectRatio="xMidYMid meet" '
