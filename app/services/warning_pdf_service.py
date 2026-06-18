@@ -9,7 +9,7 @@ WeasyPrint 는 native lib(pango/cairo/gdk-pixbuf) 필요 — requirements.txt �
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -34,14 +34,18 @@ def _fmt_date(d: date | None) -> str:
     return d.strftime("%b %-d, %Y") if isinstance(d, date) else ""
 
 
-def _fmt_time(t: str | None) -> str:
+def _fmt_time(t) -> str:
+    """'HH:MM' 문자열 또는 datetime.time → 'h:MM AM/PM' (없음/파싱실패 → '').
+    DB(TIME 컬럼)는 datetime.time 으로 주므로 둘 다 처리한다."""
     if not t:
         return ""
+    if isinstance(t, time):
+        return f"{t.hour % 12 or 12}:{t.minute:02d} {'AM' if t.hour < 12 else 'PM'}"
     try:
-        hh, mm = (int(x) for x in t.split(":")[:2])
+        hh, mm = (int(x) for x in str(t).split(":")[:2])
         return f"{hh % 12 or 12}:{mm:02d} {'AM' if hh < 12 else 'PM'}"
     except (ValueError, TypeError):
-        return t
+        return str(t)
 
 
 def _fmt_dt(dt) -> str:
