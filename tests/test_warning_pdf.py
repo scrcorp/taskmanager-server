@@ -327,6 +327,31 @@ def test_build_warning_filename_handles_none_date():
     assert fn.endswith(".pdf") and "NA" in fn
 
 
+def test_fmt_time_handles_time_object_and_string():
+    """follow_up_time 은 DB(TIME 컬럼)가 datetime.time 으로 준다 — 객체/문자열 둘 다
+    포맷해야 한다(prod 500: 'datetime.time' has no attribute 'split' 회귀 방지)."""
+    from datetime import time as _time
+
+    from app.services.warning_pdf_service import _fmt_time
+
+    assert _fmt_time(_time(14, 0)) == "2:00 PM"
+    assert _fmt_time(_time(0, 5)) == "12:05 AM"
+    assert _fmt_time("14:00") == "2:00 PM"
+    assert _fmt_time(None) == ""
+    assert _fmt_time("") == ""
+
+
+def test_render_with_time_object_follow_up_does_not_crash():
+    """follow_up_time 이 datetime.time 객체여도 렌더 무오류(prod 500 회귀 방지)."""
+    from datetime import time as _time
+
+    data = _doc_data("Brief.")
+    data["follow_up_date"] = date(2026, 7, 1)
+    data["follow_up_time"] = _time(14, 30)  # DB(TIME) 형태
+    pdf = warning_pdf_service.render_pdf(data, [{"code": "tardiness", "label": "Tardiness"}])
+    assert pdf.startswith(b"%PDF-")
+
+
 def test_render_long_warning_multi_page():
     """긴 details → 여러 페이지로 나뉜다 (grid 인쇄로는 안 되던 핵심)."""
     long_details = "\n\n".join(
