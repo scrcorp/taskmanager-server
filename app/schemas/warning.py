@@ -214,6 +214,10 @@ class SignatureInfo(BaseModel):
 
     signer_user_id: str | None
     signer_name: str | None
+    # 캡처 계정 — 온-디바이스(콘솔)에서 받은 경우 실제 조작 계정. 명의와 같으면(셀프사인)
+    # 서버가 None 으로 내려준다(표시 불필요).
+    captured_by_user_id: str | None = None
+    captured_by_name: str | None = None
     signed_at: datetime
     method: str  # 'drawn' | 'saved'
     signature_strokes: dict  # {"strokes":[[[x,y]..]..],"aspect":w/h}
@@ -256,17 +260,21 @@ def _validate_strokes(strokes: list[list[list[float]]]) -> list[list[list[float]
 
 
 class WarningSignRequest(BaseModel):
-    """경고 서명 요청 — POST /{id}/sign (app=employee, console=manager).
+    """경고 서명 요청 — POST /{id}/sign.
 
     strokes 는 정규화(0..1) 벡터. method='saved' 면 저장 서명에서 적용한 것(감사용),
     'drawn' 이면 새로 그린 것. save_as_default=True 면 이 서명을 users.signature_strokes
-    로도 저장(재사용 템플릿 갱신).
+    로도 저장(재사용 템플릿 갱신, 본인 셀프사인일 때만 서버가 반영).
+
+    party: 콘솔 온-디바이스 사인에서 어느 서명란인지('employee'|'manager'). 앱 셀프사인
+    엔드포인트는 이 값을 무시하고 항상 employee 로 강제한다(앱 유저가 매니저란 서명 불가).
     """
 
     strokes: list[list[list[float]]]
     aspect: float | None = None
     method: Literal["drawn", "saved"] = "drawn"
     save_as_default: bool = False
+    party: Literal["employee", "manager"] = "manager"
 
     @field_validator("strokes")
     @classmethod

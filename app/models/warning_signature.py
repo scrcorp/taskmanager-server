@@ -52,8 +52,14 @@ class WarningSignature(Base):
     )
     # 서명 주체 — 'employee'(대상 직원) | 'manager'(발행 매니저)
     party: Mapped[str] = mapped_column(String(20), nullable=False)
-    # 실제 서명한 본인 — employee=subject_user_id, manager=issued_by_id (service 강제, 대리 금지)
+    # 서명 명의 — employee=subject_user_id, manager=issued_by_id (party 본인, service 강제)
     signer_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # 캡처 계정 — 실제로 이 서명을 받은 로그인 계정/기기(감사). 온-디바이스(콘솔)에서
+    # party 본인이 남의 세션 기기로 서명할 때 누구 계정에서 받았는지 기록. 셀프사인이면
+    # signer_user_id 와 동일. SET NULL.
+    captured_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     # 서명 일시 — Signed timestamp (UTC)
