@@ -878,34 +878,38 @@ async def test_employee_sign_creates_employee_signature(
 
 @pytest.mark.asyncio
 async def test_manager_sign_by_issuer(
-    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+    async_client, warning_perms, warning_sign_perm, assign_stores,
+    cleanup_warnings, test_users, test_store_id
 ):
-    """발행 매니저(issuer) 본인 → manager 서명 생성 성공."""
+    """발행 매니저(issuer) 본인 → manager 서명 생성 성공 (warnings:sign 필요)."""
     subject_id: UUID = test_users["teststaff"]["id"]
     wid = await _create_warning_for_staff(
         async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
     )
     gm = await _login("testgm")  # issued_by = testgm
     resp = await async_client.post(
-        f"{BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(gm)
+        f"{BASE}/{wid}/sign", json={**_sign_body(), "party": "manager"}, headers=_hdr(gm)
     )
     assert resp.status_code == 200, resp.text
     sigs = resp.json()["signatures"]
     assert sigs["manager"] is not None
     assert sigs["manager"]["signer_user_id"] == str(test_users["testgm"]["id"])
-    assert sigs["manager"]["signer_name"] == "Test GM"
+    assert sigs["manager"]["signer_name"] == test_users["testgm"]["full_name"]
 
 
 @pytest.mark.asyncio
-async def test_different_gm_cannot_manager_sign(
-    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
+async def test_different_gm_can_manager_sign_on_device(
+    async_client, warning_perms, warning_sign_perm, assign_stores,
+    cleanup_warnings, test_users, test_store_id
 ):
-    """발행자가 아닌 다른 매니저(여기선 owner override 로 sv 가 발행자) → 발행자 아닌 GM 은 403.
+    """정책 변경(온-디바이스): 발행자 아닌 GM 도 warnings:sign + store 접근이면 서명 가능.
 
-    issued_by = testsv 인 경고를 testgm 이 manager-sign 시도 → 403 (대리 금지).
+    issued_by = testsv 인 경고를 testgm 이 manager-sign → 200. 명의는 발행자(sv) 유지,
+    captured_by 에 실제 조작 계정(testgm) 기록. (구 '대리 금지' 정책 대체.)
     """
     subject_id: UUID = test_users["teststaff"]["id"]
     sv_id: UUID = test_users["testsv"]["id"]
+    gm_id: UUID = test_users["testgm"]["id"]
     # super_owner 가 발행자를 testsv 로 지정해 발행 (방향: sv > staff OK).
     owner = await _login("testadmin")
     payload = _payload(subject_id, test_store_id)
@@ -914,32 +918,18 @@ async def test_different_gm_cannot_manager_sign(
     assert created.status_code == 201, created.text
     wid = created.json()["id"]
 
-    # 발행자가 아닌 testgm 이 manager-sign → 403.
+    # 발행자가 아닌 testgm 이 (warnings:sign + test_store 관리) manager-sign → 200.
     gm = await _login("testgm")
     resp = await async_client.post(
-        f"{BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(gm)
+        f"{BASE}/{wid}/sign", json={**_sign_body(), "party": "manager"}, headers=_hdr(gm)
     )
-    assert resp.status_code == 403, resp.text
-
-
-@pytest.mark.asyncio
-async def test_owner_not_issuer_cannot_manager_sign(
-    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id
-):
-    """발행자가 아닌 Owner/super-owner 도 manager-sign 불가 → 403 (대리 금지 핵심).
-
-    issued_by = testgm 인 경고를 testadmin(super_owner)이 서명 시도 → 403.
-    Owner 는 발행자를 바꿀 수는 있어도 남의 이름으로 서명할 수 없다.
-    """
-    subject_id: UUID = test_users["teststaff"]["id"]
-    wid = await _create_warning_for_staff(
-        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
-    )
-    owner = await _login("testadmin")  # super_owner, issued_by 아님
-    resp = await async_client.post(
-        f"{BASE}/{wid}/sign", json=_sign_body(), headers=_hdr(owner)
-    )
-    assert resp.status_code == 403, resp.text
+    assert resp.status_code == 200, resp.text
+    mgr = resp.json()["signatures"]["manager"]
+    assert mgr["signer_user_id"] == str(sv_id)            # 명의는 발행자(sv)
+    assert mgr["signer_name"] == test_users["testsv"]["full_name"]
+    assert mgr["captured_by_name"] == test_users["testgm"]["full_name"]  # 캡처=조작 GM
+    row = await _sig_row(wid, "manager")
+    assert row.signer_user_id == sv_id and row.captured_by_user_id == gm_id
 
 
 @pytest.mark.asyncio
@@ -1218,3 +1208,286 @@ async def test_ordinal_snapshot_per_subject_independent(
     _, b1 = await _create_get_ordinal(async_client, token, sv, test_store_id)
     assert (a1, a2) == (1, 2)
     assert b1 == 1  # 다른 직원은 독립적으로 1 부터
+
+
+# ===================================================================
+# 11. Console on-device sign (warnings:sign) — 대리 캡처 + captured_by + 게이트
+# ===================================================================
+
+WARNING_SIGN_CODE = "warnings:sign"
+
+
+@pytest_asyncio.fixture
+async def warning_sign_perm(seed_roles: dict[str, UUID]) -> None:
+    """warnings:sign 을 GM role 에 idempotent 부여 (콘솔 온-디바이스 사인 게이트).
+
+    warnings:read 와 별개 권한 — read 만 있는 사용자는 사인 불가여야 한다.
+    """
+    async with async_session() as db:
+        p = (
+            await db.execute(select(Permission).where(Permission.code == WARNING_SIGN_CODE))
+        ).scalar_one_or_none()
+        if p is None:
+            p = Permission(code=WARNING_SIGN_CODE, resource="warnings", action="sign")
+            db.add(p)
+            await db.flush()
+        role_id = seed_roles["general_manager"]
+        exists = (
+            await db.execute(
+                select(RolePermission).where(
+                    RolePermission.role_id == role_id,
+                    RolePermission.permission_id == p.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if exists is None:
+            db.add(RolePermission(role_id=role_id, permission_id=p.id))
+        await db.commit()
+
+
+async def _sig_row(wid: str, party: str) -> WarningSignature | None:
+    """warning_signatures 행 직접 조회 (signer/captured 검증용)."""
+    async with async_session() as db:
+        return (
+            await db.execute(
+                select(WarningSignature).where(
+                    WarningSignature.warning_id == UUID(wid),
+                    WarningSignature.party == party,
+                )
+            )
+        ).scalar_one_or_none()
+
+
+def test_default_role_permissions_warnings_sign_gm_plus_only():
+    """warnings:sign 은 owner/gm 기본 부여, sv/staff 미부여 (GM+ contract)."""
+    assert WARNING_SIGN_CODE in DEFAULT_ROLE_PERMISSIONS["owner"]
+    assert WARNING_SIGN_CODE in DEFAULT_ROLE_PERMISSIONS["gm"]
+    assert WARNING_SIGN_CODE not in DEFAULT_ROLE_PERMISSIONS["sv"]
+    assert WARNING_SIGN_CODE not in DEFAULT_ROLE_PERMISSIONS["staff"]
+
+
+@pytest.mark.asyncio
+async def test_console_sign_manager_by_issuer(
+    async_client, warning_perms, warning_sign_perm, assign_stores,
+    cleanup_warnings, test_users, test_store_id,
+):
+    """issuer(GM)가 콘솔에서 자기 발행 경고에 manager 서명 — 명의/캡처 모두 본인."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    gm_id: UUID = test_users["testgm"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    gm = await _login("testgm")
+    resp = await async_client.post(
+        f"{BASE}/{wid}/sign", json={**_sign_body(), "party": "manager"}, headers=_hdr(gm)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["manager_signed"] is True
+    mgr = body["signatures"]["manager"]
+    assert mgr is not None and mgr["signer_name"] == test_users["testgm"]["full_name"]
+    # 셀프사인 → captured_by 는 응답에서 None(표시 불필요).
+    assert mgr["captured_by_name"] is None
+    row = await _sig_row(wid, "manager")
+    assert row is not None
+    assert row.signer_user_id == gm_id and row.captured_by_user_id == gm_id
+
+
+@pytest.mark.asyncio
+async def test_console_sign_employee_on_device_by_gm(
+    async_client, warning_perms, warning_sign_perm, assign_stores,
+    cleanup_warnings, test_users, test_store_id,
+):
+    """GM이 한 기기에서 직원(subject) 서명을 받음 — 명의=직원, 캡처=GM."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    gm_id: UUID = test_users["testgm"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    gm = await _login("testgm")
+    resp = await async_client.post(
+        f"{BASE}/{wid}/sign", json={**_sign_body(), "party": "employee"}, headers=_hdr(gm)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["employee_signed"] is True
+    emp = body["signatures"]["employee"]
+    assert emp is not None and emp["signer_name"] == test_users["teststaff"]["full_name"]
+    # 명의(직원) ≠ 캡처(GM) → captured_by 표시.
+    assert emp["captured_by_name"] == test_users["testgm"]["full_name"]
+    row = await _sig_row(wid, "employee")
+    assert row is not None
+    assert row.signer_user_id == subject_id and row.captured_by_user_id == gm_id
+
+
+@pytest.mark.asyncio
+async def test_console_sign_manager_on_device_by_owner(
+    async_client, warning_perms, warning_sign_perm, assign_stores,
+    cleanup_warnings, test_users, test_store_id,
+):
+    """Owner가 GM 발행 경고의 manager 서명을 자기 기기에서 받음 — 명의=발행GM, 캡처=Owner."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    gm_id: UUID = test_users["testgm"]["id"]
+    admin_id: UUID = test_users["testadmin"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    admin = await _login("testadmin")
+    resp = await async_client.post(
+        f"{BASE}/{wid}/sign", json={**_sign_body(), "party": "manager"}, headers=_hdr(admin)
+    )
+    assert resp.status_code == 200, resp.text
+    mgr = resp.json()["signatures"]["manager"]
+    assert mgr["signer_name"] == test_users["testgm"]["full_name"]      # 명의는 발행 매니저
+    assert mgr["captured_by_name"] == test_users["testadmin"]["full_name"]  # 캡처는 owner 계정
+    row = await _sig_row(wid, "manager")
+    assert row.signer_user_id == gm_id and row.captured_by_user_id == admin_id
+
+
+@pytest.mark.asyncio
+async def test_console_sign_requires_sign_permission(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id,
+):
+    """warnings:sign 없는 사용자(SV)는 콘솔 사인 403 (read 와 별개 권한)."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    sv = await _login("testsv")
+    resp = await async_client.post(
+        f"{BASE}/{wid}/sign", json={**_sign_body(), "party": "manager"}, headers=_hdr(sv)
+    )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_console_sign_cross_store_404(
+    async_client, warning_perms, warning_sign_perm, cleanup_warnings,
+    test_users, test_store_id, second_store_id,
+):
+    """warnings:sign 있어도 접근 불가 매장 경고는 404 (issuer/owner 아닌 GM, IDOR 가드)."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    gm_id: UUID = test_users["testgm"]["id"]
+    # teststaff 를 second_store 에 배정(subject-store 검증 통과용), testgm 은 test_store 만 관리.
+    async with async_session() as db:
+        db.add(UserStore(user_id=subject_id, store_id=second_store_id, is_manager=False))
+        db.add(UserStore(user_id=gm_id, store_id=test_store_id, is_manager=True))
+        await db.commit()
+    try:
+        admin = await _login("testadmin")
+        created = (
+            await async_client.post(
+                f"{BASE}/", json=_payload(subject_id, second_store_id), headers=_hdr(admin)
+            )
+        ).json()
+        wid = created["id"]
+        gm = await _login("testgm")
+        resp = await async_client.post(
+            f"{BASE}/{wid}/sign", json={**_sign_body(), "party": "manager"}, headers=_hdr(gm)
+        )
+        assert resp.status_code == 404, resp.text
+    finally:
+        async with async_session() as db:
+            await db.execute(
+                delete(UserStore).where(
+                    UserStore.user_id == subject_id, UserStore.store_id == second_store_id
+                )
+            )
+            await db.execute(
+                delete(UserStore).where(
+                    UserStore.user_id == gm_id, UserStore.store_id == test_store_id
+                )
+            )
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_console_sign_save_as_default_only_self(
+    async_client, warning_perms, warning_sign_perm, assign_stores,
+    cleanup_warnings, test_users, test_store_id,
+):
+    """save_as_default — 본인 셀프사인만 저장. 타인 캡처(on-device)는 무시."""
+    subject_id: UUID = test_users["teststaff"]["id"]
+    gm_id: UUID = test_users["testgm"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    await _reset_saved_signature("testgm")
+    await _reset_saved_signature("teststaff")
+    gm = await _login("testgm")
+
+    # (1) GM이 직원 서명을 받으며 save_as_default=True → 타인 서명이므로 아무도 저장 안 됨.
+    resp = await async_client.post(
+        f"{BASE}/{wid}/sign",
+        json={**_sign_body(save_as_default=True), "party": "employee"},
+        headers=_hdr(gm),
+    )
+    assert resp.status_code == 200, resp.text
+    async with async_session() as db:
+        gm_u = (await db.execute(select(User).where(User.id == gm_id))).scalar_one()
+        staff_u = (await db.execute(select(User).where(User.id == subject_id))).scalar_one()
+        assert gm_u.signature_strokes is None, "조작자 저장 서명 안 바뀜"
+        assert staff_u.signature_strokes is None, "명의자 저장 서명도 안 바뀜(남이 그림)"
+
+    # (2) GM이 자기 manager 서명을 save_as_default=True → 본인 셀프사인이므로 저장됨.
+    resp2 = await async_client.post(
+        f"{BASE}/{wid}/sign",
+        json={**_sign_body(save_as_default=True), "party": "manager"},
+        headers=_hdr(gm),
+    )
+    assert resp2.status_code == 200, resp2.text
+    async with async_session() as db:
+        gm_u = (await db.execute(select(User).where(User.id == gm_id))).scalar_one()
+        assert gm_u.signature_strokes is not None, "본인 셀프사인 → 저장됨"
+    await _reset_saved_signature("testgm")
+
+
+@pytest.mark.asyncio
+async def test_sign_service_strict_rejects_non_self(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id,
+):
+    """allow_on_behalf=False (앱 셀프사인 경로) — 본인 아니면 ForbiddenError (대리 금지 유지)."""
+    from app.services.warning_signature_service import PARTY_EMPLOYEE, warning_signature_service
+    from app.utils.exceptions import ForbiddenError
+
+    subject_id: UUID = test_users["teststaff"]["id"]
+    gm_id: UUID = test_users["testgm"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    async with async_session() as db:
+        warning = (await db.execute(select(Warning).where(Warning.id == UUID(wid)))).scalar_one()
+        gm = (await db.execute(select(User).where(User.id == gm_id))).scalar_one()
+        with pytest.raises(ForbiddenError):
+            await warning_signature_service.sign(
+                db, warning=warning, party=PARTY_EMPLOYEE, signer=gm,
+                strokes_payload={"strokes": _strokes(), "aspect": 2.0},
+                allow_on_behalf=False,
+            )
+        await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_sign_service_required_none_rejected_even_on_behalf(
+    async_client, warning_perms, assign_stores, cleanup_warnings, test_users, test_store_id,
+):
+    """발행자 미지정(issued_by None) manager 서명은 on_behalf 라도 거부 (명의자 없음)."""
+    from app.services.warning_signature_service import PARTY_MANAGER, warning_signature_service
+    from app.utils.exceptions import ForbiddenError
+
+    subject_id: UUID = test_users["teststaff"]["id"]
+    admin_id: UUID = test_users["testadmin"]["id"]
+    wid = await _create_warning_for_staff(
+        async_client, issuer="testgm", subject_id=subject_id, store_id=test_store_id
+    )
+    async with async_session() as db:
+        warning = (await db.execute(select(Warning).where(Warning.id == UUID(wid)))).scalar_one()
+        warning.issued_by_id = None  # 발행자 제거 (in-memory, 커밋 안 함)
+        admin = (await db.execute(select(User).where(User.id == admin_id))).scalar_one()
+        with pytest.raises(ForbiddenError):
+            await warning_signature_service.sign(
+                db, warning=warning, party=PARTY_MANAGER, signer=admin,
+                strokes_payload={"strokes": _strokes(), "aspect": 2.0},
+                allow_on_behalf=True,
+            )
+        await db.rollback()

@@ -3,12 +3,14 @@
 Warning Signature Service — party 별 서명 적용(upsert) + 조회 + 저장 서명 갱신.
 
 핵심 규칙 (security-critical):
-    - 신원 바인딩(identity binding): 서명은 절대 대리 불가.
-        · employee 서명: signer == warning.subject_user_id 만. 아니면 403.
-        · manager 서명: signer == warning.issued_by_id 만 (지정된 발행 매니저).
-          다른 GM 도, Owner/super-owner 도 본인이 발행자가 아니면 403.
-          (Owner 는 발행자를 다른 매니저로 바꿀(reassign) 수는 있으나,
-           남의 이름으로 서명할 수는 없다.)
+    - 신원 바인딩(identity binding):
+        · 앱 셀프사인(allow_on_behalf=False): 서명은 본인만.
+          employee → signer == subject_user_id, manager → signer == issued_by_id.
+          아니면 403 (Owner/super-owner 라도 예외 없음).
+        · 콘솔 온-디바이스 캡처(allow_on_behalf=True, warnings:sign 권한): 한 기기에서
+          party 본인이 그 자리에 직접 서명. 일치 검사는 면제하되 서명 명의
+          (signer_user_id)는 항상 party 본인으로 박제하고, 실제 조작 계정은
+          captured_by_user_id 에 따로 남긴다(감사). required signer 미지정은 거부.
     - 스냅샷: signature_strokes 는 적용 순간 박제. users.signature_strokes 를
       나중에 바꿔도 과거 warning_signatures 행은 불변 (징계 기록 보존).
     - 상태: status=='active' + 비삭제 경고만 서명 가능. 아니면 400.
@@ -54,17 +56,24 @@ class WarningSignatureService:
         strokes_payload: dict,
         method: str = "drawn",
         save_as_default: bool = False,
+        allow_on_behalf: bool = False,
     ) -> WarningSignature:
         """party 서명 적용(upsert). 신원/상태 검증 후 스냅샷 박제.
 
-        Identity gate (대리 금지):
-            signer.id 가 party 의 required signer (employee=subject, manager=issuer)
-            와 정확히 일치해야 한다. 아니면 403 (Owner/super-owner 라도 예외 없음).
+        Identity gate:
+            기본(allow_on_behalf=False, 앱 셀프사인)은 signer.id 가 party 의 required
+            signer (employee=subject, manager=issuer)와 정확히 일치해야 한다 — 대리 금지.
+            allow_on_behalf=True (콘솔 온-디바이스 캡처)면 일치 검사를 건너뛴다: party
+            본인이 다른 사람의 로그인 세션(기기)으로 그 자리에서 서명하는 경우. 이때도
+            서명 명의(signer_user_id)는 항상 party 본인(required_id)으로 박제하고,
+            실제 조작 계정은 captured_by_user_id 에 따로 기록한다. required_id 미지정
+            (None — 발행자/대상 없음)은 양쪽 모두 거부.
 
         State gate:
             status=='active' + deleted_at IS NULL 만. 아니면 400.
 
-        save_as_default=True 면 signer.signature_strokes 도 같은 스냅샷으로 갱신.
+        save_as_default 는 signer 가 곧 party 본인일 때만 적용 (남의 서명을 조작 계정의
+        기본 서명으로 저장하지 않는다). 콘솔 온-디바이스 캡처(타인)는 draw-only.
         """
         if party not in (PARTY_EMPLOYEE, PARTY_MANAGER):
             raise BadRequestError("Invalid signature party")
@@ -73,13 +82,22 @@ class WarningSignatureService:
         if warning.deleted_at is not None or warning.status != "active":
             raise BadRequestError("Only active warnings can be signed")
 
-        # 신원 게이트 — 대리 서명 금지 (Owner 포함). 발행자 미지정(None)도 거부.
+        # 신원 게이트. required_id 미지정(발행자/대상 없음)은 항상 거부.
         required_id = self._required_signer_id(warning, party)
-        if required_id is None or signer.id != required_id:
+        if required_id is None:
+            raise ForbiddenError(
+                "This warning has no designated "
+                f"{party} to sign for"
+            )
+        # 앱 셀프사인 경로는 본인 강제(대리 금지). 콘솔 온-디바이스는 게이트 면제.
+        if not allow_on_behalf and signer.id != required_id:
             raise ForbiddenError(
                 "You are not authorized to sign this warning as "
                 f"the {party}"
             )
+
+        # 서명 명의는 party 본인, 캡처 계정은 실제 조작자. 셀프사인이면 둘이 동일.
+        is_self = signer.id == required_id
 
         # upsert — 같은 (warning, party) 행이 있으면 갱신, 없으면 생성.
         from datetime import datetime, timezone
@@ -99,21 +117,23 @@ class WarningSignatureService:
                 sig = WarningSignature(
                     warning_id=warning.id,
                     party=party,
-                    signer_user_id=signer.id,
+                    signer_user_id=required_id,
+                    captured_by_user_id=signer.id,
                     signed_at=now,
                     method=method,
                     signature_strokes=strokes_payload,
                 )
                 db.add(sig)
             else:
-                existing.signer_user_id = signer.id
+                existing.signer_user_id = required_id
+                existing.captured_by_user_id = signer.id
                 existing.signed_at = now
                 existing.method = method
                 existing.signature_strokes = strokes_payload
                 sig = existing
 
-            # 저장 서명 갱신 (옵션). 스냅샷과 독립적인 별개 기록.
-            if save_as_default:
+            # 저장 서명 갱신 (옵션) — 본인 셀프사인일 때만. 스냅샷과 독립적인 별개 기록.
+            if save_as_default and is_self:
                 signer.signature_strokes = strokes_payload
 
             await db.flush()
@@ -146,9 +166,18 @@ class WarningSignatureService:
                 signer = await db.get(User, sig.signer_user_id)
                 if signer:
                     signer_name = signer.full_name
+            # 캡처 계정 — 명의(signer)와 다를 때만 의미 있음(온-디바이스). 셀프사인이면 동일.
+            captured_by_name: str | None = None
+            captured_by_id = sig.captured_by_user_id
+            if captured_by_id and captured_by_id != sig.signer_user_id:
+                captured_by = await db.get(User, captured_by_id)
+                if captured_by:
+                    captured_by_name = captured_by.full_name
             out[sig.party] = {
                 "signer_user_id": str(sig.signer_user_id) if sig.signer_user_id else None,
                 "signer_name": signer_name,
+                "captured_by_user_id": str(captured_by_id) if captured_by_id else None,
+                "captured_by_name": captured_by_name,
                 "signed_at": sig.signed_at,
                 "method": sig.method,
                 "signature_strokes": sig.signature_strokes,
