@@ -10,6 +10,7 @@ Permission Matrix (warnings:* 는 GM 이상에 기본 부여):
     - 발행/picker: warnings:create (방향 검증 — 발행자보다 낮은 권한만)
     - 수정/해결: warnings:update (소유권 — Owner 전체 / GM 본인)
     - 삭제(소프트): warnings:delete (소유권 동일)
+    - 온-디바이스 사인(employee/manager): warnings:sign (GM+/Owner 기본, store-scope 가드)
 
 Store scoping:
     - POST/PUT: check_store_access (불가 → 403)
@@ -54,6 +55,7 @@ from app.services.storage_service import storage_service
 from app.services.warning_pdf_service import warning_pdf_service
 from app.services.warning_service import warning_service
 from app.services.warning_signature_service import (
+    PARTY_EMPLOYEE,
     PARTY_MANAGER,
     warning_signature_service,
 )
@@ -211,32 +213,46 @@ async def get_warning(
 
 
 @router.post("/{warning_id}/sign", response_model=WarningResponse)
-async def sign_warning_as_manager(
+async def sign_warning_on_device(
     warning_id: UUID,
     data: WarningSignRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("warnings:read"))],
+    current_user: Annotated[User, Depends(require_permission("warnings:sign"))],
 ) -> dict:
-    """경고에 manager 서명 적용 (party='manager').
+    """경고에 온-디바이스 서명 적용 (party='employee'|'manager', 기본 manager).
 
-    Identity gate (대리 금지 — 권한/priority 체크 아님):
-        service 가 signer == warning.issued_by_id 를 강제한다. 따라서 발행자가
-        아닌 GM 도, 발행자가 아닌 Owner/super-owner 도 403. (Owner 는 발행자를
-        reassign 할 수 있을 뿐, 남의 이름으로 서명할 수는 없다.)
+    온-디바이스 캡처: 한 기기에서 party 본인이 그 자리에 직접 서명한다(대표가 자기
+    핸드폰을 건네 직원/매니저가 서명하는 흐름). warnings:sign 권한(GM+/Owner 기본)으로
+    게이팅하고, 서명 명의는 항상 party 본인(employee=subject, manager=issuer)으로 박제,
+    실제 조작 계정은 captured_by 로 기록(service). required signer 미지정이면 403.
 
+    Store scoping (IDOR): 경고의 store 가 접근 불가 + Owner 아님 + issuer 본인 아니면
+    404 (cross-store 누설/서명 방지 — get 상세와 동일 가드).
     active 경고만 서명 가능. 부재/org 밖/soft-deleted → 404.
     """
     warning = await warning_service.get_warning(
         db, warning_id=warning_id, organization_id=current_user.organization_id
     )
+
+    if not is_owner(current_user) and warning.issued_by_id != current_user.id:
+        accessible = await get_accessible_store_ids(db, current_user)
+        if (
+            accessible is not None
+            and warning.store_id is not None
+            and warning.store_id not in accessible
+        ):
+            raise NotFoundError("Warning not found")
+
+    party = PARTY_EMPLOYEE if data.party == PARTY_EMPLOYEE else PARTY_MANAGER
     await warning_signature_service.sign(
         db,
         warning=warning,
-        party=PARTY_MANAGER,
+        party=party,
         signer=current_user,
         strokes_payload=data.to_strokes_payload(),
         method=data.method,
         save_as_default=data.save_as_default,
+        allow_on_behalf=True,
     )
     fresh = await warning_service.get_warning(
         db, warning_id=warning_id, organization_id=current_user.organization_id

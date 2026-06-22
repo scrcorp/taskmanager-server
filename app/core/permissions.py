@@ -169,6 +169,10 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     # wet 서명 PDF 업로드 — 발행자 본인 건은 warnings:create 로 가능, '타인 발행 건'은
     # 이 권한(또는 오너)이 있어야 한다(서비스에서 게이트). owner/gm 기본 부여.
     ("warnings:upload", "warnings", "upload", "Upload signed (wet) warning PDFs for others", False),
+    # 온-디바이스 사인 — 한 기기에서 employee/manager 서명을 그 자리에서 받기(콘솔).
+    # signer_user_id 는 party 본인(subject/issuer) 유지, captured_by 에 조작 계정 기록.
+    # 기본 GM+/Owner (DEFAULT_ROLE_PERMISSIONS 의 owner/gm 세트에 자동 포함, SV/Staff 제외).
+    ("warnings:sign", "warnings", "sign", "Capture warning signatures on a shared device", False),
 
     # ── Daily Reports (legacy, multi-type reports로 이관 중) ──
     ("daily_reports:read",   "daily_reports", "read",   "View daily reports", False),
