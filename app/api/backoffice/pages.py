@@ -1,6 +1,6 @@
-"""Control plane 서버렌더 HTML — 인라인 문자열 (setup.py 패턴 따름, Jinja 미사용).
+"""Backoffice 서버렌더 HTML — 인라인 문자열 (setup.py 패턴 따름, Jinja 미사용).
 
-Server-rendered HTML for the control plane. Dark theme matching the existing
+Server-rendered HTML for the backoffice. Dark theme matching the existing
 setup page. All responses carry X-Robots-Tag: noindex so the secret surface is
 never indexed even if a URL leaks.
 """
@@ -69,7 +69,7 @@ def login_html(base: str, message: str = "", status_code: int = 200) -> HTMLResp
     msg = f"<div class='msg err'>{_html.escape(message)}</div>" if message else ""
     body = (
         "<div class='center'><div class='card'>"
-        "<div class='tag'>HTM Control Plane</div>"
+        "<div class='tag'>HTM Backoffice</div>"
         "<h2>Operator Login</h2>"
         f"{msg}"
         f"<form method='post' action='{base}/login'>"
@@ -78,7 +78,7 @@ def login_html(base: str, message: str = "", status_code: int = 200) -> HTMLResp
         "<button type='submit'>Sign in</button>"
         "</form></div></div>"
     )
-    return render("HTM Control Plane", body, status_code)
+    return render("HTM Backoffice", body, status_code)
 
 
 # 좌측 nav 메뉴 — (라벨, 경로 또는 None=비활성/곧추가)
@@ -98,7 +98,7 @@ def _nav(base: str, active: str) -> str:
         else:
             items.append(f"<a href='{base}{path}'>{_html.escape(label)}</a>")
     return (
-        "<div class='nav'><div class='brand'>⬡ Control Plane</div>"
+        "<div class='nav'><div class='brand'>⬡ Backoffice</div>"
         + "".join(items)
         + "</div>"
     )
@@ -123,4 +123,4 @@ def dashboard_html(base: str, admin: str) -> HTMLResponse:
         "</div></div>"
         "</div></div>"
     )
-    return render("HTM Control Plane — Dashboard", body)
+    return render("HTM Backoffice — Dashboard", body)

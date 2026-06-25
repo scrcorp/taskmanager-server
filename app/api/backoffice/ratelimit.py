@@ -1,6 +1,6 @@
 """로그인 무차별 대입 방어 — 메모리 기반 실패 카운터.
 
-In-memory failed-login limiter for the control plane login.
+In-memory failed-login limiter for the backoffice login.
 Single-process, single-operator scale — no Redis needed. Resets on success.
 """
 

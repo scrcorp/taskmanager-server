@@ -1,21 +1,21 @@
-"""Control plane (운영자 평면) P1 테스트 — 인증/세션/보안.
+"""Backoffice (운영자 평면) P1 테스트 — 인증/세션/보안.
 
 org 권한과 독립된 평면이라 DB seed가 필요 없다. async_client(ASGITransport)로
 실제 네트워크 없이 앱을 직접 호출한다. 활성화/계정은 worktree .env 값 사용
-(CONTROL_PLANE_PATH=_cp_local_dev, user=ops, pw=control1234).
+(BACKOFFICE_PATH=_cp_local_dev, user=ops, pw=control1234).
 """
 
 import pytest
 from httpx import AsyncClient
 
-from app.api.control import ratelimit
-from app.api.control.deps import COOKIE_NAME
+from app.api.backoffice import ratelimit
+from app.api.backoffice.deps import COOKIE_NAME
 from app.config import settings
 
 pytestmark = pytest.mark.asyncio
 
-BASE = "/" + settings.CONTROL_PLANE_PATH.strip("/")
-USER = settings.CONTROL_ADMIN_USERNAME
+BASE = "/" + settings.BACKOFFICE_PATH.strip("/")
+USER = settings.BACKOFFICE_ADMIN_USERNAME
 PW = "control1234"  # worktree .env 해시의 평문
 
 
@@ -27,8 +27,8 @@ async def _login(client: AsyncClient, username: str = USER, password: str = PW):
 
 
 async def test_enabled_in_test_env() -> None:
-    """전제 — 테스트 .env에서 control plane이 활성이어야 한다."""
-    assert settings.control_plane_enabled is True
+    """전제 — 테스트 .env에서 backoffice이 활성이어야 한다."""
+    assert settings.backoffice_enabled is True
 
 
 async def test_secret_path_404(async_client: AsyncClient) -> None:

@@ -61,14 +61,14 @@ app.include_router(console_router, prefix="/api/v1/console")
 app.include_router(app_router, prefix="/api/v1/app")
 app.include_router(setup_page_router, tags=["Setup Page"])
 
-# Control Plane — 플랫폼 운영자 전용 평면 (org 권한 밖). 비밀경로 슬러그로 마운트.
-# 비밀경로+운영자 해시가 설정된 경우에만 활성 (settings.control_plane_enabled).
-if settings.control_plane_enabled:
-    from app.api.control import control_router  # noqa: E402
+# Backoffice — 플랫폼 운영자 전용 평면 (org 권한 밖). 비밀경로 슬러그로 마운트.
+# 비밀경로+운영자 해시가 설정된 경우에만 활성 (settings.backoffice_enabled).
+if settings.backoffice_enabled:
+    from app.api.backoffice import backoffice_router  # noqa: E402
 
     app.include_router(
-        control_router,
-        prefix="/" + settings.CONTROL_PLANE_PATH.strip("/"),
+        backoffice_router,
+        prefix="/" + settings.BACKOFFICE_PATH.strip("/"),
         include_in_schema=False,
     )
 

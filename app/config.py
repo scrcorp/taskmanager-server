@@ -118,33 +118,33 @@ class Settings(BaseSettings):
     ADMIN_BASE_URL: str = "https://console.hermesops.site"
 
     # ------------------------------------------------------------------
-    # Control Plane — 플랫폼 운영자 전용 평면 (org 권한 시스템 밖)
-    # Control Plane — vendor-internal operator surface, OUTSIDE org RBAC.
+    # Backoffice — 플랫폼 운영자 전용 평면 (org 권한 시스템 밖)
+    # Backoffice — vendor-internal operator surface, OUTSIDE org RBAC.
     # SoT: docs/99_inbox/2026-06-24 HTM control-plane ... 설계.md
     # ------------------------------------------------------------------
-    # 외부 URL 비밀 슬러그 — 비어있으면 control plane 자체를 마운트하지 않음(비활성).
-    # 내부 코드 이름은 'control'이지만 공개 경로는 이 비밀값. prod에선 추측 불가한 랜덤값.
-    CONTROL_PLANE_PATH: str = ""
+    # 외부 URL 비밀 슬러그 — 비어있으면 backoffice 자체를 마운트하지 않음(비활성).
+    # 내부 코드 이름은 'backoffice'이지만 공개 경로는 이 비밀값. prod에선 추측 불가한 랜덤값.
+    BACKOFFICE_PATH: str = ""
     # 운영자 단일 계정 — username + bcrypt 해시. 해시가 비어있으면 비활성.
-    CONTROL_ADMIN_USERNAME: str = ""
-    CONTROL_ADMIN_PASSWORD_HASH: str = ""  # get_password_hash()로 생성한 bcrypt 해시
-    # 세션 쿠키 서명 시크릿 — HMAC. 비어있으면 JWT_SECRET_KEY 파생값 사용(control_session_secret).
-    CONTROL_SESSION_SECRET: str = ""
+    BACKOFFICE_ADMIN_USERNAME: str = ""
+    BACKOFFICE_ADMIN_PASSWORD_HASH: str = ""  # get_password_hash()로 생성한 bcrypt 해시
+    # 세션 쿠키 서명 시크릿 — HMAC. 비어있으면 JWT_SECRET_KEY 파생값 사용(backoffice_session_secret).
+    BACKOFFICE_SESSION_SECRET: str = ""
     # 세션 유효 시간(분)
-    CONTROL_SESSION_MAX_AGE_MINUTES: int = 60
+    BACKOFFICE_SESSION_MAX_AGE_MINUTES: int = 60
 
     @property
-    def control_plane_enabled(self) -> bool:
-        """control plane 활성 조건 — 비밀경로 + 운영자 해시 둘 다 설정돼야 마운트."""
-        return bool(self.CONTROL_PLANE_PATH and self.CONTROL_ADMIN_PASSWORD_HASH)
+    def backoffice_enabled(self) -> bool:
+        """backoffice 활성 조건 — 비밀경로 + 운영자 해시 둘 다 설정돼야 마운트."""
+        return bool(self.BACKOFFICE_PATH and self.BACKOFFICE_ADMIN_PASSWORD_HASH)
 
     @property
-    def control_session_secret(self) -> str:
+    def backoffice_session_secret(self) -> str:
         """세션 서명 키 — 전용값 없으면 JWT 시크릿에서 파생(별도 네임스페이스)."""
-        return self.CONTROL_SESSION_SECRET or (self.JWT_SECRET_KEY + ":control-plane")
+        return self.BACKOFFICE_SESSION_SECRET or (self.JWT_SECRET_KEY + ":backoffice")
 
     @property
-    def control_cookie_secure(self) -> bool:
+    def backoffice_cookie_secure(self) -> bool:
         """Secure 쿠키 여부 — local(http)에선 False(쿠키 전송돼야 로그인 됨), 그 외 True."""
         return self.APP_ENV != "local"
 
