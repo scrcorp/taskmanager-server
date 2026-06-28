@@ -9,39 +9,52 @@ import html as _html
 
 from fastapi.responses import HTMLResponse
 
-# 공통 스타일 — setup.py 다크테마 재사용 + 셸 레이아웃 약간 확장
+# 공통 스타일 — Notion 라이트 테마 (warm paper 캔버스 + 흰 카드 + 단일 블루 + hairline)
 _STYLE = """
+:root{
+  --canvas:#f6f5f4;--surface:#fff;--ink:#1a1a1a;--ink2:#31302e;--muted:#615d59;--faint:#a39e98;
+  --hairline:#e6e6e6;--primary:#0075de;--primary-active:#005bab;
+  --shadow1:0 .175px 1.04px rgba(0,0,0,.01),0 .8px 2.9px rgba(0,0,0,.02),0 2px 7.8px rgba(0,0,0,.027),0 4px 18px rgba(0,0,0,.04);
+}
 *{box-sizing:border-box}
-body{font-family:system-ui,-apple-system,sans-serif;background:#0f0f17;color:#e8e8ec;margin:0}
-a{color:#8b7df0;text-decoration:none}
+body{font-family:Inter,-apple-system,system-ui,"Segoe UI",Helvetica,Arial,sans-serif;background:var(--canvas);color:var(--ink);margin:0;-webkit-font-smoothing:antialiased}
+a{color:var(--primary);text-decoration:none}
+a:hover{text-decoration:underline}
 .center{display:flex;justify-content:center;align-items:center;min-height:100vh}
-.card{background:#1a1a2e;border:1px solid #2a2a40;border-radius:12px;padding:36px;width:360px}
-h1,h2{margin:0 0 20px}
-h2{text-align:center}
-label{display:block;font-size:13px;color:#9a9ab0;margin-bottom:4px}
-input{width:100%;padding:10px;border:1px solid #2a2a40;border-radius:6px;background:#0f0f17;color:#e8e8ec;font-size:14px;margin-bottom:16px}
-input:focus{outline:none;border-color:#6c5ce7}
-button{width:100%;padding:12px;border:none;border-radius:6px;background:#6c5ce7;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
-button:hover{background:#7c6df0}
-.msg{padding:10px;border-radius:6px;font-size:13px;margin-bottom:16px;text-align:center}
-.err{background:#ff6b6b22;color:#ff8787}
-.tag{font-size:11px;color:#6a6a80;letter-spacing:.08em;text-transform:uppercase;text-align:center;margin-bottom:8px}
+.card{background:var(--surface);border:1px solid var(--hairline);border-radius:12px;padding:36px;width:360px;box-shadow:var(--shadow1)}
+h1{font-size:40px;font-weight:700;letter-spacing:-1px;margin:0 0 20px}
+h2{font-size:26px;font-weight:700;letter-spacing:-.625px;margin:0 0 20px;text-align:center}
+h3{font-size:22px;font-weight:700;letter-spacing:-.25px}
+label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px;font-weight:500}
+input{width:100%;padding:10px;border:1px solid #ddd;border-radius:4px;background:var(--surface);color:var(--ink);font-size:15px;margin-bottom:16px;font-family:inherit}
+input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(0,117,222,.12)}
+button{font-family:inherit;border:none;border-radius:9999px;background:var(--primary);color:#fff;font-size:16px;font-weight:500;cursor:pointer;padding:11px 22px;transition:transform .08s ease,background .15s ease}
+button:hover{background:var(--primary-active)}
+button:active{transform:scale(.97)}
+.card button{width:100%}
+.msg{padding:10px;border-radius:8px;font-size:13px;margin-bottom:16px;text-align:center}
+.err{background:#fdeaea;color:#c0392b}
+.tag{font-size:12px;color:var(--faint);letter-spacing:.06em;text-transform:uppercase;text-align:center;margin-bottom:8px;font-weight:600}
 /* shell */
 .shell{display:flex;min-height:100vh}
-.nav{width:220px;background:#15151f;border-right:1px solid #2a2a40;padding:24px 16px;flex-shrink:0}
-.nav .brand{font-weight:700;font-size:15px;margin-bottom:24px}
-.nav a{display:block;padding:9px 12px;border-radius:6px;color:#c8c8d4;font-size:14px;margin-bottom:4px}
-.nav a:hover{background:#22223a}
-.nav a.muted{color:#5a5a70;cursor:default}
+.nav{width:240px;background:var(--surface);border-right:1px solid var(--hairline);padding:24px 16px;flex-shrink:0}
+.nav .brand{font-weight:700;font-size:15px;margin-bottom:24px;letter-spacing:-.2px}
+.nav a{display:block;padding:9px 12px;border-radius:8px;color:var(--ink2);font-size:15px;margin-bottom:4px}
+.nav a:hover{background:var(--canvas);text-decoration:none}
+.nav a.muted{color:var(--faint);cursor:default}
 .nav a.muted:hover{background:none}
-.main{flex:1;padding:32px 40px}
+.main{flex:1;padding:32px 40px;max-width:1320px}
 .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:28px}
-.topbar .who{font-size:13px;color:#9a9ab0}
+.topbar .who{font-size:13px;color:var(--muted)}
 .topbar form{display:inline}
-.topbar button{width:auto;padding:7px 14px;background:#2a2a40}
-.topbar button:hover{background:#3a3a55}
-.muted-box{background:#15151f;border:1px dashed #2a2a40;border-radius:10px;padding:24px;color:#7a7a90}
+.topbar button{background:var(--surface);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:7px 14px;font-size:15px;box-shadow:var(--shadow1)}
+.topbar button:hover{background:var(--canvas)}
+.muted-box{background:var(--surface);border:1px solid var(--hairline);border-radius:12px;padding:24px;color:var(--muted);box-shadow:var(--shadow1)}
+.muted-box b,.muted-box code{color:var(--ink2)}
 .section{margin-bottom:24px}
+table{font-size:14px}
+th{color:var(--muted);font-weight:600}
+td{color:var(--ink2)}
 """
 
 
@@ -96,7 +109,7 @@ def _nav(base: str, active: str) -> str:
         if path is None:
             items.append(f"<a class='muted'>{_html.escape(label)} <span style='font-size:10px'>soon</span></a>")
         else:
-            cls = " style='background:#22223a;color:#fff'" if path == active else ""
+            cls = " style='background:#eaf3fc;color:#0075de;font-weight:600'" if path == active else ""
             items.append(f"<a href='{base}{path}'{cls}>{_html.escape(label)}</a>")
     return (
         "<div class='nav'><div class='brand'>⬡ Backoffice</div>"

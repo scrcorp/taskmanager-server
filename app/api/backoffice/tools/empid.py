@@ -59,7 +59,7 @@ async def upload_form(request: Request) -> HTMLResponse:
         "<div class='section'>"
         f"<form method='post' action='{base}/tools/empid/preview' enctype='multipart/form-data'>"
         "<input type='file' name='file' accept='.xlsx,.csv' required "
-        "style='margin-bottom:16px;color:#e8e8ec'>"
+        "style='margin-bottom:16px;color:#1a1a1a'>"
         "<button type='submit' style='width:auto;padding:10px 20px'>Preview matches</button>"
         "</form></div>"
     )
@@ -71,17 +71,17 @@ async def upload_form(request: Request) -> HTMLResponse:
 # --------------------------------------------------------------------------- #
 def _summary(counts: dict) -> str:
     chips = [
-        ("auto", "Auto-assign", "#00b894"),
-        ("multiple", "Multiple #", "#fdcb6e"),
-        ("placeholder", "Placeholder", "#636e72"),
-        ("assigned", "Already set", "#636e72"),
-        ("deferred", "Deferred", "#636e72"),
-        ("excluded_rows", "Excluded(PURADAK)", "#636e72"),
-        ("total_rows", "Rows", "#8b7df0"),
+        ("auto", "Auto-assign", "#1aae39"),
+        ("multiple", "Multiple #", "#dd5b00"),
+        ("placeholder", "Placeholder", "#615d59"),
+        ("assigned", "Already set", "#615d59"),
+        ("deferred", "Deferred", "#615d59"),
+        ("excluded_rows", "Excluded(PURADAK)", "#615d59"),
+        ("total_rows", "Rows", "#0075de"),
     ]
     cells = "".join(
         f"<span style='display:inline-block;margin:0 12px 8px 0;padding:6px 12px;"
-        f"border-radius:6px;background:{c}22;color:{c};font-size:13px'>"
+        f"border-radius:8px;background:{c}1a;color:{c};font-size:13px;font-weight:500'>"
         f"<b>{counts.get(k, 0)}</b> {label}</span>"
         for k, label, c in chips
     )
@@ -98,9 +98,9 @@ def _auto_table(props) -> str:
         for p in props
     )
     return (
-        f"<h3 style='color:#00b894'>Auto-assignable ({len(props)})</h3>"
+        f"<h3 style='color:#1aae39'>Auto-assignable ({len(props)})</h3>"
         "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
-        "<tr style='text-align:left;color:#9a9ab0'><th>✓</th><th>User</th><th>Email</th><th>emp_id</th></tr>"
+        "<tr style='text-align:left;color:#615d59'><th>✓</th><th>User</th><th>Email</th><th>emp_id</th></tr>"
         f"{rows}</table>"
     )
 
@@ -115,13 +115,13 @@ def _multiple_table(props) -> str:
         )
         rows += (
             f"<tr><td>{_esc(p.user_full_name)}</td><td>{_esc(p.email)}</td>"
-            f"<td><select name='assign' style='padding:4px;background:#0f0f17;color:#e8e8ec;"
-            f"border:1px solid #2a2a40;border-radius:4px'>{opts}</select></td></tr>"
+            f"<td><select name='assign' style='padding:5px 8px;background:#fff;color:#1a1a1a;"
+            f"border:1px solid #ddd;border-radius:6px;font-family:inherit'>{opts}</select></td></tr>"
         )
     return (
-        f"<h3 style='color:#fdcb6e'>Multiple numbers — pick canonical ({len(props)})</h3>"
+        f"<h3 style='color:#dd5b00'>Multiple numbers — pick canonical ({len(props)})</h3>"
         "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
-        "<tr style='text-align:left;color:#9a9ab0'><th>User</th><th>Email</th><th>Pick emp_id</th></tr>"
+        "<tr style='text-align:left;color:#615d59'><th>User</th><th>Email</th><th>Pick emp_id</th></tr>"
         f"{rows}</table>"
     )
 
@@ -132,13 +132,13 @@ def _readonly_table(title: str, color: str, props, show_options: bool = False) -
     rows = "".join(
         f"<tr><td>{_esc(p.name or p.user_full_name)}</td><td>{_esc(p.email)}</td>"
         f"<td>{_esc(', '.join(p.emp_id_options) if show_options and p.emp_id_options else (p.emp_id or ''))}</td>"
-        f"<td style='color:#7a7a90'>{_esc(p.note)}</td></tr>"
+        f"<td style='color:#615d59'>{_esc(p.note)}</td></tr>"
         for p in props
     )
     return (
         f"<h3 style='color:{color}'>{_html.escape(title)} ({len(props)})</h3>"
         "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
-        "<tr style='text-align:left;color:#9a9ab0'><th>Name</th><th>Email</th><th>emp_id</th><th>note</th></tr>"
+        "<tr style='text-align:left;color:#615d59'><th>Name</th><th>Email</th><th>emp_id</th><th>note</th></tr>"
         f"{rows}</table>"
     )
 
@@ -175,9 +175,9 @@ async def preview(
         + _multiple_table(result.multiple)
         + "<button type='submit' style='width:auto;padding:11px 22px;margin-bottom:28px'>"
           "Confirm assignments</button></form>"
-        + _readonly_table("Already assigned (skip)", "#636e72", result.assigned)
-        + _readonly_table("Placeholder emails (excluded)", "#636e72", result.placeholder, show_options=True)
-        + _readonly_table("Deferred (no DB match / no email)", "#636e72", result.deferred)
+        + _readonly_table("Already assigned (skip)", "#615d59", result.assigned)
+        + _readonly_table("Placeholder emails (excluded)", "#615d59", result.placeholder, show_options=True)
+        + _readonly_table("Deferred (no DB match / no email)", "#615d59", result.deferred)
     )
     return pages.shell(base, admin, "/tools/empid", "EMPID — Review matches", body)
 
@@ -223,9 +223,9 @@ async def commit(
     body = (
         f"<div class='section'><div class='muted-box'>Committed to org <b>{_esc(org.name)}</b>. "
         "Re-running is safe (already-assigned users are skipped).</div></div>"
-        + _list("Assigned", "#00b894", res.assigned, lambda x: f"{_esc(x[0])} → <b>{_esc(x[1])}</b>")
-        + _list("Skipped (already had emp_id)", "#636e72", res.skipped, lambda x: f"{_esc(x[0])} ({_esc(x[1])})")
-        + _list("Rejected", "#ff8787", res.rejected, lambda x: f"{_esc(x[0])} — {_esc(x[1])}")
+        + _list("Assigned", "#1aae39", res.assigned, lambda x: f"{_esc(x[0])} → <b>{_esc(x[1])}</b>")
+        + _list("Skipped (already had emp_id)", "#615d59", res.skipped, lambda x: f"{_esc(x[0])} ({_esc(x[1])})")
+        + _list("Rejected", "#c0392b", res.rejected, lambda x: f"{_esc(x[0])} — {_esc(x[1])}")
         + f"<div class='section'><a href='{base}/tools/empid'>← Back to EMPID</a></div>"
     )
     return pages.shell(base, admin, "/tools/empid", "EMPID — Commit result", body)
