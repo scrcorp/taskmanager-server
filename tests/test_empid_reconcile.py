@@ -89,3 +89,17 @@ def test_parse_excludes_puradak_and_preserves_emp_id_string() -> None:
     emp_ids = {r.emp_id for r in rows}
     assert "415" in emp_ids and "07" in emp_ids
     assert all("PURADAK" not in r.company.upper() for r in rows)
+
+
+def test_parse_csv_format() -> None:
+    csv_text = (
+        "COMPANY,CORP_ABR_3,Name,emp_id,Email\n"
+        "IL FIORA,IFO,Alice,415,a@x.com\n"
+        "PURADAK BP,,Ghost,5021,g@x.com\n"
+        "SEED AND WATER,SWC,Bob,07,b@x.com\n"
+    )
+    rows, excluded = parse_emplist(csv_text.encode("utf-8"), filename="list.csv")
+    assert excluded == 1
+    emp_ids = {r.emp_id for r in rows}
+    assert "415" in emp_ids and "07" in emp_ids  # 선행0 보존
+    assert {r.email for r in rows} == {"a@x.com", "b@x.com"}

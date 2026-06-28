@@ -86,7 +86,7 @@ _NAV = [
     ("Dashboard", "/dashboard"),
     ("Organizations", None),
     ("Users", None),
-    ("Tools · EMPID", None),
+    ("Tools · EMPID", "/tools/empid"),
 ]
 
 
@@ -96,7 +96,8 @@ def _nav(base: str, active: str) -> str:
         if path is None:
             items.append(f"<a class='muted'>{_html.escape(label)} <span style='font-size:10px'>soon</span></a>")
         else:
-            items.append(f"<a href='{base}{path}'>{_html.escape(label)}</a>")
+            cls = " style='background:#22223a;color:#fff'" if path == active else ""
+            items.append(f"<a href='{base}{path}'{cls}>{_html.escape(label)}</a>")
     return (
         "<div class='nav'><div class='brand'>⬡ Backoffice</div>"
         + "".join(items)
@@ -104,23 +105,32 @@ def _nav(base: str, active: str) -> str:
     )
 
 
-def dashboard_html(base: str, admin: str) -> HTMLResponse:
-    """대시보드 셸 — 좌측 nav + 콘텐츠. P1은 빈 셸(앞으로 도구 입주)."""
+def shell(base: str, admin: str, active: str, title: str, content: str,
+          page_title: str = "HTM Backoffice") -> HTMLResponse:
+    """공통 셸 — 좌측 nav + topbar(로그아웃) + 본문. 도구 페이지가 재사용."""
     body = (
         "<div class='shell'>"
-        f"{_nav(base, 'dashboard')}"
+        f"{_nav(base, active)}"
         "<div class='main'>"
         "<div class='topbar'>"
-        "<h1>Dashboard</h1>"
+        f"<h1>{_html.escape(title)}</h1>"
         f"<div><span class='who'>signed in as <b>{_html.escape(admin)}</b></span> "
         f"<form method='post' action='{base}/logout'><button type='submit'>Sign out</button></form></div>"
         "</div>"
-        "<div class='section'><div class='muted-box'>"
-        "Operator console shell is live. Tools will mount here:<br><br>"
-        "• <b>Organizations</b> — list/drill into every org<br>"
-        "• <b>Users</b> — cross-org lookup<br>"
-        "• <b>Tools · EMPID Reconciliation</b> — legacy employee-number import"
-        "</div></div>"
+        f"{content}"
         "</div></div>"
     )
-    return render("HTM Backoffice — Dashboard", body)
+    return render(page_title, body)
+
+
+def dashboard_html(base: str, admin: str) -> HTMLResponse:
+    """대시보드 — 셸 + 도구 안내."""
+    content = (
+        "<div class='section'><div class='muted-box'>"
+        "Operator console shell is live. Tools:<br><br>"
+        "• <b>Organizations</b> — list/drill into every org (soon)<br>"
+        "• <b>Users</b> — cross-org lookup (soon)<br>"
+        f"• <a href='{base}/tools/empid'><b>Tools · EMPID Reconciliation</b></a> — legacy employee-number import"
+        "</div></div>"
+    )
+    return shell(base, admin, "/dashboard", "Dashboard", content, "HTM Backoffice — Dashboard")

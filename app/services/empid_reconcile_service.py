@@ -19,6 +19,7 @@ SoT: docs/99_inbox/2026-06-24 HTM control-plane(=Backoffice) 운영자콘솔 + E
 
 from __future__ import annotations
 
+import csv
 import io
 import re
 from dataclasses import dataclass, field
@@ -100,46 +101,101 @@ class ReconcileResult:
         }
 
 
-# 기대 헤더 → EmpRow 필드 (xlsx 컬럼명)
-def parse_emplist(content: bytes) -> tuple[list[EmpRow], int]:
-    """xlsx 바이트 → (제외 후 EmpRow 목록, 제외된 행 수).
+# 헤더 별칭 — 컬럼명이 조금 달라도 매핑 (소문자/공백제거 기준)
+def _hkey(s: object) -> str:
+    return re.sub(r"\s+", "", str(s or "").strip().lower())
 
-    PURADAK 등 폐점 회사 행은 제외하고 카운트만 반환.
-    """
+
+_HEADER_ALIASES = {
+    "company": "company", "corp_abr_3": "corp_abr", "corpabr3": "corp_abr",
+    "name": "name", "emp_id": "emp_id", "empid": "emp_id",
+    "email": "email",
+}
+
+
+def _emp_id_str(raw: object) -> str | None:
+    """emp_id 문자열 보존 (float면 .0 제거, 선행0 보존)."""
+    if raw is None:
+        return None
+    if isinstance(raw, float) and raw.is_integer():
+        return str(int(raw))
+    s = str(raw).strip()
+    return s or None
+
+
+def _build_row(cells: dict[str, object]) -> EmpRow | None:
+    """정규화 컬럼 dict(company/corp_abr/name/emp_id/email) → EmpRow (emp_id 없으면 None)."""
+    emp_id = _emp_id_str(cells.get("emp_id"))
+    if emp_id is None:
+        return None
+    return EmpRow(
+        company=str(cells.get("company") or "").strip(),
+        corp_abr=(str(cells.get("corp_abr")).strip() if cells.get("corp_abr") else None),
+        name=str(cells.get("name") or "").strip(),
+        emp_id=emp_id,
+        email=_norm_email(cells.get("email")),
+    )
+
+
+def _is_excluded(company: str) -> bool:
+    return any(x in company.upper() for x in _EXCLUDED_COMPANIES)
+
+
+def _rows_from_records(records) -> tuple[list[EmpRow], int]:
+    """헤더 매핑된 레코드 iterable(dict 정규화키) → (EmpRow 목록, 제외 수)."""
+    out: list[EmpRow] = []
+    excluded = 0
+    for cells in records:
+        company = str(cells.get("company") or "").strip()
+        if _is_excluded(company):
+            excluded += 1
+            continue
+        row = _build_row(cells)
+        if row is not None:
+            out.append(row)
+    return out, excluded
+
+
+def _parse_xlsx(content: bytes) -> tuple[list[EmpRow], int]:
     wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
     ws = wb.worksheets[0]
     rows_iter = ws.iter_rows(values_only=True)
-    header = [str(c).strip() if c is not None else "" for c in next(rows_iter)]
-    idx = {name: i for i, name in enumerate(header)}
+    header = [_HEADER_ALIASES.get(_hkey(c)) for c in next(rows_iter)]
 
-    def col(row: tuple, key: str) -> object:
-        i = idx.get(key)
-        return row[i] if i is not None and i < len(row) else None
+    def records():
+        for row in rows_iter:
+            if row is None or all(c is None for c in row):
+                continue
+            yield {key: row[i] for i, key in enumerate(header) if key and i < len(row)}
 
-    out: list[EmpRow] = []
-    excluded = 0
-    for row in rows_iter:
-        if row is None or all(c is None for c in row):
-            continue
-        company = str(col(row, " COMPANY") or col(row, "COMPANY") or "").strip()
-        if any(x in company.upper() for x in _EXCLUDED_COMPANIES):
-            excluded += 1
-            continue
-        emp_id_raw = col(row, "emp_id")
-        if emp_id_raw is None:
-            continue
-        # emp_id 문자열 보존 (정수면 .0 제거)
-        emp_id = str(int(emp_id_raw)) if isinstance(emp_id_raw, float) and emp_id_raw.is_integer() else str(emp_id_raw).strip()
-        out.append(
-            EmpRow(
-                company=company,
-                corp_abr=(str(col(row, "CORP_ABR_3")).strip() if col(row, "CORP_ABR_3") else None),
-                name=str(col(row, "Name") or "").strip(),
-                emp_id=emp_id,
-                email=_norm_email(col(row, "Email")),
-            )
-        )
-    return out, excluded
+    return _rows_from_records(records())
+
+
+def _parse_csv(content: bytes) -> tuple[list[EmpRow], int]:
+    text = content.decode("utf-8-sig", errors="replace")
+    reader = csv.reader(io.StringIO(text))
+    try:
+        header = [_HEADER_ALIASES.get(_hkey(c)) for c in next(reader)]
+    except StopIteration:
+        return [], 0
+
+    def records():
+        for row in reader:
+            if not row or all(not str(c).strip() for c in row):
+                continue
+            yield {key: row[i] for i, key in enumerate(header) if key and i < len(row)}
+
+    return _rows_from_records(records())
+
+
+def parse_emplist(content: bytes, filename: str = "") -> tuple[list[EmpRow], int]:
+    """업로드 파일(xlsx/csv) → (제외 후 EmpRow 목록, 제외된 행 수).
+
+    포맷은 확장자로 판별(.csv → CSV, 그 외 → Excel). PURADAK 등 폐점 회사 행 제외.
+    """
+    if filename.lower().endswith(".csv"):
+        return _parse_csv(content)
+    return _parse_xlsx(content)
 
 
 def _is_placeholder_email(email: str) -> bool:
@@ -217,9 +273,11 @@ def classify(emp_rows: list[EmpRow], users_by_email: dict[str, list]) -> Reconci
     return result
 
 
-async def reconcile(db: AsyncSession, organization_id: UUID, content: bytes) -> ReconcileResult:
-    """DB 연동 — xlsx 파싱 + 해당 org 유저 매칭 + 분류."""
-    emp_rows, excluded = parse_emplist(content)
+async def reconcile(
+    db: AsyncSession, organization_id: UUID, content: bytes, filename: str = ""
+) -> ReconcileResult:
+    """DB 연동 — 업로드 파일(xlsx/csv) 파싱 + 해당 org 유저 매칭 + 분류."""
+    emp_rows, excluded = parse_emplist(content, filename)
     users = await user_repository.get_by_org(db, organization_id)
     by_email: dict[str, list] = {}
     for u in users:
