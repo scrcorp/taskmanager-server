@@ -29,8 +29,13 @@ from dataclasses import dataclass, field
 from uuid import UUID
 
 import openpyxl
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.utils.exceptions import DuplicateError
+from app.repositories.employee_no_history_repository import (
+    employee_no_history_repository,
+)
 from app.repositories.user_repository import user_repository
 from app.schemas.user import _normalize_employee_no
 
@@ -557,32 +562,50 @@ async def commit_assignments(
 
     - org 불일치 user → reject (IDOR 방지)
     - 이미 employee_no 있음 → skip (저널, 덮어쓰지 않음)
-    - 포맷 검증(_normalize_employee_no) + org-uniqueness 위반 → reject
+    - 포맷 검증(_normalize_employee_no) + org 이력(ledger) burn 위반 → reject (blind overwrite 금지)
+    - 성공 시 employee_no 기록 + ledger 적재 (옵션 A 영구 burn). 같은 트랜잭션.
     """
     result = CommitResult()
-    for user_id, raw_emp in assignments:
-        user = await user_repository.get_by_id(db, user_id, organization_id)
-        if user is None:
-            result.rejected.append((str(user_id), "not found in org"))
-            continue
-        if user.employee_no:
-            result.skipped.append((user.full_name, user.employee_no))
-            continue
-        try:
-            emp = _normalize_employee_no(raw_emp)
-        except ValueError as e:
-            result.rejected.append((str(user_id), str(e)))
-            continue
-        if emp is None:
-            result.rejected.append((str(user_id), "empty employee_no"))
-            continue
-        dup = await user_repository.exists(db, {"organization_id": organization_id, "employee_no": emp})
-        if dup:
-            result.rejected.append((str(user_id), f"employee_no {emp} already used in org"))
-            continue
-        user.employee_no = emp
-        result.assigned.append((user.full_name, emp))
+    try:
+        for user_id, raw_emp in assignments:
+            user = await user_repository.get_by_id(db, user_id, organization_id)
+            if user is None:
+                result.rejected.append((str(user_id), "not found in org"))
+                continue
+            if user.employee_no:
+                result.skipped.append((user.full_name, user.employee_no))
+                continue
+            try:
+                emp = _normalize_employee_no(raw_emp)
+            except ValueError as e:
+                result.rejected.append((str(user_id), str(e)))
+                continue
+            if emp is None:
+                result.rejected.append((str(user_id), "empty employee_no"))
+                continue
+            # 이력 기반 영구 burn 체크 — 과거 사용/현재 활성 모두 차단 (덮어쓰지 않음).
+            burned = await employee_no_history_repository.exists_for_org(
+                db, organization_id, emp
+            )
+            if burned:
+                result.rejected.append(
+                    (str(user_id), f"employee_no {emp} already used in org (previously assigned, cannot be reused)")
+                )
+                continue
+            user.employee_no = emp
+            # ledger 적재 — 성공 부여 시 burn 기록. user 존재(FK 충족).
+            await employee_no_history_repository.add(
+                db, organization_id, emp, user.id
+            )
+            result.assigned.append((user.full_name, emp))
 
-    if result.assigned:
-        await db.commit()
+        if result.assigned:
+            await db.commit()
+    except IntegrityError as e:
+        # 동시 임포트 등으로 ledger unique 충돌 → 부분 저장 방지하고 깔끔한 409.
+        # (배치 전체 롤백; 운영자에게 재시도 안내.)
+        await db.rollback()
+        raise DuplicateError(
+            "employee_no assignment conflict (concurrent change) — please retry"
+        ) from e
     return result
