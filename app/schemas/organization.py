@@ -9,19 +9,33 @@ from datetime import datetime
 from typing import Any
 from pydantic import BaseModel, field_validator
 
+from app.models.organization import STORE_STATUSES, STORE_STATUS_OPEN
+
 # 스토어 코드 — 파일명/식별용 짧은 약어 (예: IFO, SWC). org 내 유일(partial unique).
-_STORE_CODE_RE = re.compile(r"^[A-Z0-9]{2,5}$")
+# 길이 2~10 영숫자. 현장에서 store 이름 약어(예: "swc - Seed Water Cafe")를 직접 붙이던
+# 관행을 정식 필드로 흡수하기 위해 2-5 → 2-10 으로 완화 (2026-06-24).
+_STORE_CODE_RE = re.compile(r"^[A-Z0-9]{2,10}$")
 
 
 def _normalize_store_code(v: str | None) -> str | None:
-    """trim → 대문자 → 빈문자는 None. 2~5 영숫자만 허용."""
+    """trim → 대문자 → 빈문자는 None. 2~10 영숫자만 허용."""
     if v is None:
         return None
     v = v.strip().upper()
     if not v:
         return None
     if not _STORE_CODE_RE.match(v):
-        raise ValueError("Store code must be 2-5 alphanumeric characters")
+        raise ValueError("Store code must be 2-10 alphanumeric characters")
+    return v
+
+
+def _validate_store_status(v: str | None) -> str | None:
+    """매장 상태값이 허용된 enum(preparing/open/paused/closed)인지 검증."""
+    if v is None:
+        return None
+    v = v.strip().lower()
+    if v not in STORE_STATUSES:
+        raise ValueError(f"Store status must be one of {', '.join(STORE_STATUSES)}")
     return v
 
 
@@ -96,12 +110,16 @@ class StoreCreate(BaseModel):
     """
 
     name: str  # 매장 이름 (Store name)
-    code: str | None = None  # 매장 코드 (Short code for filenames/identity, 2-5 alnum, optional)
+    code: str | None = None  # 매장 코드 (Short code for filenames/identity, 2-10 alnum, optional)
     address: str | None = None  # 매장 주소 (Physical address, optional)
+    phone: str | None = None  # 매장 연락처 (Store phone, optional)
+    email: str | None = None  # 매장/매니저 이메일 (Store/manager email, optional)
     timezone: str | None = None  # IANA 타임존 (Store timezone override, optional)
+    status: str = STORE_STATUS_OPEN  # 매장 상태 (preparing/open/paused/closed, default open)
     default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate, optional)
 
     _norm_code = field_validator("code")(_normalize_store_code)
+    _norm_status = field_validator("status")(_validate_store_status)
 
 
 class StoreUpdate(BaseModel):
@@ -116,9 +134,11 @@ class StoreUpdate(BaseModel):
     """
 
     name: str | None = None  # 변경할 매장 이름 (New name, optional)
-    code: str | None = None  # 변경할 매장 코드 (New short code, 2-5 alnum, optional)
+    code: str | None = None  # 변경할 매장 코드 (New short code, 2-10 alnum, optional)
     address: str | None = None  # 변경할 주소 (New address, optional)
-    is_active: bool | None = None  # 활성 상태 변경 (Activate/deactivate, optional)
+    phone: str | None = None  # 변경할 연락처 (New phone, optional)
+    email: str | None = None  # 변경할 이메일 (New email, optional)
+    status: str | None = None  # 매장 상태 변경 (preparing/open/paused/closed, optional)
     operating_hours: dict[str, Any] | None = None  # 운영시간 JSONB (Operating hours, optional)
     day_start_time: dict[str, str] | None = None  # 영업일 경계 시각 (Day boundary, optional)
     max_work_hours_weekly: int | None = None  # 주간 최대 근무시간 (Max weekly hours, optional)
@@ -127,6 +147,7 @@ class StoreUpdate(BaseModel):
     default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate, optional)
 
     _norm_code = field_validator("code")(_normalize_store_code)
+    _norm_status = field_validator("status")(_validate_store_status)
 
 
 class StoreResponse(BaseModel):
@@ -148,7 +169,11 @@ class StoreResponse(BaseModel):
     name: str  # 매장 이름 (Store name)
     code: str | None = None  # 매장 코드 (Short code for filenames/identity)
     address: str | None  # 매장 주소 (Address, may be null)
-    is_active: bool  # 활성 상태 (Active flag)
+    phone: str | None = None  # 매장 연락처 (Store phone)
+    email: str | None = None  # 매장/매니저 이메일 (Store/manager email)
+    status: str = STORE_STATUS_OPEN  # 매장 상태 (preparing/open/paused/closed)
+    sort_order: int = 0  # 정렬 순서 (Manual display order)
+    is_active: bool  # 활성 상태(파생 = status==open). 구 필드 호환용 (Derived active flag)
     require_approval: bool = True  # 승인 필요 여부 (Schedule approval required)
     operating_hours: dict[str, Any] | None = None  # 운영시간 (Operating hours JSONB)
     day_start_time: dict[str, str] | None = None  # 영업일 경계 시각 (Day boundary JSONB)
@@ -158,6 +183,15 @@ class StoreResponse(BaseModel):
     default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate)
     accepting_signups: bool = True  # 가입/지원 접수 여부 (Hiring signups open flag)
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
+
+
+class StoreReorderRequest(BaseModel):
+    """매장 정렬 순서 일괄 변경 요청.
+
+    Bulk store reorder request — store IDs in the desired display order.
+    """
+
+    store_ids: list[str]  # 새 순서의 매장 UUID 목록 (Store UUIDs in desired order)
 
 
 class StoreDetailResponse(StoreResponse):

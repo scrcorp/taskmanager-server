@@ -6,13 +6,33 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
 from app.api.deps import check_store_access, require_permission
 from app.database import get_db
+from app.models.schedule import StoreWorkRole
 from app.models.user import User
 from app.schemas.schedule import WorkRoleCreate, WorkRoleReorderRequest, WorkRoleResponse, WorkRoleUpdate
 from app.services.work_role_service import work_role_service
+from app.utils.exceptions import NotFoundError
 
 router: APIRouter = APIRouter()
+
+
+async def _check_work_role_store_access(
+    db: AsyncSession, current_user: User, work_role_id: UUID
+) -> None:
+    """flat work-role 경로용 — work_role 의 store 에 접근 가능한지 검증.
+
+    org 내 미할당 매장의 work-role 을 GM/SV 가 수정/삭제하지 못하게 차단.
+    org 소속 검증은 service 가 처리(미소속이면 NotFound).
+    """
+    store_id = await db.scalar(
+        select(StoreWorkRole.store_id).where(StoreWorkRole.id == work_role_id)
+    )
+    if store_id is None:
+        raise NotFoundError("Work role not found")
+    await check_store_access(db, current_user, store_id)
 
 
 @router.get("/stores/{store_id}/work-roles", response_model=list[WorkRoleResponse])
@@ -54,6 +74,7 @@ async def update_work_role(
     current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> WorkRoleResponse:
     """업무 역할을 수정합니다."""
+    await _check_work_role_store_access(db, current_user, work_role_id)
     return await work_role_service.update_work_role(
         db, work_role_id, current_user.organization_id, data
     )
@@ -84,6 +105,7 @@ async def delete_work_role(
     current_user: Annotated[User, Depends(require_permission("stores:delete"))],
 ) -> None:
     """업무 역할을 삭제합니다."""
+    await _check_work_role_store_access(db, current_user, work_role_id)
     await work_role_service.delete_work_role(
         db, work_role_id, current_user.organization_id
     )

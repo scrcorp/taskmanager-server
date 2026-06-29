@@ -19,6 +19,7 @@ from app.schemas.report import (
     ReportCommentCreate,
     ReportCreate,
     ReportResponse,
+    ReportReviewRequest,
     ReportTemplateResponse,
     ReportUpdate,
 )
@@ -53,6 +54,28 @@ async def get_template(
     return report_service.build_template_response(t)
 
 
+@router.get("/report-types")
+async def list_effective_report_types(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("reports:read"))],
+    store_id: Annotated[str | None, Query()] = None,
+    active_only: Annotated[bool, Query()] = True,
+) -> dict:
+    """매장에 enabled 된 report type(period) 목록 — type selector 채우기용.
+
+    active_only=True(default) → 활성 타입만. False → 비활성 포함 전체.
+    store_id 없으면 org-default 기준.
+    """
+    items = await report_service.resolve_effective_types(
+        db,
+        organization_id=current_user.organization_id,
+        store_id=UUID(store_id) if store_id else None,
+    )
+    if active_only:
+        items = [i for i in items if i["is_active"]]
+    return {"items": items}
+
+
 @router.get("")
 async def list_my_reports(
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -60,6 +83,9 @@ async def list_my_reports(
     type: Annotated[str | None, Query()] = None,
     store_id: Annotated[str | None, Query()] = None,
     status: Annotated[str | None, Query()] = None,
+    date_from: Annotated[str | None, Query()] = None,
+    date_to: Annotated[str | None, Query()] = None,
+    period: Annotated[str | None, Query()] = None,
     show_all: Annotated[bool, Query()] = False,
     only_mine: Annotated[bool, Query()] = True,
     page: int = 1,
@@ -74,6 +100,9 @@ async def list_my_reports(
         author_id=author_filter,
         store_id=UUID(store_id) if store_id else None,
         status=status,
+        date_from=date.fromisoformat(date_from) if date_from else None,
+        date_to=date.fromisoformat(date_to) if date_to else None,
+        period=period,
         exclude_draft=False,
         page=page,
         per_page=per_page,
@@ -195,6 +224,35 @@ async def submit_report(
         )
 
     return resp
+
+
+@router.post("/{report_id}/review", response_model=ReportResponse)
+async def review_report(
+    report_id: UUID,
+    data: ReportReviewRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("reports:review"))],
+) -> dict:
+    """리포트 검토 완료 (SV+). submitted → reviewed + 선택 feedback 코멘트."""
+    r = await report_service.review_report(
+        db, report_id, current_user.organization_id, current_user.id, data.feedback
+    )
+    r = await report_service.get_report(db, r.id, current_user.organization_id)
+    return await report_service.build_response(db, r, include_comments=True)
+
+
+@router.post("/{report_id}/acknowledge", response_model=ReportResponse)
+async def acknowledge_report(
+    report_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("reports:acknowledge"))],
+) -> dict:
+    """리포트 읽음 확인 (멱등)."""
+    await report_service.acknowledge_report(
+        db, report_id, current_user.organization_id, current_user.id
+    )
+    r = await report_service.get_report(db, report_id, current_user.organization_id)
+    return await report_service.build_response(db, r, include_comments=True)
 
 
 @router.post("/{report_id}/comments")

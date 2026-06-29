@@ -18,7 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import check_store_access, get_accessible_store_ids, require_permission
 from app.database import get_db
 from app.models.user import User
-from app.schemas.report import ReportCommentCreate, ReportCreate, ReportResponse, ReportUpdate
+from app.schemas.report import (
+    ReportCommentCreate,
+    ReportCreate,
+    ReportResponse,
+    ReportReviewRequest,
+    ReportUpdate,
+)
 from app.services.report_service import report_service
 from pydantic import BaseModel
 
@@ -122,6 +128,39 @@ async def transition_issue_status(
         db, report_id, current_user.organization_id, current_user.id, data.status
     )
     r = await report_service.get_report(db, r.id, current_user.organization_id)
+    return await report_service.build_response(db, r, include_comments=True)
+
+
+@router.post("/{report_id}/review", response_model=ReportResponse)
+async def review_report(
+    report_id: UUID,
+    data: ReportReviewRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("reports:review"))],
+) -> dict:
+    r = await report_service.get_report(db, report_id, current_user.organization_id)
+    if r.store_id:
+        await check_store_access(db, current_user, r.store_id)
+    r = await report_service.review_report(
+        db, report_id, current_user.organization_id, current_user.id, data.feedback
+    )
+    r = await report_service.get_report(db, r.id, current_user.organization_id)
+    return await report_service.build_response(db, r, include_comments=True)
+
+
+@router.post("/{report_id}/acknowledge", response_model=ReportResponse)
+async def acknowledge_report(
+    report_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("reports:acknowledge"))],
+) -> dict:
+    r = await report_service.get_report(db, report_id, current_user.organization_id)
+    if r.store_id:
+        await check_store_access(db, current_user, r.store_id)
+    await report_service.acknowledge_report(
+        db, report_id, current_user.organization_id, current_user.id
+    )
+    r = await report_service.get_report(db, report_id, current_user.organization_id)
     return await report_service.build_response(db, r, include_comments=True)
 
 

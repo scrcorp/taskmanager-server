@@ -27,6 +27,8 @@ async def list_my_work_roles(
     store_id가 없으면 사용자 소속 전체 매장의 역할을 반환.
     """
     if store_id is not None:
+        from app.api.deps import check_store_access
+        await check_store_access(db, current_user, UUID(store_id))  # 소속 매장만
         return await work_role_service.list_work_roles(
             db, UUID(store_id), current_user.organization_id,
         )

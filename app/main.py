@@ -61,6 +61,17 @@ app.include_router(console_router, prefix="/api/v1/console")
 app.include_router(app_router, prefix="/api/v1/app")
 app.include_router(setup_page_router, tags=["Setup Page"])
 
+# Backoffice — 플랫폼 운영자 전용 평면 (org 권한 밖). 비밀경로 슬러그로 마운트.
+# 비밀경로+운영자 해시가 설정된 경우에만 활성 (settings.backoffice_enabled).
+if settings.backoffice_enabled:
+    from app.api.backoffice import backoffice_router  # noqa: E402
+
+    app.include_router(
+        backoffice_router,
+        prefix="/" + settings.BACKOFFICE_PATH.strip("/"),
+        include_in_schema=False,
+    )
+
 # Attendance Device 전용 라우터 — JWT 와 별개 auth scope (device token)
 from app.api.attendance import router as attendance_router  # noqa: E402
 app.include_router(attendance_router, prefix="/api/v1/attendance", tags=["Attendance Device"])
@@ -68,6 +79,10 @@ app.include_router(attendance_router, prefix="/api/v1/attendance", tags=["Attend
 # Public 라우터 — 인증 없음 (htma-download 등 매장 staff 공유용)
 from app.api.public_releases import router as public_releases_router  # noqa: E402
 app.include_router(public_releases_router, prefix="/api/v1/public", tags=["Public"])
+
+# Public changelog — 인증 없이 발행된 업데이트 내역 조회 (console/app/homepage)
+from app.api.public_changelog import router as public_changelog_router  # noqa: E402
+app.include_router(public_changelog_router, prefix="/api/v1/public", tags=["Public Changelog"])
 
 # 로컬 버킷 정적 파일 서빙 — Local bucket static file serving
 from app.services.storage_service import BUCKET_DIR  # noqa: E402
@@ -228,6 +243,70 @@ async def ensure_issue_default_template() -> None:
             logger.info("Created system default issue template")
     except Exception as e:
         logger.warning(f"Failed to ensure default issue template: {e}")
+
+
+@app.on_event("startup")
+async def ensure_unified_daily_default_template() -> None:
+    """System default UNIFIED daily template (org_id=NULL, store_id=NULL, type='daily') 1건 보장.
+
+    daily 리포트가 레거시 daily_reports → 통합 reports 로 cutover 되었으나, 통합
+    report_templates 에는 daily 시드가 없어 org 가 템플릿을 만들기 전까지 daily 생성이
+    404 가 된다. issue 와 동일하게 system default fallback 1건을 시드한다
+    (resolution: store → org → system). 섹션은 static/default_daily_report_template.json 사용.
+    applicable_types=None → 모든 report_type(period)에 적용.
+    """
+    import json
+    import logging
+    import uuid as _uuid
+    from pathlib import Path
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.report import ReportTemplate
+
+    logger = logging.getLogger("uvicorn.error")
+    try:
+        async with async_session() as db:
+            existing = await db.execute(
+                select(ReportTemplate).where(
+                    ReportTemplate.type == "daily",
+                    ReportTemplate.organization_id.is_(None),
+                    ReportTemplate.store_id.is_(None),
+                    ReportTemplate.is_default.is_(True),
+                )
+            )
+            if existing.scalar_one_or_none():
+                return
+            config_path = (
+                Path(__file__).resolve().parent.parent / "static" / "default_daily_report_template.json"
+            )
+            with open(config_path) as f:
+                config = json.load(f)
+            sections = [
+                {
+                    "id": str(_uuid.uuid4()),
+                    "title": s["title"],
+                    "description": s.get("description", ""),
+                    "sort_order": s["sort_order"],
+                    "is_required": s.get("is_required", False),
+                }
+                for s in config["sections"]
+            ]
+            db.add(
+                ReportTemplate(
+                    type="daily",
+                    organization_id=None,
+                    store_id=None,
+                    name=config.get("name", "Supervisor Daily Report"),
+                    is_default=True,
+                    is_active=True,
+                    applicable_types=None,
+                    payload={"sections": sections},
+                )
+            )
+            await db.commit()
+            logger.info("Created system default unified daily template")
+    except Exception as e:
+        logger.warning(f"Failed to ensure unified daily default template: {e}")
 
 
 @app.on_event("startup")
