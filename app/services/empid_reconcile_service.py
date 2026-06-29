@@ -107,6 +107,10 @@ class Proposal:
     db_emp_id: str | None = None
     # deferred — 이름이 비슷한 DB 유저 후보 [(full_name, email)]
     similar: list[tuple[str, str | None]] = field(default_factory=list)
+    # placeholder — 같은 이메일을 쓰는 각 인물+번호 [(name, emp_id, company)]
+    members: list[tuple[str, str, str]] = field(default_factory=list)
+    # placeholder/공유 — 이 이메일을 실제로 쓰는 DB 계정 [(full_name, employee_no)]
+    db_accounts: list[tuple[str, str | None]] = field(default_factory=list)
 
 
 @dataclass
@@ -300,10 +304,17 @@ def classify(
 
         # 3. placeholder — 내부 도메인 or 서로 다른 사람이 공유
         if _is_placeholder_email(email) or not same_person:
+            # 각 인물+번호를 그대로 보여준다(이름 하나로 뭉뚱그리지 않음). 중복 행 제거.
+            members = list(dict.fromkeys((r.name, r.emp_id, r.company) for r in rows))
+            # 이 이메일을 실제로 쓰는 DB 계정도 함께 표시
+            db_accounts = [(u.full_name, getattr(u, "employee_no", None)) for u in db_users]
+            reason = ("internal email — shared placeholder" if _is_placeholder_email(email)
+                      else "shared email — multiple people")
+            note = reason + (f"; {len(db_accounts)} DB account(s) use this email" if db_accounts else "")
             result.placeholder.append(
                 Proposal(email=email, name=rep_name, user_id=None, user_full_name=None,
                          emp_id=None, emp_id_options=emp_ids, emp_id_sources=sources,
-                         note="internal/shared email — not matchable")
+                         members=members, db_accounts=db_accounts, note=note)
             )
             continue
 
@@ -378,11 +389,15 @@ def build_report_csv(result: ReconcileResult) -> str:
                 "sources", "similar_db_users", "note"])
 
     def _src(p: Proposal) -> str:
+        if p.members:  # placeholder/공유 — 인물별 번호를 그대로
+            return " | ".join(f"{name}={eid}({co})" for name, eid, co in p.members)
         if p.emp_id_sources:
             return " | ".join(f"{eid}={co}" for eid, co in p.emp_id_sources)
         return ""
 
     def _sim(p: Proposal) -> str:
+        if p.db_accounts:  # placeholder/공유 — 실제 DB 계정
+            return " | ".join(f"{fn}={emp or '-'}" for fn, emp in p.db_accounts)
         return " | ".join(f"{n} <{e or '-'}>" for n, e in p.similar)
 
     def _file_ids(p: Proposal) -> str:
@@ -410,6 +425,120 @@ def build_report_csv(result: ReconcileResult) -> str:
                 p.note,
             ])
     return buf.getvalue()
+
+
+def _p_sources(p: Proposal) -> str:
+    return "\n".join(f"{eid} ← {co}" for eid, co in p.emp_id_sources)
+
+
+def _p_file_ids(p: Proposal) -> str:
+    return ", ".join(p.emp_id_options) if p.emp_id_options else (p.emp_id or "")
+
+
+def _p_similar(p: Proposal) -> str:
+    return "\n".join(f"{n} <{e or '-'}>" for n, e in p.similar)
+
+
+def _p_members(p: Proposal) -> str:
+    return "\n".join(f"{name} = {eid} ({co})" for name, eid, co in p.members)
+
+
+def _p_db_accounts(p: Proposal) -> str:
+    return "\n".join(f"{fn} = {emp or '(no emp_id)'}" for fn, emp in p.db_accounts)
+
+
+def build_report_xlsx(result: ReconcileResult, org_name: str = "", filename: str = "") -> bytes:
+    """버킷 결과를 보기 편한 .xlsx로 — 버킷별 시트 + Summary 시트, 헤더 스타일/틀고정/열폭."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+
+    head_font = Font(bold=True, color="FFFFFF", size=11)
+    wrap = Alignment(vertical="top", wrap_text=True)
+    top = Alignment(vertical="top")
+
+    def _sheet(title: str, color: str, headers: list[str], rows: list[list[str]]) -> None:
+        ws = wb.create_sheet(title)
+        fill = PatternFill("solid", fgColor=color)
+        ws.append(headers)
+        for c in ws[1]:
+            c.font = head_font
+            c.fill = fill
+            c.alignment = Alignment(vertical="center")
+        for r in rows:
+            ws.append(r)
+        # 열폭 자동(셀 줄바꿈 고려) + 줄바꿈/상단정렬
+        for ci, _ in enumerate(headers, start=1):
+            letter = get_column_letter(ci)
+            longest = max(
+                [len(headers[ci - 1])]
+                + [max((len(ln) for ln in str(r[ci - 1]).split("\n")), default=0) for r in rows],
+                default=10,
+            )
+            ws.column_dimensions[letter].width = min(max(longest + 2, 10), 48)
+        for row in ws.iter_rows(min_row=2):
+            for c in row:
+                c.alignment = wrap if "\n" in str(c.value or "") else top
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{ws.max_row}"
+
+    # Summary 시트 (기본 시트 재사용)
+    summ = wb.active
+    summ.title = "Summary"
+    summ.append(["HTM Backoffice — EMPID Reconciliation"])
+    summ["A1"].font = Font(bold=True, size=14)
+    summ.append([])
+    if org_name:
+        summ.append(["Organization", org_name])
+    if filename:
+        summ.append(["Source file", filename])
+    summ.append([])
+    counts = result.counts()
+    summ.append(["Bucket", "Count"])
+    for c in summ[summ.max_row]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="0075DE")
+    bucket_meta = [
+        ("Auto-assign", "auto", "1AAE39"),
+        ("Multiple numbers", "multiple", "DD5B00"),
+        ("Mismatch (DB vs file)", "mismatch", "C0392B"),
+        ("Already assigned", "assigned", "615D59"),
+        ("Placeholder emails", "placeholder", "615D59"),
+        ("Deferred", "deferred", "615D59"),
+    ]
+    for label, key, _ in bucket_meta:
+        summ.append([label, counts.get(key, 0)])
+    summ.append(["Excluded (PURADAK)", counts.get("excluded_rows", 0)])
+    summ.append(["Total rows", counts.get("total_rows", 0)])
+    summ.column_dimensions["A"].width = 26
+    summ.column_dimensions["B"].width = 12
+
+    _sheet("Auto-assign", "1AAE39",
+           ["Name", "Email", "emp_id"],
+           [[p.user_full_name or p.name, p.email or "", p.emp_id or ""] for p in result.auto])
+    _sheet("Multiple numbers", "DD5B00",
+           ["Name", "Email", "emp_id options", "Sources (← COMPANY)"],
+           [[p.user_full_name or p.name, p.email or "", _p_file_ids(p), _p_sources(p)] for p in result.multiple])
+    _sheet("Mismatch", "C0392B",
+           ["Name", "Email", "DB emp_id", "File says", "Sources (← COMPANY)", "Note"],
+           [[p.user_full_name or p.name, p.email or "", p.db_emp_id or "", _p_file_ids(p), _p_sources(p), p.note]
+            for p in result.mismatch])
+    _sheet("Already assigned", "615D59",
+           ["Name", "Email", "emp_id"],
+           [[p.user_full_name or p.name, p.email or "", p.emp_id or ""] for p in result.assigned])
+    _sheet("Placeholder", "615D59",
+           ["Email", "People in file (name = number)", "DB account(s) using email", "Note"],
+           [[p.email or "", _p_members(p) or (p.name or ""), _p_db_accounts(p), p.note]
+            for p in result.placeholder])
+    _sheet("Deferred", "615D59",
+           ["Name (file)", "Email", "emp_id", "Similar DB users", "Note"],
+           [[p.name or p.user_full_name, p.email or "", _p_file_ids(p), _p_similar(p), p.note]
+            for p in result.deferred])
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
 @dataclass
