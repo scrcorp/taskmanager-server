@@ -70,24 +70,46 @@ async def upload_form(request: Request) -> HTMLResponse:
 # --------------------------------------------------------------------------- #
 # Preview (parse + match + render review form)
 # --------------------------------------------------------------------------- #
+_STATS = [
+    ("auto", "Auto-assign", "#1aae39"),
+    ("multiple", "Multiple #", "#dd5b00"),
+    ("mismatch", "Mismatch", "#c0392b"),
+    ("placeholder", "Placeholder", "#615d59"),
+    ("assigned", "Already set", "#615d59"),
+    ("deferred", "Deferred", "#615d59"),
+    ("excluded_rows", "Excluded", "#615d59"),
+    ("total_rows", "Rows", "#0075de"),
+]
+
+
 def _summary(counts: dict) -> str:
-    chips = [
-        ("auto", "Auto-assign", "#1aae39"),
-        ("multiple", "Multiple #", "#dd5b00"),
-        ("mismatch", "Mismatch", "#c0392b"),
-        ("placeholder", "Placeholder", "#615d59"),
-        ("assigned", "Already set", "#615d59"),
-        ("deferred", "Deferred", "#615d59"),
-        ("excluded_rows", "Excluded(PURADAK)", "#615d59"),
-        ("total_rows", "Rows", "#0075de"),
-    ]
     cells = "".join(
-        f"<span style='display:inline-block;margin:0 12px 8px 0;padding:6px 12px;"
-        f"border-radius:8px;background:{c}1a;color:{c};font-size:13px;font-weight:500'>"
-        f"<b>{counts.get(k, 0)}</b> {label}</span>"
-        for k, label, c in chips
+        f"<div class='stat'><div class='n' style='color:{c}'>{counts.get(k, 0)}</div>"
+        f"<div class='l'>{label}</div></div>"
+        for k, label, c in _STATS
     )
-    return f"<div class='section'>{cells}</div>"
+    return f"<div class='stats'>{cells}</div>"
+
+
+def _bucket(anchor: str, title: str, color: str, count: int, body: str,
+            sub: str = "", collapsed: bool = False) -> str:
+    """버킷 카드 — 색 배지 + 제목 + (옵션)부제 + 본문. collapsed면 <details>로 접음."""
+    head_inner = (
+        f"<span class='badge' style='background:{color}'>{count}</span>"
+        f"<span>{_html.escape(title)}</span>"
+        + (f"<span class='bsub'>{sub}</span>" if sub else "")
+    )
+    if collapsed:
+        return (
+            f"<details id='{anchor}' class='bucket'>"
+            f"<summary>{head_inner}</summary>"
+            f"<div class='bbody'>{body}</div></details>"
+        )
+    return (
+        f"<section id='{anchor}' class='bucket'>"
+        f"<div class='bhead' style='color:{color}'>{head_inner}</div>"
+        f"<div class='bbody'>{body}</div></section>"
+    )
 
 
 def _auto_table(props) -> str:
@@ -96,25 +118,29 @@ def _auto_table(props) -> str:
     rows = "".join(
         f"<tr><td><input type='checkbox' name='assign' value='{_esc(p.user_id)}|{_esc(p.emp_id)}' checked></td>"
         f"<td>{_esc(p.user_full_name)}</td><td>{_esc(p.email)}</td>"
-        f"<td><b>{_esc(p.emp_id)}</b></td></tr>"
+        f"<td><span class='pill'>{_esc(p.emp_id)}</span></td></tr>"
         for p in props
     )
-    return (
-        f"<h3 style='color:#1aae39'>Auto-assignable ({len(props)})</h3>"
-        "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
-        "<tr style='text-align:left;color:#615d59'><th>✓</th><th>User</th><th>Email</th><th>emp_id</th></tr>"
-        f"{rows}</table>"
+    body = (
+        "<table class='dtable'><thead><tr><th style='width:34px'>✓</th><th>User</th>"
+        "<th>Email</th><th style='width:120px'>emp_id</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
     )
+    return _bucket("auto", "Auto-assignable", "#1aae39", len(props), body,
+                   sub="email matched · single number · empty in DB")
 
 
-def _sources_html(p) -> str:
+def _sources_html(p, warn: bool = False) -> str:
     """각 emp_id가 어느 COMPANY에서 왔는지 — 모든 번호를 한 번에 표시."""
+    cls = "pill pill-warn" if warn else "pill"
     if not p.emp_id_sources:
-        return _esc(", ".join(p.emp_id_options) if p.emp_id_options else (p.emp_id or ""))
-    return "<br>".join(
-        f"<b>{_esc(eid)}</b> <span style='color:#615d59'>← {_esc(co)}</span>"
+        ids = p.emp_id_options if p.emp_id_options else ([p.emp_id] if p.emp_id else [])
+        return " ".join(f"<span class='{cls}'>{_esc(e)}</span>" for e in ids)
+    return "<div style='display:flex;flex-direction:column;gap:4px'>" + "".join(
+        f"<div><span class='{cls}'>{_esc(eid)}</span> "
+        f"<span class='hint'>← {_esc(co)}</span></div>"
         for eid, co in p.emp_id_sources
-    )
+    ) + "</div>"
 
 
 def _multiple_table(props) -> str:
@@ -132,18 +158,15 @@ def _multiple_table(props) -> str:
         rows += (
             f"<tr><td>{_esc(p.user_full_name)}</td><td>{_esc(p.email)}</td>"
             f"<td>{_sources_html(p)}</td>"
-            f"<td><select name='assign' style='padding:5px 8px;background:#fff;color:#1a1a1a;"
-            f"border:1px solid #ddd;border-radius:6px;font-family:inherit'>{opts}</select></td></tr>"
+            f"<td><select class='sel' name='assign'>{opts}</select></td></tr>"
         )
-    return (
-        f"<h3 style='color:#dd5b00'>Multiple numbers — pick canonical ({len(props)})</h3>"
-        "<div class='muted-box' style='margin-bottom:8px'>Same person across stores — each number "
-        "and the COMPANY it came from is shown. Pick the canonical emp_id.</div>"
-        "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
-        "<tr style='text-align:left;color:#615d59'><th>User</th><th>Email</th>"
-        "<th>Numbers (← COMPANY)</th><th>Pick emp_id</th></tr>"
-        f"{rows}</table>"
+    body = (
+        "<table class='dtable'><thead><tr><th>User</th><th>Email</th>"
+        "<th>Numbers &amp; source</th><th style='width:300px'>Pick canonical</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
     )
+    return _bucket("multiple", "Multiple numbers — pick canonical", "#dd5b00", len(props), body,
+                   sub="same person across stores · all numbers shown with their COMPANY")
 
 
 def _mismatch_table(props) -> str:
@@ -151,39 +174,81 @@ def _mismatch_table(props) -> str:
     if not props:
         return ""
     rows = "".join(
-        f"<tr style='background:#c0392b0d'><td>{_esc(p.user_full_name or p.name)}</td>"
+        f"<tr><td>{_esc(p.user_full_name or p.name)}</td>"
         f"<td>{_esc(p.email)}</td>"
-        f"<td><b style='color:#c0392b'>{_esc(p.db_emp_id)}</b></td>"
-        f"<td>{_sources_html(p)}</td></tr>"
+        f"<td><span class='pill pill-warn'>{_esc(p.db_emp_id)}</span></td>"
+        f"<td>{_sources_html(p, warn=True)}</td></tr>"
         for p in props
     )
-    return (
-        f"<h3 style='color:#c0392b'>Mismatch — DB vs file differ ({len(props)})</h3>"
-        "<div class='muted-box' style='margin-bottom:8px'>These users already have an emp_id in the DB, "
-        "but the uploaded file lists a <b>different</b> number. Not auto-changed — review manually "
-        "(commit never overwrites an existing emp_id).</div>"
-        "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
-        "<tr style='text-align:left;color:#615d59'><th>User</th><th>Email</th>"
-        "<th>DB emp_id</th><th>File says (← COMPANY)</th></tr>"
-        f"{rows}</table>"
+    body = (
+        "<div class='hint' style='margin-bottom:10px'>Already have an emp_id in the DB, but the file lists a "
+        "<b>different</b> number. Not auto-changed — review manually (commit never overwrites).</div>"
+        "<table class='dtable'><thead><tr><th>User</th><th>Email</th>"
+        "<th style='width:120px'>DB emp_id</th><th>File says (← COMPANY)</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
     )
+    return _bucket("mismatch", "Mismatch — DB vs file differ", "#c0392b", len(props), body)
 
 
-def _readonly_table(title: str, color: str, props, show_options: bool = False) -> str:
+def _placeholder_table(props) -> str:
+    """더미/공유 이메일 — 같은 이메일을 쓰는 각 인물+번호 + 실제 DB 계정을 함께 표시(읽기전용)."""
+    if not props:
+        return ""
+    rows = ""
+    for p in props:
+        # 각 인물 + 그 사람의 번호(+회사) — 이름 하나로 뭉뚱그리지 않음
+        if p.members:
+            people = "<div style='display:flex;flex-direction:column;gap:4px'>" + "".join(
+                f"<div>{_esc(name)} <span class='pill'>{_esc(eid)}</span> "
+                f"<span class='hint'>← {_esc(co)}</span></div>"
+                for name, eid, co in p.members
+            ) + "</div>"
+        else:
+            people = f"{_esc(p.name)} {_sources_html(p)}"
+        # 이 이메일을 실제로 쓰는 DB 계정
+        if p.db_accounts:
+            db = "<div style='display:flex;flex-direction:column;gap:3px'>" + "".join(
+                f"<div>{_esc(fn)}"
+                + (f" <span class='pill'>{_esc(emp)}</span>" if emp else " <span class='hint'>(no emp_id)</span>")
+                + "</div>"
+                for fn, emp in p.db_accounts
+            ) + "</div>"
+        else:
+            db = "<span style='color:#bdb9b4'>— none in DB —</span>"
+        rows += (
+            f"<tr><td>{_esc(p.email)}</td><td>{people}</td><td>{db}</td>"
+            f"<td class='hint'>{_esc(p.note)}</td></tr>"
+        )
+    body = (
+        "<div class='hint' style='margin-bottom:10px'>One email shared by several people (or an internal "
+        "placeholder). Each person and their number is listed. <b>DB account</b> shows who actually uses "
+        "that email in the server — match manually if needed.</div>"
+        "<table class='dtable'><thead><tr><th style='width:220px'>Email</th>"
+        "<th>People in file (name · number ← COMPANY)</th>"
+        "<th>DB account(s) using this email</th><th>note</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
+    return _bucket("placeholder", "Placeholder / shared emails", "#615d59", len(props), body,
+                   sub="one email, multiple people · shows each person+number and the real DB account")
+
+
+def _assigned_card(props) -> str:
+    """이미 배정(파일과 일치) — 노이즈라 기본 접힘."""
     if not props:
         return ""
     rows = "".join(
-        f"<tr><td>{_esc(p.name or p.user_full_name)}</td><td>{_esc(p.email)}</td>"
-        f"<td>{_esc(', '.join(p.emp_id_options) if show_options and p.emp_id_options else (p.emp_id or ''))}</td>"
-        f"<td style='color:#615d59'>{_esc(p.note)}</td></tr>"
+        f"<tr><td>{_esc(p.user_full_name or p.name)}</td><td>{_esc(p.email)}</td>"
+        f"<td><span class='pill'>{_esc(p.emp_id)}</span></td></tr>"
         for p in props
     )
-    return (
-        f"<h3 style='color:{color}'>{_html.escape(title)} ({len(props)})</h3>"
-        "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
-        "<tr style='text-align:left;color:#615d59'><th>Name</th><th>Email</th><th>emp_id</th><th>note</th></tr>"
-        f"{rows}</table>"
+    body = (
+        "<div class='hint' style='margin-bottom:10px'>Already have an emp_id that matches the file — nothing to do.</div>"
+        "<table class='dtable'><thead><tr><th>User</th><th>Email</th>"
+        "<th style='width:120px'>emp_id</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
     )
+    return _bucket("assigned", "Already assigned (matches file)", "#615d59", len(props), body,
+                   collapsed=True)
 
 
 def _deferred_table(props) -> str:
@@ -193,26 +258,25 @@ def _deferred_table(props) -> str:
     rows = ""
     for p in props:
         sim = (
-            "<br>".join(
-                f"{_esc(n)} <span style='color:#615d59'>&lt;{_esc(e or '-')}&gt;</span>"
+            "<div style='display:flex;flex-direction:column;gap:3px'>" + "".join(
+                f"<div>{_esc(n)} <span class='hint'>&lt;{_esc(e or '-')}&gt;</span></div>"
                 for n, e in p.similar
-            )
-            if p.similar else "<span style='color:#a8a29e'>— none —</span>"
+            ) + "</div>"
+            if p.similar else "<span style='color:#bdb9b4'>— none —</span>"
         )
         rows += (
             f"<tr><td>{_esc(p.name or p.user_full_name)}</td><td>{_esc(p.email)}</td>"
-            f"<td>{_esc(', '.join(p.emp_id_options) if p.emp_id_options else (p.emp_id or ''))}</td>"
-            f"<td>{sim}</td><td style='color:#615d59'>{_esc(p.note)}</td></tr>"
+            f"<td>{_sources_html(p)}</td>"
+            f"<td>{sim}</td><td class='hint'>{_esc(p.note)}</td></tr>"
         )
-    return (
-        f"<h3 style='color:#615d59'>Deferred — no DB match / no email ({len(props)})</h3>"
-        "<div class='muted-box' style='margin-bottom:8px'>Report-only. "
-        "<b>Similar DB users</b> are name-based hints to help manual matching — verify before acting.</div>"
-        "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
-        "<tr style='text-align:left;color:#615d59'><th>Name (file)</th><th>Email</th>"
-        "<th>emp_id</th><th>Similar DB users</th><th>note</th></tr>"
-        f"{rows}</table>"
+    body = (
+        "<div class='hint' style='margin-bottom:10px'>Report-only. <b>Similar DB users</b> are name-based "
+        "hints to help manual matching — verify before acting.</div>"
+        "<table class='dtable'><thead><tr><th>Name (file)</th><th>Email</th>"
+        "<th>emp_id</th><th>Similar DB users</th><th>note</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
     )
+    return _bucket("deferred", "Deferred — no DB match / no email", "#615d59", len(props), body)
 
 
 @router.post("/preview", response_class=HTMLResponse)
@@ -234,50 +298,63 @@ async def preview(
     content_bytes = await file.read()
     result = await svc.reconcile(db, org.id, content_bytes, file.filename or "")
 
-    # 공유용 CSV — 페이지에 data URI 다운로드 링크로 바로 임베드(서버 상태 불필요)
-    csv_text = svc.build_report_csv(result)
-    csv_b64 = base64.b64encode(csv_text.encode("utf-8")).decode("ascii")
+    # 공유용 Excel(.xlsx) — 버킷별 시트로 보기 편하게. data URI로 임베드(서버 상태 불필요)
+    xlsx_bytes = svc.build_report_xlsx(result, org_name=org.name or "", filename=file.filename or "")
+    xlsx_b64 = base64.b64encode(xlsx_bytes).decode("ascii")
     safe_org = "".join(c if c.isalnum() else "-" for c in (org.name or "org")).strip("-").lower() or "org"
-    download = (
-        "<div class='section'>"
-        f"<a download='empid-report-{safe_org}.csv' "
-        f"href='data:text/csv;charset=utf-8;base64,{csv_b64}' "
-        "style='display:inline-block;padding:9px 18px;background:#0075de;color:#fff;"
-        "border-radius:8px;text-decoration:none;font-size:13px;font-weight:500'>"
-        "⬇ Download CSV report</a>"
-        "<span style='color:#615d59;font-size:12px;margin-left:12px'>"
-        "All buckets (auto / multiple / mismatch / assigned / placeholder / deferred) for sharing.</span>"
+    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    # 비어있지 않은 버킷만 빠른 이동 링크로
+    counts = result.counts()
+    jump_meta = [
+        ("auto", "Auto", "#1aae39"), ("multiple", "Multiple", "#dd5b00"),
+        ("mismatch", "Mismatch", "#c0392b"), ("placeholder", "Placeholder", "#615d59"),
+        ("deferred", "Deferred", "#615d59"), ("assigned", "Assigned", "#615d59"),
+    ]
+    jumps = "".join(
+        f"<a href='#{k}'>{label} <b style='color:{c}'>{counts.get(k, 0)}</b></a>"
+        for k, label, c in jump_meta if counts.get(k, 0)
+    )
+
+    toolbar = (
+        "<div class='toolbar'>"
+        f"<a class='btn-dl' download='empid-report-{safe_org}.xlsx' "
+        f"href='data:{xlsx_mime};base64,{xlsx_b64}'>⬇ Download Excel report</a>"
+        f"<div class='jump'>{jumps}</div>"
         "</div>"
     )
 
     note = (
-        "<div class='muted-box' style='margin-bottom:24px'>"
-        f"Org: <b>{_esc(org.name)}</b>, file: <b>{_esc(file.filename)}</b>. "
-        "<b>Mismatch / Placeholder / Deferred</b> are report-only (not assigned).</div>"
+        "<div class='muted-box section'>"
+        f"Org <b>{_esc(org.name)}</b> · file <b>{_esc(file.filename)}</b>. "
+        "<b>Mismatch / Placeholder / Deferred</b> are report-only (not assigned). "
+        "Excel report has one sheet per bucket.</div>"
     )
 
-    # 이미 배정된 인물은 기본적으로 접어 노이즈 제거(원하면 펼쳐서 확인)
-    assigned_block = (
-        "<details style='margin-bottom:24px'>"
-        f"<summary style='cursor:pointer;color:#615d59;font-size:14px;font-weight:600'>"
-        f"Already assigned — matches file (skip) ({len(result.assigned)})</summary>"
-        + _readonly_table("", "#615d59", result.assigned)
-        + "</details>"
-    ) if result.assigned else ""
+    # 액션 가능한 항목(auto/multiple)을 commit 폼으로 묶음
+    actionable = _auto_table(result.auto) + _multiple_table(result.multiple)
+    if actionable:
+        action_block = (
+            f"<form method='post' action='{base}/tools/empid/commit'>"
+            + actionable
+            + "<div class='confirm-bar'><button type='submit'>Confirm assignments</button>"
+            "<span class='hint'>Only checked / selected rows are written. Re-running is safe.</span></div>"
+            "</form>"
+        )
+    else:
+        action_block = (
+            "<div class='muted-box section'>No auto-assignable or multiple-number matches in this file.</div>"
+        )
 
     body = (
-        _summary(result.counts())
-        + download
+        _summary(counts)
+        + toolbar
         + note
-        + f"<form method='post' action='{base}/tools/empid/commit'>"
-        + _auto_table(result.auto)
-        + _multiple_table(result.multiple)
-        + "<button type='submit' style='width:auto;padding:11px 22px;margin-bottom:28px'>"
-          "Confirm assignments</button></form>"
+        + action_block
         + _mismatch_table(result.mismatch)
-        + _readonly_table("Placeholder emails (excluded)", "#615d59", result.placeholder, show_options=True)
+        + _placeholder_table(result.placeholder)
         + _deferred_table(result.deferred)
-        + assigned_block
+        + _assigned_card(result.assigned)
     )
     return pages.shell(base, admin, "/tools/empid", "EMPID — Review matches", body)
 

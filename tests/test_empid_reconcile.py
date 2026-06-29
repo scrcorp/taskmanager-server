@@ -13,6 +13,7 @@ import openpyxl
 from app.services.empid_reconcile_service import (
     EmpRow,
     build_report_csv,
+    build_report_xlsx,
     classify,
     parse_emplist,
 )
@@ -58,6 +59,26 @@ def test_placeholder_shared_different_people() -> None:
     rows = [_row("share@x.com", "1", "ALICE KIM"), _row("share@x.com", "2", "BOB LEE")]
     res = classify(rows, {"share@x.com": [FakeUser(uuid4(), "Alice", "share@x.com")]})
     assert len(res.placeholder) == 1 and not res.auto and not res.multiple
+
+
+def test_placeholder_shows_each_person_and_number() -> None:
+    # 공유 이메일 — 각 인물과 번호를 짝지어 보여준다(이름 하나로 뭉뚱그리지 않음)
+    rows = [_row("share@x.com", "1", "ALICE KIM", company="IL FIORA"),
+            _row("share@x.com", "2", "BOB LEE", company="M KOREAN BBQ")]
+    res = classify(rows, {})
+    members = res.placeholder[0].members
+    assert ("ALICE KIM", "1", "IL FIORA") in members
+    assert ("BOB LEE", "2", "M KOREAN BBQ") in members
+
+
+def test_placeholder_surfaces_existing_db_account() -> None:
+    # 공유 이메일을 실제로 쓰는 DB 계정도 함께 표시
+    db_user = FakeUser(uuid4(), "Real Account", "share@x.com", employee_no="77")
+    rows = [_row("share@x.com", "1", "ALICE KIM"), _row("share@x.com", "2", "BOB LEE")]
+    res = classify(rows, {"share@x.com": [db_user]})
+    p = res.placeholder[0]
+    assert ("Real Account", "77") in p.db_accounts
+    assert "DB account" in p.note
 
 
 def test_already_assigned_matches_file_skipped() -> None:
@@ -123,6 +144,28 @@ def test_build_report_csv_covers_all_buckets() -> None:
     assert "bucket,name,email" in csv_text
     assert "auto" in csv_text and "mismatch" in csv_text and "deferred" in csv_text
     assert "100" in csv_text and "999" in csv_text
+
+
+def test_build_report_xlsx_has_bucket_sheets() -> None:
+    auto_u = FakeUser(uuid4(), "Auto User", "auto@x.com")
+    mis_u = FakeUser(uuid4(), "Mis User", "mis@x.com", employee_no="999")
+    rows = [
+        _row("auto@x.com", "100", "Auto User"),
+        _row("mis@x.com", "200", "Mis User"),
+        _row("ghost@x.com", "300", "Ghost Person"),
+    ]
+    res = classify(rows, {"auto@x.com": [auto_u], "mis@x.com": [mis_u]})
+    data = build_report_xlsx(res, org_name="Acme", filename="list.xlsx")
+    assert data[:2] == b"PK"  # xlsx == zip
+    wb = openpyxl.load_workbook(io.BytesIO(data))
+    assert {"Summary", "Auto-assign", "Multiple numbers", "Mismatch",
+            "Already assigned", "Placeholder", "Deferred"} <= set(wb.sheetnames)
+    # Summary 시트에 org/file + 버킷 카운트가 들어간다
+    flat = [str(c.value) for row in wb["Summary"].iter_rows() for c in row]
+    assert "Acme" in flat and "list.xlsx" in flat
+    # Auto-assign 시트에 자동배정 사번이 데이터로 존재
+    auto_vals = [str(c.value) for row in wb["Auto-assign"].iter_rows() for c in row]
+    assert "100" in auto_vals
 
 
 def test_deferred_no_email() -> None:
