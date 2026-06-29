@@ -27,6 +27,7 @@ from app.models.user import User
 from app.schemas.organization import (
     StoreCreate,
     StoreDetailResponse,
+    StoreReorderRequest,
     StoreResponse,
     StoreUpdate,
 )
@@ -35,18 +36,38 @@ from app.services.store_service import store_service
 router: APIRouter = APIRouter()
 
 
+@router.put("/reorder", status_code=204)
+async def reorder_stores(
+    data: StoreReorderRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+) -> None:
+    """매장 표시 순서를 일괄 변경합니다 (드래그 정렬). org-scoped.
+
+    Bulk-reorder stores within the org. Declared before /{store_id} so the
+    literal path is matched first (store_id is UUID-typed).
+    """
+    org_id: UUID = current_user.organization_id
+    ordered_ids: list[UUID] = [UUID(s) for s in data.store_ids]
+    await store_service.reorder_stores(db, org_id, ordered_ids)
+
+
 @router.get("", response_model=list[StoreResponse])
 async def list_stores(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("stores:read"))],
+    include_closed: bool = False,
 ) -> list[StoreResponse]:
     """매장 목록을 조회합니다. Owner=전체, GM=담당 매장, SV=소속 매장.
 
     List stores scoped to user's accessible stores.
+    include_closed=true 면 폐점(closed) 매장도 포함 (복구 화면용).
     """
     org_id: UUID = current_user.organization_id
     accessible = await get_accessible_store_ids(db, current_user)
-    stores = await store_service.list_stores(db, org_id, accessible_store_ids=accessible)
+    stores = await store_service.list_stores(
+        db, org_id, accessible_store_ids=accessible, include_closed=include_closed
+    )
     if hide_cost_for(current_user):
         for s in stores:
             scrub_cost_fields(s)

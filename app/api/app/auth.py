@@ -69,7 +69,9 @@ async def get_store_by_code(
         )
     store, org = row
 
-    if not store.is_active or store.deleted_at is not None:
+    # closed(폐점=deleted_at)만 가입 차단. preparing/paused 는 accepting_signups 로 게이트.
+    # (라이프사이클 결정 2026-06-25: closed 만 소비자 경계)
+    if store.deleted_at is not None:
         raise HTTPException(
             status_code=404,
             detail={"code": "store_not_found", "message": "Store is no longer available."},
@@ -96,6 +98,8 @@ async def get_store_by_code(
             "id": str(store.id),
             "name": store.name,
             "address": store.address,
+            "phone": store.phone,
+            "email": store.email,
             "cover_photos": cover_photos,
         },
         "organization": {
@@ -124,7 +128,7 @@ async def get_stores_by_company_code(
             "address": s.address,
         }
         for s in stores
-        if s.is_active and s.deleted_at is None
+        if s.deleted_at is None  # closed 만 제외 (preparing/open/paused 노출)
     ]
 
 
