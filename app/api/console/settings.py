@@ -8,9 +8,10 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_permission
+from app.api.deps import check_store_access, require_permission
 from app.core.permissions import is_owner
 from app.database import get_db
+from app.models.organization import Store
 from app.models.settings import OrgSetting, SettingsRegistry, StaffSetting, StoreSetting
 from app.models.user import User
 from app.schemas.settings import (
@@ -24,6 +25,24 @@ from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 
 router: APIRouter = APIRouter()
+
+
+async def _guard_store(db: AsyncSession, current_user: User, store_id: UUID) -> None:
+    """매장 설정 접근 가드 — cross-org IDOR 차단.
+
+    1) store 가 current_user 의 org 소속인지 확인 (owner 의 cross-org 까지 차단:
+       check_store_access 는 owner 에게 None=full 이라 org 검증을 안 함).
+    2) GM/SV 의 org 내 미할당 매장 접근 차단 (check_store_access).
+    """
+    in_org = await db.scalar(
+        select(Store.id).where(
+            Store.id == store_id,
+            Store.organization_id == current_user.organization_id,
+        )
+    )
+    if in_org is None:
+        raise NotFoundError("Store not found")
+    await check_store_access(db, current_user, store_id)
 
 
 # ─── Registry ──────────────────────────────────────
@@ -185,6 +204,7 @@ async def list_store_settings(
     current_user: Annotated[User, Depends(require_permission("stores:read"))],
 ) -> list[StoreSettingResponse]:
     """매장 설정 override 조회."""
+    await _guard_store(db, current_user, store_id)
     result = await db.execute(
         select(StoreSetting).where(StoreSetting.store_id == store_id)
     )
@@ -208,6 +228,7 @@ async def upsert_store_setting(
     current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> StoreSettingResponse:
     """매장 설정 upsert. registry + force_locked 체크."""
+    await _guard_store(db, current_user, store_id)
     registry = await db.scalar(select(SettingsRegistry).where(SettingsRegistry.key == data.key))
     if registry is None:
         raise BadRequestError(f"Setting key '{data.key}' is not registered")
@@ -258,6 +279,7 @@ async def delete_store_setting(
     current_user: Annotated[User, Depends(require_permission("stores:update"))],
 ) -> None:
     """매장 설정 override 제거."""
+    await _guard_store(db, current_user, store_id)
     existing = await db.scalar(
         select(StoreSetting).where(
             StoreSetting.store_id == store_id,
@@ -281,6 +303,9 @@ async def resolve(
     user_id: Annotated[str | None, Query()] = None,
 ) -> ResolvedSettingResponse:
     """Setting 키 값 해결 (resolver utility 호출)."""
+    # store_id 가 주어지면 접근 권한 검증 (cross-org IDOR 차단)
+    if store_id is not None:
+        await _guard_store(db, current_user, UUID(store_id))
     try:
         value = await resolve_setting(
             db, key,

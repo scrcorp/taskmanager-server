@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_permission
+from app.api.deps import check_store_access, get_accessible_store_ids, require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import (
@@ -64,6 +64,11 @@ async def list_attendances(
     store_uuid: UUID | None = UUID(store_id) if store_id else None
     user_uuid: UUID | None = UUID(user_id) if user_id else None
 
+    # 접근 가능 매장으로 스코프 제한 (owner=None=전체). 특정 store_id 요청 시 접근 검증.
+    accessible = await get_accessible_store_ids(db, current_user)
+    if store_uuid is not None:
+        await check_store_access(db, current_user, store_uuid)
+
     attendances, total = await attendance_service.get_attendances(
         db,
         organization_id=current_user.organization_id,
@@ -75,6 +80,7 @@ async def list_attendances(
         status=status,
         page=page,
         per_page=per_page,
+        store_ids=accessible,
     )
 
     # Batch-load breaks for all attendance IDs to avoid N+1 queries
@@ -209,12 +215,17 @@ async def get_weekly_summary(
 
     Weekly work time summary — net work hours per user.
     """
+    store_uuid = UUID(store_id) if store_id else None
+    accessible = await get_accessible_store_ids(db, current_user)
+    if store_uuid is not None:
+        await check_store_access(db, current_user, store_uuid)
     return await attendance_service.get_weekly_summary(
         db,
         organization_id=current_user.organization_id,
         user_id=UUID(user_id) if user_id else None,
-        store_id=UUID(store_id) if store_id else None,
+        store_id=store_uuid,
         week_date=week_date,
+        store_ids=accessible,
     )
 
 
@@ -230,11 +241,16 @@ async def get_overtime_alerts(
     Get overtime alerts — List employees exceeding weekly work hour limits.
     Returns users whose total weekly hours exceed the configured threshold.
     """
+    store_uuid = UUID(store_id) if store_id else None
+    accessible = await get_accessible_store_ids(db, current_user)
+    if store_uuid is not None:
+        await check_store_access(db, current_user, store_uuid)
     return await attendance_service.get_overtime_alerts(
         db,
         organization_id=current_user.organization_id,
-        store_id=UUID(store_id) if store_id else None,
+        store_id=store_uuid,
         week_date=week_date,
+        store_ids=accessible,
     )
 
 
