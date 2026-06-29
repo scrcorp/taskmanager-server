@@ -12,6 +12,7 @@ import openpyxl
 
 from app.services.empid_reconcile_service import (
     EmpRow,
+    build_report_csv,
     classify,
     parse_emplist,
 )
@@ -59,15 +60,69 @@ def test_placeholder_shared_different_people() -> None:
     assert len(res.placeholder) == 1 and not res.auto and not res.multiple
 
 
-def test_already_assigned_skipped() -> None:
+def test_already_assigned_matches_file_skipped() -> None:
+    # DB 사번 == 파일 사번 → assigned(skip)
+    u = FakeUser(uuid4(), "Camille Ilar", "c@x.com", employee_no="415")
+    res = classify([_row("c@x.com", "415", "Camille Ilar")], {"c@x.com": [u]})
+    assert len(res.assigned) == 1 and not res.auto and not res.mismatch
+
+
+def test_mismatch_db_differs_from_file() -> None:
+    # DB 사번 != 파일 사번 → mismatch(충돌, 덮어쓰지 않음)
     u = FakeUser(uuid4(), "Camille Ilar", "c@x.com", employee_no="999")
     res = classify([_row("c@x.com", "415", "Camille Ilar")], {"c@x.com": [u]})
-    assert len(res.assigned) == 1 and not res.auto
+    assert len(res.mismatch) == 1 and not res.assigned and not res.auto
+    m = res.mismatch[0]
+    assert m.db_emp_id == "999" and m.emp_id_options == ["415"]
+    assert "999" in m.note and "415" in m.note
+
+
+def test_multiple_includes_sources_per_company() -> None:
+    u = FakeUser(uuid4(), "Camille Ilar", "c@x.com")
+    rows = [_row("c@x.com", "415", "CAMILLE ILAR", company="IL FIORA"),
+            _row("c@x.com", "1226", "CAMILLE ILAR", company="M KOREAN BBQ")]
+    res = classify(rows, {"c@x.com": [u]})
+    src = dict(res.multiple[0].emp_id_sources)
+    assert src["415"] == "IL FIORA" and src["1226"] == "M KOREAN BBQ"
 
 
 def test_deferred_no_db_user() -> None:
     res = classify([_row("ghost@x.com", "415", "Ghost Person")], {})
     assert len(res.deferred) == 1 and res.deferred[0].note == "email present, no DB user"
+
+
+def test_deferred_shows_similar_name_hint() -> None:
+    # 이메일은 매칭 안되지만 이름이 비슷한 DB 유저를 힌트로
+    u = FakeUser(uuid4(), "John Doe", "john.real@x.com")
+    res = classify(
+        [_row("john.typo@x.com", "415", "John Doe")],
+        {},  # 이메일 매칭 없음
+        users=[u],
+    )
+    assert len(res.deferred) == 1
+    sim = res.deferred[0].similar
+    assert any(n == "John Doe" for n, _ in sim)
+
+
+def test_no_similar_when_names_unrelated() -> None:
+    u = FakeUser(uuid4(), "Maria Santos", "maria@x.com")
+    res = classify([_row("bob@x.com", "415", "Bob Lee")], {}, users=[u])
+    assert res.deferred[0].similar == []
+
+
+def test_build_report_csv_covers_all_buckets() -> None:
+    auto_u = FakeUser(uuid4(), "Auto User", "auto@x.com")
+    mis_u = FakeUser(uuid4(), "Mis User", "mis@x.com", employee_no="999")
+    rows = [
+        _row("auto@x.com", "100", "Auto User"),
+        _row("mis@x.com", "200", "Mis User"),
+        _row("ghost@x.com", "300", "Ghost Person"),
+    ]
+    res = classify(rows, {"auto@x.com": [auto_u], "mis@x.com": [mis_u]})
+    csv_text = build_report_csv(res)
+    assert "bucket,name,email" in csv_text
+    assert "auto" in csv_text and "mismatch" in csv_text and "deferred" in csv_text
+    assert "100" in csv_text and "999" in csv_text
 
 
 def test_deferred_no_email() -> None:

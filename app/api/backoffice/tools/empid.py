@@ -3,6 +3,7 @@
 org 권한 밖. 세션쿠키 인증만. 단일 org 기준(멀티-org 시 org 선택 추가 — TODO).
 """
 
+import base64
 import html as _html
 from uuid import UUID
 
@@ -73,6 +74,7 @@ def _summary(counts: dict) -> str:
     chips = [
         ("auto", "Auto-assign", "#1aae39"),
         ("multiple", "Multiple #", "#dd5b00"),
+        ("mismatch", "Mismatch", "#c0392b"),
         ("placeholder", "Placeholder", "#615d59"),
         ("assigned", "Already set", "#615d59"),
         ("deferred", "Deferred", "#615d59"),
@@ -105,23 +107,64 @@ def _auto_table(props) -> str:
     )
 
 
+def _sources_html(p) -> str:
+    """각 emp_id가 어느 COMPANY에서 왔는지 — 모든 번호를 한 번에 표시."""
+    if not p.emp_id_sources:
+        return _esc(", ".join(p.emp_id_options) if p.emp_id_options else (p.emp_id or ""))
+    return "<br>".join(
+        f"<b>{_esc(eid)}</b> <span style='color:#615d59'>← {_esc(co)}</span>"
+        for eid, co in p.emp_id_sources
+    )
+
+
 def _multiple_table(props) -> str:
     if not props:
         return ""
     rows = ""
     for p in props:
+        # 드롭다운 옵션에도 출처 회사를 함께 표기
+        src_by_id = {eid: co for eid, co in p.emp_id_sources}
         opts = "<option value=''>— skip —</option>" + "".join(
-            f"<option value='{_esc(p.user_id)}|{_esc(e)}'>{_esc(e)}</option>" for e in p.emp_id_options
+            f"<option value='{_esc(p.user_id)}|{_esc(e)}'>{_esc(e)}"
+            f"{(' — ' + _esc(src_by_id[e])) if src_by_id.get(e) else ''}</option>"
+            for e in p.emp_id_options
         )
         rows += (
             f"<tr><td>{_esc(p.user_full_name)}</td><td>{_esc(p.email)}</td>"
+            f"<td>{_sources_html(p)}</td>"
             f"<td><select name='assign' style='padding:5px 8px;background:#fff;color:#1a1a1a;"
             f"border:1px solid #ddd;border-radius:6px;font-family:inherit'>{opts}</select></td></tr>"
         )
     return (
         f"<h3 style='color:#dd5b00'>Multiple numbers — pick canonical ({len(props)})</h3>"
+        "<div class='muted-box' style='margin-bottom:8px'>Same person across stores — each number "
+        "and the COMPANY it came from is shown. Pick the canonical emp_id.</div>"
         "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
-        "<tr style='text-align:left;color:#615d59'><th>User</th><th>Email</th><th>Pick emp_id</th></tr>"
+        "<tr style='text-align:left;color:#615d59'><th>User</th><th>Email</th>"
+        "<th>Numbers (← COMPANY)</th><th>Pick emp_id</th></tr>"
+        f"{rows}</table>"
+    )
+
+
+def _mismatch_table(props) -> str:
+    """이미 사번이 있는데 파일의 번호가 다른 경우 — 충돌, 운영자 확인용(읽기전용)."""
+    if not props:
+        return ""
+    rows = "".join(
+        f"<tr style='background:#c0392b0d'><td>{_esc(p.user_full_name or p.name)}</td>"
+        f"<td>{_esc(p.email)}</td>"
+        f"<td><b style='color:#c0392b'>{_esc(p.db_emp_id)}</b></td>"
+        f"<td>{_sources_html(p)}</td></tr>"
+        for p in props
+    )
+    return (
+        f"<h3 style='color:#c0392b'>Mismatch — DB vs file differ ({len(props)})</h3>"
+        "<div class='muted-box' style='margin-bottom:8px'>These users already have an emp_id in the DB, "
+        "but the uploaded file lists a <b>different</b> number. Not auto-changed — review manually "
+        "(commit never overwrites an existing emp_id).</div>"
+        "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
+        "<tr style='text-align:left;color:#615d59'><th>User</th><th>Email</th>"
+        "<th>DB emp_id</th><th>File says (← COMPANY)</th></tr>"
         f"{rows}</table>"
     )
 
@@ -139,6 +182,35 @@ def _readonly_table(title: str, color: str, props, show_options: bool = False) -
         f"<h3 style='color:{color}'>{_html.escape(title)} ({len(props)})</h3>"
         "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
         "<tr style='text-align:left;color:#615d59'><th>Name</th><th>Email</th><th>emp_id</th><th>note</th></tr>"
+        f"{rows}</table>"
+    )
+
+
+def _deferred_table(props) -> str:
+    """DB 미매칭/무이메일 — 이름이 비슷한 DB 유저 후보를 힌트로 함께 표시."""
+    if not props:
+        return ""
+    rows = ""
+    for p in props:
+        sim = (
+            "<br>".join(
+                f"{_esc(n)} <span style='color:#615d59'>&lt;{_esc(e or '-')}&gt;</span>"
+                for n, e in p.similar
+            )
+            if p.similar else "<span style='color:#a8a29e'>— none —</span>"
+        )
+        rows += (
+            f"<tr><td>{_esc(p.name or p.user_full_name)}</td><td>{_esc(p.email)}</td>"
+            f"<td>{_esc(', '.join(p.emp_id_options) if p.emp_id_options else (p.emp_id or ''))}</td>"
+            f"<td>{sim}</td><td style='color:#615d59'>{_esc(p.note)}</td></tr>"
+        )
+    return (
+        f"<h3 style='color:#615d59'>Deferred — no DB match / no email ({len(props)})</h3>"
+        "<div class='muted-box' style='margin-bottom:8px'>Report-only. "
+        "<b>Similar DB users</b> are name-based hints to help manual matching — verify before acting.</div>"
+        "<table style='width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px'>"
+        "<tr style='text-align:left;color:#615d59'><th>Name (file)</th><th>Email</th>"
+        "<th>emp_id</th><th>Similar DB users</th><th>note</th></tr>"
         f"{rows}</table>"
     )
 
@@ -162,22 +234,50 @@ async def preview(
     content_bytes = await file.read()
     result = await svc.reconcile(db, org.id, content_bytes, file.filename or "")
 
-    deferred_note = (
-        "<div class='muted-box' style='margin-bottom:24px'>"
-        f"<b>Deferred / Placeholder</b> are report-only (not assigned). Org: <b>{_esc(org.name)}</b>, "
-        f"file: <b>{_esc(file.filename)}</b>.</div>"
+    # 공유용 CSV — 페이지에 data URI 다운로드 링크로 바로 임베드(서버 상태 불필요)
+    csv_text = svc.build_report_csv(result)
+    csv_b64 = base64.b64encode(csv_text.encode("utf-8")).decode("ascii")
+    safe_org = "".join(c if c.isalnum() else "-" for c in (org.name or "org")).strip("-").lower() or "org"
+    download = (
+        "<div class='section'>"
+        f"<a download='empid-report-{safe_org}.csv' "
+        f"href='data:text/csv;charset=utf-8;base64,{csv_b64}' "
+        "style='display:inline-block;padding:9px 18px;background:#0075de;color:#fff;"
+        "border-radius:8px;text-decoration:none;font-size:13px;font-weight:500'>"
+        "⬇ Download CSV report</a>"
+        "<span style='color:#615d59;font-size:12px;margin-left:12px'>"
+        "All buckets (auto / multiple / mismatch / assigned / placeholder / deferred) for sharing.</span>"
+        "</div>"
     )
+
+    note = (
+        "<div class='muted-box' style='margin-bottom:24px'>"
+        f"Org: <b>{_esc(org.name)}</b>, file: <b>{_esc(file.filename)}</b>. "
+        "<b>Mismatch / Placeholder / Deferred</b> are report-only (not assigned).</div>"
+    )
+
+    # 이미 배정된 인물은 기본적으로 접어 노이즈 제거(원하면 펼쳐서 확인)
+    assigned_block = (
+        "<details style='margin-bottom:24px'>"
+        f"<summary style='cursor:pointer;color:#615d59;font-size:14px;font-weight:600'>"
+        f"Already assigned — matches file (skip) ({len(result.assigned)})</summary>"
+        + _readonly_table("", "#615d59", result.assigned)
+        + "</details>"
+    ) if result.assigned else ""
+
     body = (
         _summary(result.counts())
-        + deferred_note
+        + download
+        + note
         + f"<form method='post' action='{base}/tools/empid/commit'>"
         + _auto_table(result.auto)
         + _multiple_table(result.multiple)
         + "<button type='submit' style='width:auto;padding:11px 22px;margin-bottom:28px'>"
           "Confirm assignments</button></form>"
-        + _readonly_table("Already assigned (skip)", "#615d59", result.assigned)
+        + _mismatch_table(result.mismatch)
         + _readonly_table("Placeholder emails (excluded)", "#615d59", result.placeholder, show_options=True)
-        + _readonly_table("Deferred (no DB match / no email)", "#615d59", result.deferred)
+        + _deferred_table(result.deferred)
+        + assigned_block
     )
     return pages.shell(base, admin, "/tools/empid", "EMPID — Review matches", body)
 
