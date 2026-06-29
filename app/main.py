@@ -242,6 +242,70 @@ async def ensure_issue_default_template() -> None:
 
 
 @app.on_event("startup")
+async def ensure_unified_daily_default_template() -> None:
+    """System default UNIFIED daily template (org_id=NULL, store_id=NULL, type='daily') 1건 보장.
+
+    daily 리포트가 레거시 daily_reports → 통합 reports 로 cutover 되었으나, 통합
+    report_templates 에는 daily 시드가 없어 org 가 템플릿을 만들기 전까지 daily 생성이
+    404 가 된다. issue 와 동일하게 system default fallback 1건을 시드한다
+    (resolution: store → org → system). 섹션은 static/default_daily_report_template.json 사용.
+    applicable_types=None → 모든 report_type(period)에 적용.
+    """
+    import json
+    import logging
+    import uuid as _uuid
+    from pathlib import Path
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.report import ReportTemplate
+
+    logger = logging.getLogger("uvicorn.error")
+    try:
+        async with async_session() as db:
+            existing = await db.execute(
+                select(ReportTemplate).where(
+                    ReportTemplate.type == "daily",
+                    ReportTemplate.organization_id.is_(None),
+                    ReportTemplate.store_id.is_(None),
+                    ReportTemplate.is_default.is_(True),
+                )
+            )
+            if existing.scalar_one_or_none():
+                return
+            config_path = (
+                Path(__file__).resolve().parent.parent / "static" / "default_daily_report_template.json"
+            )
+            with open(config_path) as f:
+                config = json.load(f)
+            sections = [
+                {
+                    "id": str(_uuid.uuid4()),
+                    "title": s["title"],
+                    "description": s.get("description", ""),
+                    "sort_order": s["sort_order"],
+                    "is_required": s.get("is_required", False),
+                }
+                for s in config["sections"]
+            ]
+            db.add(
+                ReportTemplate(
+                    type="daily",
+                    organization_id=None,
+                    store_id=None,
+                    name=config.get("name", "Supervisor Daily Report"),
+                    is_default=True,
+                    is_active=True,
+                    applicable_types=None,
+                    payload={"sections": sections},
+                )
+            )
+            await db.commit()
+            logger.info("Created system default unified daily template")
+    except Exception as e:
+        logger.warning(f"Failed to ensure unified daily default template: {e}")
+
+
+@app.on_event("startup")
 async def ensure_daily_report_templates() -> None:
     """Check all organizations and create default template for those missing one."""
     import logging

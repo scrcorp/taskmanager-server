@@ -308,6 +308,56 @@ class AlertService:
             reference_id=reference_id,
         )
 
+    async def create_for_report_submitted(
+        self,
+        db: AsyncSession,
+        *,
+        organization_id: UUID,
+        recipient_id: UUID,
+        author_name: str,
+        context_label: str,
+        reference_type: str,
+        reference_id: UUID,
+    ) -> Alert | None:
+        """리포트가 제출되어 리뷰가 필요할 때 매장 리뷰어에게 알림. 선호 비활성 시 None."""
+        if not await self._is_in_app_enabled_for_user(db, recipient_id, "report_submitted"):
+            return None
+        message = f"{author_name} submitted a {context_label}"
+        return await alert_repository.create_alert(
+            db,
+            organization_id=organization_id,
+            user_id=recipient_id,
+            alert_type="report_submitted",
+            message=message,
+            reference_type=reference_type,
+            reference_id=reference_id,
+        )
+
+    async def create_for_report_reviewed(
+        self,
+        db: AsyncSession,
+        *,
+        organization_id: UUID,
+        recipient_id: UUID,
+        reviewer_name: str,
+        context_label: str,
+        reference_type: str,
+        reference_id: UUID,
+    ) -> Alert | None:
+        """리포트가 검토 완료되었을 때 작성자에게 알림. 선호 비활성 시 None."""
+        if not await self._is_in_app_enabled_for_user(db, recipient_id, "report_reviewed"):
+            return None
+        message = f"{reviewer_name} reviewed your {context_label}"
+        return await alert_repository.create_alert(
+            db,
+            organization_id=organization_id,
+            user_id=recipient_id,
+            alert_type="report_reviewed",
+            message=message,
+            reference_type=reference_type,
+            reference_id=reference_id,
+        )
+
     async def create_for_notice(
         self,
         db: AsyncSession,

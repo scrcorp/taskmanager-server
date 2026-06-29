@@ -181,10 +181,15 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     ("daily_reports:delete", "daily_reports", "delete", "Delete daily reports", False),
 
     # ── Reports (multi-type: daily, issue, ...) ──
-    ("reports:read",   "reports", "read",   "View reports (all types)", False),
-    ("reports:create", "reports", "create", "Write reports", False),
-    ("reports:update", "reports", "update", "Edit reports and add comments", False),
-    ("reports:delete", "reports", "delete", "Delete reports", False),
+    ("reports:read",        "reports", "read",        "View reports (all types)", False),
+    ("reports:create",      "reports", "create",      "Write reports", False),
+    ("reports:update",      "reports", "update",      "Edit reports and add comments", False),
+    ("reports:delete",      "reports", "delete",      "Delete reports", False),
+    ("reports:review",      "reports", "review",      "Review and mark reports as reviewed", False),
+    ("reports:acknowledge", "reports", "acknowledge", "Acknowledge (confirm reading) reports", False),
+
+    # ── Report Types (daily 'period' 종류 구성 — org/store scope) ──
+    ("report_types:manage", "report_types", "manage", "Manage report types (periods) for org and stores", False),
 
     # ── Tasks (work items — promoted from issue reports or directly created) ──
     # 명명 변경 이력: additional_tasks → issues → tasks. issue report 와 단어 겹침을 피하려 tasks 로 정리.
@@ -284,6 +289,7 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         "evaluations:read", "evaluations:create", "evaluations:update", "evaluations:delete",
         "daily_reports:read", "daily_reports:create", "daily_reports:update",
         "reports:read", "reports:create", "reports:update",
+        "reports:review", "reports:acknowledge",
         "tasks:read", "tasks:create", "tasks:update",
         "dashboard:read",
         "inventory:read", "inventory:create",
@@ -296,6 +302,7 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
     "staff": {
         "daily_reports:read", "daily_reports:create", "daily_reports:update",
         "reports:read", "reports:create", "reports:update",
+        "reports:acknowledge",
         "tasks:read", "tasks:update",
         "tips:read", "tips:edit_own", "tips:form_view",
     },

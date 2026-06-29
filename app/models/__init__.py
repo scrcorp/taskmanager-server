@@ -39,7 +39,7 @@ from app.models.warning_category import WarningCategory
 from app.models.warning_signature import WarningSignature
 from app.models.permission import Permission, RolePermission
 from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSection, DailyReport, DailyReportSection, DailyReportComment
-from app.models.report import Report, ReportTemplate, ReportComment
+from app.models.report import Report, ReportTemplate, ReportComment, ReportType, ReportAcknowledgement
 from app.models.task import Task, TaskAssignee, TaskComment
 from app.models.email_verification import EmailVerificationCode
 from app.models.inventory import InventoryCategory, InventorySubUnit, InventoryProduct, StoreInventory, InventoryTransaction, InventoryAudit, InventoryAuditItem, InventoryAuditSetting
@@ -69,7 +69,7 @@ __all__ = [
     "WarningSignature",
     "Permission", "RolePermission",
     "DailyReportTemplate", "DailyReportTemplateSection", "DailyReport", "DailyReportSection", "DailyReportComment",
-    "Report", "ReportTemplate", "ReportComment",
+    "Report", "ReportTemplate", "ReportComment", "ReportType", "ReportAcknowledgement",
     "Task", "TaskAssignee", "TaskComment",
     "EmailVerificationCode",
     "InventoryCategory", "InventorySubUnit", "InventoryProduct", "StoreInventory", "InventoryTransaction", "InventoryAudit", "InventoryAuditItem", "InventoryAuditSetting",
