@@ -132,6 +132,7 @@ _NAV = [
     ("Organizations", None),
     ("Users", None),
     ("Tools · EMPID", "/tools/empid"),
+    ("Changelog", "/tools/changelog"),
 ]
 
 

@@ -50,6 +50,7 @@ from app.models.interview import InterviewSlot, InterviewSlotPreference
 from app.models.app_version import AppVersion
 from app.models.tip import TipEntry, TipDistribution, TipAuditLog, TipPeriod, Form4070Document
 from app.models.schedule_report import ScheduleReportSnapshot
+from app.models.changelog import ChangelogPost
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -81,4 +82,5 @@ __all__ = [
     "AppVersion",
     "TipEntry", "TipDistribution", "TipAuditLog", "TipPeriod", "Form4070Document",
     "ScheduleReportSnapshot",
+    "ChangelogPost",
 ]
