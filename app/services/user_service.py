@@ -8,6 +8,7 @@ and user-store association management.
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.organization import Organization, Store
@@ -15,6 +16,9 @@ from app.models.user import Role, User
 from app.repositories.store_repository import store_repository
 from app.repositories.role_repository import role_repository
 from app.repositories.user_repository import user_repository
+from app.repositories.employee_no_history_repository import (
+    employee_no_history_repository,
+)
 from app.schemas.organization import StoreResponse
 from app.core.permissions import (
     OWNER_PRIORITY,
@@ -29,6 +33,7 @@ from app.schemas.user import (
     UserResponse,
     UserStoreResponse,
     UserUpdate,
+    _normalize_employee_no,
 )
 from app.utils.exceptions import BadRequestError, DuplicateError, ForbiddenError, NotFoundError
 from app.utils.password import hash_password, verify_password
@@ -100,6 +105,55 @@ class UserService:
         )
         val = r.scalar()
         return float(val) if val is not None else None
+
+    # 사번 영구 burn 메시지 — previously-used(과거 사용/현재 활성 모두 포함) 차단.
+    _EMP_NO_BURNED_MSG = (
+        "This employee number was previously used in this organization "
+        "and cannot be reused."
+    )
+
+    async def _burn_check_and_record(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        employee_no: str | None,
+        user_id: UUID | None,
+    ) -> str | None:
+        """사번 ledger 체크 + 기록 (옵션 A 영구 burn).
+
+        Normalize → org 이력 조회 → 이미 존재하면 409(DuplicateError) →
+        없으면 ledger 에 INSERT (first_assigned_user_id=user_id).
+        호출자의 트랜잭션 안에서 동작하며 commit 하지 않는다 (원자성: 함께 롤백).
+
+        Args:
+            db: 비동기 데이터베이스 세션 (Async database session)
+            organization_id: 조직 ID (Organization UUID)
+            employee_no: 부여할 사번 (validator 로 정규화되어 들어오지만 방어적으로 재정규화)
+            user_id: 최초 부여 대상 유저 (Audit; ledger FK)
+
+        Returns:
+            str | None: 정규화된 사번 (None 이면 기록할 사번 없음)
+
+        Raises:
+            DuplicateError: 이력에 이미 존재(=burn)하는 사번일 때 (409)
+        """
+        normalized: str | None = _normalize_employee_no(employee_no)
+        if normalized is None:
+            return None
+        burned: bool = await employee_no_history_repository.exists_for_org(
+            db, organization_id, normalized
+        )
+        if burned:
+            raise DuplicateError(self._EMP_NO_BURNED_MSG)
+        try:
+            await employee_no_history_repository.add(
+                db, organization_id, normalized, user_id
+            )
+        except IntegrityError as e:
+            # 동시 요청 TOCTOU: exists 체크 통과 후 같은 사번 동시 INSERT →
+            # uq_emp_no_history_org_no 충돌. raw 500 대신 깔끔한 409 로 변환.
+            raise DuplicateError(self._EMP_NO_BURNED_MSG) from e
+        return normalized
 
     async def list_users(
         self,
@@ -229,22 +283,30 @@ class UserService:
             if data.department is not None:
                 create_data["department"] = data.department
 
-            # 사번 — 지정 시 org 내 중복 확인 후 저장 (validator 로 normalize 완료)
+            # 사번 — 지정 시 org 이력(ledger) burn 체크 후 저장 (옵션 A 영구 burn).
+            # FK 순서상 ledger 는 user 생성 후 기록(아래) — 여기선 burn 여부만 먼저 확인해
+            # 활성/과거 중복 모두 깔끔한 409 로 반환 (partial unique IntegrityError 회피).
+            normalized_emp: str | None = None
             if data.employee_no is not None:
-                emp_exists: bool = await user_repository.exists(
-                    db,
-                    {"organization_id": organization_id, "employee_no": data.employee_no},
-                )
-                if emp_exists:
-                    raise DuplicateError(
-                        "Employee number already exists in this organization"
+                normalized_emp = _normalize_employee_no(data.employee_no)
+                if normalized_emp is not None:
+                    burned: bool = await employee_no_history_repository.exists_for_org(
+                        db, organization_id, normalized_emp
                     )
-                create_data["employee_no"] = data.employee_no
+                    if burned:
+                        raise DuplicateError(self._EMP_NO_BURNED_MSG)
+                    create_data["employee_no"] = normalized_emp
 
             user: User = await user_repository.create(
                 db,
                 create_data,
             )
+
+            # 사번 ledger 기록 — user 생성 후(FK 충족). 같은 트랜잭션, 함께 커밋/롤백.
+            if normalized_emp is not None:
+                await employee_no_history_repository.add(
+                    db, organization_id, normalized_emp, user.id
+                )
 
             # Owner / Super Owner 신규 생성 시 조직 내 모든 매장에 자동 배정
             # (is_manager=true, is_work_assignment=true — manager 면 work 자동). 알림 + 관리 권한 + 근무 배정 대상.
@@ -324,7 +386,9 @@ class UserService:
                 update_data["email_verified"] = False
 
         # 사번 변경 — 파일명·법적 문서(경고 PDF)에 발행시점 스냅샷되므로 보호.
-        # '이미 부여된 사번'의 변경/삭제는 Owner 만 (신규 부여는 users:update 로 가능). org 내 중복 확인.
+        # '이미 부여된 사번'의 변경/삭제는 Owner 만 (신규 부여는 users:update 로 가능).
+        # 실제 burn 체크+ledger 기록은 트랜잭션 내부에서 수행(아래 try 블록).
+        record_emp_no: str | None = None  # 새로 burn+기록할 사번 (None=기록 안 함)
         if "employee_no" in update_data:
             new_emp: str | None = update_data["employee_no"]  # validator 로 normalize 완료
             emp_target: User | None = await user_repository.get_by_id(
@@ -339,15 +403,11 @@ class UserService:
                     raise ForbiddenError(
                         "Only an Owner can change an existing employee number"
                     )
+                # 새 non-null 값으로 변경될 때만 ledger burn+기록.
+                # null 해제는 옛 번호 burn 을 그대로 유지(기록 안 함).
                 if new_emp is not None:
-                    emp_dup: bool = await user_repository.exists(
-                        db,
-                        {"organization_id": organization_id, "employee_no": new_emp},
-                    )
-                    if emp_dup:
-                        raise DuplicateError(
-                            "Employee number already exists in this organization"
-                        )
+                    record_emp_no = new_emp
+            # 같은 값이면 no-op — 자기 현재 번호를 다시 기록하지 않는다.
 
         # role_id를 문자열에서 UUID로 변환 — Convert role_id from string to UUID
         if "role_id" in update_data and update_data["role_id"] is not None:
@@ -385,6 +445,13 @@ class UserService:
                 await user_repository.reset_manager_flags(db, user_id)
 
         try:
+            # 사번 새 부여/변경 시 ledger burn 체크 + 기록.
+            # user update 와 같은 트랜잭션 — burn 이면 DuplicateError(409) 후 함께 롤백.
+            if record_emp_no is not None:
+                await self._burn_check_and_record(
+                    db, organization_id, record_emp_no, user_id
+                )
+
             user: User | None = await user_repository.update(
                 db, user_id, update_data, organization_id
             )

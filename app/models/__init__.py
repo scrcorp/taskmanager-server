@@ -22,6 +22,7 @@ Modules:
 
 from app.models.organization import Organization, Store, ShiftPreset, LaborLawSetting
 from app.models.user import Role, User
+from app.models.employee_no_history import EmployeeNoHistory
 from app.models.work import Shift, Position
 from app.models.token import RefreshToken
 from app.models.user_store import UserStore
@@ -53,6 +54,7 @@ from app.models.schedule_report import ScheduleReportSnapshot
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
     "Role", "User",
+    "EmployeeNoHistory",
     "Shift", "Position",
     "RefreshToken", "UserStore",
     "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistInstance", "ChecklistInstanceItem", "ChecklistItemFile", "ChecklistItemSubmission", "ChecklistItemReviewLog", "ChecklistItemMessage",

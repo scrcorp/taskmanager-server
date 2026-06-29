@@ -20,7 +20,7 @@ from uuid import UUID
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Prevent scheduler startup noise in tests
@@ -35,6 +35,7 @@ from app.models.communication import Notice  # noqa: E402
 from app.models.organization import Organization, Store  # noqa: E402
 from app.models.schedule import Schedule  # noqa: E402
 from app.models.user import Role, User  # noqa: E402
+from app.models.employee_no_history import EmployeeNoHistory  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +470,18 @@ async def _purge_test_data(
     """attendance / schedule / 테스트 notice 정리. 시드(user/store/org) 는 안 건드림."""
     user_ids: list[UUID] = [info["id"] for info in test_users.values()]
     store_ids: list[UUID] = [test_store_id, second_store_id]
+    org_ids: set[UUID] = {info["organization_id"] for info in test_users.values()}
     async with async_session() as db:
+        # 사번 영구 burn ledger 는 append-only 라 테스트 재실행 시 누적된다.
+        # 테스트 org 의 이력 + 시드유저 employee_no 를 비워 재실행 가능하게 한다.
+        await db.execute(
+            delete(EmployeeNoHistory).where(
+                EmployeeNoHistory.organization_id.in_(org_ids)
+            )
+        )
+        await db.execute(
+            update(User).where(User.id.in_(user_ids)).values(employee_no=None)
+        )
         # attendance_breaks 는 attendance FK CASCADE 로 같이 삭제됨
         await db.execute(
             delete(Attendance).where(
