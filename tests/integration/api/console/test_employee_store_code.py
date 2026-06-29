@@ -48,9 +48,23 @@ async def test_store_update_code_reflected_uppercased(
 async def test_store_code_invalid_returns_422(
     async_client: AsyncClient, admin_headers: dict, test_store_id: UUID
 ):
-    """2~5 영숫자 위반 → 422 (validator)."""
-    resp = await _set_store_code(async_client, admin_headers, test_store_id, "toolong6")
-    assert resp.status_code == 422, resp.text
+    """2~10 영숫자 위반 → 422 (validator). 11자 초과 / 특수문자."""
+    too_long = await _set_store_code(async_client, admin_headers, test_store_id, "ELEVENCHARS")  # 11자
+    assert too_long.status_code == 422, too_long.text
+    bad_char = await _set_store_code(async_client, admin_headers, test_store_id, "AB-CD")  # 특수문자
+    assert bad_char.status_code == 422, bad_char.text
+
+
+async def test_store_code_ten_chars_allowed(
+    async_client: AsyncClient, admin_headers: dict, test_store_id: UUID
+):
+    """현장 관행(이름 약어)을 흡수하기 위해 최대 10자 허용."""
+    try:
+        resp = await _set_store_code(async_client, admin_headers, test_store_id, "swcafe1234")  # 10자
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["code"] == "SWCAFE1234"
+    finally:
+        await _set_store_code(async_client, admin_headers, test_store_id, None)
 
 
 async def test_store_duplicate_code_returns_409(

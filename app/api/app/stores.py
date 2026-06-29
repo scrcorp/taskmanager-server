@@ -27,13 +27,17 @@ async def get_my_stores(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> list[dict]:
-    """현재 사용자에게 배정된 매장 목록을 반환합니다."""
+    """현재 사용자에게 배정된 매장 목록을 반환합니다.
+
+    closed(폐점=deleted_at)만 제외하고 preparing/open/paused 는 모두 노출 —
+    스태프는 일시중단/준비중 매장에도 소속을 유지한다 (라이프사이클 결정 2026-06-25).
+    """
     query = (
         select(Store)
         .join(UserStore, UserStore.store_id == Store.id)
         .where(
             UserStore.user_id == current_user.id,
-            Store.is_active.is_(True),
+            Store.deleted_at.is_(None),  # closed(폐점)만 제외
         )
         .order_by(Store.name)
     )
@@ -43,8 +47,10 @@ async def get_my_stores(
         {
             "id": str(s.id),
             "name": s.name,
+            "code": s.code,
             "address": s.address,
-            "is_active": s.is_active,
+            "status": s.status,
+            "is_active": s.is_active,  # 파생(status==open) — 구버전 앱 호환
             "timezone": s.timezone,
             "day_start_time": s.day_start_time,
         }
@@ -94,6 +100,8 @@ async def get_store_work_date(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     """매장의 현재 work_date를 경계 시각 기준으로 반환합니다."""
+    from app.api.deps import check_store_access
+    await check_store_access(db, current_user, store_id)  # 소속 매장만
     from app.utils.timezone import get_store_day_config, get_work_date
     store_tz, day_start = await get_store_day_config(db, store_id)
     work_date: date = get_work_date(store_tz, day_start)

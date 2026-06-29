@@ -255,7 +255,7 @@ async def test_store_id(seed_organization: dict) -> UUID:
             store.timezone = "UTC"
             store.day_start_time = {"all": "00:00"}
             store.deleted_at = None
-            store.is_active = True
+            store.status = "open"  # is_active 는 status==open 파생(읽기전용)
             await db.commit()
         return store.id
 

@@ -44,6 +44,7 @@ class AttendanceRepository(BaseRepository[Attendance]):
         status: str | None = None,
         page: int = 1,
         per_page: int = 20,
+        store_ids: list[UUID] | None = None,
     ) -> tuple[Sequence[Attendance], int]:
         """필터 조건에 맞는 근태 기록을 페이지네이션하여 조회합니다.
 
@@ -70,6 +71,9 @@ class AttendanceRepository(BaseRepository[Attendance]):
             .where(Attendance.organization_id == organization_id)
         )
 
+        if store_ids is not None:
+            # 접근 가능 매장으로 스코프 제한 (None=owner 전체). 빈 리스트면 결과 없음.
+            query = query.where(Attendance.store_id.in_(store_ids))
         if store_id is not None:
             query = query.where(Attendance.store_id == store_id)
         if user_id is not None:

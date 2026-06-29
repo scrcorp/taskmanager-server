@@ -706,6 +706,9 @@ class ScheduleService:
         created_by: UUID,
     ) -> ScheduleResponse:
         store_id = UUID(data.store_id)
+        # 폐점(closed) 매장엔 새 스케줄 생성 차단 (조회/수정/삭제는 허용)
+        from app.services.store_service import store_service
+        await store_service.assert_open_for_create(db, store_id)
         user_id = UUID(data.user_id)
         start_time = self._parse_time(data.start_time)  # type: ignore[arg-type]
         end_time = self._parse_time(data.end_time)  # type: ignore[arg-type]

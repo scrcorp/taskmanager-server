@@ -381,6 +381,9 @@ class AttendanceService:
 
         # 동작별 처리 — Process based on action type
         if action == "clock_in":
+            # 폐점(closed) 매장엔 새 출근 기록 생성 차단 (clock_out/break 등 기존 기록 갱신은 허용)
+            from app.services.store_service import store_service
+            await store_service.assert_open_for_create(db, store_id)
             if attendance is not None:
                 raise BadRequestError(
                     "이미 오늘 출근 기록이 있습니다 (Already clocked in today)"
@@ -533,6 +536,7 @@ class AttendanceService:
         status: str | None = None,
         page: int = 1,
         per_page: int = 20,
+        store_ids: list[UUID] | None = None,
     ) -> tuple[Sequence[Attendance], int]:
         """근태 기록 목록을 필터링하여 페이지네이션 조회합니다.
 
@@ -554,7 +558,8 @@ class AttendanceService:
             tuple[Sequence[Attendance], int]: (근태 목록, 전체 개수)
         """
         return await attendance_repository.get_by_filters(
-            db, organization_id, store_id, user_id, work_date, date_from, date_to, status, page, per_page
+            db, organization_id, store_id, user_id, work_date, date_from, date_to, status, page, per_page,
+            store_ids=store_ids,
         )
 
     async def get_attendance(
@@ -1047,6 +1052,7 @@ class AttendanceService:
         user_id: UUID | None = None,
         store_id: UUID | None = None,
         week_date: date | None = None,
+        store_ids: list[UUID] | None = None,
     ) -> list[dict]:
         """주간 근무시간 요약 — 사용자별 일일/주간 근무시간.
 
@@ -1079,6 +1085,8 @@ class AttendanceService:
             query = query.where(Attendance.user_id == user_id)
         if store_id:
             query = query.where(Attendance.store_id == store_id)
+        if store_ids is not None:
+            query = query.where(Attendance.store_id.in_(store_ids))
 
         result = await db.execute(query)
         rows = result.all()
@@ -1115,6 +1123,7 @@ class AttendanceService:
         organization_id: UUID,
         store_id: UUID | None = None,
         week_date: date | None = None,
+        store_ids: list[UUID] | None = None,
     ) -> list[dict]:
         """주간 초과근무 경고 목록 조회.
 
@@ -1155,6 +1164,8 @@ class AttendanceService:
         )
         if store_id:
             query = query.where(Attendance.store_id == store_id)
+        if store_ids is not None:
+            query = query.where(Attendance.store_id.in_(store_ids))
 
         result = await db.execute(query)
         rows = result.all()

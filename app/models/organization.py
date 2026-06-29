@@ -16,7 +16,21 @@ from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy import String, Boolean, DateTime, Index, Integer, Numeric, Text, Time, ForeignKey, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+# 매장 상태(라이프사이클) — Store lifecycle status values.
+# preparing: 오픈 전 셋업 / open: 영업중(=구 is_active true) / paused: 일시중단 / closed: 폐점(soft-delete)
+STORE_STATUS_PREPARING = "preparing"
+STORE_STATUS_OPEN = "open"
+STORE_STATUS_PAUSED = "paused"
+STORE_STATUS_CLOSED = "closed"
+STORE_STATUSES = (
+    STORE_STATUS_PREPARING,
+    STORE_STATUS_OPEN,
+    STORE_STATUS_PAUSED,
+    STORE_STATUS_CLOSED,
+)
 
 
 def generate_company_code() -> str:
@@ -113,13 +127,22 @@ class Store(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     # 매장 코드 — Short identifier for the store (unique within org, e.g. "DT", "GM")
     code: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # 매장 연락처 — Store phone number (optional, shown on public signup/hiring page)
+    phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # 매장/매니저 이메일 — Store or manager email (optional, signup/escalation/notification target)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # 매장 주소 — Physical address of the store (optional)
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     # IANA 타임존 — Store-level timezone override (nullable, falls back to org timezone)
     timezone: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # 활성 상태 — Whether the store is active (soft-delete pattern)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    # 소프트 삭제 일시 — Timestamp when store was soft-deleted (NULL = active)
+    # 매장 상태 — Store lifecycle status (preparing/open/paused/closed). SoT for active/retire.
+    # 구 is_active 컬럼을 대체. is_active 는 아래 hybrid_property(= status==open)로 파생.
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=STORE_STATUS_OPEN, server_default=STORE_STATUS_OPEN
+    )
+    # 정렬 순서 — Manual display order within org (lower first, then created_at). Drag-reorder.
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # 소프트 삭제 일시 — Timestamp when store was soft-deleted/closed (NULL = live)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 승인 필요 여부 — Whether schedule approval is required (default True)
     # True: SV가 생성한 스케줄은 GM 승인 후 배정 생성
@@ -148,6 +171,16 @@ class Store(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # 활성 상태(파생) — Derived from status. 구 is_active 컬럼 호환용.
+    # Python 읽기(store.is_active)와 SQL 필터(Store.is_active.is_(True)) 모두 지원.
+    @hybrid_property
+    def is_active(self) -> bool:  # type: ignore[override]
+        return self.status == STORE_STATUS_OPEN
+
+    @is_active.expression  # type: ignore[no-redef]
+    def is_active(cls):  # noqa: N805
+        return cls.status == STORE_STATUS_OPEN
 
     # 관계 — Relationships
     organization = relationship("Organization", back_populates="stores")
