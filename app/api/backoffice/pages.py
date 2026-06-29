@@ -55,6 +55,38 @@ button:active{transform:scale(.97)}
 table{font-size:14px}
 th{color:var(--muted);font-weight:600}
 td{color:var(--ink2)}
+/* ---- EMPID review (bucket cards + data tables) ---- */
+.stats{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}
+.stat{background:var(--surface);border:1px solid var(--hairline);border-radius:10px;padding:12px 16px;box-shadow:var(--shadow1);min-width:88px}
+.stat .n{font-size:24px;font-weight:700;letter-spacing:-.5px;line-height:1}
+.stat .l{font-size:11.5px;color:var(--muted);margin-top:5px;font-weight:500}
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:22px}
+.btn-dl{display:inline-flex;align-items:center;gap:7px;padding:10px 18px;background:#107c41;color:#fff;border-radius:9999px;font-size:14px;font-weight:600}
+.btn-dl:hover{background:#0c6133;text-decoration:none}
+.jump{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.jump a{font-size:12px;padding:5px 11px;border:1px solid var(--hairline);border-radius:9999px;color:var(--ink2);background:var(--surface)}
+.jump a:hover{background:var(--canvas);text-decoration:none}
+.bucket{background:var(--surface);border:1px solid var(--hairline);border-radius:12px;box-shadow:var(--shadow1);margin-bottom:18px;overflow:hidden}
+.bhead{display:flex;align-items:center;gap:10px;padding:15px 20px;font-weight:700;font-size:16px;border-bottom:1px solid var(--hairline)}
+.bucket>summary{display:flex;align-items:center;gap:10px;padding:15px 20px;font-weight:700;font-size:16px;cursor:pointer;list-style:none}
+.bucket>summary::-webkit-details-marker{display:none}
+.bucket[open]>summary{border-bottom:1px solid var(--hairline)}
+.badge{font-size:12px;font-weight:700;min-width:22px;text-align:center;padding:2px 8px;border-radius:9999px;color:#fff}
+.bsub{font-weight:400;font-size:12.5px;color:var(--muted)}
+.bbody{padding:6px 20px 16px}
+.dtable{width:100%;border-collapse:collapse;font-size:13.5px}
+.dtable th{text-align:left;color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding:9px 12px;border-bottom:1px solid var(--hairline)}
+.dtable td{padding:10px 12px;border-bottom:1px solid #f0efed;vertical-align:top;color:var(--ink2)}
+.dtable tr:last-child td{border-bottom:none}
+.dtable tbody tr:hover{background:var(--canvas)}
+.dtable .num{font-variant-numeric:tabular-nums;font-weight:600}
+.pill{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:6px;background:#eaf3fc;color:#0075de;font-variant-numeric:tabular-nums}
+.pill-warn{background:#fdecea;color:#c0392b}
+.hint{color:var(--muted);font-size:12px}
+.empty{color:var(--faint);font-style:italic;padding:6px 0;font-size:13px}
+select.sel{padding:6px 10px;background:#fff;color:var(--ink);border:1px solid #ddd;border-radius:8px;font-family:inherit;font-size:13px;max-width:280px}
+.confirm-bar{display:flex;align-items:center;gap:14px;margin:6px 0 26px}
+.confirm-bar .hint{margin:0}
 """
 
 
