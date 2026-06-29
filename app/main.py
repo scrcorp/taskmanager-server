@@ -80,6 +80,10 @@ app.include_router(attendance_router, prefix="/api/v1/attendance", tags=["Attend
 from app.api.public_releases import router as public_releases_router  # noqa: E402
 app.include_router(public_releases_router, prefix="/api/v1/public", tags=["Public"])
 
+# Public changelog — 인증 없이 발행된 업데이트 내역 조회 (console/app/homepage)
+from app.api.public_changelog import router as public_changelog_router  # noqa: E402
+app.include_router(public_changelog_router, prefix="/api/v1/public", tags=["Public Changelog"])
+
 # 로컬 버킷 정적 파일 서빙 — Local bucket static file serving
 from app.services.storage_service import BUCKET_DIR  # noqa: E402
 

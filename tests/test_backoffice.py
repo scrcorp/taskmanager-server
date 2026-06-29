@@ -103,3 +103,106 @@ async def test_rate_limit_locks_after_max_fails(async_client: AsyncClient) -> No
     still = await _login(async_client)
     assert still.status_code == 429
     ratelimit._FAILS.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Changelog 도구 — 인증 가드 + 작성→발행→공개노출→삭제 플로우
+# --------------------------------------------------------------------------- #
+_CL_TITLE = "Zztest Backoffice Flow"
+_CL_SLUG = "zztest-backoffice-flow"
+_PUBLIC = "/api/v1/public/changelog"
+
+
+async def _cleanup_changelog() -> None:
+    from sqlalchemy import delete
+    from app.database import async_session
+    from app.models.changelog import ChangelogPost
+
+    async with async_session() as db:
+        await db.execute(delete(ChangelogPost).where(ChangelogPost.slug.like("zztest-%")))
+        await db.commit()
+
+
+async def test_changelog_requires_auth(async_client: AsyncClient) -> None:
+    """미인증 changelog 도구 접근 → 로그인으로 redirect."""
+    resp = await async_client.get(f"{BASE}/tools/changelog")
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"{BASE}/login"
+
+
+async def test_changelog_create_publish_delete_flow(async_client: AsyncClient) -> None:
+    await _cleanup_changelog()
+    await _login(async_client)
+
+    # 작성 → edit 페이지로 redirect
+    create = await async_client.post(
+        f"{BASE}/tools/changelog/new",
+        data={"title": _CL_TITLE, "category": "console", "body": "Flow body",
+              "summary": "", "tags": "feature, bugfix", "cover_image_key": ""},
+    )
+    assert create.status_code == 303
+    loc = create.headers["location"]
+    post_id = loc.rsplit("/", 1)[-1]
+
+    # 목록에 노출
+    listing = await async_client.get(f"{BASE}/tools/changelog")
+    assert listing.status_code == 200
+    assert _CL_TITLE in listing.text
+
+    # 발행 전 — 공개 상세 404
+    pre = await async_client.get(f"{_PUBLIC}/{_CL_SLUG}/")
+    assert pre.status_code == 404
+
+    # 발행 → 공개 상세 200 + body 노출
+    pub = await async_client.post(f"{BASE}/tools/changelog/{post_id}/publish")
+    assert pub.status_code == 303
+    got = await async_client.get(f"{_PUBLIC}/{_CL_SLUG}/")
+    assert got.status_code == 200
+    assert got.json()["body"] == "Flow body"
+    assert got.json()["tags"] == ["feature", "bugfix"]
+
+    # 삭제 → 공개 상세 다시 404
+    dele = await async_client.post(f"{BASE}/tools/changelog/{post_id}/delete")
+    assert dele.status_code == 303
+    gone = await async_client.get(f"{_PUBLIC}/{_CL_SLUG}/")
+    assert gone.status_code == 404
+
+    await _cleanup_changelog()
+
+
+# 최소 1x1 PNG (이미지 업로드 테스트용)
+import base64
+
+_PNG_1x1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+_UPLOAD = f"{BASE}/tools/changelog/upload-image"
+
+
+async def test_upload_image_requires_auth(async_client: AsyncClient) -> None:
+    """미인증 이미지 업로드 → 401 JSON."""
+    resp = await async_client.post(
+        _UPLOAD, files={"file": ("x.png", _PNG_1x1, "image/png")}
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"]
+
+
+async def test_upload_image_rejects_non_image(async_client: AsyncClient) -> None:
+    await _login(async_client)
+    resp = await async_client.post(
+        _UPLOAD, files={"file": ("x.txt", b"not an image", "text/plain")}
+    )
+    assert resp.status_code == 400
+    assert "image" in resp.json()["error"].lower()
+
+
+async def test_upload_image_authenticated_returns_url(async_client: AsyncClient) -> None:
+    await _login(async_client)
+    resp = await async_client.post(
+        _UPLOAD, files={"file": ("x.png", _PNG_1x1, "image/png")}
+    )
+    assert resp.status_code == 200
+    url = resp.json()["url"]
+    assert url and url.startswith("http")
+    assert "/bucket/" in url or ".amazonaws.com/" in url
