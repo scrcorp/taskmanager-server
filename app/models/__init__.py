@@ -22,6 +22,7 @@ Modules:
 
 from app.models.organization import Organization, Store, ShiftPreset, LaborLawSetting
 from app.models.user import Role, User
+from app.models.employee_no_history import EmployeeNoHistory
 from app.models.work import Shift, Position
 from app.models.token import RefreshToken
 from app.models.user_store import UserStore
@@ -39,7 +40,7 @@ from app.models.warning_category import WarningCategory
 from app.models.warning_signature import WarningSignature
 from app.models.permission import Permission, RolePermission
 from app.models.daily_report import DailyReportTemplate, DailyReportTemplateSection, DailyReport, DailyReportSection, DailyReportComment
-from app.models.report import Report, ReportTemplate, ReportComment
+from app.models.report import Report, ReportTemplate, ReportComment, ReportType, ReportAcknowledgement
 from app.models.task import Task, TaskAssignee, TaskComment
 from app.models.email_verification import EmailVerificationCode
 from app.models.inventory import InventoryCategory, InventorySubUnit, InventoryProduct, StoreInventory, InventoryTransaction, InventoryAudit, InventoryAuditItem, InventoryAuditSetting
@@ -53,6 +54,7 @@ from app.models.schedule_report import ScheduleReportSnapshot
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
     "Role", "User",
+    "EmployeeNoHistory",
     "Shift", "Position",
     "RefreshToken", "UserStore",
     "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistInstance", "ChecklistInstanceItem", "ChecklistItemFile", "ChecklistItemSubmission", "ChecklistItemReviewLog", "ChecklistItemMessage",
@@ -69,7 +71,7 @@ __all__ = [
     "WarningSignature",
     "Permission", "RolePermission",
     "DailyReportTemplate", "DailyReportTemplateSection", "DailyReport", "DailyReportSection", "DailyReportComment",
-    "Report", "ReportTemplate", "ReportComment",
+    "Report", "ReportTemplate", "ReportComment", "ReportType", "ReportAcknowledgement",
     "Task", "TaskAssignee", "TaskComment",
     "EmailVerificationCode",
     "InventoryCategory", "InventorySubUnit", "InventoryProduct", "StoreInventory", "InventoryTransaction", "InventoryAudit", "InventoryAuditItem", "InventoryAuditSetting",

@@ -131,6 +131,8 @@ class ReportTemplateCreate(BaseModel):
     name: str
     store_id: str | None = None
     is_default: bool = False
+    # 적용 report_type code 배열. null 또는 [] = 해당 type 의 모든 report_type 에 적용. 결정-9.
+    applicable_types: list[str] | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -138,6 +140,7 @@ class ReportTemplateUpdate(BaseModel):
     name: str | None = None
     is_default: bool | None = None
     is_active: bool | None = None
+    applicable_types: list[str] | None = None
     payload: dict[str, Any] | None = None
 
 
@@ -149,8 +152,83 @@ class ReportTemplateResponse(BaseModel):
     name: str
     is_default: bool = False
     is_active: bool = True
+    applicable_types: list[str] | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
+
+
+# ── Report Types (daily 'period' 종류 — org-default + store override) ──
+
+# org 에 report_types row 가 하나도 없을 때 사용하는 내장 기본값(결정-7).
+# morning 은 존재하나 기본 비활성.
+DEFAULT_REPORT_TYPE_DEFS: list[dict[str, Any]] = [
+    {"code": "morning", "label": "Morning", "sort_order": 0, "is_active": False},
+    {"code": "lunch", "label": "Lunch", "sort_order": 1, "is_active": True},
+    {"code": "dinner", "label": "Dinner", "sort_order": 2, "is_active": True},
+]
+
+
+class ReportTypeCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=100)
+    store_id: str | None = None  # null = org-default; set = store override/add
+    sort_order: int = 0
+    is_active: bool = True
+    default_deadline_local_time: str | None = None  # "HH:MM"
+    deadline_day_offset: int = 0
+
+
+class ReportTypeUpdate(BaseModel):
+    label: str | None = None
+    sort_order: int | None = None
+    is_active: bool | None = None
+    default_deadline_local_time: str | None = None
+    deadline_day_offset: int | None = None
+
+
+class ReportTypeReorderItem(BaseModel):
+    id: str
+    sort_order: int
+
+
+class ReportTypeReorder(BaseModel):
+    items: list[ReportTypeReorderItem]
+
+
+class ReportTypeResponse(BaseModel):
+    id: str
+    organization_id: str
+    store_id: str | None = None
+    code: str
+    label: str
+    sort_order: int = 0
+    is_active: bool = True
+    default_deadline_local_time: str | None = None
+    deadline_day_offset: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class EffectiveReportType(BaseModel):
+    """매장에 실제로 적용되는 resolved report type (org+store 병합 결과)."""
+    code: str
+    label: str
+    sort_order: int = 0
+    is_active: bool = True
+    default_deadline_local_time: str | None = None
+    deadline_day_offset: int = 0
+    scope: str = "org"  # "org" | "store"
+    # 이 type 을 편집할 때 PUT 대상이 되는 row id (store override 면 store row, 아니면 org row).
+    # 내장 기본값(DB row 없음)이면 None.
+    id: str | None = None
+    # store override 가 가리키는 org-default row id (있으면).
+    org_type_id: str | None = None
+
+
+# ── Review / Acknowledge (P3) ──────────────────────────────────────
+
+class ReportReviewRequest(BaseModel):
+    feedback: str | None = None  # 선택 코멘트 (작성자에게 전달)
 
 
 # ── Report CRUD ────────────────────────────────────────────────────
@@ -198,8 +276,16 @@ class ReportResponse(BaseModel):
     status: str
     report_date: date | None = None
     submitted_at: datetime | None = None
+    deadline_at: datetime | None = None
+    is_overdue: bool = False  # 마감 지남 + 아직 미제출 (display only)
+    is_late: bool = False  # 마감 이후 제출됨 (display only)
+    reviewed_by_id: str | None = None
+    reviewed_by_name: str | None = None
+    reviewed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     payload: dict[str, Any] = Field(default_factory=dict)
     comment_count: int = 0
     comments: list[dict] = []
+    acknowledgement_count: int = 0
+    acknowledgements: list[dict] = []

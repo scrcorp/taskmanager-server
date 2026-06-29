@@ -7,7 +7,7 @@ from sqlalchemy import Date, Select, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.report import Report, ReportTemplate
+from app.models.report import Report, ReportTemplate, ReportType
 from app.repositories.base import BaseRepository
 
 
@@ -23,12 +23,19 @@ class ReportRepository(BaseRepository[Report]):
     ) -> Report | None:
         query: Select = (
             select(Report)
-            .options(selectinload(Report.comments))
+            .options(
+                selectinload(Report.comments),
+                selectinload(Report.acknowledgements),
+            )
             .where(
                 Report.id == report_id,
                 Report.organization_id == organization_id,
                 Report.deleted_at.is_(None),
             )
+            # expire_on_commit=False 환경: 같은 세션에서 commit 후 재조회 시
+            # identity-map 의 이미 로드된 comments/acknowledgements 컬렉션이 갱신되지
+            # 않는다. populate_existing 으로 강제 refresh (detail 응답 정확성 보장).
+            .execution_options(populate_existing=True)
         )
         result = await db.execute(query)
         return result.scalar_one_or_none()
@@ -90,7 +97,10 @@ class ReportRepository(BaseRepository[Report]):
         total: int = count_result.scalar() or 0
 
         query = (
-            base.options(selectinload(Report.comments))
+            base.options(
+                selectinload(Report.comments),
+                selectinload(Report.acknowledgements),
+            )
             .order_by(Report.report_date.desc().nulls_last(), Report.created_at.desc())
             .offset((page - 1) * per_page)
             .limit(per_page)
@@ -104,16 +114,21 @@ class ReportRepository(BaseRepository[Report]):
         store_id: UUID,
         report_date: date,
         period: str,
+        author_id: UUID | None = None,
     ) -> Report | None:
-        result = await db.execute(
-            select(Report).where(
-                Report.type == "daily",
-                Report.store_id == store_id,
-                Report.report_date == report_date,
-                Report.payload["period"].astext == period,
-                Report.deleted_at.is_(None),
-            )
-        )
+        """daily 중복 탐지. per-person 유일성(결정-8): author_id 포함 시 같은
+        작성자의 (store, date, period) 중복만 매칭. author_id 미지정(레거시 호출)
+        시에는 store/date/period 전역 중복을 본다."""
+        conditions = [
+            Report.type == "daily",
+            Report.store_id == store_id,
+            Report.report_date == report_date,
+            Report.payload["period"].astext == period,
+            Report.deleted_at.is_(None),
+        ]
+        if author_id is not None:
+            conditions.append(Report.author_id == author_id)
+        result = await db.execute(select(Report).where(*conditions))
         return result.scalar_one_or_none()
 
 
@@ -124,49 +139,81 @@ class ReportTemplateRepository:
         result = await db.execute(select(ReportTemplate).where(ReportTemplate.id == template_id))
         return result.scalar_one_or_none()
 
+    @staticmethod
+    def _pick_for_type_code(
+        templates: list[ReportTemplate], type_code: str | None
+    ) -> ReportTemplate | None:
+        """한 scope 안의 후보 템플릿들 중 type_code 에 맞는 것을 고른다.
+
+        결정-9: applicable_types 에 type_code 가 포함된 템플릿을 우선,
+        없으면 applicable_types 가 null/[] 인 전체(all-types) 템플릿으로 fallback.
+        type_code 미지정이면 기존 동작(첫 활성 템플릿)을 유지.
+        """
+        if not templates:
+            return None
+        if type_code is None:
+            return templates[0]
+        # 1) 정확히 이 type_code 를 명시한 템플릿
+        for t in templates:
+            at = t.applicable_types or []
+            if type_code in at:
+                return t
+        # 2) 전체 적용(all-types) 템플릿
+        for t in templates:
+            if not t.applicable_types:
+                return t
+        return None
+
     async def get_template_for_store(
         self,
         db: AsyncSession,
         type: str,
         organization_id: UUID,
         store_id: UUID | None = None,
+        type_code: str | None = None,
     ) -> ReportTemplate | None:
         # 1. Store-specific
         if store_id:
             result = await db.execute(
-                select(ReportTemplate).where(
+                select(ReportTemplate)
+                .where(
                     ReportTemplate.type == type,
                     ReportTemplate.store_id == store_id,
                     ReportTemplate.is_active.is_(True),
                 )
+                .order_by(ReportTemplate.created_at.desc())
             )
-            t = result.scalar_one_or_none()
+            t = self._pick_for_type_code(list(result.scalars().all()), type_code)
             if t:
                 return t
 
         # 2. Org-level
         result = await db.execute(
-            select(ReportTemplate).where(
+            select(ReportTemplate)
+            .where(
                 ReportTemplate.type == type,
                 ReportTemplate.organization_id == organization_id,
                 ReportTemplate.store_id.is_(None),
                 ReportTemplate.is_active.is_(True),
             )
+            .order_by(ReportTemplate.created_at.desc())
         )
-        t = result.scalar_one_or_none()
+        t = self._pick_for_type_code(list(result.scalars().all()), type_code)
         if t:
             return t
 
         # 3. System default
         result = await db.execute(
-            select(ReportTemplate).where(
+            select(ReportTemplate)
+            .where(
                 ReportTemplate.type == type,
                 ReportTemplate.organization_id.is_(None),
                 ReportTemplate.is_default.is_(True),
                 ReportTemplate.is_active.is_(True),
             )
+            .order_by(ReportTemplate.created_at.desc())
         )
-        return result.scalar_one_or_none()
+        return self._pick_for_type_code(list(result.scalars().all()), type_code)
 
     async def list_for_org(
         self,
@@ -188,5 +235,88 @@ class ReportTemplateRepository:
         return list(result.scalars().all())
 
 
+class ReportTypeRepository:
+    """report_types CRUD + resolution 데이터 액세스. (순수 쿼리)"""
+
+    async def get_by_id(
+        self, db: AsyncSession, type_id: UUID, organization_id: UUID
+    ) -> ReportType | None:
+        result = await db.execute(
+            select(ReportType).where(
+                ReportType.id == type_id,
+                ReportType.organization_id == organization_id,
+                ReportType.is_deleted.is_(False),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_org_defaults(
+        self, db: AsyncSession, organization_id: UUID
+    ) -> list[ReportType]:
+        result = await db.execute(
+            select(ReportType)
+            .where(
+                ReportType.organization_id == organization_id,
+                ReportType.store_id.is_(None),
+                ReportType.is_deleted.is_(False),
+            )
+            .order_by(ReportType.sort_order, ReportType.label)
+        )
+        return list(result.scalars().all())
+
+    async def list_store_rows(
+        self, db: AsyncSession, organization_id: UUID, store_id: UUID
+    ) -> list[ReportType]:
+        result = await db.execute(
+            select(ReportType)
+            .where(
+                ReportType.organization_id == organization_id,
+                ReportType.store_id == store_id,
+                ReportType.is_deleted.is_(False),
+            )
+            .order_by(ReportType.sort_order, ReportType.label)
+        )
+        return list(result.scalars().all())
+
+    async def list_for_scope(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID | None,
+    ) -> list[ReportType]:
+        """관리용 raw 목록 (resolve 안 함). store_id None → org-default 행만."""
+        q = select(ReportType).where(
+            ReportType.organization_id == organization_id,
+            ReportType.is_deleted.is_(False),
+        )
+        if store_id is None:
+            q = q.where(ReportType.store_id.is_(None))
+        else:
+            q = q.where(ReportType.store_id == store_id)
+        q = q.order_by(ReportType.sort_order, ReportType.label)
+        result = await db.execute(q)
+        return list(result.scalars().all())
+
+    async def find_live_by_code(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        store_id: UUID | None,
+        code: str,
+    ) -> ReportType | None:
+        q = select(ReportType).where(
+            ReportType.organization_id == organization_id,
+            ReportType.code == code,
+            ReportType.is_deleted.is_(False),
+        )
+        if store_id is None:
+            q = q.where(ReportType.store_id.is_(None))
+        else:
+            q = q.where(ReportType.store_id == store_id)
+        result = await db.execute(q)
+        return result.scalar_one_or_none()
+
+
 report_repository: ReportRepository = ReportRepository()
 report_template_repository: ReportTemplateRepository = ReportTemplateRepository()
+report_type_repository: ReportTypeRepository = ReportTypeRepository()

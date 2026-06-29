@@ -92,6 +92,7 @@ from app.api.console.daily_report_templates import router as daily_report_templa
 # Reports 라우터 임포트 (multi-type)
 from app.api.console.reports import router as reports_router
 from app.api.console.report_templates import router as report_templates_router
+from app.api.console.report_types import router as report_types_router
 
 # Tasks 라우터 임포트 (renamed from additional_tasks → issues → tasks)
 from app.api.console.tasks import router as tasks_router
@@ -212,6 +213,7 @@ console_router.include_router(daily_reports_router, prefix="/daily-reports", tag
 console_router.include_router(daily_report_templates_router, prefix="/daily-report-templates", tags=["Daily Report Templates"])
 console_router.include_router(reports_router, prefix="/reports", tags=["Reports"])
 console_router.include_router(report_templates_router, prefix="/report-templates", tags=["Report Templates"])
+console_router.include_router(report_types_router, prefix="/report-types", tags=["Report Types"])
 console_router.include_router(tasks_router, prefix="/tasks", tags=["Tasks"])
 
 # ---------------------------------------------------------------------------
