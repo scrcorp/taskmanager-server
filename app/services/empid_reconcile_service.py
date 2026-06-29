@@ -9,12 +9,15 @@ SoT: docs/99_inbox/2026-06-24 HTM control-plane(=Backoffice) 운영자콘솔 + E
 - 멱등: 이미 employee_no 있으면 skip(=저널). NULL만 채움.
 - PURADAK(폐점) 행 제외. 신규 번호 생성은 이 도구 범위 밖.
 
-버킷(설계 §5):
+버킷(설계 §5 + 확장):
 1. auto       — 이메일 1:1 매칭 + 단일 emp_id + 대상 user employee_no NULL → 자동 제안
 2. multiple   — 멀티스토어 동일인(이메일 같고 emp_id 여러 개) → 운영자가 canonical 선택
+                (어떤 번호가 어느 COMPANY에서 왔는지 함께 표시)
 3. placeholder— 더미/공용 이메일(내부 도메인 or 서로 다른 사람들이 공유) → 매칭 제외
-4. assigned   — 매칭됐으나 이미 employee_no 있음 → skip 표시
-5. deferred   — DB 미매칭(이메일 있으나 user 없음) / 무이메일 → 리포트만
+4. assigned   — 매칭됐고 이미 employee_no 있음 + 파일 번호와 일치 → skip 표시
+5. mismatch   — 이미 employee_no 있는데 파일의 번호가 다름 → 충돌, 운영자 확인 필요
+6. deferred   — DB 미매칭(이메일 있으나 user 없음) / 무이메일 → 리포트만
+                (이름이 비슷한 DB 유저 후보를 힌트로 함께 표시)
 """
 
 from __future__ import annotations
@@ -44,6 +47,14 @@ def _norm_email(value: object) -> str | None:
     return s or None
 
 
+def _name_tokens(name: object) -> set[str]:
+    """이름 → 알파벳 토큰 집합(소문자, 별칭 괄호 제거). 이름 유사도 비교용."""
+    if not name:
+        return set()
+    s = re.sub(r"\(.*?\)", "", str(name)).strip().lower()
+    return {t for t in re.sub(r"[^a-z\s]", "", s).split() if len(t) > 1}
+
+
 def _first_name_token(name: object) -> str:
     """이름에서 별칭 괄호 제거 후 첫 단어(소문자, 알파벳만) — 동일인 판별용."""
     if not name:
@@ -51,6 +62,21 @@ def _first_name_token(name: object) -> str:
     s = re.sub(r"\(.*?\)", "", str(name)).strip().lower()
     parts = re.sub(r"[^a-z\s]", "", s).split()
     return parts[0] if parts else ""
+
+
+def _name_similar(a: set[str], b: set[str]) -> bool:
+    """두 이름 토큰셋이 '비슷한가' — 운영자 수동확인 힌트용(느슨하게).
+
+    기준: 공통 토큰 있고 (Jaccard ≥ 0.5  OR  한쪽이 다른 쪽의 부분집합).
+    예: {john,doe} ~ {john,doe,jr}, {maria,santos} ~ {maria,l,santos}.
+    """
+    if not a or not b:
+        return False
+    inter = a & b
+    if not inter:
+        return False
+    union = a | b
+    return (len(inter) / len(union) >= 0.5) or a <= b or b <= a
 
 
 @dataclass
@@ -75,6 +101,12 @@ class Proposal:
     emp_id: str | None  # 단일 후보(auto)
     emp_id_options: list[str] = field(default_factory=list)  # 멀티(operator 선택)
     note: str = ""
+    # 멀티/충돌 — 각 emp_id가 어느 COMPANY에서 왔는지 (emp_id, "회사1, 회사2")
+    emp_id_sources: list[tuple[str, str]] = field(default_factory=list)
+    # mismatch — DB에 이미 들어있는 사번 (파일과 다를 때)
+    db_emp_id: str | None = None
+    # deferred — 이름이 비슷한 DB 유저 후보 [(full_name, email)]
+    similar: list[tuple[str, str | None]] = field(default_factory=list)
 
 
 @dataclass
@@ -85,6 +117,7 @@ class ReconcileResult:
     multiple: list[Proposal] = field(default_factory=list)
     placeholder: list[Proposal] = field(default_factory=list)
     assigned: list[Proposal] = field(default_factory=list)
+    mismatch: list[Proposal] = field(default_factory=list)
     deferred: list[Proposal] = field(default_factory=list)
     excluded_rows: int = 0  # PURADAK 등 제외 행 수
     total_rows: int = 0
@@ -95,6 +128,7 @@ class ReconcileResult:
             "multiple": len(self.multiple),
             "placeholder": len(self.placeholder),
             "assigned": len(self.assigned),
+            "mismatch": len(self.mismatch),
             "deferred": len(self.deferred),
             "excluded_rows": self.excluded_rows,
             "total_rows": self.total_rows,
@@ -203,19 +237,52 @@ def _is_placeholder_email(email: str) -> bool:
     return domain in _PLACEHOLDER_DOMAINS
 
 
-def classify(emp_rows: list[EmpRow], users_by_email: dict[str, list]) -> ReconcileResult:
+def _sources_for(rows: list[EmpRow], emp_ids: list[str]) -> list[tuple[str, str]]:
+    """각 emp_id가 어느 COMPANY 행에서 왔는지 (emp_id, "회사1, 회사2")."""
+    by_id: dict[str, set[str]] = {}
+    for r in rows:
+        by_id.setdefault(r.emp_id, set()).add(r.company or "—")
+    return [(eid, ", ".join(sorted(by_id.get(eid, set())))) for eid in emp_ids]
+
+
+def classify(
+    emp_rows: list[EmpRow],
+    users_by_email: dict[str, list],
+    users: list | None = None,
+) -> ReconcileResult:
     """순수 분류 로직 — (xlsx 행, 이메일→유저목록) → 버킷.
 
     users_by_email: normalized email → [User, ...] (해당 org).
-    User는 .id, .full_name, .employee_no 속성만 사용.
+    users: 해당 org 전체 유저(이름 유사도 힌트용, 선택). 없으면 이름 매칭 생략.
+    User는 .id, .full_name, .email, .employee_no 속성만 사용.
     """
     result = ReconcileResult()
     result.total_rows = len(emp_rows)
 
-    # 이메일 없는 행 → deferred(no-email)
-    no_email = [r for r in emp_rows if not r.email]
-    for r in no_email:
-        result.deferred.append(Proposal(email=None, name=r.name, user_id=None, user_full_name=None, emp_id=r.emp_id, note="no email"))
+    # 이름 유사도 인덱스 (deferred 힌트용)
+    name_index: list[tuple[set[str], object]] = []
+    if users:
+        for u in users:
+            toks = _name_tokens(getattr(u, "full_name", None))
+            if toks:
+                name_index.append((toks, u))
+
+    def _similar(name: str) -> list[tuple[str, str | None]]:
+        toks = _name_tokens(name)
+        if not toks:
+            return []
+        out: list[tuple[str, str | None]] = []
+        for u_toks, u in name_index:
+            if _name_similar(toks, u_toks):
+                out.append((getattr(u, "full_name", ""), getattr(u, "email", None)))
+        return out[:5]
+
+    # 이메일 없는 행 → deferred(no-email) — 이름 유사 후보 힌트 부착
+    for r in (row for row in emp_rows if not row.email):
+        result.deferred.append(Proposal(
+            email=None, name=r.name, user_id=None, user_full_name=None,
+            emp_id=r.emp_id, note="no email", similar=_similar(r.name),
+        ))
 
     # 이메일별 그룹
     groups: dict[str, list[EmpRow]] = {}
@@ -225,6 +292,7 @@ def classify(emp_rows: list[EmpRow], users_by_email: dict[str, list]) -> Reconci
 
     for email, rows in groups.items():
         emp_ids = sorted({r.emp_id for r in rows})
+        sources = _sources_for(rows, emp_ids)
         first_names = {_first_name_token(r.name) for r in rows}
         same_person = len(first_names) == 1
         rep_name = rows[0].name
@@ -234,7 +302,7 @@ def classify(emp_rows: list[EmpRow], users_by_email: dict[str, list]) -> Reconci
         if _is_placeholder_email(email) or not same_person:
             result.placeholder.append(
                 Proposal(email=email, name=rep_name, user_id=None, user_full_name=None,
-                         emp_id=None, emp_id_options=emp_ids,
+                         emp_id=None, emp_id_options=emp_ids, emp_id_sources=sources,
                          note="internal/shared email — not matchable")
             )
             continue
@@ -244,18 +312,28 @@ def classify(emp_rows: list[EmpRow], users_by_email: dict[str, list]) -> Reconci
             result.deferred.append(
                 Proposal(email=email, name=rep_name, user_id=None, user_full_name=None,
                          emp_id=emp_ids[0] if len(emp_ids) == 1 else None, emp_id_options=emp_ids,
-                         note="email present, no DB user")
+                         emp_id_sources=sources, note="email present, no DB user",
+                         similar=_similar(rep_name))
             )
             continue
 
         user = db_users[0]  # 동일 이메일 1유저가 일반적
+        db_emp = getattr(user, "employee_no", None)
 
-        # 4. 이미 사번 있음 → skip
-        if getattr(user, "employee_no", None):
-            result.assigned.append(
-                Proposal(email=email, name=rep_name, user_id=user.id, user_full_name=user.full_name,
-                         emp_id=user.employee_no, note="already assigned")
-            )
+        # 4/5. 이미 사번 있음 → 파일 번호와 일치하면 skip, 다르면 mismatch(충돌)
+        if db_emp:
+            if db_emp in emp_ids:
+                result.assigned.append(
+                    Proposal(email=email, name=rep_name, user_id=user.id, user_full_name=user.full_name,
+                             emp_id=db_emp, note="already assigned (matches file)")
+                )
+            else:
+                result.mismatch.append(
+                    Proposal(email=email, name=rep_name, user_id=user.id, user_full_name=user.full_name,
+                             emp_id=db_emp, db_emp_id=db_emp, emp_id_options=emp_ids,
+                             emp_id_sources=sources,
+                             note=f"DB has {db_emp}, file has {', '.join(emp_ids)}")
+                )
             continue
 
         # 1/2. NULL → 자동 or 멀티
@@ -266,7 +344,7 @@ def classify(emp_rows: list[EmpRow], users_by_email: dict[str, list]) -> Reconci
         else:
             result.multiple.append(
                 Proposal(email=email, name=rep_name, user_id=user.id, user_full_name=user.full_name,
-                         emp_id=None, emp_id_options=emp_ids,
+                         emp_id=None, emp_id_options=emp_ids, emp_id_sources=sources,
                          note="multi-store same person — pick canonical")
             )
 
@@ -284,9 +362,54 @@ async def reconcile(
         e = _norm_email(u.email)
         if e:
             by_email.setdefault(e, []).append(u)
-    result = classify(emp_rows, by_email)
+    result = classify(emp_rows, by_email, users=users)
     result.excluded_rows = excluded
     return result
+
+
+def build_report_csv(result: ReconcileResult) -> str:
+    """버킷 결과 전체를 공유용 CSV 문자열로 직렬화.
+
+    컬럼: bucket, name, email, db_emp_id, file_emp_ids, sources, similar_db_users, note
+    """
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["bucket", "name", "email", "db_emp_id", "file_emp_ids",
+                "sources", "similar_db_users", "note"])
+
+    def _src(p: Proposal) -> str:
+        if p.emp_id_sources:
+            return " | ".join(f"{eid}={co}" for eid, co in p.emp_id_sources)
+        return ""
+
+    def _sim(p: Proposal) -> str:
+        return " | ".join(f"{n} <{e or '-'}>" for n, e in p.similar)
+
+    def _file_ids(p: Proposal) -> str:
+        if p.emp_id_options:
+            return ", ".join(p.emp_id_options)
+        return p.emp_id or ""
+
+    for bucket, props in (
+        ("auto", result.auto),
+        ("multiple", result.multiple),
+        ("mismatch", result.mismatch),
+        ("assigned", result.assigned),
+        ("placeholder", result.placeholder),
+        ("deferred", result.deferred),
+    ):
+        for p in props:
+            w.writerow([
+                bucket,
+                p.user_full_name or p.name,
+                p.email or "",
+                p.db_emp_id or "",
+                _file_ids(p),
+                _src(p),
+                _sim(p),
+                p.note,
+            ])
+    return buf.getvalue()
 
 
 @dataclass
