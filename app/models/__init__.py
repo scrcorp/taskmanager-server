@@ -26,7 +26,7 @@ from app.models.employee_no_history import EmployeeNoHistory
 from app.models.work import Shift, Position
 from app.models.token import RefreshToken
 from app.models.user_store import UserStore
-from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistInstance, ChecklistInstanceItem, ChecklistItemFile, ChecklistItemSubmission, ChecklistItemReviewLog, ChecklistItemMessage
+from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, ChecklistInstance, ChecklistInstanceItem, ChecklistItemSubmission, ChecklistItemReviewLog, ChecklistItemMessage
 from app.models.communication import Notice, NoticeRead, Voice
 from app.models.alert import Alert
 from app.models.schedule import Schedule, StoreWorkRole, StoreBreakRule, ScheduleRequestTemplate, ScheduleRequestTemplateItem, ScheduleRequest, ScheduleAuditLog
@@ -50,6 +50,7 @@ from app.models.interview import InterviewSlot, InterviewSlotPreference
 from app.models.app_version import AppVersion
 from app.models.tip import TipEntry, TipDistribution, TipAuditLog, TipPeriod, Form4070Document
 from app.models.schedule_report import ScheduleReportSnapshot
+from app.models.file import File, FileUsage
 from app.models.changelog import ChangelogPost
 
 __all__ = [
@@ -58,7 +59,7 @@ __all__ = [
     "EmployeeNoHistory",
     "Shift", "Position",
     "RefreshToken", "UserStore",
-    "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistInstance", "ChecklistInstanceItem", "ChecklistItemFile", "ChecklistItemSubmission", "ChecklistItemReviewLog", "ChecklistItemMessage",
+    "ChecklistTemplate", "ChecklistTemplateItem", "ChecklistInstance", "ChecklistInstanceItem", "ChecklistItemSubmission", "ChecklistItemReviewLog", "ChecklistItemMessage",
     "Notice", "NoticeRead", "Voice",
     "Alert",
     "Schedule", "StoreWorkRole", "StoreBreakRule", "ScheduleRequestTemplate", "ScheduleRequestTemplateItem", "ScheduleRequest", "ScheduleAuditLog",
@@ -82,5 +83,6 @@ __all__ = [
     "AppVersion",
     "TipEntry", "TipDistribution", "TipAuditLog", "TipPeriod", "Form4070Document",
     "ScheduleReportSnapshot",
+    "File", "FileUsage",
     "ChangelogPost",
 ]

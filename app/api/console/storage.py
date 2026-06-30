@@ -12,7 +12,11 @@ from pydantic import BaseModel
 
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.services.storage_service import storage_service
+from app.services.storage_service import (
+    InvalidStorageFolder,
+    UnsafeStorageKey,
+    storage_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +43,15 @@ async def create_presigned_url(
     """presigned upload URL을 생성합니다 (S3 또는 로컬)."""
     base_url = str(request.base_url).rstrip("/")
     try:
-        result = storage_service.generate_presigned_upload_url(
+        result = storage_service.presign_upload(
+            folder=data.folder,
             filename=data.filename,
             content_type=data.content_type,
-            folder=data.folder,
             base_url=base_url,
             upload_path_prefix="/api/v1/console/storage",
         )
+    except InvalidStorageFolder:
+        raise HTTPException(status_code=400, detail={"code": "invalid_folder"})
     except Exception as e:
         logger.error("Presigned URL 생성 실패: %s", e)
         raise HTTPException(
@@ -90,8 +96,14 @@ async def upload_local(
     """로컬 모드 전용 — 파일을 서버에 직접 저장합니다.
 
     Admin의 ImageUpload가 presigned URL 대신 이 엔드포인트로 PUT합니다.
-    인증 없음 (presigned URL 발급 시 이미 인증됨).
+    키 안전성 검증(temp/ 한정 + traversal 차단)으로 임의경로 쓰기를 막는다.
+
+    NOTE(보류): 클라가 이 PUT에 Authorization 헤더를 싣지 않고, prod presigned는
+    S3 URL이라 헤더 추가 시 서명 충돌 위험. 토큰 인증은 Phase 2에서 클라와 함께 검토.
     """
     body = await request.body()
-    storage_service.save_local(key, body)
+    try:
+        storage_service.receive_upload(key, body)
+    except UnsafeStorageKey:
+        raise HTTPException(status_code=400, detail={"code": "invalid_key"})
     return {"ok": True}

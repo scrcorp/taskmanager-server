@@ -214,6 +214,24 @@ class ExcelImportResponse(BaseModel):
     errors: list[str] = []
 
 
+class PhotoMeta(BaseModel):
+    """업로드 사진 1장의 메타데이터 — 최종/temp 키 + 주장 촬영시각.
+
+    photos[] 항목. 신뢰 앵커는 서버 수신시각(파일 row의 created_at)이고,
+    capture_time 은 클라가 주장하는 촬영시각이다. capture_time 이 없으면
+    서버가 capture_source="unknown" 으로 기록한다(받되 플래그).
+
+    Attributes:
+        key: temp 키 또는 최종 키 (finalize 대상)
+        capture_time: 주장 촬영시각 — 라이브=셔터시각, 갤러리=EXIF DateTimeOriginal
+        capture_source: 출처 — "live" | "gallery" | "unknown"
+    """
+
+    key: str
+    capture_time: datetime | None = None
+    capture_source: str | None = None
+
+
 class ChecklistItemComplete(BaseModel):
     """체크리스트 항목 완료 토글 요청 스키마.
 
@@ -223,12 +241,14 @@ class ChecklistItemComplete(BaseModel):
     Attributes:
         is_completed: 완료 여부 (True=완료, False=미완료)
         timezone: 클라이언트 IANA 타임존 (Client IANA timezone, e.g. "America/Los_Angeles")
+        photos: per-photo 촬영시각 메타 (신규, 우선). photos > photo_urls > photo_url.
     """
 
     is_completed: bool  # 완료 여부 — True이면 completed_at 자동 설정 (Completion flag)
     timezone: str | None = None  # 클라이언트 타임존 — None이면 매장/조직 타임존 사용 (Client timezone, falls back to store/org)
+    photos: list[PhotoMeta] | None = None  # 신규: per-photo 촬영시각 메타 (우선 사용)
     photo_url: str | None = None  # 사진 URL (하위 호환)
-    photo_urls: list[str] | None = None  # 사진 URL 배열
+    photo_urls: list[str] | None = None  # 사진 URL 배열 (하위 호환)
     note: str | None = None  # 메모 — verification_type이 text일 때 필수 (Note, optional)
 
 
@@ -240,8 +260,9 @@ class ChecklistItemRespond(BaseModel):
 
     timezone: str | None = None  # 클라이언트 타임존 — None이면 매장/조직 타임존 사용
     response_comment: str | None = None
+    photos: list[PhotoMeta] | None = None  # 신규: per-photo 촬영시각 메타 (우선 사용)
     photo_url: str | None = None  # 하위 호환
-    photo_urls: list[str] | None = None  # 사진 URL 배열
+    photo_urls: list[str] | None = None  # 사진 URL 배열 (하위 호환)
 
 
 # === 공지사항 (Notice) 스키마 ===
@@ -495,11 +516,13 @@ class ChecklistCompletionCreate(BaseModel):
     Used when a staff member completes an individual checklist item.
 
     Attributes:
+        photos: per-photo 촬영시각 메타 (신규, 우선). photos > photo_urls > photo_url.
         photo_url: 사진 URL (Photo evidence URL, optional)
         note: 메모 (Text note, optional)
         location: GPS 위치 (lat/lng location data, optional)
     """
 
+    photos: list[PhotoMeta] | None = None  # 신규: per-photo 촬영시각 메타 (우선 사용)
     photo_url: str | None = None  # 사진 URL (단일, 하위 호환) — Single photo URL (backward compat)
     photo_urls: list[str] | None = None  # 사진 URL 배열 — Multiple photo URLs (preferred)
     note: str | None = None  # 메모 (Text note, optional)
@@ -561,6 +584,7 @@ class ChecklistInstanceResponse(BaseModel):
     user_id: str  # 사용자 UUID 문자열 (User UUID as string)
     user_name: str  # 사용자 이름 — 조인된 값 (User name, resolved)
     work_date: date  # 근무 날짜 (Work date)
+    timezone: str | None = None  # store→org→default 해석 타임존 — 사진 워터마크 등 시각 표시용 (Resolved store timezone)
     total_items: int  # 총 체크리스트 항목 수 (Total items)
     completed_items: int  # 완료된 항목 수 (Completed items)
     status: str  # 진행 상태 — "pending"|"in_progress"|"completed" (Workflow status)

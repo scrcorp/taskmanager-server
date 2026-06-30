@@ -16,7 +16,6 @@ from sqlalchemy.orm import selectinload
 from app.models.checklist import (
     ChecklistInstance,
     ChecklistInstanceItem,
-    ChecklistItemFile,
     ChecklistItemMessage,
     ChecklistItemReviewLog,
     ChecklistItemSubmission,

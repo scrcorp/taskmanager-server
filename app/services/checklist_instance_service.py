@@ -9,29 +9,131 @@ from datetime import date, datetime, timezone
 from typing import Any, Sequence
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.checklist import (
     ChecklistInstance,
     ChecklistInstanceItem,
-    ChecklistItemFile,
     ChecklistItemMessage,
     ChecklistItemReviewLog,
     ChecklistItemSubmission,
     ChecklistTemplate,
     ClScoreHistory,
 )
+from app.models.file import File, FileUsage
 from app.models.organization import Store
 from app.models.user import User
 from app.repositories.checklist_instance_repository import checklist_instance_repository
 from app.services.storage_service import storage_service
 from app.config import settings
+from app.utils.capture import enforce_capture_time, normalize_photos
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
+from app.utils.timezone import get_store_timezone
 
 # URL 해석 단축 — resolve_url alias for response building
 _resolve = storage_service.resolve_url
+
+
+def _capture_metadata(capture_time: datetime | None, capture_source: str | None) -> dict | None:
+    """촬영 메타를 files.metadata 형태로 변환. 둘 다 없으면 None(미추출 tri-state)."""
+    if capture_time is None and capture_source is None:
+        return None
+    return {
+        "captured_at": capture_time.isoformat() if capture_time else None,
+        "capture_source": capture_source,
+    }
+
+
+async def _add_file_usage(
+    db: AsyncSession,
+    *,
+    owner_id: UUID,
+    instance: ChecklistInstance,
+    path: str,
+    file_type: str,
+    uploaded_by: UUID | None,
+    context: str,
+    context_id: UUID | None,
+    sort_order: int = 0,
+    capture_time: datetime | None = None,
+    capture_source: str | None = None,
+) -> None:
+    """files 행(없으면 생성, 있으면 재사용) + file_usages 행을 추가한다.
+
+    같은 path 가 이미 있으면(재제출로 같은 사진 재사용) 그 files 행을 **재사용** → blob 복사 안 함.
+    path 는 UNIQUE 라 1 물리파일 = 1 files 행. 촬영 메타는 files.metadata 에만 저장.
+    usage 는 owner_type='cl_item' + owner_id(item) + context 로 어디서 쓰는지 기록.
+    """
+    file = await db.scalar(select(File).where(File.path == path))
+    if file is None:
+        file = File(
+            organization_id=instance.organization_id,
+            store_id=instance.store_id,
+            path=path,
+            file_type=file_type,
+            status="active",
+            uploaded_by=uploaded_by,
+            file_metadata=_capture_metadata(capture_time, capture_source),
+        )
+        db.add(file)
+        await db.flush()  # file.id 확보
+    db.add(
+        FileUsage(
+            file_id=file.id,
+            owner_type="cl_item",
+            owner_id=owner_id,
+            context=context,
+            context_id=context_id,
+            sort_order=sort_order,
+        )
+    )
+
+
+def _serialize_file(u: FileUsage) -> dict:
+    """file_usages(usage) + 연결된 files 행을 응답 dict 로 직렬화 (기존 계약 유지).
+
+    file_url/thumb_url/file_type/received_at 는 files 행에서, capture_time/capture_source 는
+    files.metadata 에서 가져온다. metadata 가 NULL(legacy backfill)이면 둘 다 None.
+    """
+    file = u.file
+    meta = file.file_metadata or {}
+    return {
+        "id": str(u.id),
+        "context": u.context,
+        "context_id": str(u.context_id) if u.context_id else None,
+        "file_url": _resolve(file.path),
+        # 썸네일 — 콘솔 그리드용. thumb 파생 부재 시 full 로 자연 폴백
+        # (콘솔이 key 를 직접 조작하지 않도록 서버가 variant 해석).
+        "thumb_url": _resolve(file.path, variant="thumb"),
+        "file_type": file.file_type,
+        "sort_order": u.sort_order,
+        # 촬영시각 메타 — 신뢰 앵커는 files.created_at(서버 수신). 콘솔이 claimed vs received
+        # 격차/출처로 위변조 신호 표시. legacy 행은 metadata=NULL → 둘 다 None.
+        "capture_time": meta.get("captured_at"),
+        "capture_source": meta.get("capture_source"),
+        "received_at": file.created_at.isoformat() if file.created_at else None,
+    }
+
+
+async def purge_cl_item_file_usages(db: AsyncSession, instance_id: UUID) -> None:
+    """이 instance 의 모든 item 에 달린 file_usages(owner_type='cl_item')를 삭제한다.
+
+    owner_id 는 폴리모픽(FK 없음)이라 instance/item 하드삭제가 file_usages 를 cascade 하지 못한다.
+    → cl_instances/cl_instance_items 를 하드삭제하는 **모든 경로**는 삭제 직전에 이 함수를 호출해야
+    orphan usage 가 안 생긴다. blob 은 안 건드림(usage 0 된 files 는 file_service.gc_orphan_files 가 회수).
+    """
+    await db.execute(
+        delete(FileUsage).where(
+            FileUsage.owner_type == "cl_item",
+            FileUsage.owner_id.in_(
+                select(ChecklistInstanceItem.id).where(
+                    ChecklistInstanceItem.instance_id == instance_id
+                )
+            ),
+        )
+    )
 
 
 class ChecklistInstanceService:
@@ -150,7 +252,7 @@ class ChecklistInstanceService:
         """체크리스트 인스턴스를 초기 상태(pending)로 초기화합니다.
 
         모든 항목 완료 상태를 클리어하고 status → pending.
-        cl_item_submissions, cl_item_files 등 이력 데이터는 보존.
+        cl_item_submissions, file_usages 등 이력 데이터는 보존.
         """
         from sqlalchemy import update as sa_update
 
@@ -185,14 +287,20 @@ class ChecklistInstanceService:
     ) -> "ChecklistInstance | None":
         """Work role 변경 시 기존 instance를 삭제하고 새 role 기반으로 재생성.
 
-        기존 진행 기록(item submissions, files, messages 등)은 DB cascade로 함께 삭제.
+        items/submissions/messages 는 DB cascade 로 삭제된다. 이 instance 의 file_usages
+        (owner_type='cl_item')는 owner_id 가 폴리모픽(FK 없음)이라 cascade 안 되므로 명시적으로
+        한 줄(bulk) 삭제한다. blob 은 안 건드리고, usage 없는 files 는 별도 GC 가 회수한다.
         호출자가 'reset_checklist=true' 플래그로 이를 명시적으로 동의한 상태여야 함.
         """
         from sqlalchemy import delete as sa_delete
 
-        # cascade로 items 포함 삭제 (FK on delete cascade 의존)
+        # 이 instance 의 file_usages 정리 (owner_id 폴리모픽이라 cascade 안 됨; blob 은 GC).
+        await purge_cl_item_file_usages(db, instance.id)
+        await db.flush()
+
+        # items + instance Core 삭제 (FK on delete cascade 가 submissions/messages/reviews 처리).
         await db.execute(sa_delete(ChecklistInstanceItem).where(ChecklistInstanceItem.instance_id == instance.id))
-        await db.delete(instance)
+        await db.execute(sa_delete(ChecklistInstance).where(ChecklistInstance.id == instance.id))
         await db.flush()
         # 새 work_role 기반으로 재생성. default_checklist_id 없으면 None 반환되어 CL 없는 상태로 남음.
         return await self.create_for_schedule(
@@ -269,13 +377,14 @@ class ChecklistInstanceService:
         user_id: UUID,
         photo_url: str | None = None,
         photo_urls: list[str] | None = None,
+        photos: list | None = None,
         note: str | None = None,
         location: dict | None = None,
         client_timezone: str = "America/Los_Angeles",
     ) -> ChecklistInstance:
         """체크리스트 항목을 완료 처리합니다.
 
-        Updates cl_instance_items row and creates cl_item_files + cl_item_submissions.
+        Updates cl_instance_items row and creates file_usages + cl_item_submissions.
         Accepts photo_urls (list, preferred) or photo_url (single, backward compat).
 
         Raises:
@@ -305,19 +414,19 @@ class ChecklistInstanceService:
             # 멱등성: 이미 완료된 항목이면 에러 대신 현재 상태 반환
             return await self.get_instance(db, instance_id)
 
-        # Resolve effective photo list: photo_urls takes priority over single photo_url
-        effective_photo_urls: list[str] = []
-        if photo_urls:
-            effective_photo_urls = photo_urls
-        elif photo_url:
-            effective_photo_urls = [photo_url]
+        # 사진 정규화: photos(메타 포함) > photo_urls > photo_url 우선순위
+        normalized_photos = normalize_photos(photos, photo_urls, photo_url)
 
         # 항목 타입별 검증
         v_type: str = target_item.verification_type or "none"
-        if "photo" in v_type and not effective_photo_urls:
+        if "photo" in v_type and not normalized_photos:
             raise BadRequestError("Photo is required for this item")
         if "text" in v_type and not note:
             raise BadRequestError("Note is required for this item")
+
+        # 촬영시각 강제(과도기엔 off) — 검증맥락 사진 경로에만 적용
+        if "photo" in v_type:
+            enforce_capture_time(normalized_photos, required=settings.REQUIRE_CAPTURE_TIME)
 
         try:
             now = datetime.now(timezone.utc)
@@ -340,19 +449,23 @@ class ChecklistInstanceService:
             db.add(submission)
             await db.flush()
 
-            # 파일 저장 — one row per photo
-            for idx, p_url in enumerate(effective_photo_urls):
-                finalized = storage_service.finalize_upload(p_url)
-                file_row = ChecklistItemFile(
-                    item_id=target_item.id,
-                    context="submission",
-                    context_id=submission.id,
-                    file_url=finalized,
-                    file_type="photo",
-                    sort_order=idx,
-                    uploaded_by=user_id,
-                )
-                db.add(file_row)
+            # 파일 저장 — files 행(재사용 upsert) + file_usages (촬영 메타는 files.metadata)
+            for idx, np in enumerate(normalized_photos):
+                finalized = storage_service.put_finalized(np.key)
+                if finalized:
+                    await _add_file_usage(
+                        db,
+                        owner_id=target_item.id,
+                        instance=instance,
+                        path=finalized,
+                        file_type="photo",
+                        uploaded_by=user_id,
+                        context="submission",
+                        context_id=submission.id,
+                        sort_order=idx,
+                        capture_time=np.capture_time,
+                        capture_source=np.capture_source,
+                    )
 
             await db.flush()
 
@@ -431,6 +544,7 @@ class ChecklistInstanceService:
         user_id: UUID,
         photo_url: str | None = None,
         photo_urls: list[str] | None = None,
+        photos: list | None = None,
         note: str | None = None,
         location: dict | None = None,
         client_timezone: str | None = None,
@@ -496,21 +610,25 @@ class ChecklistInstanceService:
             if client_timezone:
                 target_item.completed_tz = client_timezone
 
-            # 새 파일 추가 (photo_urls 우선, photo_url fallback)
-            effective_urls = photo_urls or ([photo_url] if photo_url else [])
-            for idx, url in enumerate(effective_urls):
-                finalized = storage_service.finalize_upload(url)
+            # 새 파일 추가 (photos 우선, photo_urls/photo_url fallback — 촬영시각 기록)
+            normalized_photos = normalize_photos(photos, photo_urls, photo_url)
+            enforce_capture_time(normalized_photos, required=settings.REQUIRE_CAPTURE_TIME)
+            for idx, np in enumerate(normalized_photos):
+                finalized = storage_service.put_finalized(np.key)
                 if finalized:
-                    new_file = ChecklistItemFile(
-                        item_id=target_item.id,
-                        context="submission",
-                        context_id=new_submission.id,
-                        file_url=finalized,
+                    await _add_file_usage(
+                        db,
+                        owner_id=target_item.id,
+                        instance=instance,
+                        path=finalized,
                         file_type="photo",
                         uploaded_by=user_id,
+                        context="submission",
+                        context_id=new_submission.id,
                         sort_order=idx,
+                        capture_time=np.capture_time,
+                        capture_source=np.capture_source,
                     )
-                    db.add(new_file)
 
             await db.flush()
 
@@ -592,18 +710,19 @@ class ChecklistInstanceService:
             db.add(log)
             await db.flush()
 
-            # 리뷰 피드백 사진이 있으면 cl_item_files에 저장
+            # 리뷰 피드백 사진이 있으면 files(재사용 upsert) + file_usages 로 저장
             if comment_photo_url:
-                finalized = storage_service.finalize_upload(comment_photo_url)
-                file_row = ChecklistItemFile(
-                    item_id=target_item.id,
-                    context="review",
-                    context_id=log.id,
-                    file_url=finalized,
+                finalized = storage_service.put_finalized(comment_photo_url)
+                await _add_file_usage(
+                    db,
+                    owner_id=target_item.id,
+                    instance=instance,
+                    path=finalized,
                     file_type="photo",
                     uploaded_by=reviewer_id,
+                    context="review",
+                    context_id=log.id,
                 )
-                db.add(file_row)
 
             target_item.review_result = result
             target_item.reviewer_id = reviewer_id
@@ -736,7 +855,7 @@ class ChecklistInstanceService:
         try:
             if content_type in ("photo", "video"):
                 # photo/video: finalize upload → save as cl_item_file with context='chat'
-                file_key = storage_service.finalize_upload(content)
+                file_key = storage_service.put_finalized(content)
                 msg = ChecklistItemMessage(
                     item_id=target_item.id,
                     author_id=author_id,
@@ -745,15 +864,17 @@ class ChecklistInstanceService:
                 db.add(msg)
                 await db.flush()
                 await db.refresh(msg)
-                file_record = ChecklistItemFile(
-                    item_id=target_item.id,
+                await _add_file_usage(
+                    db,
+                    owner_id=target_item.id,
+                    instance=instance,
+                    path=file_key,
+                    file_type=content_type,
+                    uploaded_by=author_id,
                     context="chat",
                     context_id=msg.id,
-                    file_url=file_key,
-                    file_type=content_type,
                     sort_order=0,
                 )
-                db.add(file_record)
             else:
                 # text message
                 msg = ChecklistItemMessage(
@@ -879,18 +1000,14 @@ class ChecklistInstanceService:
                 raise ForbiddenError("No access to this store's checklist")
 
         try:
-            # Delete associated files (context="chat", context_id=message.id)
-            related_files = (
-                await db.execute(
-                    select(ChecklistItemFile).where(
-                        ChecklistItemFile.context == "chat",
-                        ChecklistItemFile.context_id == existing.id,
-                    )
+            # 이 채팅 메시지의 file_usages 한 줄 삭제 (blob 은 GC 가 회수).
+            await db.execute(
+                delete(FileUsage).where(
+                    FileUsage.owner_type == "cl_item",
+                    FileUsage.context == "chat",
+                    FileUsage.context_id == existing.id,
                 )
-            ).scalars().all()
-            for f in related_files:
-                storage_service.delete_file(f.file_url)
-                await db.delete(f)
+            )
 
             await db.delete(existing)
             await db.flush()
@@ -1013,11 +1130,11 @@ class ChecklistInstanceService:
             # 최신 submission
             log_latest_sub = sorted(item.submissions, key=lambda s: s.version)[-1] if item.submissions else None
 
-            # 현재 파일 URL (최신 파일)
+            # 현재 파일 URL (최신 파일 — files.created_at 기준)
             photo_url: str | None = None
             if item.files:
                 latest_file = sorted(item.files, key=lambda f: f.created_at)[-1]
-                photo_url = _resolve(latest_file.file_url)
+                photo_url = _resolve(latest_file.file.path)
 
             items.append({
                 "id": str(item.id),
@@ -1116,6 +1233,9 @@ class ChecklistInstanceService:
         user_result = await db.execute(select(User.full_name).where(User.id == instance.user_id))
         user_name: str = user_result.scalar() or "Unknown"
 
+        # store→org→default 로 해석한 타임존 — 콘솔이 사진 워터마크 등 시각을 store-tz 로 표시.
+        store_tz: str = await get_store_timezone(db, instance.store_id)
+
         return {
             "id": str(instance.id),
             "template_id": str(instance.template_id) if instance.template_id else None,
@@ -1125,6 +1245,7 @@ class ChecklistInstanceService:
             "user_id": str(instance.user_id),
             "user_name": user_name,
             "work_date": instance.work_date,
+            "timezone": store_tz,
             "total_items": instance.total_items,
             "completed_items": instance.completed_items,
             "status": instance.status,
@@ -1298,16 +1419,9 @@ class ChecklistInstanceService:
                 "reviewed_at": item.reviewed_at.isoformat() if item.reviewed_at else None,
             }
 
-            # files — all files for this item, resolved URLs
+            # files — all files for this item, resolved URLs (files 행 경유)
             item_data["files"] = [
-                {
-                    "id": str(f.id),
-                    "context": f.context,
-                    "context_id": str(f.context_id) if f.context_id else None,
-                    "file_url": _resolve(f.file_url),
-                    "file_type": f.file_type,
-                    "sort_order": f.sort_order,
-                }
+                _serialize_file(f)
                 for f in sorted(item.files or [], key=lambda f: f.created_at)
             ]
 

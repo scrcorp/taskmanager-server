@@ -2,6 +2,9 @@
 from datetime import datetime
 from pydantic import BaseModel
 
+# 검증맥락 사진의 촬영시각 출처 — 체크리스트와 동일 의미(live=셔터, gallery=EXIF, unknown=미상).
+CAPTURE_SOURCES = ["live", "gallery", "unknown"]
+
 
 TASK_STATUSES = ["pending", "in_progress", "under_review", "completed"]
 TASK_PRIORITIES = ["normal", "urgent"]
@@ -16,6 +19,10 @@ class TaskAttachment(BaseModel):
     kind: str | None = None  # "image" | "video" | "file"
     name: str | None = None
     size: int | None = None
+    # 촬영시각 메타 — 받으면 JSONB 에 그대로 보존(강제 검증 없음, 체크리스트 완료만 강제 대상).
+    # 신뢰 앵커는 task/comment 의 created_at(서버 수신시각).
+    capture_time: datetime | None = None
+    capture_source: str | None = None  # live | gallery | unknown
 
 
 class TaskLinks(BaseModel):

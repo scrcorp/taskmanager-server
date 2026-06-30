@@ -588,8 +588,9 @@ class WarningService:
             except Exception:
                 pass
 
-        key = storage_service.upload_bytes(
-            pdf_bytes, filename or "signed.pdf", "warnings", content_type="application/pdf"
+        key = storage_service.put_bytes(
+            pdf_bytes, folder="warnings", filename=filename or "signed.pdf",
+            content_type="application/pdf",
         )
         now = datetime.now(timezone.utc)
         try:

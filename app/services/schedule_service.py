@@ -2240,9 +2240,14 @@ class ScheduleService:
                 )
                 existing: ChecklistInstance | None = existing_result.scalar_one_or_none()
 
+                # file_usages 는 owner_id 폴리모픽(FK 없음)이라 instance 삭제로 cascade 안 됨 →
+                # 하드삭제 전에 명시적으로 정리(orphan usage 방지). blob 은 GC 가 회수.
+                from app.services.checklist_instance_service import purge_cl_item_file_usages
+
                 if checklist_template_id is None:
                     # 제거 모드 — Remove mode
                     if existing is not None:
+                        await purge_cl_item_file_usages(db, existing.id)
                         await db.delete(existing)
                         await db.flush()
                         removed += 1
@@ -2252,6 +2257,7 @@ class ScheduleService:
                     # 할당/교체 모드 — Assign/Replace mode
                     if existing is not None:
                         # 기존 인스턴스 교체 — Replace existing instance
+                        await purge_cl_item_file_usages(db, existing.id)
                         await db.delete(existing)
                         await db.flush()
 

@@ -271,17 +271,15 @@ async def complete_checklist_item(
     effective_tz = resolve_timezone(data.timezone, store_tz)
 
     if data.is_completed:
-        # photo_urls 우선, 없으면 photo_url 하위 호환
-        photo_urls = data.photo_urls
-        if not photo_urls and data.photo_url:
-            photo_urls = [data.photo_url]
-        # 완료 처리
+        # photos(메타 포함) 우선 — 정규화/우선순위는 서비스에서 처리
         await checklist_instance_service.complete_item(
             db,
             instance_id=cl_instance.id,
             item_index=item_index,
             user_id=current_user.id,
-            photo_urls=photo_urls,
+            photos=data.photos,
+            photo_urls=data.photo_urls,
+            photo_url=data.photo_url,
             note=data.note,
             client_timezone=effective_tz,
         )
@@ -322,15 +320,15 @@ async def respond_to_rejection(
     store_tz = await get_store_timezone(db, cl_instance.store_id)
     effective_tz = resolve_timezone(data.timezone, store_tz)
 
-    photo_urls = data.photo_urls
-    if not photo_urls and data.photo_url:
-        photo_urls = [data.photo_url]
+    # photos(메타 포함) 우선 — 정규화/우선순위는 서비스에서 처리
     await checklist_instance_service.resubmit_completion(
         db,
         instance_id=cl_instance.id,
         item_index=item_index,
         user_id=current_user.id,
-        photo_urls=photo_urls,
+        photos=data.photos,
+        photo_urls=data.photo_urls,
+        photo_url=data.photo_url,
         note=data.response_comment,
         client_timezone=effective_tz,
     )
