@@ -200,6 +200,43 @@ async def test_publish_sets_timestamp_and_toggles():
 
 
 @pytest.mark.asyncio
+async def test_general_category_published_and_filterable():
+    """general 카테고리(제품 전반/통합)로 발행 → 공개 목록 + category=general 필터 노출."""
+    async with async_session() as db:
+        await db.execute(delete(ChangelogPost).where(ChangelogPost.slug.like(f"{_PREFIX}gen%")))
+        await db.commit()
+        post = await changelog_service.create(
+            db,
+            ChangelogCreate(
+                title="Platform-wide update",
+                category="general",  # Literal 이 'general' 을 허용해야 통과
+                body="Cross-surface changes",
+                slug=f"{_PREFIX}gen",
+            ),
+        )
+        await changelog_service.set_published(db, post.id, True)
+        await db.commit()
+
+    try:
+        async with _client() as c:
+            # category=general 필터로 잡힌다
+            resp = await c.get(f"{PUBLIC}/", params={"category": "general"})
+            data = resp.json()
+            assert resp.status_code == 200
+            assert any(it["slug"] == f"{_PREFIX}gen" for it in data["items"])
+            assert all(it["category"] == "general" for it in data["items"])
+
+            # 무필터(전체 집계 = 홈페이지 'All' 탭)에도 노출된다
+            resp_all = await c.get(f"{PUBLIC}/")
+            slugs = {it["slug"] for it in resp_all.json()["items"]}
+            assert f"{_PREFIX}gen" in slugs
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(ChangelogPost).where(ChangelogPost.slug.like(f"{_PREFIX}gen%")))
+            await db.commit()
+
+
+@pytest.mark.asyncio
 async def test_update_missing_raises():
     import uuid
     async with async_session() as db:
