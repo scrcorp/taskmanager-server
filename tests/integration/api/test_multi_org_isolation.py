@@ -161,3 +161,31 @@ async def test_cross_org_user_detail_is_404(org2: dict, async_client: AsyncClien
         f"/api/v1/console/users/{org2['user_id']}", headers=admin_headers
     )
     assert resp.status_code == 404, resp.text
+
+
+# ── 역방향(org2 → org1) 격리: org2 owner 가 org1 자원 접근 시 차단 ──────────
+
+
+async def test_org2_owner_cannot_read_org1_store(
+    org2: dict, async_client: AsyncClient, test_store_id
+):
+    """org2 owner 가 org1 의 store_id 를 조회 → 404."""
+    token = await _login("org2owner")
+    resp = await async_client.get(
+        f"/api/v1/console/stores/{test_store_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_org2_owner_cannot_read_org1_user(
+    org2: dict, async_client: AsyncClient, test_users: dict
+):
+    """org2 owner 가 org1 의 user_id 를 조회 → 404."""
+    org1_user_id = test_users["testgm"]["id"]
+    token = await _login("org2owner")
+    resp = await async_client.get(
+        f"/api/v1/console/users/{org1_user_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404, resp.text
