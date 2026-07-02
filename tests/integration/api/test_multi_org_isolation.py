@@ -11,6 +11,7 @@ conftest 는 단일 org(org1)를 세션 시드한다. 이 파일은 함수 스�
 
 from __future__ import annotations
 
+from datetime import date, time
 from typing import AsyncIterator
 
 import pytest_asyncio
@@ -21,6 +22,7 @@ from app.database import async_session
 from app.main import app
 from app.models.organization import Organization, Store
 from app.models.permission import Permission, RolePermission
+from app.models.schedule import Schedule
 from app.models.user import Role, User
 from app.utils.password import hash_password
 
@@ -57,10 +59,29 @@ async def org2() -> AsyncIterator[dict]:
 
         store = Store(organization_id=org.id, name="Org2 Downtown", timezone="UTC")
         db.add(store)
+        await db.flush()
+
+        # org2 의 스케줄 신청(requested) — cross-org IDOR 검증용.
+        sched = Schedule(
+            organization_id=org.id,
+            user_id=user.id,
+            store_id=store.id,
+            work_date=date(2026, 1, 15),
+            start_time=time(9, 0),
+            end_time=time(17, 0),
+            status="requested",
+        )
+        db.add(sched)
         await db.commit()
         await db.refresh(org)
         await db.refresh(store)
-        data = {"org_id": org.id, "store_id": store.id, "username": "org2owner"}
+        await db.refresh(sched)
+        data = {
+            "org_id": org.id,
+            "store_id": store.id,
+            "username": "org2owner",
+            "request_id": sched.id,
+        }
 
     try:
         yield data
@@ -112,3 +133,22 @@ async def test_cross_org_store_detail_is_404(org2: dict, async_client: AsyncClie
         f"/api/v1/console/stores/{org2['store_id']}", headers=admin_headers
     )
     assert resp.status_code == 404, resp.text
+
+
+async def test_cross_org_schedule_request_status_change_is_404(
+    org2: dict, async_client: AsyncClient, admin_headers: dict
+):
+    """org1 admin 이 org2 의 schedule request 상태를 변경 시도 → 404 (write IDOR 차단)."""
+    resp = await async_client.patch(
+        f"/api/v1/console/schedule-requests/{org2['request_id']}/status",
+        headers=admin_headers,
+        json={"status": "rejected"},
+    )
+    assert resp.status_code == 404, resp.text
+
+    # org2 의 request 는 변경되지 않았어야 함 (여전히 requested).
+    async with async_session() as db:
+        sched = (
+            await db.execute(select(Schedule).where(Schedule.id == org2["request_id"]))
+        ).scalar_one()
+        assert sched.status == "requested"
