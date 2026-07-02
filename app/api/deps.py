@@ -165,6 +165,30 @@ async def get_current_user(
             if issued_at < user.password_changed_at - timedelta(seconds=2):
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Password changed, please re-login")
 
+    # [Model B] JWT 의 org 컨텍스트를 사용자의 실제 멤버십과 대조 (forged org 방지).
+    # 멤버십이 하나라도 있으면 JWT org 는 그중 하나(active)여야 한다.
+    # 멤버십이 전혀 없는 계정(백필 이전 신규 등)은 레거시 경로(user.organization_id)로 허용.
+    # 비-mutating: user.role/organization_id 는 건드리지 않는다(단일 org 에선 이미 일치).
+    sel_org = payload.get("org")
+    if sel_org is not None:
+        from app.models.org_member import OrgMember
+
+        member_org_ids = set(
+            (
+                await db.execute(
+                    select(OrgMember.organization_id).where(
+                        OrgMember.user_id == user.id,
+                        OrgMember.status != "terminated",
+                    )
+                )
+            ).scalars().all()
+        )
+        if member_org_ids and UUID(sel_org) not in member_org_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not a member of the selected organization",
+            )
+
     return user
 
 

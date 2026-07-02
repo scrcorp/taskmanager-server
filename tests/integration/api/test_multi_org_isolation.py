@@ -189,3 +189,19 @@ async def test_org2_owner_cannot_read_org1_user(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 404, resp.text
+
+
+async def test_forged_org_in_token_is_rejected(
+    org2: dict, async_client: AsyncClient, test_users: dict
+):
+    """멤버십이 있는 계정의 토큰에 비-멤버 org 를 위조하면 거부 (Model B org 컨텍스트 검증)."""
+    from app.utils.jwt import create_access_token
+
+    admin_id = test_users["testadmin"]["id"]
+    forged = create_access_token(
+        {"sub": str(admin_id), "org": str(org2["org_id"]), "role": "super_owner", "priority": 5}
+    )
+    resp = await async_client.get(
+        "/api/v1/console/stores", headers={"Authorization": f"Bearer {forged}"}
+    )
+    assert resp.status_code == 403, resp.text
