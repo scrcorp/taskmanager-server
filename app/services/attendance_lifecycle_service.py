@@ -78,9 +78,12 @@ def _compute_initial_status(
     if sched_start and sched_end and sched_end <= sched_start:
         sched_end = sched_end + timedelta(days=1)
 
-    if sched_end and now_utc >= sched_end:
+    # late/no_show 판정은 분 단위로만 (초 버림). clock_in/out 은 초까지 저장하되,
+    # 초 차이로 정시 출근이 late 로 찍히지 않게 한다.
+    now_min = now_utc.replace(second=0, microsecond=0)
+    if sched_end and now_min >= sched_end:
         return "no_show", ["no_show"]
-    if sched_start and now_utc >= sched_start + timedelta(minutes=late_buffer_min):
+    if sched_start and now_min > sched_start + timedelta(minutes=late_buffer_min):
         return "late", ["late"]
     return "upcoming", None
 

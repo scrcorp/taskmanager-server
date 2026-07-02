@@ -164,6 +164,8 @@ class Schedule(Base):
     net_work_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Status: draft / requested / confirmed / rejected / cancelled
     status: Mapped[str] = mapped_column(String(20), default="confirmed")
+    # Origin: 'manual' (사람이 등록한 스케줄) | 'walk_in' (출근 시 자동 생성된 워크인 스케줄)
+    origin: Mapped[str] = mapped_column(String(20), nullable=False, server_default="manual", default="manual")
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
