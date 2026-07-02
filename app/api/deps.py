@@ -246,7 +246,22 @@ async def get_work_store_ids(
 async def check_store_access(
     db: AsyncSession, user: User, store_id: UUID
 ) -> None:
-    """사용자가 특정 매장에 접근 가능한지 확인합니다. 불가 시 403 발생."""
+    """사용자가 특정 매장에 접근 가능한지 확인합니다. 불가 시 403/404 발생.
+
+    [Model B / 멀티-org IDOR 수정] 먼저 store 가 caller 의 org 소속인지 무조건 검증한다
+    (Owner 도 예외 없음 — 기존엔 Owner 면 get_accessible_store_ids 가 None 이라 이 함수가
+    no-op 이 되어 타 org store_id 도 통과하던 cross-tenant 결함이 있었다). 타 org 의
+    store_id 는 존재를 노출하지 않도록 404 로 응답한다.
+    """
+    from app.models.organization import Store
+
+    store = await db.get(Store, store_id)
+    if store is None or store.organization_id != user.organization_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Store not found",
+        )
+    # org 소속 확인 후 — 비-Owner 는 배정된 매장인지 추가 확인.
     accessible = await get_accessible_store_ids(db, user)
     if accessible is not None and store_id not in accessible:
         raise HTTPException(

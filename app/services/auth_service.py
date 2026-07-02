@@ -54,7 +54,7 @@ class AuthService:
         self,
         db: AsyncSession,
         company_code: str | None,
-    ) -> UUID:
+    ) -> UUID | None:
         """회사 코드를 조직 UUID로 변환합니다.
 
         company_code가 None이면 단일 active organization을 자동 매칭한다.
@@ -74,16 +74,17 @@ class AuthService:
         """
         if company_code is None:
             result = await db.execute(
-                select(Organization).where(Organization.is_active == True)
+                select(Organization.id).where(Organization.is_active == True).limit(2)
             )
-            orgs = list(result.scalars().all())
-            if len(orgs) == 0:
+            org_ids = [row[0] for row in result.all()]
+            if len(org_ids) == 0:
                 raise NotFoundError("No active organization configured")
-            if len(orgs) > 1:
-                raise BadRequestError(
-                    "Multiple organizations exist; client must specify company_code"
-                )
-            return orgs[0].id
+            if len(org_ids) > 1:
+                # [Model B] 멀티-org: org 를 여기서 확정하지 못한다 → None 반환.
+                # 로그인은 username(전역) 조회로 user→org 를 도출한다(admin_login/app_login).
+                # 단일 org 환경에서는 아래 단일 매칭이 그대로 동작(하위호환).
+                return None
+            return org_ids[0]
         result = await db.execute(
             select(Organization).where(
                 Organization.code == company_code.upper(),
