@@ -22,6 +22,8 @@ Modules:
 
 from app.models.organization import Organization, Store, ShiftPreset, LaborLawSetting
 from app.models.user import Role, User
+from app.models.org_member import OrgMember, OrgMemberStore
+from app.models.platform_admin import PlatformAdmin
 from app.models.employee_no_history import EmployeeNoHistory
 from app.models.work import Shift, Position
 from app.models.token import RefreshToken
@@ -56,6 +58,8 @@ from app.models.changelog import ChangelogPost
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
     "Role", "User",
+    "OrgMember", "OrgMemberStore",
+    "PlatformAdmin",
     "EmployeeNoHistory",
     "Shift", "Position",
     "RefreshToken", "UserStore",
