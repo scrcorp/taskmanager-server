@@ -191,7 +191,8 @@ class User(Base):
     )
 
     # 관계 — Relationships
-    organization = relationship("Organization", back_populates="users")
+    # users→organizations FK 가 2개(organization_id, last_org_id)라 명시 필요.
+    organization = relationship("Organization", back_populates="users", foreign_keys=[organization_id])
     role = relationship("Role", back_populates="users")
     refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
     user_stores = relationship("UserStore", back_populates="user", cascade="all, delete-orphan")
