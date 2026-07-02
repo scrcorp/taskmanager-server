@@ -80,6 +80,7 @@ async def org2() -> AsyncIterator[dict]:
             "org_id": org.id,
             "store_id": store.id,
             "username": "org2owner",
+            "user_id": user.id,
             "request_id": sched.id,
         }
 
@@ -152,3 +153,11 @@ async def test_cross_org_schedule_request_status_change_is_404(
             await db.execute(select(Schedule).where(Schedule.id == org2["request_id"]))
         ).scalar_one()
         assert sched.status == "requested"
+
+
+async def test_cross_org_user_detail_is_404(org2: dict, async_client: AsyncClient, admin_headers: dict):
+    """org1 admin 이 org2 의 user_id 를 직접 조회 → 404 (users 도메인 org 스코프)."""
+    resp = await async_client.get(
+        f"/api/v1/console/users/{org2['user_id']}", headers=admin_headers
+    )
+    assert resp.status_code == 404, resp.text
