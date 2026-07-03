@@ -225,9 +225,13 @@ async def get_current_user(
         lic_status, lic_expires = lic
         expired = lic_expires is not None and lic_expires < datetime.now(timezone.utc)
         if lic_status != "active" or expired:
+            # 구조화된 에러 코드 — 프론트가 텍스트가 아닌 code 로 분기(전용 화면 표시).
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Organization license is inactive",
+                detail={
+                    "code": "ORG_LICENSE_INACTIVE",
+                    "message": "Organization license is inactive",
+                },
             )
 
     return user

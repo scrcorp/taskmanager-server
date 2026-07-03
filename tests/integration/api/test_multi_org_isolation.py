@@ -300,6 +300,8 @@ async def test_suspended_license_blocks_org_access(org2: dict, async_client: Asy
         await db.commit()
     r = await async_client.get("/api/v1/console/stores", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 403, r.text
+    # 구조화된 에러 코드로 응답 (프론트 분기용)
+    assert r.json()["detail"]["code"] == "ORG_LICENSE_INACTIVE", r.text
 
     # reactivate → 복구
     async with async_session() as db:
