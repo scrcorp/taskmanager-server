@@ -240,6 +240,43 @@ async def test_create_organization_bootstraps_and_owner_can_login(async_client: 
             await db.commit()
 
 
+async def test_confirm_email_honors_test_code(async_client: AsyncClient):
+    """로그인-후 이메일 인증(confirm-email)이 EMAIL_VERIFICATION_TEST_CODE(000000)를 존중한다.
+
+    회귀: confirm_email 에 magic 우회가 없어 콘솔 verify-email 화면에서 000000 이 항상 실패했음.
+    (env 의존 — TEST_CODE 미설정 환경에선 skip.)
+    """
+    import uuid as _uuid
+    import pytest
+    from app.config import settings
+    from app.services.organization_service import organization_service
+
+    if not (settings.EMAIL_VERIFICATION_TEST_CODE or "").strip():
+        pytest.skip("EMAIL_VERIFICATION_TEST_CODE not set")
+
+    uname = f"efix_{_uuid.uuid4().hex[:6]}"
+    async with async_session() as db:
+        res = await organization_service.create_organization(
+            db, name="EFix", admin_username=uname, admin_password="pw123456", timezone="America/Los_Angeles",
+        )
+    org_id = res["org_id"]
+    try:
+        token = await _login(uname, "pw123456")
+        r = await async_client.post(
+            "/api/v1/app/auth/confirm-email",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"email": f"{uname}@test.com", "code": settings.EMAIL_VERIFICATION_TEST_CODE},
+        )
+        assert r.status_code == 200, r.text
+        async with async_session() as db:
+            u = (await db.execute(select(User).where(User.username == uname, User.organization_id == org_id))).scalar_one()
+            assert u.email_verified is True
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(Organization).where(Organization.id == org_id))
+            await db.commit()
+
+
 async def test_forged_org_in_token_is_rejected(
     org2: dict, async_client: AsyncClient, test_users: dict
 ):
