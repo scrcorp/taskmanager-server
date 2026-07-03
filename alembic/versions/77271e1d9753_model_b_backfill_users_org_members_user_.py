@@ -54,16 +54,25 @@ def upgrade() -> None:
         """
     )
 
-    # 3) full_name → first/last 파싱 (첫 토큰=first, 나머지=last; middle 은 수동 교정 여지).
+    # 3) full_name → first/middle/last 파싱.
+    #    규칙: 공백 기준 단어들 중 first=맨 앞, last=맨 뒤, middle=그 사이 전부.
+    #    1단어=first만, 2단어=first+last(middle 없음), 3+단어=first+middle+last.
     op.execute(
         """
-        UPDATE users
-        SET first_name = split_part(btrim(full_name), ' ', 1),
-            last_name = NULLIF(
-                btrim(substring(btrim(full_name) from position(' ' in btrim(full_name)) + 1)),
-                btrim(full_name)
-            )
-        WHERE first_name IS NULL
+        UPDATE users u
+        SET first_name = w.arr[1],
+            last_name = CASE WHEN w.n >= 2 THEN w.arr[w.n] ELSE NULL END,
+            middle_name = CASE WHEN w.n >= 3
+                               THEN array_to_string(w.arr[2:w.n - 1], ' ')
+                               ELSE NULL END
+        FROM (
+            SELECT id,
+                   regexp_split_to_array(btrim(full_name), '\\s+') AS arr,
+                   array_length(regexp_split_to_array(btrim(full_name), '\\s+'), 1) AS n
+            FROM users
+            WHERE full_name IS NOT NULL AND btrim(full_name) <> ''
+        ) w
+        WHERE u.id = w.id AND u.first_name IS NULL
         """
     )
 
