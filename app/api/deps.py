@@ -165,10 +165,14 @@ async def get_current_user(
             if issued_at < user.password_changed_at - timedelta(seconds=2):
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Password changed, please re-login")
 
-    # [Model B] JWT 의 org 컨텍스트를 사용자의 실제 멤버십과 대조 (forged org 방지).
-    # 멤버십이 하나라도 있으면 JWT org 는 그중 하나(active)여야 한다.
-    # 멤버십이 전혀 없는 계정(백필 이전 신규 등)은 레거시 경로(user.organization_id)로 허용.
-    # 비-mutating: user.role/organization_id 는 건드리지 않는다(단일 org 에선 이미 일치).
+    # [Model B] JWT 의 org 컨텍스트를 사용자의 실제 멤버십과 대조 검증 (forged org 방지).
+    #   - 멤버십이 하나라도 있으면 JWT org 는 그중 active 하나여야 한다(아니면 403).
+    #   - 멤버십이 전혀 없는 계정(백필 이전 신규 등)은 레거시(user.organization_id)로 허용.
+    # 주의: role/org 를 선택 멤버십으로 "교체"하는 컨텍스트 전환은 current_user 를 mutate 해야
+    # 하는데, 이는 self-update 엔드포인트(프로필/서명/PIN 등, current_user 를 직접 수정 후 commit)
+    # 를 깨뜨린다. 따라서 여기서는 검증만 하고, 실제 컨텍스트 전환은 별도 CurrentContext 리팩토링
+    # (컨텍스트 객체 + 전 call-site 이전)으로 미룬다. 단일 멤버십(현재/지인 트라이얼)에서는 home org
+    # 컨텍스트가 곧 유일 org 라 이 검증만으로 정확하다.
     sel_org = payload.get("org")
     if sel_org is not None:
         from app.models.org_member import OrgMember
