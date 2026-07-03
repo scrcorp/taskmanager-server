@@ -32,3 +32,102 @@ async def next_empid(db: AsyncSession, store_id: UUID) -> int:
             )
         )
     ).scalar() or 1
+
+
+async def _org_member_id_for_store(db: AsyncSession, user_id: UUID, store_id: UUID) -> UUID | None:
+    """user 가 그 store 의 org 에서 갖는 org_member id (없으면 None = legacy)."""
+    from app.models.organization import Store
+
+    org_id = (
+        await db.execute(select(Store.organization_id).where(Store.id == store_id))
+    ).scalar_one_or_none()
+    if org_id is None:
+        return None
+    return (
+        await db.execute(
+            select(OrgMember.id).where(
+                OrgMember.user_id == user_id, OrgMember.organization_id == org_id
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def ensure_member_store(
+    db: AsyncSession,
+    user_id: UUID,
+    store_id: UUID,
+    *,
+    is_manager: bool = False,
+    is_work_assignment: bool = True,
+) -> None:
+    """매장 배정 시 org_member_stores 행을 empid 부여하며 보장. 이미 있으면 속성만 갱신.
+
+    (전환기: legacy user_stores 와 병행. org_member 없는 legacy 계정은 skip.)
+    """
+    member_id = await _org_member_id_for_store(db, user_id, store_id)
+    if member_id is None:
+        return
+    existing = (
+        await db.execute(
+            select(OrgMemberStore).where(
+                OrgMemberStore.org_member_id == member_id,
+                OrgMemberStore.store_id == store_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.is_manager = is_manager
+        existing.is_work_assignment = is_work_assignment
+        return
+    db.add(
+        OrgMemberStore(
+            org_member_id=member_id,
+            store_id=store_id,
+            is_manager=is_manager,
+            is_work_assignment=is_work_assignment,
+            empid=await next_empid(db, store_id),
+        )
+    )
+
+
+async def remove_member_store(db: AsyncSession, user_id: UUID, store_id: UUID) -> None:
+    """매장 배정 해제 시 대응 org_member_store 삭제."""
+    member_id = await _org_member_id_for_store(db, user_id, store_id)
+    if member_id is None:
+        return
+    from sqlalchemy import delete as _delete
+
+    await db.execute(
+        _delete(OrgMemberStore).where(
+            OrgMemberStore.org_member_id == member_id,
+            OrgMemberStore.store_id == store_id,
+        )
+    )
+
+
+async def reconcile_member_stores(
+    db: AsyncSession, user_id: UUID, targets: list[dict]
+) -> None:
+    """sync 용 — targets(=[{store_id, is_manager, is_work_assignment}])에 org_member_stores 를 맞춘다.
+
+    없는 매장은 empid 부여하며 추가, 목록 밖 매장은 삭제.
+    """
+    target_ids = {t["store_id"] for t in targets}
+    # 현재 이 user 의 org_member_stores (모든 org 소속의 매장) 중 관련 매장만 처리
+    for t in targets:
+        await ensure_member_store(
+            db, user_id, t["store_id"],
+            is_manager=bool(t.get("is_manager")),
+            is_work_assignment=bool(t.get("is_work_assignment", True)),
+        )
+    # 목록에서 빠진 매장 삭제 — user 의 모든 org_member 를 거쳐 org_member_stores 조회
+    rows = (
+        await db.execute(
+            select(OrgMemberStore.store_id, OrgMemberStore.org_member_id)
+            .join(OrgMember, OrgMember.id == OrgMemberStore.org_member_id)
+            .where(OrgMember.user_id == user_id)
+        )
+    ).all()
+    for store_id, _member_id in rows:
+        if store_id not in target_ids:
+            await remove_member_store(db, user_id, store_id)

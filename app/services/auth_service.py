@@ -419,9 +419,13 @@ class AuthService:
         )
         await db.flush()
 
-        # 매장 배정 — Assign user to selected stores
+        # 매장 배정 — Assign user to selected stores (+org_member_stores/empid)
+        from app.services.org_numbering import ensure_member_store
+
         for sid in data.store_ids:
             db.add(UserStore(user_id=user.id, store_id=UUID(sid)))
+            await db.flush()
+            await ensure_member_store(db, user.id, UUID(sid))
         if data.store_ids:
             await db.flush()
 

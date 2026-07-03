@@ -857,6 +857,9 @@ class UserService:
 
         try:
             await user_repository.sync_user_stores(db, user_id, assignments)
+            # [Model B] org_member_stores 도 동기화(+empid 부여) — 표시/배정의 새 소스
+            from app.services.org_numbering import reconcile_member_stores
+            await reconcile_member_stores(db, user_id, assignments)
             await db.commit()
         except Exception:
             await db.rollback()
@@ -895,6 +898,8 @@ class UserService:
 
         try:
             await user_repository.add_user_store(db, user_id, store_id)
+            from app.services.org_numbering import ensure_member_store
+            await ensure_member_store(db, user_id, store_id)
             await db.commit()
         except Exception:
             await db.rollback()
@@ -924,6 +929,8 @@ class UserService:
             removed: bool = await user_repository.remove_user_store(db, user_id, store_id)
             if not removed:
                 raise NotFoundError("User-store assignment not found")
+            from app.services.org_numbering import remove_member_store
+            await remove_member_store(db, user_id, store_id)
             await db.commit()
         except Exception:
             await db.rollback()

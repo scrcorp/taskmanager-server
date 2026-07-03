@@ -221,6 +221,41 @@ async def test_crewid_assigned_sequentially_per_org(
             await db.commit()
 
 
+async def test_store_assignment_assigns_empid(
+    async_client: AsyncClient, admin_headers: dict, seed_roles: dict, seed_organization: dict, test_store_id
+):
+    """사람을 매장에 배정하면 org_member_stores 행이 empid 부여되어 생성된다."""
+    import uuid as _uuid
+    from app.models.org_member import OrgMember, OrgMemberStore
+    from app.services.user_service import user_service
+
+    uname = f"emp_{_uuid.uuid4().hex[:6]}"
+    resp = await async_client.post(
+        "/api/v1/console/users",
+        headers=admin_headers,
+        json={"username": uname, "password": "test1234", "full_name": "Emp Test", "role_id": str(seed_roles["staff"])},
+    )
+    assert resp.status_code in (200, 201), resp.text
+    uid = _uuid.UUID(resp.json()["id"])
+    try:
+        async with async_session() as db:
+            await user_service.add_user_store(db, uid, test_store_id, seed_organization["id"])
+        async with async_session() as db:
+            m = (await db.execute(select(OrgMember.id).where(OrgMember.user_id == uid))).scalar_one()
+            oms = (
+                await db.execute(
+                    select(OrgMemberStore).where(
+                        OrgMemberStore.org_member_id == m, OrgMemberStore.store_id == test_store_id
+                    )
+                )
+            ).scalar_one()
+            assert oms.empid is not None and oms.empid >= 1
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(User).where(User.id == uid))
+            await db.commit()
+
+
 async def test_create_organization_bootstraps_and_owner_can_login(async_client: AsyncClient):
     """organization_service.create_organization 이 org+roles+권한+super_owner+org_member+store 를
     부트스트랩하고, 그 org 의 owner 가 실제로 로그인된다 (백오피스 org 생성의 핵심 로직)."""
