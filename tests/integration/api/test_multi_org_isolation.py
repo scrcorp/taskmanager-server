@@ -192,6 +192,54 @@ async def test_org2_owner_cannot_read_org1_user(
     assert resp.status_code == 404, resp.text
 
 
+async def test_create_organization_bootstraps_and_owner_can_login(async_client: AsyncClient):
+    """organization_service.create_organization 이 org+roles+권한+super_owner+org_member+store 를
+    부트스트랩하고, 그 org 의 owner 가 실제로 로그인된다 (백오피스 org 생성의 핵심 로직)."""
+    import uuid as _uuid
+    from app.models.org_member import OrgMember
+    from app.services.organization_service import organization_service
+
+    uname = f"friend_{_uuid.uuid4().hex[:6]}"
+    async with async_session() as db:
+        res = await organization_service.create_organization(
+            db,
+            name="Friend Cafe",
+            admin_username=uname,
+            admin_password="pw123456",
+            admin_email="f@example.com",
+            timezone="America/New_York",
+            first_store_name="Friend Downtown",
+        )
+    org_id = res["org_id"]
+    try:
+        async with async_session() as db:
+            org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one()
+            assert org.code and len(org.code) == 6
+            assert org.timezone == "America/New_York"
+            roles = (await db.execute(select(Role).where(Role.organization_id == org_id))).scalars().all()
+            assert len(roles) == 5
+            su = (
+                await db.execute(select(User).where(User.organization_id == org_id, User.username == uname))
+            ).scalar_one()
+            m = (await db.execute(select(OrgMember).where(OrgMember.user_id == su.id))).scalar_one()
+            assert m.organization_id == org_id and m.status == "active"
+            assert res["store_id"] is not None
+            store = (await db.execute(select(Store).where(Store.id == res["store_id"]))).scalar_one()
+            assert store.organization_id == org_id
+        # 신규 org owner 가 console 로그인 가능 (멀티-org → username 전역 해석)
+        token = await _login(uname, "pw123456")
+        assert token
+        # 그리고 자기 org 매장만 본다
+        r = await async_client.get("/api/v1/console/stores", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200, r.text
+        ids = {s["id"] for s in r.json()}
+        assert str(res["store_id"]) in ids
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(Organization).where(Organization.id == org_id))
+            await db.commit()
+
+
 async def test_forged_org_in_token_is_rejected(
     org2: dict, async_client: AsyncClient, test_users: dict
 ):
