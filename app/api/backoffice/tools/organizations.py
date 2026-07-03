@@ -6,6 +6,7 @@ org 권한 밖, 세션쿠키 인증만(get_current_admin). 운영자가 새 고�
 """
 
 import html as _html
+from uuid import UUID
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -17,6 +18,7 @@ from app.api.backoffice import pages
 from app.api.backoffice.deps import get_current_admin
 from app.config import settings
 from app.database import get_db
+from app.models.license import License
 from app.models.organization import Organization, Store
 from app.models.user import Role, User
 from app.services.organization_service import organization_service
@@ -71,18 +73,37 @@ async def list_page(request: Request, db: AsyncSession = Depends(get_db)) -> HTM
     for oid, uname in su_rows:
         su_map.setdefault(oid, uname)
 
+    lic_map = dict(
+        (await db.execute(select(License.organization_id, License.status))).all()
+    )
+
     rows = ""
     for o in orgs:
+        lic_status = lic_map.get(o.id, "—")
+        if lic_status == "active":
+            lic_badge = "<span class='pill'>active</span>"
+            toggle_label = "Suspend"
+        elif lic_status == "—":
+            lic_badge = "<span class='pill pill-warn'>none</span>"
+            toggle_label = "Activate"
+        else:
+            lic_badge = f"<span class='pill pill-warn'>{_esc(lic_status)}</span>"
+            toggle_label = "Activate"
+        toggle = (
+            f"<form method='post' action='{base}/tools/orgs/{o.id}/license/toggle' style='margin:0'>"
+            f"<button type='submit' style='padding:5px 12px;font-size:13px'>{toggle_label}</button></form>"
+        )
         rows += (
             f"<tr><td><b>{_esc(o.name)}</b></td>"
             f"<td><span class='pill'>{_esc(o.code)}</span></td>"
             f"<td>{_esc(su_map.get(o.id, '—'))}</td>"
             f"<td class='num'>{_esc(store_counts.get(o.id, 0))}</td>"
             f"<td>{_esc(o.timezone)}</td>"
-            f"<td>{_esc(o.created_at.strftime('%Y-%m-%d') if o.created_at else '—')}</td></tr>"
+            f"<td>{lic_badge}</td>"
+            f"<td>{toggle}</td></tr>"
         )
     if not rows:
-        rows = "<tr><td colspan='6' class='empty'>No organizations yet.</td></tr>"
+        rows = "<tr><td colspan='7' class='empty'>No organizations yet.</td></tr>"
 
     content = (
         "<div class='toolbar'>"
@@ -90,8 +111,9 @@ async def list_page(request: Request, db: AsyncSession = Depends(get_db)) -> HTM
         f"<span class='hint'>{len(orgs)} organizations</span>"
         "</div>"
         "<div class='bucket'><table class='dtable'>"
-        "<thead><tr><th>Name</th><th>Code</th><th>Super Owner</th><th>Stores</th><th>Timezone</th><th>Created</th></tr></thead>"
+        "<thead><tr><th>Name</th><th>Code</th><th>Super Owner</th><th>Stores</th><th>Timezone</th><th>License</th><th></th></tr></thead>"
         f"<tbody>{rows}</tbody></table></div>"
+        "<p class='hint' style='margin-top:12px'>Suspend a license to block that org's users from accessing (immediate 403 on any request).</p>"
     )
     return pages.shell(base, admin, _ACTIVE, "Organizations", content, "HTM Backoffice — Organizations")
 
@@ -178,3 +200,27 @@ async def new_submit(
         "</div>"
     )
     return pages.shell(base, admin, _ACTIVE, "Organization Created", content, "HTM Backoffice — Organization Created")
+
+
+# --------------------------------------------------------------------------- #
+# 라이센스 활성/정지 토글
+# --------------------------------------------------------------------------- #
+@router.post("/{org_id}/license/toggle", response_class=HTMLResponse)
+async def toggle_license(
+    org_id: UUID, request: Request, db: AsyncSession = Depends(get_db)
+) -> HTMLResponse:
+    admin = get_current_admin(request)
+    base = _base()
+    if not admin:
+        return _redirect(f"{base}/login")
+
+    lic = (
+        await db.execute(select(License).where(License.organization_id == org_id))
+    ).scalar_one_or_none()
+    if lic is None:
+        # 라이센스 없으면 active 로 신설
+        db.add(License(organization_id=org_id, status="active", plan="trial"))
+    else:
+        lic.status = "suspended" if lic.status == "active" else "active"
+    await db.commit()
+    return _redirect(f"{base}/tools/orgs")

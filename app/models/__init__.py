@@ -24,6 +24,7 @@ from app.models.organization import Organization, Store, ShiftPreset, LaborLawSe
 from app.models.user import Role, User
 from app.models.org_member import OrgMember, OrgMemberStore
 from app.models.platform_admin import PlatformAdmin
+from app.models.license import License
 from app.models.employee_no_history import EmployeeNoHistory
 from app.models.work import Shift, Position
 from app.models.token import RefreshToken
@@ -60,6 +61,7 @@ __all__ = [
     "Role", "User",
     "OrgMember", "OrgMemberStore",
     "PlatformAdmin",
+    "License",
     "EmployeeNoHistory",
     "Shift", "Position",
     "RefreshToken", "UserStore",

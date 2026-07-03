@@ -277,6 +277,37 @@ async def test_confirm_email_honors_test_code(async_client: AsyncClient):
             await db.commit()
 
 
+async def test_suspended_license_blocks_org_access(org2: dict, async_client: AsyncClient):
+    """org 라이센스 정지 → 그 org 사용자 접근 차단(403). 재활성 → 복구."""
+    from app.models.license import License
+
+    # org2 는 fixture 가 직접 만들어 라이센스가 없음 → active 로 신설
+    async with async_session() as db:
+        existing = (
+            await db.execute(select(License).where(License.organization_id == org2["org_id"]))
+        ).scalar_one_or_none()
+        if existing is None:
+            db.add(License(organization_id=org2["org_id"], status="active", plan="trial"))
+            await db.commit()
+
+    token = await _login("org2owner")
+    # active → 접근 OK
+    assert (await async_client.get("/api/v1/console/stores", headers={"Authorization": f"Bearer {token}"})).status_code == 200
+
+    # suspend → 즉시 403 (기존 토큰도 차단)
+    async with async_session() as db:
+        await db.execute(update(License).where(License.organization_id == org2["org_id"]).values(status="suspended"))
+        await db.commit()
+    r = await async_client.get("/api/v1/console/stores", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 403, r.text
+
+    # reactivate → 복구
+    async with async_session() as db:
+        await db.execute(update(License).where(License.organization_id == org2["org_id"]).values(status="active"))
+        await db.commit()
+    assert (await async_client.get("/api/v1/console/stores", headers={"Authorization": f"Bearer {token}"})).status_code == 200
+
+
 async def test_forged_org_in_token_is_rejected(
     org2: dict, async_client: AsyncClient, test_users: dict
 ):

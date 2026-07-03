@@ -132,6 +132,7 @@ class OrganizationService:
         from app.models.user import Role, User
         from app.models.organization import Store
         from app.models.org_member import OrgMember
+        from app.models.license import License
         from app.models.permission import Permission, RolePermission
         from app.utils.password import hash_password
         from app.services.attendance_device_service import generate_clockin_pin
@@ -146,6 +147,9 @@ class OrganizationService:
                 org.timezone = timezone
             db.add(org)
             await db.flush()
+
+            # 1b) 라이센스 (active) — org 운영 자격
+            db.add(License(organization_id=org.id, status="active", plan="trial"))
 
             # 2) 기본 역할 5개
             super_owner_role: Role | None = None

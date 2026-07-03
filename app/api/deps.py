@@ -210,6 +210,26 @@ async def get_current_user(
                 set_committed_value(user, "role_id", match.role_id)
                 set_committed_value(user, "role", match.role)
 
+    # [License] 유효 org 의 라이센스가 active 가 아니거나 만료면 접근 차단 (403).
+    # 운영자가 백오피스에서 라이센스 정지 → 그 org 사용자는 즉시 접근 불가.
+    from app.models.license import License
+
+    lic = (
+        await db.execute(
+            select(License.status, License.expires_at).where(
+                License.organization_id == user.organization_id
+            )
+        )
+    ).first()
+    if lic is not None:
+        lic_status, lic_expires = lic
+        expired = lic_expires is not None and lic_expires < datetime.now(timezone.utc)
+        if lic_status != "active" or expired:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Organization license is inactive",
+            )
+
     return user
 
 
