@@ -308,6 +308,24 @@ class UserService:
                     db, organization_id, normalized_emp, user.id
                 )
 
+            # [Model B] org 소속(org_member) 병행 생성 — 새 유저를 Model B 완결 엔티티로.
+            # org별 속성(role/시급/부서/PIN/사번)을 org_member 에 미러(전환기: users 컬럼과 병존).
+            from app.models.org_member import OrgMember
+
+            db.add(
+                OrgMember(
+                    user_id=user.id,
+                    organization_id=organization_id,
+                    role_id=UUID(data.role_id),
+                    hourly_rate=hourly_rate,
+                    department=create_data.get("department"),
+                    clockin_pin=clockin_pin,
+                    employee_no=normalized_emp,
+                    status="active",
+                )
+            )
+            await db.flush()
+
             # Owner / Super Owner 신규 생성 시 조직 내 모든 매장에 자동 배정
             # (is_manager=true, is_work_assignment=true — manager 면 work 자동). 알림 + 관리 권한 + 근무 배정 대상.
             if role.priority <= OWNER_PRIORITY:

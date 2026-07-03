@@ -271,6 +271,35 @@ async def test_context_org_follows_selected_membership(
     assert str(test_store_id) not in ids2
 
 
+async def test_created_user_gets_org_member(
+    async_client: AsyncClient, admin_headers: dict, seed_roles: dict, seed_organization: dict
+):
+    """console 로 유저 생성 시 org_member 도 함께 생성된다 (Model B 완결 엔티티)."""
+    import uuid as _uuid
+    from app.models.org_member import OrgMember
+
+    uname = f"mbtest_{_uuid.uuid4().hex[:8]}"
+    resp = await async_client.post(
+        "/api/v1/console/users",
+        headers=admin_headers,
+        json={"username": uname, "password": "test1234", "full_name": "MB Test", "role_id": str(seed_roles["staff"])},
+    )
+    assert resp.status_code in (200, 201), resp.text
+    uid = _uuid.UUID(resp.json()["id"])
+    try:
+        async with async_session() as db:
+            m = (
+                await db.execute(select(OrgMember).where(OrgMember.user_id == uid))
+            ).scalar_one_or_none()
+            assert m is not None, "org_member not created"
+            assert m.organization_id == seed_organization["id"]
+            assert m.status == "active"
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(User).where(User.id == uid))
+            await db.commit()
+
+
 async def test_context_switch_does_not_corrupt_home_org(
     org2: dict, dual_member_user: dict, async_client: AsyncClient
 ):

@@ -403,6 +403,20 @@ class AuthService:
         await db.flush()
         await db.refresh(user)
 
+        # [Model B] org 소속(org_member) 병행 생성 — 자가가입 유저도 Model B 완결 엔티티로.
+        from app.models.org_member import OrgMember
+
+        db.add(
+            OrgMember(
+                user_id=user.id,
+                organization_id=organization_id,
+                role_id=staff_role.id,
+                clockin_pin=clockin_pin,
+                status="active",
+            )
+        )
+        await db.flush()
+
         # 매장 배정 — Assign user to selected stores
         for sid in data.store_ids:
             db.add(UserStore(user_id=user.id, store_id=UUID(sid)))
