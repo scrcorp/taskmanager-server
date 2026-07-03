@@ -58,7 +58,9 @@ class UserService:
             return float(org_rate)
         return None
 
-    def _to_response(self, user: User, org_rate: float | None = None) -> UserResponse:
+    def _to_response(
+        self, user: User, org_rate: float | None = None, crewid: int | None = None
+    ) -> UserResponse:
         """사용자 모델을 상세 응답 스키마로 변환 (effective rate 포함)."""
         role: Role = user.role
         raw_rate = float(user.hourly_rate) if user.hourly_rate is not None else None
@@ -74,6 +76,7 @@ class UserService:
             effective_hourly_rate=self._effective_rate(raw_rate, org_rate),
             department=user.department,
             employee_no=user.employee_no,
+            crewid=crewid,
             is_active=user.is_active,
             created_at=user.created_at,
         )
@@ -199,7 +202,18 @@ class UserService:
             raise NotFoundError("User not found")
 
         org_rate = await self._get_org_rate(db, organization_id)
-        return self._to_response(user, org_rate)
+        # CREWID — 이 org 에서의 org 번호 (org_member.crewid)
+        from app.models.org_member import OrgMember
+
+        crewid = (
+            await db.execute(
+                select(OrgMember.crewid).where(
+                    OrgMember.user_id == user_id,
+                    OrgMember.organization_id == organization_id,
+                )
+            )
+        ).scalar_one_or_none()
+        return self._to_response(user, org_rate, crewid=crewid)
 
     async def create_user(
         self,
@@ -788,11 +802,21 @@ class UserService:
             raise NotFoundError("User not found")
 
         from app.models.user_store import UserStore
+        from app.models.org_member import OrgMember, OrgMemberStore
 
         assignments: list[UserStore] = await user_repository.get_user_store_assignments(db, user_id)
         # store 정보가 필요하므로 store 조회
         stores: list[Store] = await user_repository.get_user_stores(db, user_id)
         store_map = {s.id: s for s in stores}
+        # EMPID map (store_id -> empid) from org_member_stores
+        empid_rows = (
+            await db.execute(
+                select(OrgMemberStore.store_id, OrgMemberStore.empid)
+                .join(OrgMember, OrgMember.id == OrgMemberStore.org_member_id)
+                .where(OrgMember.user_id == user_id)
+            )
+        ).all()
+        empid_map = {sid: emp for sid, emp in empid_rows}
 
         return [
             UserStoreResponse(
@@ -804,6 +828,7 @@ class UserService:
                 is_manager=a.is_manager,
                 is_work_assignment=a.is_work_assignment,
                 created_at=store_map[a.store_id].created_at if a.store_id in store_map else a.created_at,
+                empid=empid_map.get(a.store_id),
             )
             for a in assignments
             if a.store_id in store_map

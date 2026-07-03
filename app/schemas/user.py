@@ -163,7 +163,8 @@ class UserResponse(BaseModel):
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속 (None = inherit from store/org)
     effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
     department: str | None = None  # FOH/BOH 분류 (None=미지정)
-    employee_no: str | None = None  # 사번 (Company employee number, nullable)
+    employee_no: str | None = None  # 사번 (Company employee number, nullable) [레거시]
+    crewid: int | None = None  # CREWID — org 안 1부터 순번 (org 번호)
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
@@ -192,7 +193,8 @@ class UserListResponse(BaseModel):
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속
     effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
     department: str | None = None  # FOH/BOH 분류 (None=미지정)
-    employee_no: str | None = None  # 사번 (Company employee number, nullable)
+    employee_no: str | None = None  # 사번 (Company employee number, nullable) [레거시]
+    crewid: int | None = None  # CREWID — org 안 1부터 순번 (org 번호)
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
@@ -222,6 +224,7 @@ class UserStoreResponse(BaseModel):
     is_manager: bool
     is_work_assignment: bool
     created_at: datetime
+    empid: int | None = None  # 이 매장에서의 EMPID (매장 안 1부터 순번)
 
 
 # === 프로필 (Profile) 스키마 ===
