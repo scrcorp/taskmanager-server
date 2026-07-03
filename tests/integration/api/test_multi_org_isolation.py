@@ -208,6 +208,81 @@ async def test_forged_org_in_token_is_rejected(
     assert resp.status_code == 403, resp.text
 
 
-# 주: 멀티-멤버십 "컨텍스트 전환"(토큰 org 에 따라 role/매장 스코프 교체) 테스트는
-# 제거했다. 그 동작은 current_user 를 mutate 해야 하는데 self-update 엔드포인트를 깨서
-# 지금은 검증(forged-org 403)만 구현하고, 실제 전환은 CurrentContext 리팩토링으로 미룬다.
+@pytest_asyncio.fixture
+async def dual_member_user(org2: dict, seed_roles: dict, seed_organization: dict) -> AsyncIterator[dict]:
+    """org1(owner) + org2(super_owner) 양쪽 멤버십을 가진 user — 컨텍스트 전환 검증용.
+
+    users.organization_id 는 org1(기본). 종료 시 user 삭제(멤버십 CASCADE 정리).
+    """
+    from app.models.org_member import OrgMember
+
+    async with async_session() as db:
+        u = User(
+            organization_id=seed_organization["id"],
+            role_id=seed_roles["owner"],
+            username="dualmember",
+            full_name="Dual Member",
+            password_hash=hash_password("1234"),
+            is_active=True,
+        )
+        db.add(u)
+        await db.flush()
+        db.add(OrgMember(user_id=u.id, organization_id=seed_organization["id"], role_id=seed_roles["owner"]))
+        db.add(OrgMember(user_id=u.id, organization_id=org2["org_id"], role_id=org2["role_id"]))
+        await db.commit()
+        await db.refresh(u)
+        data = {"user_id": u.id}
+    try:
+        yield data
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(User).where(User.id == data["user_id"]))
+            await db.commit()
+
+
+async def test_context_org_follows_selected_membership(
+    org2: dict,
+    dual_member_user: dict,
+    async_client: AsyncClient,
+    test_store_id,
+    seed_organization: dict,
+):
+    """같은 계정이 토큰의 org 에 따라 그 org 컨텍스트(매장목록)로 동작 — 컨텍스트 전환."""
+    from app.utils.jwt import create_access_token
+
+    uid = str(dual_member_user["user_id"])
+    tok_org1 = create_access_token({"sub": uid, "org": str(seed_organization["id"])})
+    tok_org2 = create_access_token({"sub": uid, "org": str(org2["org_id"])})
+
+    r1 = await async_client.get(
+        "/api/v1/console/stores", headers={"Authorization": f"Bearer {tok_org1}"}
+    )
+    assert r1.status_code == 200, r1.text
+    ids1 = {s["id"] for s in r1.json()}
+    assert str(test_store_id) in ids1
+    assert str(org2["store_id"]) not in ids1
+
+    r2 = await async_client.get(
+        "/api/v1/console/stores", headers={"Authorization": f"Bearer {tok_org2}"}
+    )
+    assert r2.status_code == 200, r2.text
+    ids2 = {s["id"] for s in r2.json()}
+    assert str(org2["store_id"]) in ids2
+    assert str(test_store_id) not in ids2
+
+
+async def test_context_switch_does_not_corrupt_home_org(
+    org2: dict, dual_member_user: dict, async_client: AsyncClient
+):
+    """org2 컨텍스트로 요청해도 계정의 DB home org(org1)는 변하지 않아야 함 (flush 안 됨)."""
+    from app.utils.jwt import create_access_token
+    from app.models.user import User as U
+
+    uid = dual_member_user["user_id"]
+    tok_org2 = create_access_token({"sub": str(uid), "org": str(org2["org_id"])})
+    # org2 컨텍스트로 임의 요청
+    await async_client.get("/api/v1/console/stores", headers={"Authorization": f"Bearer {tok_org2}"})
+    # DB 의 home org 는 여전히 org1 이어야 함
+    async with async_session() as db:
+        u = (await db.execute(select(U).where(U.id == uid))).scalar_one()
+        assert u.organization_id != org2["org_id"]  # home 그대로

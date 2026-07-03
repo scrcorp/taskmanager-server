@@ -175,23 +175,35 @@ async def get_current_user(
     # 컨텍스트가 곧 유일 org 라 이 검증만으로 정확하다.
     sel_org = payload.get("org")
     if sel_org is not None:
+        from sqlalchemy.orm.attributes import set_committed_value
         from app.models.org_member import OrgMember
 
-        member_org_ids = set(
-            (
-                await db.execute(
-                    select(OrgMember.organization_id).where(
-                        OrgMember.user_id == user.id,
-                        OrgMember.status != "terminated",
-                    )
+        sel_org_uuid = UUID(sel_org)
+        members = (
+            await db.execute(
+                select(OrgMember)
+                .options(selectinload(OrgMember.role))
+                .where(
+                    OrgMember.user_id == user.id,
+                    OrgMember.status != "terminated",
                 )
-            ).scalars().all()
-        )
-        if member_org_ids and UUID(sel_org) not in member_org_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not a member of the selected organization",
             )
+        ).scalars().all()
+        if members:
+            match = next((m for m in members if m.organization_id == sel_org_uuid), None)
+            if match is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Not a member of the selected organization",
+                )
+            # 선택 org 컨텍스트를 current_user 에 반영하되, set_committed_value 로 "이미 커밋된 값"
+            # 처럼 세팅한다 → 이 요청 동안 organization_id/role 이 선택 org 로 읽히지만, dirty 가
+            # 아니므로 commit 시 DB 로 flush 되지 않는다(계정의 home org 는 그대로). user 는 attached
+            # 상태라 self-update 엔드포인트(프로필/서명/PIN)도 정상 동작. 기본 org 와 다를 때만 적용.
+            if match.organization_id != user.organization_id or match.role_id != user.role_id:
+                set_committed_value(user, "organization_id", match.organization_id)
+                set_committed_value(user, "role_id", match.role_id)
+                set_committed_value(user, "role", match.role)
 
     return user
 
