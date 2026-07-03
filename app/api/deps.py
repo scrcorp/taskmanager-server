@@ -199,8 +199,13 @@ async def get_current_user(
             # 선택 org 컨텍스트를 current_user 에 반영하되, set_committed_value 로 "이미 커밋된 값"
             # 처럼 세팅한다 → 이 요청 동안 organization_id/role 이 선택 org 로 읽히지만, dirty 가
             # 아니므로 commit 시 DB 로 flush 되지 않는다(계정의 home org 는 그대로). user 는 attached
-            # 상태라 self-update 엔드포인트(프로필/서명/PIN)도 정상 동작. 기본 org 와 다를 때만 적용.
-            if match.organization_id != user.organization_id or match.role_id != user.role_id:
+            # 상태라 self-update 엔드포인트(프로필/서명/PIN)도 정상 동작.
+            #
+            # ★ home org(= user.organization_id) 는 override 하지 않는다: home org 의 role 은
+            # users.role_id(라이브 소스)를 그대로 쓴다. org_member 는 update_user 시 동기화되지
+            # 않을 수 있어(전환기), home org 에서 org_member.role 을 신뢰하면 stale role 위험.
+            # org_member.role 은 "다른 org(멀티-멤버십)" 컨텍스트에서만 권위를 갖는다.
+            if match.organization_id != user.organization_id:
                 set_committed_value(user, "organization_id", match.organization_id)
                 set_committed_value(user, "role_id", match.role_id)
                 set_committed_value(user, "role", match.role)

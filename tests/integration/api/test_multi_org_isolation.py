@@ -16,7 +16,7 @@ from typing import AsyncIterator
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from app.database import async_session
 from app.main import app
@@ -294,6 +294,41 @@ async def test_created_user_gets_org_member(
             assert m is not None, "org_member not created"
             assert m.organization_id == seed_organization["id"]
             assert m.status == "active"
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(User).where(User.id == uid))
+            await db.commit()
+
+
+async def test_home_org_uses_live_user_role_not_stale_member(
+    async_client: AsyncClient, seed_roles: dict, seed_organization: dict
+):
+    """org_member 가 stale(staff) 여도 home org 컨텍스트는 users.role_id(라이브 owner)를 쓴다.
+
+    회귀 방지: home org 에서 org_member.role 을 신뢰하면, role 변경 후 org_member 미동기화 시
+    stale role 이 적용되는 버그가 생긴다. home org 는 override 하지 않아야 한다.
+    """
+    import uuid as _uuid
+    from app.models.org_member import OrgMember
+
+    uid = _uuid.uuid4()
+    uname = f"stale_{_uuid.uuid4().hex[:6]}"
+    async with async_session() as db:
+        db.add(User(id=uid, organization_id=seed_organization["id"], role_id=seed_roles["staff"],
+                    username=uname, full_name="Stale Role", password_hash=hash_password("1234"), is_active=True))
+        db.add(OrgMember(user_id=uid, organization_id=seed_organization["id"], role_id=seed_roles["staff"]))
+        await db.commit()
+    try:
+        # users.role_id 를 owner 로 승격 (org_member 는 staff 로 stale 하게 방치)
+        async with async_session() as db:
+            await db.execute(update(User).where(User.id == uid).values(role_id=seed_roles["owner"]))
+            await db.commit()
+        # 로그인(owner 라 console 가능) + owner-gated 조회 → 200 (live owner). stale staff 면 403.
+        token = await _login(uname)
+        r = await async_client.get(
+            "/api/v1/console/stores", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert r.status_code == 200, r.text
     finally:
         async with async_session() as db:
             await db.execute(delete(User).where(User.id == uid))
