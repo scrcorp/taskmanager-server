@@ -595,6 +595,12 @@ class AuthService:
         from app.repositories.permission_repository import permission_repository
         permissions = await permission_repository.get_permissions_by_role_id(db, role.id)
 
+        # [Model B] 소속 org 목록 + 현재 org 접근상태 — /me 는 차단돼도 200 으로 이걸 준다.
+        # 컨텍스트 인지된 원본 user(선택 org 반영)로 접근판정한다.
+        from app.services.access_service import access_service
+        organizations = await access_service.list_user_orgs(db, user)
+        reason, _info = await access_service.block_reason_for_org(db, user, user.organization_id)
+
         return UserMeResponse(
             id=str(loaded_user.id),
             username=loaded_user.username,
@@ -612,7 +618,64 @@ class AuthService:
             permissions=sorted(permissions),
             preferred_language=loaded_user.preferred_language,  # type: ignore[arg-type]
             console_filters=loaded_user.console_filters or {},
+            organizations=organizations,  # type: ignore[arg-type]
+            current_org_accessible=reason is None,
+            current_org_block_reason=reason,
         )
+
+    async def switch_organization(
+        self,
+        db: AsyncSession,
+        user: User,
+        organization_id: str,
+        client_type: str = "admin",
+        user_agent: str | None = None,
+        ip_address: str | None = None,
+    ) -> TokenResponse:
+        """소속된 다른 org 로 전환 — 접근 가능하면 그 org 컨텍스트 토큰 재발급.
+
+        대상 org 라이센스 정지/밴이면 ForbiddenError. 계정의 home org(users.organization_id)는
+        불변(set_committed_value 로 payload org 만 target 으로).
+        """
+        from uuid import UUID as _UUID
+        from sqlalchemy.orm.attributes import set_committed_value
+        from app.services.access_service import access_service
+        from app.models.org_member import OrgMember
+
+        org_uuid = _UUID(str(organization_id))
+        reason, info = await access_service.block_reason_for_org(db, user, org_uuid)
+        if reason is not None:
+            name = info.get("organization_name")
+            raise ForbiddenError(
+                f"Cannot access {name}" if name else "Cannot access this organization"
+            )
+
+        member = (
+            await db.execute(
+                select(OrgMember)
+                .options(selectinload(OrgMember.role))
+                .where(
+                    OrgMember.user_id == user.id,
+                    OrgMember.organization_id == org_uuid,
+                )
+            )
+        ).scalar_one_or_none()
+        role: Role = member.role if member is not None else user.role
+
+        # payload org 을 target 으로(committed value → users.organization_id 는 DB flush 안 됨)
+        set_committed_value(user, "organization_id", org_uuid)
+        try:
+            result = await self._generate_tokens(
+                db, user, role,
+                client_type=client_type,
+                user_agent=user_agent,
+                ip_address=ip_address,
+            )
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # 싱글턴 인스턴스 — Singleton instance

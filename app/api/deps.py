@@ -130,11 +130,15 @@ async def get_current_attendance_manage_session(
     return device, session, manager
 
 
-async def get_current_user(
+async def get_current_account(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
-    """JWT 토큰에서 현재 인증된 사용자를 추출합니다."""
+    """JWT 토큰 → 인증된 계정(User). 토큰/계정 검증 + 선택 org 역할 컨텍스트 해석까지.
+
+    org 접근 차단(라이센스 정지/멤버십 terminated)은 하지 않는다 — 그건 get_current_user 게이트.
+    /me·switch-org 처럼 '차단돼도 상황을 알려줘야' 하는 곳은 이 의존성을 직접 쓴다.
+    """
     try:
         payload: dict = decode_token(credentials.credentials)
         if payload.get("type") != "access":
@@ -183,10 +187,7 @@ async def get_current_user(
             await db.execute(
                 select(OrgMember)
                 .options(selectinload(OrgMember.role))
-                .where(
-                    OrgMember.user_id == user.id,
-                    OrgMember.status != "terminated",
-                )
+                .where(OrgMember.user_id == user.id)
             )
         ).scalars().all()
         if members:
@@ -194,7 +195,10 @@ async def get_current_user(
             if match is None:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Not a member of the selected organization",
+                    detail={
+                        "code": "NOT_A_MEMBER",
+                        "message": "Not a member of the selected organization",
+                    },
                 )
             # 선택 org 컨텍스트를 current_user 에 반영하되, set_committed_value 로 "이미 커밋된 값"
             # 처럼 세팅한다 → 이 요청 동안 organization_id/role 이 선택 org 로 읽히지만, dirty 가
@@ -210,31 +214,39 @@ async def get_current_user(
                 set_committed_value(user, "role_id", match.role_id)
                 set_committed_value(user, "role", match.role)
 
-    # [License] 유효 org 의 라이센스가 active 가 아니거나 만료면 접근 차단 (403).
-    # 운영자가 백오피스에서 라이센스 정지 → 그 org 사용자는 즉시 접근 불가.
-    from app.models.license import License
-
-    lic = (
-        await db.execute(
-            select(License.status, License.expires_at).where(
-                License.organization_id == user.organization_id
-            )
-        )
-    ).first()
-    if lic is not None:
-        lic_status, lic_expires = lic
-        expired = lic_expires is not None and lic_expires < datetime.now(timezone.utc)
-        if lic_status != "active" or expired:
-            # 구조화된 에러 코드 — 프론트가 텍스트가 아닌 code 로 분기(전용 화면 표시).
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "code": "ORG_LICENSE_INACTIVE",
-                    "message": "Organization license is inactive",
-                },
-            )
-
     return user
+
+
+async def get_current_user(
+    current_account: Annotated[User, Depends(get_current_account)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    """org-scoped 접근 게이트 — 유효 org 의 라이센스 정지/만료 또는 본인 멤버십 terminated 이면
+    구조화된 에러코드(detail={code, message, organization_name, organization_code})로 403.
+
+    인증만 필요하고 '차단돼도 상황을 알려줘야' 하는 곳(/me, switch-org)은 get_current_account 사용.
+    """
+    from app.services.access_service import (
+        access_service,
+        REASON_LICENSE_INACTIVE,
+        REASON_ACCESS_REVOKED,
+        REASON_NOT_A_MEMBER,
+    )
+
+    reason, info = await access_service.block_reason_for_org(
+        db, current_account, current_account.organization_id
+    )
+    if reason is not None:
+        messages = {
+            REASON_LICENSE_INACTIVE: "Organization license is inactive",
+            REASON_ACCESS_REVOKED: "Your access to this organization has been revoked",
+            REASON_NOT_A_MEMBER: "Not a member of this organization",
+        }
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": reason, "message": messages.get(reason, "Access denied"), **info},
+        )
+    return current_account
 
 
 async def get_user_permissions(db: AsyncSession, role_id: UUID) -> set[str]:

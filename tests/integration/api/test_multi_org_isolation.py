@@ -310,6 +310,88 @@ async def test_suspended_license_blocks_org_access(org2: dict, async_client: Asy
     assert (await async_client.get("/api/v1/console/stores", headers={"Authorization": f"Bearer {token}"})).status_code == 200
 
 
+async def test_me_stays_200_and_reports_block_reason_when_license_suspended(
+    org2: dict, async_client: AsyncClient
+):
+    """차단돼도 /me 는 200 — current_org_accessible=false + block_reason + org 목록을 준다."""
+    from app.models.license import License
+
+    async with async_session() as db:
+        if (await db.execute(select(License).where(License.organization_id == org2["org_id"]))).scalar_one_or_none() is None:
+            db.add(License(organization_id=org2["org_id"], status="active", plan="trial"))
+            await db.commit()
+
+    token = await _login("org2owner")
+    hdr = {"Authorization": f"Bearer {token}"}
+    # active
+    r = await async_client.get("/api/v1/auth/me", headers=hdr)
+    assert r.status_code == 200 and r.json()["current_org_accessible"] is True
+
+    # suspend → /me 는 여전히 200, 차단이유 포함
+    async with async_session() as db:
+        await db.execute(update(License).where(License.organization_id == org2["org_id"]).values(status="suspended"))
+        await db.commit()
+    r2 = await async_client.get("/api/v1/auth/me", headers=hdr)
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["current_org_accessible"] is False
+    assert body["current_org_block_reason"] == "ORG_LICENSE_INACTIVE"
+    entry = next((o for o in body["organizations"] if o["organization_id"] == str(org2["org_id"])), None)
+    assert entry is not None and entry["accessible"] is False and entry["block_reason"] == "ORG_LICENSE_INACTIVE"
+
+    async with async_session() as db:
+        await db.execute(update(License).where(License.organization_id == org2["org_id"]).values(status="active"))
+        await db.commit()
+
+
+async def test_terminated_membership_is_access_revoked(
+    async_client: AsyncClient, seed_roles: dict, seed_organization: dict
+):
+    """멤버십이 terminated 면(본인만 밴) ORG_ACCESS_REVOKED — 라이센스와 구분된 코드."""
+    import uuid as _uuid
+    from app.models.org_member import OrgMember
+
+    uid = _uuid.uuid4()
+    uname = f"banned_{_uuid.uuid4().hex[:6]}"
+    async with async_session() as db:
+        db.add(User(id=uid, organization_id=seed_organization["id"], role_id=seed_roles["owner"],
+                    username=uname, full_name="Banned", password_hash=hash_password("1234"), is_active=True))
+        db.add(OrgMember(user_id=uid, organization_id=seed_organization["id"], role_id=seed_roles["owner"], status="terminated"))
+        await db.commit()
+    try:
+        token = await _login(uname)  # 로그인 자체는 멤버십 상태 안 봄
+        hdr = {"Authorization": f"Bearer {token}"}
+        # /me → 200 with ACCESS_REVOKED
+        r = await async_client.get("/api/v1/auth/me", headers=hdr)
+        assert r.status_code == 200, r.text
+        assert r.json()["current_org_block_reason"] == "ORG_ACCESS_REVOKED"
+        # org-scoped → 403 with ACCESS_REVOKED
+        r2 = await async_client.get("/api/v1/console/stores", headers=hdr)
+        assert r2.status_code == 403
+        assert r2.json()["detail"]["code"] == "ORG_ACCESS_REVOKED"
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(User).where(User.id == uid))
+            await db.commit()
+
+
+async def test_switch_org_to_another_membership(
+    dual_member_user: dict, org2: dict, async_client: AsyncClient
+):
+    """멀티-org 계정이 switch-org 로 다른 org 컨텍스트 토큰을 받고 그 org 데이터에 접근."""
+    token = await _login("dualmember", "1234")
+    r = await async_client.post(
+        "/api/v1/auth/switch-org",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"organization_id": str(org2["org_id"])},
+    )
+    assert r.status_code == 200, r.text
+    token2 = r.json()["access_token"]
+    rs = await async_client.get("/api/v1/console/stores", headers={"Authorization": f"Bearer {token2}"})
+    assert rs.status_code == 200, rs.text
+    assert str(org2["store_id"]) in {s["id"] for s in rs.json()}
+
+
 async def test_forged_org_in_token_is_rejected(
     org2: dict, async_client: AsyncClient, test_users: dict
 ):
