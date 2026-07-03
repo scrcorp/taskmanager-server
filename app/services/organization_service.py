@@ -218,6 +218,7 @@ class OrganizationService:
                 role_id=super_owner_role.id,
                 clockin_pin=clockin_pin,
                 status="active",
+                crewid=1,  # 새 org 의 첫 멤버
             ))
 
             # 6) 첫 store (옵션)

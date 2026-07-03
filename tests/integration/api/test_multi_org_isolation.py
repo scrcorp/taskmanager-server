@@ -192,6 +192,35 @@ async def test_org2_owner_cannot_read_org1_user(
     assert resp.status_code == 404, resp.text
 
 
+async def test_crewid_assigned_sequentially_per_org(
+    async_client: AsyncClient, admin_headers: dict, seed_roles: dict, seed_organization: dict
+):
+    """org_member 생성 시 crewid 가 그 org 의 다음 순번으로 부여된다."""
+    import uuid as _uuid
+    from app.models.org_member import OrgMember
+    from app.services.org_numbering import next_crewid
+
+    async with async_session() as db:
+        expected = await next_crewid(db, seed_organization["id"])
+
+    uname = f"crew_{_uuid.uuid4().hex[:6]}"
+    resp = await async_client.post(
+        "/api/v1/console/users",
+        headers=admin_headers,
+        json={"username": uname, "password": "test1234", "full_name": "Crew", "role_id": str(seed_roles["staff"])},
+    )
+    assert resp.status_code in (200, 201), resp.text
+    uid = _uuid.UUID(resp.json()["id"])
+    try:
+        async with async_session() as db:
+            m = (await db.execute(select(OrgMember).where(OrgMember.user_id == uid))).scalar_one()
+            assert m.crewid == expected
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(User).where(User.id == uid))
+            await db.commit()
+
+
 async def test_create_organization_bootstraps_and_owner_can_login(async_client: AsyncClient):
     """organization_service.create_organization 이 org+roles+권한+super_owner+org_member+store 를
     부트스트랩하고, 그 org 의 owner 가 실제로 로그인된다 (백오피스 org 생성의 핵심 로직)."""

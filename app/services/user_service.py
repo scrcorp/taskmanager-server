@@ -311,6 +311,7 @@ class UserService:
             # [Model B] org 소속(org_member) 병행 생성 — 새 유저를 Model B 완결 엔티티로.
             # org별 속성(role/시급/부서/PIN/사번)을 org_member 에 미러(전환기: users 컬럼과 병존).
             from app.models.org_member import OrgMember
+            from app.services.org_numbering import next_crewid
 
             db.add(
                 OrgMember(
@@ -322,6 +323,7 @@ class UserService:
                     clockin_pin=clockin_pin,
                     employee_no=normalized_emp,
                     status="active",
+                    crewid=await next_crewid(db, organization_id),
                 )
             )
             await db.flush()

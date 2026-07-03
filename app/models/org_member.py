@@ -17,6 +17,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     UniqueConstraint,
@@ -80,6 +81,9 @@ class OrgMember(Base):
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="active", server_default="active"
     )
+    # org 번호(CREWID) — org 안에서 1부터 순번, org 내 unique. DB 컬럼명 = 라벨 = crewid.
+    # (기존 employee_no[레거시 String]와 별개 — 새 정수 순번.)
+    crewid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -104,6 +108,13 @@ class OrgMember(Base):
             "employee_no",
             unique=True,
             postgresql_where=text("employee_no IS NOT NULL"),
+        ),
+        Index(
+            "uq_org_member_crewid",
+            "organization_id",
+            "crewid",
+            unique=True,
+            postgresql_where=text("crewid IS NOT NULL"),
         ),
     )
 
@@ -146,12 +157,22 @@ class OrgMemberStore(Base):
     is_work_assignment: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true", nullable=False
     )
+    # EMPID — 매장(store) 안에서 1부터 순번, store 내 unique. DB 컬럼명 = 라벨 = empid.
+    # 사람이 매장에 배정될 때 그 매장의 다음 번호를 받는다(매장마다 독립).
+    empid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
     __table_args__ = (
         UniqueConstraint("org_member_id", "store_id", name="uq_org_member_store"),
+        Index(
+            "uq_org_member_store_empid",
+            "store_id",
+            "empid",
+            unique=True,
+            postgresql_where=text("empid IS NOT NULL"),
+        ),
     )
 
     org_member = relationship("OrgMember", back_populates="member_stores")

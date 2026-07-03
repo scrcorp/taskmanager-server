@@ -405,6 +405,7 @@ class AuthService:
 
         # [Model B] org 소속(org_member) 병행 생성 — 자가가입 유저도 Model B 완결 엔티티로.
         from app.models.org_member import OrgMember
+        from app.services.org_numbering import next_crewid
 
         db.add(
             OrgMember(
@@ -413,6 +414,7 @@ class AuthService:
                 role_id=staff_role.id,
                 clockin_pin=clockin_pin,
                 status="active",
+                crewid=await next_crewid(db, organization_id),
             )
         )
         await db.flush()
