@@ -11,9 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.org_member import OrgMember, OrgMemberStore
 
+# 정책 A: 번호는 한 번 부여되면 고정. 배정 해제해도 행은 삭제하지 않고 휴면(플래그 false)으로
+# 보존 → 재배정 시 같은 행/같은 empid 재사용. 휴면 행도 번호를 점유하므로 신규는 MAX+1 로 새 번호.
+# (껐다 켰다 해도 empid 불변, 무한히 안 올라감.)
+
 
 async def next_crewid(db: AsyncSession, organization_id: UUID) -> int:
-    """org 안에서 다음 crewid (1부터)."""
+    """org 안에서 다음 crewid — MAX+1 (1부터). 휴면 포함 사용 중 번호는 건너뜀."""
     return (
         await db.execute(
             select(func.coalesce(func.max(OrgMember.crewid), 0) + 1).where(
@@ -24,7 +28,7 @@ async def next_crewid(db: AsyncSession, organization_id: UUID) -> int:
 
 
 async def next_empid(db: AsyncSession, store_id: UUID) -> int:
-    """매장 안에서 다음 empid (1부터)."""
+    """매장 안에서 다음 empid — MAX+1 (1부터). 휴면 포함 사용 중 번호는 건너뜀."""
     return (
         await db.execute(
             select(func.coalesce(func.max(OrgMemberStore.empid), 0) + 1).where(
@@ -91,18 +95,24 @@ async def ensure_member_store(
 
 
 async def remove_member_store(db: AsyncSession, user_id: UUID, store_id: UUID) -> None:
-    """매장 배정 해제 시 대응 org_member_store 삭제."""
+    """매장 배정 해제 — 정책 A: 행을 삭제하지 않고 휴면(플래그 false)으로 두어 empid 보존.
+
+    나중에 재배정하면 ensure_member_store 가 이 행을 재사용 → 같은 empid 로 복귀.
+    """
     member_id = await _org_member_id_for_store(db, user_id, store_id)
     if member_id is None:
         return
-    from sqlalchemy import delete as _delete
-
-    await db.execute(
-        _delete(OrgMemberStore).where(
-            OrgMemberStore.org_member_id == member_id,
-            OrgMemberStore.store_id == store_id,
+    row = (
+        await db.execute(
+            select(OrgMemberStore).where(
+                OrgMemberStore.org_member_id == member_id,
+                OrgMemberStore.store_id == store_id,
+            )
         )
-    )
+    ).scalar_one_or_none()
+    if row is not None:
+        row.is_work_assignment = False
+        row.is_manager = False
 
 
 async def reconcile_member_stores(

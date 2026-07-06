@@ -256,6 +256,52 @@ async def test_store_assignment_assigns_empid(
             await db.commit()
 
 
+async def test_empid_stable_across_reassignment(
+    async_client: AsyncClient, admin_headers: dict, seed_roles: dict, seed_organization: dict, test_store_id
+):
+    """정책 A: 매장 배정 해제 후 재배정해도 empid 불변 (휴면 보존 → 재사용)."""
+    import uuid as _uuid
+    from app.models.org_member import OrgMember, OrgMemberStore
+    from app.services.user_service import user_service
+
+    uname = f"stable_{_uuid.uuid4().hex[:6]}"
+    resp = await async_client.post(
+        "/api/v1/console/users",
+        headers=admin_headers,
+        json={"username": uname, "password": "test1234", "full_name": "Stable Emp", "role_id": str(seed_roles["staff"])},
+    )
+    uid = _uuid.UUID(resp.json()["id"])
+
+    async def _empid() -> int | None:
+        async with async_session() as db:
+            m = (await db.execute(select(OrgMember.id).where(OrgMember.user_id == uid))).scalar_one()
+            return (
+                await db.execute(
+                    select(OrgMemberStore.empid).where(
+                        OrgMemberStore.org_member_id == m, OrgMemberStore.store_id == test_store_id
+                    )
+                )
+            ).scalar_one_or_none()
+
+    try:
+        async with async_session() as db:
+            await user_service.add_user_store(db, uid, test_store_id, seed_organization["id"])
+        first = await _empid()
+        assert first is not None
+        # 해제 (휴면)
+        async with async_session() as db:
+            await user_service.remove_user_store(db, uid, test_store_id, seed_organization["id"])
+        # 재배정 → 같은 empid
+        async with async_session() as db:
+            await user_service.add_user_store(db, uid, test_store_id, seed_organization["id"])
+        second = await _empid()
+        assert second == first, f"empid changed on reassignment: {first} -> {second}"
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(User).where(User.id == uid))
+            await db.commit()
+
+
 async def test_create_organization_bootstraps_and_owner_can_login(async_client: AsyncClient):
     """organization_service.create_organization 이 org+roles+권한+super_owner+org_member+store 를
     부트스트랩하고, 그 org 의 owner 가 실제로 로그인된다 (백오피스 org 생성의 핵심 로직)."""
