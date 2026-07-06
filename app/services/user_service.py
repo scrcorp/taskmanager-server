@@ -286,11 +286,16 @@ class UserService:
                 "organization_id": organization_id,
                 "role_id": UUID(data.role_id),
                 "username": data.username,
-                "full_name": data.full_name,
+                "full_name": data.full_name,  # 스키마 validator 가 first/middle/last 로 합성 보장
                 "email": data.email,
                 "password_hash": password_hash,
                 "clockin_pin": clockin_pin,
             }
+            # 구조화된 이름 (first/middle/last) — 있으면 저장
+            for _fld in ("first_name", "middle_name", "last_name"):
+                _val = getattr(data, _fld, None)
+                if _val is not None and _val.strip():
+                    create_data[_fld] = _val.strip()
             if hourly_rate is not None:
                 create_data["hourly_rate"] = hourly_rate
             # FOH/BOH 분류 — 지정된 경우만 저장 (미지정이면 NULL 유지)
@@ -327,6 +332,7 @@ class UserService:
             from app.models.org_member import OrgMember
             from app.services.org_numbering import next_crewid
 
+            _crewid = await next_crewid(db, organization_id)
             db.add(
                 OrgMember(
                     user_id=user.id,
@@ -337,7 +343,7 @@ class UserService:
                     clockin_pin=clockin_pin,
                     employee_no=normalized_emp,
                     status="active",
-                    crewid=await next_crewid(db, organization_id),
+                    crewid=_crewid,
                 )
             )
             await db.flush()
@@ -357,7 +363,7 @@ class UserService:
                 raise NotFoundError("User not found after creation")
 
             org_rate = await self._get_org_rate(db, organization_id)
-            result = self._to_response(loaded, org_rate)
+            result = self._to_response(loaded, org_rate, crewid=_crewid)
             await db.commit()
             return result
         except Exception:

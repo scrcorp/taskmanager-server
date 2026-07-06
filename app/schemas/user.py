@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # 사번(employee_no) — 회사 사번. 문자열 유지(선행0 보존), org 내 유일(partial unique).
 _EMPLOYEE_NO_RE = re.compile(r"^[A-Za-z0-9-]{1,50}$")
@@ -78,13 +78,31 @@ class UserCreate(BaseModel):
 
     username: str  # 로그인 아이디 — 조직 내 고유 (Login ID, unique within org)
     password: str  # 비밀번호 — 평문, 서버에서 해싱 (Plain text, hashed server-side)
-    full_name: str  # 실명 (Full display name)
+    # 이름: first/middle/last (권장). full_name 은 없으면 셋을 합쳐 자동 생성(호환).
+    full_name: str | None = None  # 실명 (없으면 first/middle/last 로 합성)
+    first_name: str | None = None
+    middle_name: str | None = None
+    last_name: str | None = None
     email: str | None = None  # 이메일 (Optional email)
     role_id: str  # 역할 UUID 문자열 (Role UUID to assign)
     department: Literal["FOH", "BOH"] | None = None  # FOH/BOH 분류 (None=미지정)
-    employee_no: str | None = None  # 사번 (Company employee number, optional)
+    employee_no: str | None = None  # 사번 (Company employee number, optional) [레거시]
 
     _norm_emp = field_validator("employee_no")(_normalize_employee_no)
+
+    @model_validator(mode="after")
+    def _compose_full_name(self) -> "UserCreate":
+        """full_name 이 비어 있으면 first/middle/last 로 합성. 이름은 필수."""
+        if not (self.full_name and self.full_name.strip()):
+            parts = [
+                p.strip()
+                for p in (self.first_name, self.middle_name, self.last_name)
+                if p and p.strip()
+            ]
+            self.full_name = " ".join(parts)
+        if not (self.full_name and self.full_name.strip()):
+            raise ValueError("Name is required")
+        return self
 
 
 class UserUpdate(BaseModel):
