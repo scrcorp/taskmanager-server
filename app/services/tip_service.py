@@ -241,7 +241,7 @@ class TipService:
             signature_strokes=signature_strokes,
         )
         key = f"forms/4070/{form.employee_id}/{form.id}.pdf"
-        storage_service.save_local(key, pdf_bytes)
+        storage_service.put_bytes(pdf_bytes, key=key, content_type="application/pdf")
         form.pdf_key = key
         await db.flush()
 

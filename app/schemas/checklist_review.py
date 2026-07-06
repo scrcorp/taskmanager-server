@@ -7,6 +7,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.schemas.common import PhotoMeta
+
 
 class ItemReviewUpsert(BaseModel):
     """항목 리뷰 생성/수정 요청 — result + 선택적 인라인 코멘트."""
@@ -64,6 +66,7 @@ class ItemReviewResponse(BaseModel):
 class ResubmitRequest(BaseModel):
     """Staff 재제출 요청."""
 
+    photos: list[PhotoMeta] | None = None  # 신규: per-photo 촬영시각 메타 (우선 사용)
     photo_urls: list[str] | None = None
     # backward compat: single photo_url is wrapped into list in service
     photo_url: str | None = None

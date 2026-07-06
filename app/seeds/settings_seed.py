@@ -110,7 +110,7 @@ SETTINGS_SEED: list[SettingDefinition] = [
     SettingDefinition(
         key="work.default_schedule_duration_minutes",
         label="Default shift duration (minutes)",
-        description="Default schedule length when creating a new schedule. End time = start + this value.",
+        description="Default schedule length. Also the length of an auto-created walk-in schedule (end time = clock-in time + this value).",
         value_type="number",
         default_value=330,
         category="Work Rules",
@@ -133,6 +133,22 @@ SETTINGS_SEED: list[SettingDefinition] = [
         category="Schedule Range",
     ),
     # ─── Attendance ─────────────────────────────────────
+    SettingDefinition(
+        key="attendance.walk_in_allowed",
+        label="Allow walk-in clock-in",
+        description="Allow staff to clock in without a pre-created schedule. A walk-in schedule is auto-created on clock-in. When disabled, a confirmed schedule is required.",
+        value_type="boolean",
+        default_value=False,
+        category="Attendance",
+    ),
+    SettingDefinition(
+        key="attendance.auto_clock_out_enabled",
+        label="Auto clock-out",
+        description="Automatically clock out staff who forgot to clock out. When disabled, this store is skipped by the auto clock-out loop (manager alerts still apply).",
+        value_type="boolean",
+        default_value=True,
+        category="Attendance",
+    ),
     SettingDefinition(
         key="attendance.late_buffer_minutes",
         label="Late buffer (minutes)",

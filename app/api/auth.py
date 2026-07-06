@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_account, get_current_user
 from app.database import get_db
 from app.models.user import User
 from app.schemas.auth import (
@@ -18,6 +18,7 @@ from app.schemas.auth import (
     ConsoleFiltersResponse,
     ConsoleFiltersUpdateRequest,
     FindUsernameRequest,
+    SwitchOrgRequest,
     FindUsernameResponse,
     FindUsernameSendCodeRequest,
     FindUsernameVerifyCodeRequest,
@@ -69,13 +70,33 @@ async def logout(
 @router.get("/me", response_model=UserMeResponse)
 async def get_me(
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_account: Annotated[User, Depends(get_current_account)],
 ) -> UserMeResponse:
     """현재 사용자 프로필 조회.
 
-    Get the profile of the currently authenticated user.
+    인증만 되면 200 — org 접근이 차단(라이센스/밴)돼도 소속 org 목록과 차단 이유(code)를
+    함께 반환한다. 프론트가 이걸로 전용 화면/org 전환을 판단한다. (org-scoped 엔드포인트는
+    get_current_user 로 게이트되어 403.)
     """
-    return await auth_service.get_me(db, current_user)
+    return await auth_service.get_me(db, current_account)
+
+
+@router.post("/switch-org", response_model=TokenResponse)
+async def switch_org(
+    data: SwitchOrgRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_account: Annotated[User, Depends(get_current_account)],
+) -> TokenResponse:
+    """소속된 다른 org 로 컨텍스트 전환 — 그 org 용 토큰 재발급 (접근 가능한 멤버여야).
+
+    멀티-org 계정이 org 스위처로 전환할 때 사용. 대상 org 가 라이센스 정지/밴이면 403(코드).
+    """
+    from app.api.utils import get_session_info
+
+    return await auth_service.switch_organization(
+        db, current_account, data.organization_id, **get_session_info(request)
+    )
 
 
 @router.put("/me/console-filters", response_model=ConsoleFiltersResponse)

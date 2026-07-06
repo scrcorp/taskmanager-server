@@ -264,6 +264,19 @@ class EmailVerificationService:
         if result.scalars().first() is not None:
             raise ConflictError("This email is already used by another account")
 
+        # ── QA bypass — settings.EMAIL_VERIFICATION_TEST_CODE(예 "000000")가 설정되고
+        # 입력 코드가 그와 일치하면 실제 코드 record 없이 통과. verify_code 와 동일한 우회를
+        # 로그인-후 인증(confirm_email)에도 적용 — 그렇지 않으면 magic 설정 시 send 는 메일을
+        # skip 하면서 DB엔 랜덤코드 record 만 남아 콘솔에서 000000 이 항상 실패한다.
+        # worktree/local 전용(prod 미설정).
+        from app.config import settings as _settings
+        magic = (_settings.EMAIL_VERIFICATION_TEST_CODE or "").strip()
+        if magic and code == magic:
+            user.email = email
+            user.email_verified = True
+            await db.commit()
+            return {"message": "Email verified successfully"}
+
         # 코드 검증
         now = datetime.now(timezone.utc)
         result = await db.execute(

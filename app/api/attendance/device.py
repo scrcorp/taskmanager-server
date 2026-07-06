@@ -24,12 +24,31 @@ from app.schemas.attendance_device import (
     RegisterResponse,
 )
 from app.services.attendance_device_service import attendance_device_service
+from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 from app.utils.timezone import get_store_day_config, get_work_date
 
 
 router: APIRouter = APIRouter()
 
 ACCESS_CODE_SERVICE_KEY = "attendance"
+
+
+async def _resolve_walk_in_allowed(
+    db: AsyncSession, organization_id, store_id
+) -> bool:
+    """매장의 walk-in 허용 설정 resolve. store 미할당이면 false."""
+    if store_id is None:
+        return False
+    try:
+        raw = await resolve_setting(
+            db,
+            key="attendance.walk_in_allowed",
+            organization_id=organization_id,
+            store_id=store_id,
+        )
+        return bool(raw)
+    except SettingNotRegisteredError:
+        return False
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=201)
@@ -92,6 +111,9 @@ async def get_me(
                 offset_minutes = int(off.total_seconds() // 60)
         except Exception:
             offset_minutes = None
+    walk_in_allowed = await _resolve_walk_in_allowed(
+        db, device.organization_id, device.store_id
+    )
     return DeviceMeResponse(
         device_id=device.id,
         device_name=device.device_name,
@@ -101,6 +123,7 @@ async def get_me(
         store_timezone=store_tz,
         store_timezone_offset_minutes=offset_minutes,
         work_date=work_date_str,
+        walk_in_allowed=walk_in_allowed,
         registered_at=device.registered_at,
         last_seen_at=device.last_seen_at,
     )
@@ -133,6 +156,9 @@ async def assign_store(
         except Exception:
             offset_minutes = None
 
+    walk_in_allowed = await _resolve_walk_in_allowed(
+        db, device.organization_id, device.store_id
+    )
     return DeviceMeResponse(
         device_id=device.id,
         device_name=device.device_name,
@@ -142,6 +168,7 @@ async def assign_store(
         store_timezone=store_tz,
         store_timezone_offset_minutes=offset_minutes,
         work_date=work_date_str,
+        walk_in_allowed=walk_in_allowed,
         registered_at=device.registered_at,
         last_seen_at=device.last_seen_at,
     )

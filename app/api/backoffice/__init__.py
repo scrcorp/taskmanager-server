@@ -11,8 +11,10 @@ SoT: docs/99_inbox/2026-06-24 HTM control-plane 운영자콘솔 + EMPID 임포�
 from app.api.backoffice.routes import router as backoffice_router
 from app.api.backoffice.tools.empid import router as _empid_router
 from app.api.backoffice.tools.changelog import router as _changelog_router
+from app.api.backoffice.tools.organizations import router as _orgs_router
 
 # 도구 라우터를 backoffice 라우터에 장착 (비밀경로 prefix 하위)
+backoffice_router.include_router(_orgs_router)
 backoffice_router.include_router(_empid_router)
 backoffice_router.include_router(_changelog_router)
 

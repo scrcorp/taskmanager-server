@@ -3,12 +3,14 @@
 `/api/v1/attendance` 하위에 mount.
 """
 
+import hashlib
+import json
 import uuid
 from datetime import date as date_cls, datetime, datetime as dt, timedelta, timezone as tz
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request, Response, status as http_status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,7 +45,9 @@ router: APIRouter = APIRouter()
 async def today_staff(
     device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[TodayStaffRow]:
+    request: Request,
+    response: Response,
+) -> list[TodayStaffRow] | Response:
     """기기 매장 기준 오늘 스케줄 + 각 유저의 현재 attendance 상태.
 
     한 번의 호출로 On Shift / Coming Up / Completed 를 모두 반환. 클라이언트가
@@ -201,6 +205,16 @@ async def today_staff(
         return (status_rank.get(row.status, 99), row.scheduled_start or datetime.max)
 
     result.sort(key=sort_key)
+
+    # ── ETag/304: 응답 내용 해시가 같으면 304(빈 바디)로 전송량 절감.
+    #    status/state 는 시간 파생이라 "실제 표시가 바뀔 때만" 해시가 달라진다
+    #    (아무 변화 없는 폴링 tick → 304). 304 는 표준이라 프록시 통과 문제 없음.
+    payload = [r.model_dump(mode="json") for r in result]
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    etag = 'W/"' + hashlib.sha256(body.encode("utf-8")).hexdigest()[:32] + '"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=http_status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
+    response.headers["ETag"] = etag
     return result
 
 

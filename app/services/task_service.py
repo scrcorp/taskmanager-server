@@ -49,7 +49,7 @@ def _normalize_attachments(items: list | None) -> list[dict]:
         # client 가 url 또는 key 로 보낼 수 있음 → finalize_upload 로 key 추출.
         key_or_url = d.get("key") or d.get("url")
         if key_or_url:
-            d["key"] = storage_service.finalize_upload(key_or_url)
+            d["key"] = storage_service.put_finalized(key_or_url)
         d.pop("url", None)  # DB 에는 url 저장 X
         out.append(d)
     return out

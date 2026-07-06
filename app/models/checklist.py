@@ -10,7 +10,7 @@ Tables:
     - checklist_template_items: 체크리스트 항목 (Individual items within a template)
     - cl_instances: 체크리스트 인스턴스 (One per schedule)
     - cl_instance_items: 인스턴스 항목 (One per item per instance, snapshot + completion + review)
-    - cl_item_files: 첨부파일 (Photos per item, optionally linked to a submission)
+    - (파일은 file.py 의 files + file_usages 로 이전됨 — owner_type='cl_item')
     - cl_item_submissions: 제출 이력 (Submission archive per resubmission)
     - cl_item_reviews_log: 리뷰 변경 이력 (Review result change log)
     - cl_item_messages: 메시지 스레드 (Chat-like review messages per item)
@@ -257,38 +257,21 @@ class ChecklistInstanceItem(Base):
 
     # 관계
     instance = relationship("ChecklistInstance", back_populates="items")
-    files = relationship("ChecklistItemFile", back_populates="item", cascade="all, delete-orphan", order_by="ChecklistItemFile.sort_order")
+    # files: 중앙 file_usages 중 owner_type='cl_item' 인 행. owner_id 는 폴리모픽(FK 없음)이라
+    # viewonly + primaryjoin. 삭제는 cascade 가 아니라 서비스에서 명시적으로 처리(한 줄 삭제).
+    files = relationship(
+        "FileUsage",
+        primaryjoin="and_(foreign(FileUsage.owner_id) == ChecklistInstanceItem.id, FileUsage.owner_type == 'cl_item')",
+        viewonly=True,
+        order_by="FileUsage.sort_order",
+    )
     submissions = relationship("ChecklistItemSubmission", back_populates="item", cascade="all, delete-orphan", order_by="ChecklistItemSubmission.version")
     reviews_log = relationship("ChecklistItemReviewLog", back_populates="item", cascade="all, delete-orphan", order_by="ChecklistItemReviewLog.created_at")
     messages = relationship("ChecklistItemMessage", back_populates="item", cascade="all, delete-orphan", order_by="ChecklistItemMessage.created_at")
 
 
-class ChecklistItemFile(Base):
-    """체크리스트 항목 첨부파일 — 항목별 사진/파일.
-
-    One row per file per instance item.
-    Optionally linked to a specific submission (for per-submission photo tracking).
-    """
-
-    __tablename__ = "cl_item_files"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    item_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("cl_instance_items.id", ondelete="CASCADE"), nullable=False)
-    # 어떤 맥락의 파일인지: context + context_id
-    context: Mapped[str] = mapped_column(String(20), nullable=False)  # submission | review | chat
-    context_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)  # 해당 submission/review_log/message의 id
-    file_url: Mapped[str] = mapped_column(String(500), nullable=False)
-    file_type: Mapped[str] = mapped_column(String(20), default="photo")  # photo, video, document
-    sort_order: Mapped[int] = mapped_column(Integer, default=0)
-    uploaded_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-    __table_args__ = (
-        Index("ix_cl_item_files_item_id", "item_id"),
-        Index("ix_cl_item_files_context", "context", "context_id"),
-    )
-
-    item = relationship("ChecklistInstanceItem", back_populates="files")
+# 체크리스트 파일은 범용 `files`(레지스트리) + `file_usages`(owner_type='cl_item') 로 옮겨졌다.
+# 모델은 app/models/file.py 의 File / FileUsage 참조. (구 cl_item_files 테이블 폐기)
 
 
 class ChecklistItemSubmission(Base):

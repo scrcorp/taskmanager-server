@@ -70,7 +70,7 @@ async def admin_update_request(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleRequestResponse:
     """관리자가 스케줄 신청 수정 — 원본 추적 + auto-unmodify."""
-    req = await schedule_request_service.admin_update_request(db, request_id, data)
+    req = await schedule_request_service.admin_update_request(db, request_id, data, organization_id=current_user.organization_id)
     if hide_cost_for(current_user):
         scrub_cost_fields(req)
     return req
@@ -84,7 +84,7 @@ async def update_request_status(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleRequestResponse:
     """직원 스케줄 신청 상태 변경."""
-    req = await schedule_request_service.update_request_status(db, request_id, data.status)
+    req = await schedule_request_service.update_request_status(db, request_id, data.status, organization_id=current_user.organization_id)
     if hide_cost_for(current_user):
         scrub_cost_fields(req)
     return req
@@ -97,7 +97,7 @@ async def admin_revert_request(
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
 ) -> ScheduleRequestResponse:
     """Modified/rejected 신청을 원래 값으로 복원."""
-    req = await schedule_request_service.admin_revert_request(db, request_id)
+    req = await schedule_request_service.admin_revert_request(db, request_id, organization_id=current_user.organization_id)
     if hide_cost_for(current_user):
         scrub_cost_fields(req)
     return req

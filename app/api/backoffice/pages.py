@@ -129,7 +129,7 @@ def login_html(base: str, message: str = "", status_code: int = 200) -> HTMLResp
 # 좌측 nav 메뉴 — (라벨, 경로 또는 None=비활성/곧추가)
 _NAV = [
     ("Dashboard", "/dashboard"),
-    ("Organizations", None),
+    ("Organizations", "/tools/orgs"),
     ("Users", None),
     ("Tools · EMPID", "/tools/empid"),
     ("Changelog", "/tools/changelog"),
@@ -174,7 +174,7 @@ def dashboard_html(base: str, admin: str) -> HTMLResponse:
     content = (
         "<div class='section'><div class='muted-box'>"
         "Operator console shell is live. Tools:<br><br>"
-        "• <b>Organizations</b> — list/drill into every org (soon)<br>"
+        f"• <a href='{base}/tools/orgs'><b>Organizations</b></a> — list every org + create new (org bootstrap)<br>"
         "• <b>Users</b> — cross-org lookup (soon)<br>"
         f"• <a href='{base}/tools/empid'><b>Tools · EMPID Reconciliation</b></a> — legacy employee-number import"
         "</div></div>"

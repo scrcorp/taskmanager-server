@@ -301,7 +301,7 @@ async def upload_signature_blob(
     if not body:
         raise HTTPException(status_code=400, detail="Empty body")
     key = f"signatures/users/{current_user.id}/{_uuid.uuid4()}.png"
-    storage_service.save_local(key, body)
+    storage_service.put_bytes(body, key=key, content_type="image/png")
     return {
         "signature_image_key": key,
         "signature_url": storage_service.resolve_url(key),

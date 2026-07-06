@@ -260,10 +260,10 @@ async def upload_attachment(
             },
         )
 
-    key = storage_service.upload_bytes(
+    key = storage_service.put_bytes(
         data,
-        filename=file.filename or "attachment",
         folder="applicant_attachments",
+        filename=file.filename or "attachment",
         content_type=file.content_type,
     )
     return {
@@ -288,6 +288,9 @@ class AttachmentInput(BaseModel):
     file_name: str
     file_size: int
     mime_type: str
+    # 촬영시각 메타 — 받으면 스냅샷 JSONB 에 보존(강제 없음). 신뢰 앵커는 제출시각.
+    capture_time: Optional[datetime] = None
+    capture_source: Optional[str] = None  # live | gallery | unknown
 
 
 class StartBody(BaseModel):
@@ -398,6 +401,8 @@ def _validate_against_form(
                 "file_name": a.file_name,
                 "file_size": a.file_size,
                 "mime_type": a.mime_type,
+                "capture_time": a.capture_time.isoformat() if a.capture_time else None,
+                "capture_source": a.capture_source,
             })
 
     return answer_snaps, attachment_snaps

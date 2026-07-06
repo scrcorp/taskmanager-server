@@ -86,10 +86,12 @@ async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
         except (SettingNotRegisteredError, TypeError, ValueError):
             late_buffer = DEFAULT_LATE_BUFFER_MINUTES
 
+        # no_show/late 판정은 분 단위로만 (초 버림) — 정시가 초 차이로 late 가 되지 않게.
+        now_min = now_utc.replace(second=0, microsecond=0)
         # 1) sched_end 가 지났으면 no_show 로 강등.
         #    단 clock_in 이 이미 있으면(출근 완료) "late" 그대로 유지 — 출근한 직원을
         #    no_show 로 표시하면 키오스크 "Clocked In" 섹션에서 사라진다.
-        if sched_end is not None and now_utc >= sched_end:
+        if sched_end is not None and now_min >= sched_end:
             if att.clock_in is not None:
                 continue
             if att.status != "no_show":
@@ -102,7 +104,7 @@ async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
             continue
 
         # 2) 아직 sched_end 전이면 late_buffer 지났을 때 upcoming → late
-        if att.status == "upcoming" and now_utc >= sched_start + timedelta(minutes=late_buffer):
+        if att.status == "upcoming" and now_min > sched_start + timedelta(minutes=late_buffer):
             att.status = "late"
             anoms = list(att.anomalies or [])
             if "late" not in anoms:
@@ -150,7 +152,29 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
     rows_list = list(rows.all())
     auto_count = 0
 
+    # F9: 틱마다 행 수만큼 resolve 하지 않도록 매장당 1회 resolve 후 캐시.
+    auto_enabled_cache: dict = {}
+
     for att, sch, store in rows_list:
+        # N2: 매장의 auto_clock_out_enabled 토글 가드. OFF 매장은 자동 퇴근 skip
+        # (미퇴근 관리자 알림은 별도 경로에서 유지 — D11).
+        if att.store_id in auto_enabled_cache:
+            auto_enabled = auto_enabled_cache[att.store_id]
+        else:
+            try:
+                raw_enabled = await resolve_setting(
+                    db,
+                    key="attendance.auto_clock_out_enabled",
+                    organization_id=att.organization_id,
+                    store_id=att.store_id,
+                )
+                auto_enabled = bool(raw_enabled) if raw_enabled is not None else True
+            except (SettingNotRegisteredError, TypeError, ValueError):
+                auto_enabled = True
+            auto_enabled_cache[att.store_id] = auto_enabled
+        if not auto_enabled:
+            continue
+
         # 동일하게 helper 사용 — store.timezone null 이면 org.timezone fallback.
         tz_name, _ = await get_store_day_config(db, att.store_id)
         try:

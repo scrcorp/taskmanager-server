@@ -45,3 +45,7 @@ jinja2==3.1.6
 
 # Scheduler (cron jobs for attendance state transitions)
 APScheduler==3.10.4
+
+# Image pipeline — WebP 인코딩/썸네일 (storage_service). 이전엔 weasyprint 의
+# transitive 의존이었으나 직접 사용하므로 명시 고정.
+Pillow==12.2.0

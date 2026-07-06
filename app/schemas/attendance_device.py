@@ -38,6 +38,9 @@ class DeviceMeResponse(BaseModel):
     store_timezone: str | None = None   # IANA tz, e.g. "America/Los_Angeles"
     store_timezone_offset_minutes: int | None = None  # 현재 UTC 오프셋 (분, 예: PDT=-420)
     work_date: str | None = None         # store tz + day_start 기준 "YYYY-MM-DD"
+    # 워크인 허용 여부 (store 설정 resolve, store 없으면 false). 키오스크가
+    # 스케줄 없이도 clock-in 버튼을 띄울지 판단하는 데 사용.
+    walk_in_allowed: bool = False
     registered_at: datetime
     last_seen_at: datetime | None
 
@@ -67,6 +70,9 @@ class ClockActionRequest(BaseModel):
     # (Issue 8) 다중 schedule 시 client 가 선택한 schedule 지정. 미지정이면
     # 서버가 우선순위로 자동 선택 (단일 schedule 케이스 호환).
     schedule_id: UUID | None = None
+    # 워크인 의도 (clock-in 에만 의미). true 이고 오늘 confirmed 스케줄이 없으며
+    # store 의 walk_in_allowed 설정이 켜져 있으면 서버가 워크인 스케줄을 자동 생성.
+    walk_in: bool = False
 
 
 class ManageBreakEntry(BaseModel):

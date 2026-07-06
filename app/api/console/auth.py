@@ -138,6 +138,19 @@ async def admin_setup(
         password_hash=hash_password(password),
     )
     db.add(user)
+    await db.flush()
+
+    # [Model B] org 소속(org_member) 병행 생성 — 첫 super_owner 도 Model B 완결 엔티티로.
+    from app.models.org_member import OrgMember
+
+    db.add(
+        OrgMember(
+            user_id=user.id,
+            organization_id=org.id,
+            role_id=super_owner_role.id,
+            status="active",
+        )
+    )
 
     try:
         await db.commit()

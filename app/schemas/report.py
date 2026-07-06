@@ -88,6 +88,9 @@ class IssueAttachment(BaseModel):
     kind: str | None = None  # "image" | "video"
     name: str | None = None
     size: int | None = None
+    # 촬영시각 메타 — 받으면 JSONB 에 그대로 보존(강제 없음). 신뢰 앵커는 report 의 created_at.
+    capture_time: datetime | None = None
+    capture_source: str | None = None  # live | gallery | unknown
 
 
 class IssueLinks(BaseModel):

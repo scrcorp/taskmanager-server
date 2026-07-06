@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # 사번(employee_no) — 회사 사번. 문자열 유지(선행0 보존), org 내 유일(partial unique).
 _EMPLOYEE_NO_RE = re.compile(r"^[A-Za-z0-9-]{1,50}$")
@@ -24,6 +24,22 @@ def _normalize_employee_no(v: str | None) -> str | None:
         return None
     if not _EMPLOYEE_NO_RE.match(v):
         raise ValueError("Employee number must be 1-50 alphanumeric/hyphen characters")
+    return v
+
+
+# username — 로그인 아이디. 3~30자, 영숫자로 시작, 이후 영숫자/`.`/`_`/`-` 허용.
+# ('.' 하나 같은 무의미 아이디 방지.)
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,29}$")
+
+
+def _validate_username(v: str) -> str:
+    """trim → 형식 검증. 3~30자, 영숫자 시작, 영숫자/./_/- 만."""
+    v = (v or "").strip()
+    if not _USERNAME_RE.match(v):
+        raise ValueError(
+            "Username must be 3-30 characters, start with a letter or digit, "
+            "and use only letters, digits, dot, underscore, or hyphen"
+        )
     return v
 
 
@@ -78,13 +94,33 @@ class UserCreate(BaseModel):
 
     username: str  # 로그인 아이디 — 조직 내 고유 (Login ID, unique within org)
     password: str  # 비밀번호 — 평문, 서버에서 해싱 (Plain text, hashed server-side)
-    full_name: str  # 실명 (Full display name)
+    # 이름: first/middle/last (권장). full_name 은 없으면 셋을 합쳐 자동 생성(호환).
+    full_name: str | None = None  # 실명 (없으면 first/middle/last 로 합성)
+    first_name: str | None = None
+    middle_name: str | None = None
+    last_name: str | None = None
     email: str | None = None  # 이메일 (Optional email)
     role_id: str  # 역할 UUID 문자열 (Role UUID to assign)
     department: Literal["FOH", "BOH"] | None = None  # FOH/BOH 분류 (None=미지정)
-    employee_no: str | None = None  # 사번 (Company employee number, optional)
+    employee_no: str | None = None  # 사번 (Company employee number, optional) [레거시]
 
     _norm_emp = field_validator("employee_no")(_normalize_employee_no)
+    _valid_username = field_validator("username")(_validate_username)
+
+    @model_validator(mode="after")
+    def _compose_full_name(self) -> "UserCreate":
+        """이름 규칙: first/last 경로면 둘 다 필수(middle 선택), full_name 합성.
+        레거시로 full_name 만 직접 준 경우는 그대로 허용(호환)."""
+        first = (self.first_name or "").strip()
+        mid = (self.middle_name or "").strip()
+        last = (self.last_name or "").strip()
+        if first or last:
+            if not first or not last:
+                raise ValueError("First name and last name are required")
+            self.full_name = " ".join(p for p in (first, mid, last) if p)
+        if not (self.full_name and self.full_name.strip()):
+            raise ValueError("Name is required")
+        return self
 
 
 class UserUpdate(BaseModel):
@@ -163,7 +199,8 @@ class UserResponse(BaseModel):
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속 (None = inherit from store/org)
     effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
     department: str | None = None  # FOH/BOH 분류 (None=미지정)
-    employee_no: str | None = None  # 사번 (Company employee number, nullable)
+    employee_no: str | None = None  # 사번 (Company employee number, nullable) [레거시]
+    crewid: int | None = None  # CREWID — org 안 1부터 순번 (org 번호)
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
@@ -192,7 +229,8 @@ class UserListResponse(BaseModel):
     hourly_rate: float | None = None  # 개인 시급 raw — NULL이면 상속
     effective_hourly_rate: float | None = None  # 실효 시급: user → (any store) → org cascade
     department: str | None = None  # FOH/BOH 분류 (None=미지정)
-    employee_no: str | None = None  # 사번 (Company employee number, nullable)
+    employee_no: str | None = None  # 사번 (Company employee number, nullable) [레거시]
+    crewid: int | None = None  # CREWID — org 안 1부터 순번 (org 번호)
     is_active: bool  # 계정 활성 상태 (Account active flag)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
@@ -222,6 +260,7 @@ class UserStoreResponse(BaseModel):
     is_manager: bool
     is_work_assignment: bool
     created_at: datetime
+    empid: int | None = None  # 이 매장에서의 EMPID (매장 안 1부터 순번)
 
 
 # === 프로필 (Profile) 스키마 ===

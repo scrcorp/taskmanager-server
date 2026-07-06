@@ -29,6 +29,7 @@ async def _perform_action(
     break_type: str | None = None,
     reason: str | None = None,
     schedule_id: uuid.UUID | None = None,
+    walk_in: bool = False,
 ) -> dict:
     attendance = await attendance_device_service.perform_clock_action(
         db,
@@ -39,6 +40,7 @@ async def _perform_action(
         break_type=break_type,
         reason=reason,
         schedule_id=schedule_id,
+        walk_in=walk_in,
     )
     return await attendance_service.build_response(db, attendance)
 
@@ -52,6 +54,7 @@ async def clock_in(
     return await _perform_action(
         db, device, data.pin, data.user_id, "clock_in",
         schedule_id=data.schedule_id,
+        walk_in=data.walk_in,
     )
 
 

@@ -82,13 +82,15 @@ def compute_effective_status(
     # Overnight shift: end 가 start 보다 빠르면 다음날로 보정
     if sched_end is not None and sched_end <= sched_start:
         sched_end = sched_end + timedelta(days=1)
-    if sched_end is not None and now >= sched_end:
+    # 판정은 분 단위로만 (초 버림) — 정시가 초 차이로 late 로 보이지 않게.
+    now_min = now.replace(second=0, microsecond=0)
+    if sched_end is not None and now_min >= sched_end:
         return "no_show"
     if att_status == "late":
         return "late"
-    if now >= sched_start + timedelta(minutes=late_buffer):
+    if now_min > sched_start + timedelta(minutes=late_buffer):
         return "late"
-    if now >= sched_start - timedelta(minutes=soon_threshold_minutes):
+    if now_min >= sched_start - timedelta(minutes=soon_threshold_minutes):
         return "soon"
     return "upcoming"
 
@@ -399,7 +401,8 @@ class AttendanceService:
                 tz = ZoneInfo(effective_tz)
                 scheduled_start = _dt.combine(today, schedule.start_time, tzinfo=tz)
                 from datetime import timedelta as _td
-                if now > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
+                # late 판정은 분 단위 (clock_in 은 초까지 저장하되 초로 late 찍지 않음)
+                if now.replace(second=0, microsecond=0) > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
                     new_status = "late"
                     anomalies.append("late")
             attendance = await attendance_repository.create(
@@ -489,8 +492,8 @@ class AttendanceService:
                 from zoneinfo import ZoneInfo
                 tz = ZoneInfo(effective_tz)
                 scheduled_end = _dt.combine(today, schedule.end_time, tzinfo=tz)
-                # 조퇴
-                if now < scheduled_end - _td(minutes=EARLY_LEAVE_THRESHOLD_MINUTES):
+                # 조퇴 (분 단위 판정)
+                if now.replace(second=0, microsecond=0) < scheduled_end - _td(minutes=EARLY_LEAVE_THRESHOLD_MINUTES):
                     _add_anomaly(attendance, "early_leave")
                 # 초과근무
                 if attendance.total_work_minutes is not None:
