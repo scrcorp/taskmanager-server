@@ -178,7 +178,7 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
-        UniqueConstraint("organization_id", "username", name="uq_user_org_username"),
+        UniqueConstraint("username", name="uq_user_username"),  # 전역 유니크 (Model B)
         UniqueConstraint("organization_id", "clockin_pin", name="uq_user_org_clockin_pin"),
         # 사번 — 조직 내 non-null 값만 고유. NULL 은 다중 허용 (partial unique).
         Index(

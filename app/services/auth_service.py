@@ -338,8 +338,9 @@ class AuthService:
         # 사용자명 중복 확인 — users + candidates 양쪽에서 체크.
         # 회원가입 경로(register, direct-signup) 모두 이 함수를 거치므로
         # 두 테이블 모두에 같은 ID가 존재하지 않도록 막아둔다.
+        # 전역 유니크 (Model B: username = 전역 로그인 아이디)
         existing: User | None = await auth_repository.get_user_by_username(
-            db, data.username, organization_id
+            db, data.username
         )
         if existing is not None:
             raise DuplicateError("Username already exists")

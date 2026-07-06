@@ -243,12 +243,12 @@ class UserService:
             ForbiddenError: 자기보다 높거나 같은 우선순위의 역할 지정 시도
                             (Attempting to assign a role at or above caller's priority)
         """
-        # 사용자명 중복 확인 — Check username uniqueness within org
+        # 사용자명 중복 확인 — 전역 유니크 (Model B: 계정=전역, username 은 전역 로그인 아이디)
         exists: bool = await user_repository.exists(
-            db, {"organization_id": organization_id, "username": data.username}
+            db, {"username": data.username}
         )
         if exists:
-            raise DuplicateError("Username already exists in this organization")
+            raise DuplicateError("Username already exists")
 
         # 역할 유효성 확인 — Validate role exists in org
         role: Role | None = await role_repository.get_by_id(
@@ -406,8 +406,9 @@ class UserService:
             if not new_username:
                 raise BadRequestError("Username cannot be empty")
             update_data["username"] = new_username
+            # 전역 유니크 체크 (username = 전역 로그인 아이디)
             exists: bool = await user_repository.exists(
-                db, {"organization_id": organization_id, "username": new_username}
+                db, {"username": new_username}
             )
             if exists:
                 # 자기 자신의 기존 username이면 무시
@@ -415,7 +416,7 @@ class UserService:
                     db, user_id, organization_id
                 )
                 if current_user_obj is None or current_user_obj.username != new_username:
-                    raise DuplicateError("Username already exists in this organization")
+                    raise DuplicateError("Username already exists")
 
         # 이메일 변경 시 인증 상태 리셋 — Reset email_verified when email changes
         if "email" in update_data:

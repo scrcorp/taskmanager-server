@@ -27,6 +27,22 @@ def _normalize_employee_no(v: str | None) -> str | None:
     return v
 
 
+# username — 로그인 아이디. 3~30자, 영숫자로 시작, 이후 영숫자/`.`/`_`/`-` 허용.
+# ('.' 하나 같은 무의미 아이디 방지.)
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,29}$")
+
+
+def _validate_username(v: str) -> str:
+    """trim → 형식 검증. 3~30자, 영숫자 시작, 영숫자/./_/- 만."""
+    v = (v or "").strip()
+    if not _USERNAME_RE.match(v):
+        raise ValueError(
+            "Username must be 3-30 characters, start with a letter or digit, "
+            "and use only letters, digits, dot, underscore, or hyphen"
+        )
+    return v
+
+
 # === 역할 (Role) 스키마 ===
 
 class RoleCreate(BaseModel):
@@ -89,17 +105,19 @@ class UserCreate(BaseModel):
     employee_no: str | None = None  # 사번 (Company employee number, optional) [레거시]
 
     _norm_emp = field_validator("employee_no")(_normalize_employee_no)
+    _valid_username = field_validator("username")(_validate_username)
 
     @model_validator(mode="after")
     def _compose_full_name(self) -> "UserCreate":
-        """full_name 이 비어 있으면 first/middle/last 로 합성. 이름은 필수."""
-        if not (self.full_name and self.full_name.strip()):
-            parts = [
-                p.strip()
-                for p in (self.first_name, self.middle_name, self.last_name)
-                if p and p.strip()
-            ]
-            self.full_name = " ".join(parts)
+        """이름 규칙: first/last 경로면 둘 다 필수(middle 선택), full_name 합성.
+        레거시로 full_name 만 직접 준 경우는 그대로 허용(호환)."""
+        first = (self.first_name or "").strip()
+        mid = (self.middle_name or "").strip()
+        last = (self.last_name or "").strip()
+        if first or last:
+            if not first or not last:
+                raise ValueError("First name and last name are required")
+            self.full_name = " ".join(p for p in (first, mid, last) if p)
         if not (self.full_name and self.full_name.strip()):
             raise ValueError("Name is required")
         return self
