@@ -347,27 +347,25 @@ async def ensure_daily_report_templates() -> None:
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def bootstrap_attendance_access_code() -> None:
-    """attendance service_key 의 access code 를 보장.
+    """모든 활성 조직에 attendance access code 를 보장 (조직별).
 
-    .env 의 ATTENDANCE_ACCESS_CODE 가 있으면 upsert, 없으면 기존 DB 값 유지,
-    그것도 없으면 자동 생성.
+    조직마다 자기 코드를 하나씩 가진다. 이 기능 도입 전 만들어졌거나 코드 없이
+    생성된 조직을 커버하는 보정 단계 — 신규 조직은 생성 시점에 이미 발급된다.
     """
     import logging
 
-    from app.core.access_code import ensure_code
+    from app.core.access_code import ensure_codes_for_all_orgs
     from app.database import async_session
 
     logger = logging.getLogger("uvicorn.error")
     try:
         async with async_session() as db:
-            record = await ensure_code(db, "attendance", env_var_name="ATTENDANCE_ACCESS_CODE")
+            created = await ensure_codes_for_all_orgs(db, "attendance")
             await db.commit()
-            if record.source == "auto":
-                logger.info(f"[access_code] attendance code (auto): {record.code}")
-            else:
-                logger.info(f"[access_code] attendance code loaded from env")
+            if created:
+                logger.info(f"[access_code] attendance code 신규 발급: {created} orgs")
     except Exception as e:
-        logger.warning(f"Failed to bootstrap attendance access code: {e}")
+        logger.warning(f"Failed to bootstrap attendance access codes: {e}")
 
 
 # ---------------------------------------------------------------------------

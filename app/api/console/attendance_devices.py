@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_permission
-from app.core.access_code import get_code, rotate_code
+from app.core.access_code import ensure_code, get_code, rotate_code
 from app.database import get_db
 from app.models.organization import Store
 from app.models.user import User
@@ -91,10 +91,11 @@ async def get_access_code(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("attendance_devices:read"))],
 ) -> AdminAccessCodeResponse:
-    record = await get_code(db, service_key)
+    # 자기 조직 코드만 조회. 없으면 자동 생성해 항상 코드를 노출(운영자가 기기 등록에 바로 사용).
+    record = await get_code(db, service_key, current_user.organization_id)
     if record is None:
-        from fastapi import HTTPException, status as http_status
-        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Access code not found")
+        record = await ensure_code(db, service_key, current_user.organization_id)
+        await db.commit()
     return AdminAccessCodeResponse(
         service_key=record.service_key,
         code=record.code,
@@ -110,7 +111,8 @@ async def rotate_access_code(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("attendance_devices:update"))],
 ) -> AdminAccessCodeResponse:
-    record = await rotate_code(db, service_key)
+    # 자기 조직 코드만 rotate — 다른 조직 코드에 영향 없음.
+    record = await rotate_code(db, service_key, current_user.organization_id)
     await db.commit()
     return AdminAccessCodeResponse(
         service_key=record.service_key,

@@ -305,21 +305,20 @@ async def async_client(_clean_state) -> AsyncIterator[AsyncClient]:
 # ---------------------------------------------------------------------------
 
 
-@pytest_asyncio.fixture(scope="session")
-async def attendance_access_code() -> str:
-    async with async_session() as db:
-        result = await db.execute(
-            text("SELECT code FROM access_codes WHERE service_key='attendance'")
-        )
-        code = result.scalar_one_or_none()
-    if not code:
-        from app.core.access_code import ensure_code
+@pytest_asyncio.fixture
+async def attendance_access_code(seed_organization: dict) -> str:
+    """시드 조직의 attendance 등록 코드 (조직별). 없으면 생성.
 
-        async with async_session() as db:
-            record = await ensure_code(db, "attendance", env_var_name="ATTENDANCE_ACCESS_CODE")
-            await db.commit()
-            code = record.code
-    return code
+    코드는 (service_key, organization) 별로 유니크하며, 이 코드로 등록하면
+    해당 조직에 기기가 귀속된다.
+    """
+    from app.core.access_code import ensure_code
+
+    org_id: UUID = seed_organization["id"]
+    async with async_session() as db:
+        record = await ensure_code(db, "attendance", org_id)
+        await db.commit()
+        return record.code
 
 
 # ---------------------------------------------------------------------------

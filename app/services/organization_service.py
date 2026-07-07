@@ -126,6 +126,7 @@ class OrganizationService:
 
         Returns: {org_id, code, name, admin_username, store_id}
         """
+        from app.core.access_code import ensure_code
         from app.core.permissions import (
             SUPER_OWNER_PRIORITY, OWNER_PRIORITY, GM_PRIORITY, SV_PRIORITY, STAFF_PRIORITY,
         )
@@ -150,6 +151,9 @@ class OrganizationService:
 
             # 1b) 라이센스 (active) — org 운영 자격
             db.add(License(organization_id=org.id, status="active", plan="trial"))
+
+            # 1c) attendance 기기 등록 코드 (조직별, 자동 발급) — 태블릿 등록에 사용
+            await ensure_code(db, "attendance", org.id)
 
             # 2) 기본 역할 5개
             super_owner_role: Role | None = None

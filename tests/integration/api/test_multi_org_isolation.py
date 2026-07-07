@@ -660,3 +660,105 @@ async def test_context_switch_does_not_corrupt_home_org(
     async with async_session() as db:
         u = (await db.execute(select(U).where(U.id == uid))).scalar_one()
         assert u.organization_id != org2["org_id"]  # home 그대로
+
+
+# ── Attendance 기기 등록 코드: 조직별 발급 + 코드로 org 귀속 ──────────────────
+
+
+async def test_create_organization_issues_attendance_code(async_client: AsyncClient):
+    """create_organization 이 신규 org 에 attendance 등록 코드를 자동 발급한다."""
+    import uuid as _uuid
+    from app.core.access_code import get_code
+    from app.services.organization_service import organization_service
+
+    uname = f"acode_{_uuid.uuid4().hex[:6]}"
+    async with async_session() as db:
+        res = await organization_service.create_organization(
+            db, name="ACode Cafe", admin_username=uname, admin_password="pw123456",
+            timezone="America/New_York",
+        )
+    org_id = res["org_id"]
+    try:
+        async with async_session() as db:
+            rec = await get_code(db, "attendance", org_id)
+            assert rec is not None and rec.code and rec.organization_id == org_id
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(Organization).where(Organization.id == org_id))
+            await db.commit()
+
+
+async def _get_console_access_code(async_client: AsyncClient, token: str) -> str:
+    r = await async_client.get(
+        "/api/v1/console/access-codes/attendance",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["code"]
+
+
+async def test_console_access_code_is_org_scoped(
+    org2: dict, async_client: AsyncClient, admin_headers: dict
+):
+    """org1(testadmin) 과 org2 owner 는 서로 다른 등록 코드를 본다 (org 스코프)."""
+    code1 = (await async_client.get("/api/v1/console/access-codes/attendance", headers=admin_headers)).json()["code"]
+    token2 = await _login("org2owner")
+    code2 = await _get_console_access_code(async_client, token2)
+    assert code1 and code2 and code1 != code2
+
+
+async def test_device_registers_to_org_of_submitted_code(
+    org2: dict, async_client: AsyncClient
+):
+    """org2 코드로 기기 등록 → 기기가 org2 에 귀속 (가장 오래된 org 아님)."""
+    import uuid as _uuid
+    from app.models.attendance_device import AttendanceDevice
+
+    token2 = await _login("org2owner")
+    code2 = await _get_console_access_code(async_client, token2)
+
+    resp = await async_client.post(
+        "/api/v1/attendance/register",
+        json={"access_code": code2, "fingerprint": "pytest-org2-device"},
+    )
+    assert resp.status_code == 201, resp.text
+    device_id = _uuid.UUID(resp.json()["device_id"])
+    try:
+        async with async_session() as db:
+            dev = (
+                await db.execute(select(AttendanceDevice).where(AttendanceDevice.id == device_id))
+            ).scalar_one()
+            assert dev.organization_id == org2["org_id"]
+    finally:
+        async with async_session() as db:
+            await db.execute(delete(AttendanceDevice).where(AttendanceDevice.id == device_id))
+            await db.commit()
+
+
+async def test_register_with_invalid_access_code_is_401(async_client: AsyncClient):
+    """등록되지 않은 코드로 기기 등록 → 401 (조직 매칭 실패)."""
+    resp = await async_client.post(
+        "/api/v1/attendance/register",
+        json={"access_code": "ZZZZ99", "fingerprint": "pytest-bad"},
+    )
+    assert resp.status_code == 401, resp.text
+
+
+async def test_console_rotate_is_org_isolated(
+    org2: dict, async_client: AsyncClient, admin_headers: dict
+):
+    """org2 가 코드를 rotate 해도 org1 코드는 그대로."""
+    code1_before = (await async_client.get("/api/v1/console/access-codes/attendance", headers=admin_headers)).json()["code"]
+    token2 = await _login("org2owner")
+    code2_before = await _get_console_access_code(async_client, token2)
+
+    rot = await async_client.post(
+        "/api/v1/console/access-codes/attendance/rotate",
+        headers={"Authorization": f"Bearer {token2}"},
+    )
+    assert rot.status_code == 200, rot.text
+    code2_after = rot.json()["code"]
+    code1_after = (await async_client.get("/api/v1/console/access-codes/attendance", headers=admin_headers)).json()["code"]
+
+    assert code2_after != code2_before       # org2 는 바뀜
+    assert code1_after == code1_before        # org1 은 불변 (격리)
