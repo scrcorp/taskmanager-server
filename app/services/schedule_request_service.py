@@ -742,12 +742,16 @@ class ScheduleRequestService:
     async def update_request_status(
         self, db: AsyncSession, request_id: UUID, status: str,
         rejection_reason: str | None = None,
+        organization_id: UUID | None = None,
     ) -> ScheduleRequestResponse:
         # schedules 테이블에서 유효 상태값: requested/rejected (confirmed는 별도 confirm 흐름)
         if status not in ("requested", "rejected"):
             raise BadRequestError("Invalid status. Use: requested, rejected")
         schedule = await schedule_repository.get_by_id(db, request_id)
         if schedule is None:
+            raise NotFoundError("Request not found")
+        # [멀티-org IDOR] 타 org 의 request 를 조작하지 못하도록 org 검증.
+        if organization_id is not None and schedule.organization_id != organization_id:
             raise NotFoundError("Request not found")
         update_data: dict = {"status": status}
         if status == "rejected" and rejection_reason is not None:
@@ -833,10 +837,14 @@ class ScheduleRequestService:
 
     async def admin_update_request(
         self, db: AsyncSession, request_id: UUID, data: ScheduleRequestAdminUpdate,
+        organization_id: UUID | None = None,
     ) -> ScheduleRequestResponse:
         """SV/GM이 request 수정 — modifications JSONB에 원본 기록 + is_modified=True 설정."""
         schedule = await schedule_repository.get_by_id(db, request_id)
         if schedule is None:
+            raise NotFoundError("Request not found")
+        # [멀티-org IDOR] 타 org 의 request 수정 차단.
+        if organization_id is not None and schedule.organization_id != organization_id:
             raise NotFoundError("Request not found")
         if schedule.status == "rejected":
             raise BadRequestError("Rejected requests cannot be updated. Revert the request first.")
@@ -963,10 +971,14 @@ class ScheduleRequestService:
 
     async def admin_revert_request(
         self, db: AsyncSession, request_id: UUID,
+        organization_id: UUID | None = None,
     ) -> ScheduleRequestResponse:
         """Modified/rejected schedule을 modifications JSONB의 최초 원본값으로 복원."""
         schedule = await schedule_repository.get_by_id(db, request_id)
         if schedule is None:
+            raise NotFoundError("Request not found")
+        # [멀티-org IDOR] 타 org 의 request 복원 차단.
+        if organization_id is not None and schedule.organization_id != organization_id:
             raise NotFoundError("Request not found")
         if schedule.status not in ("requested", "rejected") and not schedule.is_modified:
             raise BadRequestError("Only modified or rejected requests can be reverted")

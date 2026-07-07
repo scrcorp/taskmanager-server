@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # local | staging | production
     APP_ENV: str = "local"
 
+    # 검증맥락 사진 촬영시각 강제 — True이면 체크리스트 완료 사진에 capture_time 없으면 422 거부.
+    # 과도기엔 False(받되 capture_source="unknown" 플래그). 앱 배포 완료 후 True로 전환.
+    REQUIRE_CAPTURE_TIME: bool = False
+
     # Storage 모드 — "local" 또는 "s3" (s3일 때 access key 없으면 IAM role 사용)
     STORAGE_MODE: str = "local"
 

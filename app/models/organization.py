@@ -91,7 +91,8 @@ class Organization(Base):
     # 관계 — Relationships (cascade: 조직 삭제 시 하위 데이터 일괄 삭제)
     stores = relationship("Store", back_populates="organization", cascade="all, delete-orphan")
     roles = relationship("Role", back_populates="organization", cascade="all, delete-orphan")
-    users = relationship("User", back_populates="organization", cascade="all, delete-orphan")
+    # User→Organization FK 가 2개(organization_id, last_org_id)라 명시 필요.
+    users = relationship("User", back_populates="organization", cascade="all, delete-orphan", foreign_keys="User.organization_id")
 
 
 class Store(Base):

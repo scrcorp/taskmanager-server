@@ -84,6 +84,26 @@ class RefreshRequest(BaseModel):
     refresh_token: str  # 기존 리프레시 토큰 (Current refresh token)
 
 
+class SwitchOrgRequest(BaseModel):
+    """org 컨텍스트 전환 요청 (POST /auth/switch-org)."""
+
+    organization_id: str
+
+
+class OrgMembershipInfo(BaseModel):
+    """사용자의 org 소속 1건 + 접근 상태 (org 스위처/차단화면용)."""
+
+    organization_id: str
+    organization_name: str | None = None
+    organization_code: str | None = None
+    role_name: str | None = None
+    role_priority: int | None = None
+    member_status: str
+    license_status: str | None = None
+    accessible: bool
+    block_reason: str | None = None  # None=접근가능, ORG_LICENSE_INACTIVE/ORG_ACCESS_REVOKED 등
+
+
 class UserMeResponse(BaseModel):
     """현재 사용자 정보 응답 스키마 (GET /me).
 
@@ -120,6 +140,11 @@ class UserMeResponse(BaseModel):
     # 콘솔 페이지별 영속 필터/검색/정렬 상태 — 1계정 1데이터, 다른 디바이스에서도 동일.
     # shape: { "<page_storage_key>": { "<param>": "<string>" } }
     console_filters: dict[str, dict[str, str]] = {}
+    # [Model B] 이 계정이 소속된 모든 org + 각 접근상태 (org 스위처/차단화면용).
+    organizations: list[OrgMembershipInfo] = []
+    # 현재(선택된) org 접근 가능 여부 + 차단 이유 코드. /me 는 차단돼도 200 으로 이걸 알려준다.
+    current_org_accessible: bool = True
+    current_org_block_reason: str | None = None
 
 
 class ConsoleFiltersUpdateRequest(BaseModel):

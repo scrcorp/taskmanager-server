@@ -104,7 +104,10 @@ class User(Base):
     # 사용자 고유 식별자 — User unique identifier (UUID v4, auto-generated)
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 소속 조직 FK — Parent organization (CASCADE: 조직 삭제 시 사용자도 삭제)
+    # [Model B 이행] 전환 후 제거 예정. org 소속은 org_members 로 이동.
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    # [Model B] 마지막 선택 org — 다중 소속 시 로그인 자동 입장 대상 (SET NULL). nullable.
+    last_org_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True)
     # 역할 FK — Assigned role (역할 삭제 시 제한됨, role deletion is restricted)
     role_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("roles.id"), nullable=False)
     # 로그인 아이디 — Login username (조직 내 고유, unique within org)
@@ -112,11 +115,20 @@ class User(Base):
     # 이메일 — Email address (optional, for alerts)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # 실명 — User's full display name
+    # [Model B 이행] full_name 은 first/middle/last 로 분리 예정. 백필 전까지 병존.
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # [Model B] 이름 분리 — 고객 반복 요청. 백필 시 full_name 파싱, 이후 canonical.
+    first_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    middle_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    last_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     # 비밀번호 해시 — bcrypt hashed password (평문 저장 금지, never store plaintext)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     # 활성 상태 — Whether the user account is active
+    # [Model B 이행] status 로 대체 예정(active/deactivated/deleted). 백필 전까지 병존.
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # [Model B] 계정 상태 — active / deactivated / deleted (계정 레벨, org별 status와 별개).
+    # 탈퇴/비활성해도 org 데이터는 무기한 보존(관리자 명시 purge만 삭제).
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
     # 이메일 인증 여부 — Whether email has been verified
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     # 로그인 실패 횟수 — Failed login attempt counter (reset on success)
@@ -166,7 +178,7 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
-        UniqueConstraint("organization_id", "username", name="uq_user_org_username"),
+        UniqueConstraint("username", name="uq_user_username"),  # 전역 유니크 (Model B)
         UniqueConstraint("organization_id", "clockin_pin", name="uq_user_org_clockin_pin"),
         # 사번 — 조직 내 non-null 값만 고유. NULL 은 다중 허용 (partial unique).
         Index(
@@ -179,7 +191,10 @@ class User(Base):
     )
 
     # 관계 — Relationships
-    organization = relationship("Organization", back_populates="users")
+    # users→organizations FK 가 2개(organization_id, last_org_id)라 명시 필요.
+    organization = relationship("Organization", back_populates="users", foreign_keys=[organization_id])
     role = relationship("Role", back_populates="users")
     refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
     user_stores = relationship("UserStore", back_populates="user", cascade="all, delete-orphan")
+    # [Model B] org 소속 — 한 계정이 여러 org 소속 가능
+    org_members = relationship("OrgMember", foreign_keys="OrgMember.user_id", back_populates="user", cascade="all, delete-orphan")

@@ -13,7 +13,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-ChangelogCategory = Literal["staff_app", "attendance_app", "console", "homepage"]
+ChangelogCategory = Literal[
+    "general", "staff_app", "attendance_app", "console", "homepage"
+]
 
 
 class ChangelogCreate(BaseModel):

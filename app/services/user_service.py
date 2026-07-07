@@ -58,7 +58,9 @@ class UserService:
             return float(org_rate)
         return None
 
-    def _to_response(self, user: User, org_rate: float | None = None) -> UserResponse:
+    def _to_response(
+        self, user: User, org_rate: float | None = None, crewid: int | None = None
+    ) -> UserResponse:
         """사용자 모델을 상세 응답 스키마로 변환 (effective rate 포함)."""
         role: Role = user.role
         raw_rate = float(user.hourly_rate) if user.hourly_rate is not None else None
@@ -74,6 +76,7 @@ class UserService:
             effective_hourly_rate=self._effective_rate(raw_rate, org_rate),
             department=user.department,
             employee_no=user.employee_no,
+            crewid=crewid,
             is_active=user.is_active,
             created_at=user.created_at,
         )
@@ -199,7 +202,18 @@ class UserService:
             raise NotFoundError("User not found")
 
         org_rate = await self._get_org_rate(db, organization_id)
-        return self._to_response(user, org_rate)
+        # CREWID — 이 org 에서의 org 번호 (org_member.crewid)
+        from app.models.org_member import OrgMember
+
+        crewid = (
+            await db.execute(
+                select(OrgMember.crewid).where(
+                    OrgMember.user_id == user_id,
+                    OrgMember.organization_id == organization_id,
+                )
+            )
+        ).scalar_one_or_none()
+        return self._to_response(user, org_rate, crewid=crewid)
 
     async def create_user(
         self,
@@ -229,12 +243,12 @@ class UserService:
             ForbiddenError: 자기보다 높거나 같은 우선순위의 역할 지정 시도
                             (Attempting to assign a role at or above caller's priority)
         """
-        # 사용자명 중복 확인 — Check username uniqueness within org
+        # 사용자명 중복 확인 — 전역 유니크 (Model B: 계정=전역, username 은 전역 로그인 아이디)
         exists: bool = await user_repository.exists(
-            db, {"organization_id": organization_id, "username": data.username}
+            db, {"username": data.username}
         )
         if exists:
-            raise DuplicateError("Username already exists in this organization")
+            raise DuplicateError("Username already exists")
 
         # 역할 유효성 확인 — Validate role exists in org
         role: Role | None = await role_repository.get_by_id(
@@ -272,11 +286,16 @@ class UserService:
                 "organization_id": organization_id,
                 "role_id": UUID(data.role_id),
                 "username": data.username,
-                "full_name": data.full_name,
+                "full_name": data.full_name,  # 스키마 validator 가 first/middle/last 로 합성 보장
                 "email": data.email,
                 "password_hash": password_hash,
                 "clockin_pin": clockin_pin,
             }
+            # 구조화된 이름 (first/middle/last) — 있으면 저장
+            for _fld in ("first_name", "middle_name", "last_name"):
+                _val = getattr(data, _fld, None)
+                if _val is not None and _val.strip():
+                    create_data[_fld] = _val.strip()
             if hourly_rate is not None:
                 create_data["hourly_rate"] = hourly_rate
             # FOH/BOH 분류 — 지정된 경우만 저장 (미지정이면 NULL 유지)
@@ -308,6 +327,27 @@ class UserService:
                     db, organization_id, normalized_emp, user.id
                 )
 
+            # [Model B] org 소속(org_member) 병행 생성 — 새 유저를 Model B 완결 엔티티로.
+            # org별 속성(role/시급/부서/PIN/사번)을 org_member 에 미러(전환기: users 컬럼과 병존).
+            from app.models.org_member import OrgMember
+            from app.services.org_numbering import next_crewid
+
+            _crewid = await next_crewid(db, organization_id)
+            db.add(
+                OrgMember(
+                    user_id=user.id,
+                    organization_id=organization_id,
+                    role_id=UUID(data.role_id),
+                    hourly_rate=hourly_rate,
+                    department=create_data.get("department"),
+                    clockin_pin=clockin_pin,
+                    employee_no=normalized_emp,
+                    status="active",
+                    crewid=_crewid,
+                )
+            )
+            await db.flush()
+
             # Owner / Super Owner 신규 생성 시 조직 내 모든 매장에 자동 배정
             # (is_manager=true, is_work_assignment=true — manager 면 work 자동). 알림 + 관리 권한 + 근무 배정 대상.
             if role.priority <= OWNER_PRIORITY:
@@ -323,7 +363,7 @@ class UserService:
                 raise NotFoundError("User not found after creation")
 
             org_rate = await self._get_org_rate(db, organization_id)
-            result = self._to_response(loaded, org_rate)
+            result = self._to_response(loaded, org_rate, crewid=_crewid)
             await db.commit()
             return result
         except Exception:
@@ -366,8 +406,9 @@ class UserService:
             if not new_username:
                 raise BadRequestError("Username cannot be empty")
             update_data["username"] = new_username
+            # 전역 유니크 체크 (username = 전역 로그인 아이디)
             exists: bool = await user_repository.exists(
-                db, {"organization_id": organization_id, "username": new_username}
+                db, {"username": new_username}
             )
             if exists:
                 # 자기 자신의 기존 username이면 무시
@@ -375,7 +416,7 @@ class UserService:
                     db, user_id, organization_id
                 )
                 if current_user_obj is None or current_user_obj.username != new_username:
-                    raise DuplicateError("Username already exists in this organization")
+                    raise DuplicateError("Username already exists")
 
         # 이메일 변경 시 인증 상태 리셋 — Reset email_verified when email changes
         if "email" in update_data:
@@ -768,11 +809,21 @@ class UserService:
             raise NotFoundError("User not found")
 
         from app.models.user_store import UserStore
+        from app.models.org_member import OrgMember, OrgMemberStore
 
         assignments: list[UserStore] = await user_repository.get_user_store_assignments(db, user_id)
         # store 정보가 필요하므로 store 조회
         stores: list[Store] = await user_repository.get_user_stores(db, user_id)
         store_map = {s.id: s for s in stores}
+        # EMPID map (store_id -> empid) from org_member_stores
+        empid_rows = (
+            await db.execute(
+                select(OrgMemberStore.store_id, OrgMemberStore.empid)
+                .join(OrgMember, OrgMember.id == OrgMemberStore.org_member_id)
+                .where(OrgMember.user_id == user_id)
+            )
+        ).all()
+        empid_map = {sid: emp for sid, emp in empid_rows}
 
         return [
             UserStoreResponse(
@@ -784,6 +835,7 @@ class UserService:
                 is_manager=a.is_manager,
                 is_work_assignment=a.is_work_assignment,
                 created_at=store_map[a.store_id].created_at if a.store_id in store_map else a.created_at,
+                empid=empid_map.get(a.store_id),
             )
             for a in assignments
             if a.store_id in store_map
@@ -837,6 +889,9 @@ class UserService:
 
         try:
             await user_repository.sync_user_stores(db, user_id, assignments)
+            # [Model B] org_member_stores 도 동기화(+empid 부여) — 표시/배정의 새 소스
+            from app.services.org_numbering import reconcile_member_stores
+            await reconcile_member_stores(db, user_id, assignments)
             await db.commit()
         except Exception:
             await db.rollback()
@@ -875,6 +930,8 @@ class UserService:
 
         try:
             await user_repository.add_user_store(db, user_id, store_id)
+            from app.services.org_numbering import ensure_member_store
+            await ensure_member_store(db, user_id, store_id)
             await db.commit()
         except Exception:
             await db.rollback()
@@ -904,6 +961,8 @@ class UserService:
             removed: bool = await user_repository.remove_user_store(db, user_id, store_id)
             if not removed:
                 raise NotFoundError("User-store assignment not found")
+            from app.services.org_numbering import remove_member_store
+            await remove_member_store(db, user_id, store_id)
             await db.commit()
         except Exception:
             await db.rollback()

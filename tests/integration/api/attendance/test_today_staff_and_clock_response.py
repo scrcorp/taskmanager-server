@@ -103,6 +103,42 @@ async def test_today_staff_late_attendance_returns_working_effective_status(
     )
 
 
+async def test_today_staff_etag_returns_304_when_unchanged(
+    async_client: AsyncClient,
+    device_auth_headers: dict,
+    make_schedule,
+    test_user: dict,
+    test_store_id: UUID,
+) -> None:
+    """today-staff 는 ETag 를 주고, If-None-Match 로 변경 없으면 304(빈 바디)."""
+    tz = await _tz_for(test_store_id)
+    now_local = datetime.now(tz)
+    start_local = (now_local - timedelta(minutes=30)).time().replace(microsecond=0)
+    end_local = (now_local + timedelta(hours=4)).time().replace(microsecond=0)
+    schedule_id = await make_schedule(
+        test_user, start_time=start_local, end_time=end_local,
+    )
+    await _ensure_attendance(schedule_id)
+
+    # 1) 첫 호출 — 200 + ETag 헤더
+    first = await async_client.get(
+        "/api/v1/attendance/today-staff", headers=device_auth_headers,
+    )
+    assert first.status_code == 200, first.text
+    etag = first.headers.get("etag")
+    assert etag, f"ETag 헤더 없음 — headers={dict(first.headers)}"
+
+    # 2) 같은 ETag 로 재요청 — 변경 없으면 304 + 빈 바디
+    second = await async_client.get(
+        "/api/v1/attendance/today-staff",
+        headers={**device_auth_headers, "If-None-Match": etag},
+    )
+    assert second.status_code == 304, second.text
+    assert second.content in (b"", b"null"), second.content
+    # 304 에도 동일 ETag 유지
+    assert second.headers.get("etag") == etag
+
+
 async def test_today_staff_no_clock_in_late_stays_late(
     async_client: AsyncClient,
     device_auth_headers: dict,

@@ -837,6 +837,110 @@ class ScheduleService:
             await db.rollback()
             raise
 
+    async def create_walk_in_schedule(
+        self,
+        db: AsyncSession,
+        *,
+        organization_id: UUID,
+        store_id: UUID,
+        user_id: UUID,
+        work_date: date,
+        clock_in_at: datetime,
+        store_tz: str,
+        created_by: UUID | None = None,
+    ) -> Schedule:
+        """키오스크 워크인 clock-in 시 자동 생성하는 confirmed 스케줄.
+
+        - 워크인은 "계획"이 없으므로 start_time 은 **실제 clock-in 시각**(매장 tz, 분 단위)으로,
+          end_time 은 start + work.default_schedule_duration_minutes(매장/조직 설정, 기본 330)로 둔다.
+          schedules 의 create-guard 상 시각 NULL 이 금지이므로 항상 채운다.
+        - 실제 출근 시각을 계획 시작으로 쓰므로 워크인엔 지각 오판정이 생기지 않는다.
+        - hourly_rate 는 직원 시급(User.hourly_rate)이 있으면 그 값, 없으면 0 (D3).
+        - confirmed 매뉴얼 스케줄과 동일하게 attendance row + checklist instance 를 파생한다.
+        - **commit 하지 않는다** — 호출자(perform_clock_action)의 트랜잭션이 소유.
+        """
+        from zoneinfo import ZoneInfo
+
+        # 1) 시작 시각 = 실제 clock-in 시각(매장 tz)을 분 단위로 내림(초 버림).
+        #    late 판정이 전역적으로 분 단위라, 같은 분에 출근한 워크인은 late 가 되지 않는다.
+        start_time = (
+            clock_in_at.astimezone(ZoneInfo(store_tz))
+            .replace(second=0, microsecond=0)
+            .time()
+        )
+
+        # 2) 근무 길이(분) — 레지스트리(기본 330)
+        duration = 330
+        try:
+            raw_dur = await resolve_setting(
+                db,
+                key="work.default_schedule_duration_minutes",
+                organization_id=organization_id,
+                store_id=store_id,
+            )
+            if raw_dur is not None:
+                duration = int(raw_dur)
+        except (SettingNotRegisteredError, TypeError, ValueError):
+            pass
+        if duration <= 0:
+            duration = 330
+
+        # 3) 종료 시각 = 시작 + duration (NOT NULL 보장). 자정 넘김은 mod 로 wrap.
+        start_total = start_time.hour * 60 + start_time.minute
+        end_total = (start_total + duration) % (24 * 60)
+        end_time = time(end_total // 60, end_total % 60)
+
+        net = self._calc_net_minutes(start_time, end_time, None, None)
+
+        # 4) hourly_rate — 직원 시급 있으면 적용, 없으면 0 (D3)
+        user_hr = await db.scalar(select(User.hourly_rate).where(User.id == user_id))
+        hourly_rate = float(user_hr) if user_hr is not None else 0.0
+
+        now_utc = datetime.now(timezone.utc)
+        entry = await schedule_repository.create(db, {
+            "organization_id": organization_id,
+            "user_id": user_id,
+            "store_id": store_id,
+            "work_date": work_date,
+            "start_time": start_time,
+            "end_time": end_time,
+            "net_work_minutes": net,
+            "hourly_rate": hourly_rate,
+            "status": "confirmed",
+            "origin": "walk_in",
+            "created_by": created_by,
+            "approved_by": created_by,
+            "confirmed_at": now_utc,
+        })
+
+        actor = (
+            await db.scalar(select(User).where(User.id == created_by))
+            if created_by is not None
+            else None
+        )
+        await self._log_audit(
+            db, entry.id, "confirmed", actor,
+            description="Walk-in schedule auto-created on clock-in",
+        )
+
+        # 체크리스트 인스턴스 파생 (confirmed 스케줄과 동일)
+        from app.services.checklist_instance_service import checklist_instance_service
+        await checklist_instance_service.create_for_schedule(
+            db,
+            schedule_id=entry.id,
+            organization_id=organization_id,
+            store_id=store_id,
+            user_id=user_id,
+            work_date=work_date,
+            work_role_id=None,
+        )
+
+        # Eager attendance row 파생
+        from app.services.attendance_lifecycle_service import ensure_attendance_for_schedule
+        await ensure_attendance_for_schedule(db, entry)
+
+        return entry
+
     async def bulk_create(
         self,
         db: AsyncSession,
@@ -2240,9 +2344,14 @@ class ScheduleService:
                 )
                 existing: ChecklistInstance | None = existing_result.scalar_one_or_none()
 
+                # file_usages 는 owner_id 폴리모픽(FK 없음)이라 instance 삭제로 cascade 안 됨 →
+                # 하드삭제 전에 명시적으로 정리(orphan usage 방지). blob 은 GC 가 회수.
+                from app.services.checklist_instance_service import purge_cl_item_file_usages
+
                 if checklist_template_id is None:
                     # 제거 모드 — Remove mode
                     if existing is not None:
+                        await purge_cl_item_file_usages(db, existing.id)
                         await db.delete(existing)
                         await db.flush()
                         removed += 1
@@ -2252,6 +2361,7 @@ class ScheduleService:
                     # 할당/교체 모드 — Assign/Replace mode
                     if existing is not None:
                         # 기존 인스턴스 교체 — Replace existing instance
+                        await purge_cl_item_file_usages(db, existing.id)
                         await db.delete(existing)
                         await db.flush()
 

@@ -586,6 +586,7 @@ class AttendanceDeviceService:
         skip_early_guards: bool = False,
         manager_user_id: UUID | None = None,
         schedule_id: UUID | None = None,
+        walk_in: bool = False,
     ) -> Attendance:
         """기기 + user_id + PIN 으로 clock in/out/break 처리.
 
@@ -656,15 +657,57 @@ class AttendanceDeviceService:
                 .order_by(Schedule.start_time.asc().nulls_last())
             )
             all_candidates = list(sch_result.scalars().all())
-            if not all_candidates:
-                raise BadRequestError("No scheduled shift for today at this store")
 
-            # 이미 끝난(clocked_out) shift 는 후보에서 제외. 같은 schedule_id 에
-            # attendance 가 clocked_out 인 경우 재출근 금지.
+            # 이미 끝난(clocked_out) shift 는 후보에서 제외.
             done_schedule_ids = {r.schedule_id for r in day_rows if r.status == "clocked_out" and r.schedule_id is not None}
             candidates = [s for s in all_candidates if s.id not in done_schedule_ids]
+
             if not candidates:
-                raise BadRequestError("All today's shifts are already completed")
+                # 사용할 수 있는 "열린" 스케줄이 없음. 매장이 walk_in 을 허용하고 요청이
+                # 워크인 의도이면, 오늘 스케줄이 아예 없든 / 이전 (워크인)shift 가 모두
+                # clocked_out 이든 관계없이 **새 워크인 스케줄을 생성**한다. → 퇴근 후
+                # 다시 출근(하루 여러 shift) 가능. (열린 shift 가 남아있으면 위 active 가드가
+                # 먼저 막으므로, 여기 도달했다는 건 열린 shift 가 없다는 뜻.)
+                from app.utils.settings_resolver import (
+                    SettingNotRegisteredError as _SNRE_wi,
+                    resolve_setting as _resolve_wi,
+                )
+
+                walk_in_allowed = False
+                if walk_in:
+                    try:
+                        walk_in_allowed = bool(
+                            await _resolve_wi(
+                                db,
+                                key="attendance.walk_in_allowed",
+                                organization_id=device.organization_id,
+                                store_id=store_id,
+                            )
+                        )
+                    except _SNRE_wi:
+                        walk_in_allowed = False
+
+                if walk_in_allowed:
+                    from app.services.schedule_service import schedule_service
+                    walk_in_schedule = await schedule_service.create_walk_in_schedule(
+                        db,
+                        organization_id=device.organization_id,
+                        store_id=store_id,
+                        user_id=user.id,
+                        work_date=today,
+                        clock_in_at=now,
+                        store_tz=store_tz,
+                        created_by=user.id,
+                    )
+                    candidates = [walk_in_schedule]
+                    # 방금 생성한 워크인 스케줄을 사용한다. 클라가 이전 (clocked_out)
+                    # shift 의 schedule_id 를 실어 보냈더라도 그건 무시 — 안 그러면
+                    # 아래 명시-선택 체크에서 새 스케줄과 불일치로 거부된다.
+                    schedule_id = None
+                elif not all_candidates:
+                    raise BadRequestError("No scheduled shift for today at this store")
+                else:
+                    raise BadRequestError("All today's shifts are already completed")
 
             tz = _Zi(store_tz)
 
@@ -733,14 +776,21 @@ class AttendanceDeviceService:
                     early_threshold = int(raw) if raw is not None else 5
                 except (SettingNotRegisteredError, TypeError, ValueError):
                     early_threshold = 5
-                if not skip_early_guards and now < scheduled_start - _td(minutes=early_threshold):
+                # late/early 판정은 분 단위로만 한다(초는 버림). clock_in 은 초까지 저장하되
+                # "정시 출근(같은 분)"이 초 차이로 late 로 찍히지 않게 한다. 워크인은 start=
+                # clock-in(분 내림)이라 이 규칙으로 자연히 early/late 가 아니게 된다(특수예외 불필요).
+                now_min = now.replace(second=0, microsecond=0)
+                if (
+                    not skip_early_guards
+                    and now_min < scheduled_start - _td(minutes=early_threshold)
+                ):
                     minutes_until = int(
-                        (scheduled_start - now).total_seconds() / 60
+                        (scheduled_start - now_min).total_seconds() / 60
                     )
                     raise BadRequestError(
                         f"Too early to clock in. Shift starts in {minutes_until} minutes."
                     )
-                if now > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
+                if now_min > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
                     status_val = "late"
                     anomalies = ["late"]
 
@@ -871,7 +921,7 @@ class AttendanceDeviceService:
                         _early_thresh = int(_raw) if _raw is not None else 5
                     except (_SNRE, TypeError, ValueError):
                         _early_thresh = 5
-                    if now < sched_end_dt - _td2(minutes=_early_thresh):
+                    if now.replace(second=0, microsecond=0) < sched_end_dt - _td2(minutes=_early_thresh):
                         is_early = True
             if not skip_early_guards and is_early and not (reason and reason.strip()):
                 raise BadRequestError(

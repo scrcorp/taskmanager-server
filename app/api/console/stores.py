@@ -284,9 +284,9 @@ async def upload_cover_photo(
             },
         )
 
-    key = storage_service.upload_bytes(
-        data, filename=file.filename or "photo.jpg",
-        folder="store_covers", content_type=file.content_type,
+    key = storage_service.put_bytes(
+        data, folder="store_covers",
+        filename=file.filename or "photo.jpg", content_type=file.content_type,
     )
     photo_id = uuid4().hex[:12]
     is_primary = set_as_primary or not photos

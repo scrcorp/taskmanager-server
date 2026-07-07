@@ -22,7 +22,7 @@ from app.schemas.user import UserCreate, UserListResponse, UserResponse, UserUpd
 
 
 def _base_create_kwargs(**extra) -> dict:
-    return {"username": "u", "password": "p", "full_name": "U", "role_id": "r", **extra}
+    return {"username": "user1", "password": "p", "full_name": "U", "role_id": "r", **extra}
 
 
 def test_user_create_department_defaults_none():

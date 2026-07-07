@@ -54,7 +54,7 @@ class AuthService:
         self,
         db: AsyncSession,
         company_code: str | None,
-    ) -> UUID:
+    ) -> UUID | None:
         """회사 코드를 조직 UUID로 변환합니다.
 
         company_code가 None이면 단일 active organization을 자동 매칭한다.
@@ -74,16 +74,17 @@ class AuthService:
         """
         if company_code is None:
             result = await db.execute(
-                select(Organization).where(Organization.is_active == True)
+                select(Organization.id).where(Organization.is_active == True).limit(2)
             )
-            orgs = list(result.scalars().all())
-            if len(orgs) == 0:
+            org_ids = [row[0] for row in result.all()]
+            if len(org_ids) == 0:
                 raise NotFoundError("No active organization configured")
-            if len(orgs) > 1:
-                raise BadRequestError(
-                    "Multiple organizations exist; client must specify company_code"
-                )
-            return orgs[0].id
+            if len(org_ids) > 1:
+                # [Model B] 멀티-org: org 를 여기서 확정하지 못한다 → None 반환.
+                # 로그인은 username(전역) 조회로 user→org 를 도출한다(admin_login/app_login).
+                # 단일 org 환경에서는 아래 단일 매칭이 그대로 동작(하위호환).
+                return None
+            return org_ids[0]
         result = await db.execute(
             select(Organization).where(
                 Organization.code == company_code.upper(),
@@ -337,8 +338,9 @@ class AuthService:
         # 사용자명 중복 확인 — users + candidates 양쪽에서 체크.
         # 회원가입 경로(register, direct-signup) 모두 이 함수를 거치므로
         # 두 테이블 모두에 같은 ID가 존재하지 않도록 막아둔다.
+        # 전역 유니크 (Model B: username = 전역 로그인 아이디)
         existing: User | None = await auth_repository.get_user_by_username(
-            db, data.username, organization_id
+            db, data.username
         )
         if existing is not None:
             raise DuplicateError("Username already exists")
@@ -402,9 +404,29 @@ class AuthService:
         await db.flush()
         await db.refresh(user)
 
-        # 매장 배정 — Assign user to selected stores
+        # [Model B] org 소속(org_member) 병행 생성 — 자가가입 유저도 Model B 완결 엔티티로.
+        from app.models.org_member import OrgMember
+        from app.services.org_numbering import next_crewid
+
+        db.add(
+            OrgMember(
+                user_id=user.id,
+                organization_id=organization_id,
+                role_id=staff_role.id,
+                clockin_pin=clockin_pin,
+                status="active",
+                crewid=await next_crewid(db, organization_id),
+            )
+        )
+        await db.flush()
+
+        # 매장 배정 — Assign user to selected stores (+org_member_stores/empid)
+        from app.services.org_numbering import ensure_member_store
+
         for sid in data.store_ids:
             db.add(UserStore(user_id=user.id, store_id=UUID(sid)))
+            await db.flush()
+            await ensure_member_store(db, user.id, UUID(sid))
         if data.store_ids:
             await db.flush()
 
@@ -580,6 +602,12 @@ class AuthService:
         from app.repositories.permission_repository import permission_repository
         permissions = await permission_repository.get_permissions_by_role_id(db, role.id)
 
+        # [Model B] 소속 org 목록 + 현재 org 접근상태 — /me 는 차단돼도 200 으로 이걸 준다.
+        # 컨텍스트 인지된 원본 user(선택 org 반영)로 접근판정한다.
+        from app.services.access_service import access_service
+        organizations = await access_service.list_user_orgs(db, user)
+        reason, _info = await access_service.block_reason_for_org(db, user, user.organization_id)
+
         return UserMeResponse(
             id=str(loaded_user.id),
             username=loaded_user.username,
@@ -597,7 +625,64 @@ class AuthService:
             permissions=sorted(permissions),
             preferred_language=loaded_user.preferred_language,  # type: ignore[arg-type]
             console_filters=loaded_user.console_filters or {},
+            organizations=organizations,  # type: ignore[arg-type]
+            current_org_accessible=reason is None,
+            current_org_block_reason=reason,
         )
+
+    async def switch_organization(
+        self,
+        db: AsyncSession,
+        user: User,
+        organization_id: str,
+        client_type: str = "admin",
+        user_agent: str | None = None,
+        ip_address: str | None = None,
+    ) -> TokenResponse:
+        """소속된 다른 org 로 전환 — 접근 가능하면 그 org 컨텍스트 토큰 재발급.
+
+        대상 org 라이센스 정지/밴이면 ForbiddenError. 계정의 home org(users.organization_id)는
+        불변(set_committed_value 로 payload org 만 target 으로).
+        """
+        from uuid import UUID as _UUID
+        from sqlalchemy.orm.attributes import set_committed_value
+        from app.services.access_service import access_service
+        from app.models.org_member import OrgMember
+
+        org_uuid = _UUID(str(organization_id))
+        reason, info = await access_service.block_reason_for_org(db, user, org_uuid)
+        if reason is not None:
+            name = info.get("organization_name")
+            raise ForbiddenError(
+                f"Cannot access {name}" if name else "Cannot access this organization"
+            )
+
+        member = (
+            await db.execute(
+                select(OrgMember)
+                .options(selectinload(OrgMember.role))
+                .where(
+                    OrgMember.user_id == user.id,
+                    OrgMember.organization_id == org_uuid,
+                )
+            )
+        ).scalar_one_or_none()
+        role: Role = member.role if member is not None else user.role
+
+        # payload org 을 target 으로(committed value → users.organization_id 는 DB flush 안 됨)
+        set_committed_value(user, "organization_id", org_uuid)
+        try:
+            result = await self._generate_tokens(
+                db, user, role,
+                client_type=client_type,
+                user_agent=user_agent,
+                ip_address=ip_address,
+            )
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # 싱글턴 인스턴스 — Singleton instance

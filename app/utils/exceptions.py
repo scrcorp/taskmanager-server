@@ -103,3 +103,49 @@ class ConflictError(HTTPException):
     def __init__(self, detail: str = "Conflict", **kwargs) -> None:
         error_detail = {"message": detail, **kwargs}
         super().__init__(status_code=status.HTTP_409_CONFLICT, detail=error_detail)
+
+
+class AppError(HTTPException):
+    """구조화 에러 — 에러 표시 UX 표준(코드 + 사용자 메시지 + 다음 행동).
+
+    Structured error following the project error-UX standard. The ``detail`` payload is:
+
+        {"code": "<MACHINE_CODE>", "message": "<user-facing cause>", "hint": "<next action>"}
+
+    Why structured:
+        - ``code``: 클라가 분기/로깅에 사용 (machine-readable). 발생 에러 = 표시 에러 일치 보장.
+        - ``message``: 사용자에게 그대로 보여줄 "원인" 문장 (raw/기술 메시지 금지).
+        - ``hint``: "다음 행동" 안내 (선택). 클라는 message 아래 보조 문구로 표시.
+
+    클라이언트는 이 셋을 신뢰해 맥락별 위치(폼=inline / 액션=toast / 로드=배너)에 배치한다.
+    임의로 일반화한 가짜 메시지를 만들지 않는다.
+    """
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        code: str,
+        message: str,
+        hint: str | None = None,
+    ) -> None:
+        detail: dict[str, str] = {"code": code, "message": message}
+        if hint is not None:
+            detail["hint"] = hint
+        super().__init__(status_code=status_code, detail=detail)
+
+
+class CaptureTimeRequiredError(AppError):
+    """422 — 검증맥락 사진에 촬영 시각(capture_time)이 없을 때.
+
+    Raised only when capture-time enforcement is ON (settings.REQUIRE_CAPTURE_TIME).
+    과도기에는 OFF(기본) — 시각 없는 사진도 받되 capture_source="unknown" 으로 기록한다.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            code="CAPTURE_TIME_REQUIRED",
+            message="This photo is missing its capture time.",
+            hint="Retake it with the camera, or choose a photo that still has its time information.",
+        )

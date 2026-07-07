@@ -88,17 +88,15 @@ async def complete_checklist_item(
     store_tz = await get_store_timezone(db, inst.store_id)
     effective_tz = resolve_timezone(data.timezone, store_tz)
 
-    # Resolve photo list: photo_urls preferred, fall back to single photo_url
-    photo_urls = data.photo_urls
-    if not photo_urls and data.photo_url:
-        photo_urls = [data.photo_url]
-
+    # photos(메타 포함) 우선 — 정규화/우선순위는 서비스에서 처리
     instance = await checklist_instance_service.complete_item(
         db,
         instance_id=instance_id,
         item_index=item_index,
         user_id=current_user.id,
-        photo_urls=photo_urls,
+        photos=data.photos,
+        photo_urls=data.photo_urls,
+        photo_url=data.photo_url,
         note=data.note,
         location=data.location,
         client_timezone=effective_tz,
@@ -128,15 +126,15 @@ async def resubmit_checklist_item(
     store_tz = await get_store_timezone(db, inst.store_id)
     effective_tz = resolve_timezone(data.client_timezone, store_tz)
 
-    # photo_urls 우선, photo_url fallback (단일 → 리스트 변환)
-    effective_photo_urls = data.photo_urls or ([data.photo_url] if data.photo_url else [])
-
+    # photos(메타 포함) 우선 — 정규화/우선순위는 서비스에서 처리
     instance = await checklist_instance_service.resubmit_completion(
         db,
         instance_id=instance_id,
         item_index=item_index,
         user_id=current_user.id,
-        photo_urls=effective_photo_urls if effective_photo_urls else None,
+        photos=data.photos,
+        photo_urls=data.photo_urls,
+        photo_url=data.photo_url,
         note=data.note,
         location=data.location,
         client_timezone=effective_tz,

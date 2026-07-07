@@ -845,7 +845,7 @@ class ReportService:
                 if not key_or_url:
                     continue
                 try:
-                    final_key = storage_service.finalize_upload(key_or_url)
+                    final_key = storage_service.put_finalized(key_or_url)
                 except Exception:
                     final_key = key_or_url
                 finalized.append({**a, "key": final_key})
