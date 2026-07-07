@@ -12,10 +12,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_attendance_device
-from app.core.access_code import verify_code
+from app.core.access_code import resolve_org_by_code
 from app.database import get_db
 from app.models.attendance_device import AttendanceDevice
-from app.models.organization import Organization, Store
+from app.models.organization import Store
 from app.schemas.attendance_device import (
     AssignStoreRequest,
     AttendanceStoreOption,
@@ -56,24 +56,19 @@ async def register_device(
     data: RegisterRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RegisterResponse:
-    """Access code 를 검증하고 새 기기 토큰을 발급."""
-    # access_code 는 service_key 당 1개이며, organization 을 식별하지 않는다.
-    # 현재 단일 조직 배포를 가정 — 없으면 400.
-    if not await verify_code(db, ACCESS_CODE_SERVICE_KEY, data.access_code):
+    """Access code 로 조직을 식별하고 새 기기 토큰을 발급.
+
+    코드는 (service_key="attendance", organization) 별로 유니크하므로, 제출된 코드
+    하나만으로 어느 조직의 기기인지 확정된다 — 태블릿 등록 시 회사코드 입력 불필요.
+    """
+    organization_id = await resolve_org_by_code(db, ACCESS_CODE_SERVICE_KEY, data.access_code)
+    if organization_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid access code",
         )
-    # 현재 시스템은 single-org 운영을 가정 (조직 1개 또는 대표 조직 1개).
-    org_result = await db.execute(select(Organization).order_by(Organization.created_at).limit(1))
-    organization = org_result.scalar_one_or_none()
-    if organization is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="No organization configured",
-        )
     device, token = await attendance_device_service.register(
-        db, organization_id=organization.id, fingerprint=data.fingerprint
+        db, organization_id=organization_id, fingerprint=data.fingerprint
     )
     await db.commit()
     return RegisterResponse(
