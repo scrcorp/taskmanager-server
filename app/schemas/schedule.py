@@ -340,11 +340,19 @@ class ScheduleCreate(BaseModel):
     user_id: str
     store_id: str
     work_role_id: str | None = None
-    work_date: date
-    start_time: str  # "HH:MM"
-    end_time: str
+    # 전환기(Wave 1): 구(舊) 필드(work_date + HH:MM)와 신(新) 필드(operating_day + ISO datetime) 둘 다 허용.
+    # 서비스가 정규화. 신 필드가 우선. Wave 3에서 구 필드 제거.
+    work_date: date | None = None  # 구: 영업일(now optional)
+    start_time: str | None = None  # 구: "HH:MM"
+    end_time: str | None = None
     break_start_time: str | None = None
     break_end_time: str | None = None
+    # 신: operating_day(영업일 라벨) + start_at/end_at(벽시계 ISO "YYYY-MM-DDTHH:MM")
+    operating_day: date | None = None
+    start_at: str | None = None
+    end_at: str | None = None
+    break_start_at: str | None = None
+    break_end_at: str | None = None
     note: str | None = None
     hourly_rate: float | None = Field(default=None, ge=0)  # 시급 override (optional, non-negative)
     status: str = "confirmed"  # "requested" for app submissions, "confirmed" for direct admin creation
@@ -363,6 +371,12 @@ class ScheduleUpdate(BaseModel):
     end_time: str | None = None
     break_start_time: str | None = None
     break_end_time: str | None = None
+    # 신: 전환기 datetime 필드 (create와 동일 정규화)
+    operating_day: date | None = None
+    start_at: str | None = None
+    end_at: str | None = None
+    break_start_at: str | None = None
+    break_end_at: str | None = None
     note: str | None = None
     hourly_rate: float | None = Field(default=None, ge=0)  # 시급 override (optional, non-negative)
     force: bool = False
@@ -396,6 +410,12 @@ class ScheduleResponse(BaseModel):
     end_time: str | None
     break_start_time: str | None
     break_end_time: str | None
+    # 신: 전환기 datetime 인코딩 (구 필드와 동시 노출). Wave 3에서 구 필드 제거.
+    operating_day: date | None = None
+    start_at: str | None = None  # "YYYY-MM-DDTHH:MM" 벽시계
+    end_at: str | None = None
+    break_start_at: str | None = None
+    break_end_at: str | None = None
     net_work_minutes: int
     status: str
     created_by: str | None
@@ -623,6 +643,12 @@ class BulkUpdateItem(BaseModel):
     end_time: str | None = None
     break_start_time: str | None = None
     break_end_time: str | None = None
+    # 전환기 datetime 인코딩 — 벌크 시간수정이 주간↔새벽 전환을 표현하도록
+    operating_day: date | None = None
+    start_at: str | None = None
+    end_at: str | None = None
+    break_start_at: str | None = None
+    break_end_at: str | None = None
     note: str | None = None
     hourly_rate: float | None = None
     reset_checklist: bool | None = None

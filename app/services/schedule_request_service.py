@@ -21,6 +21,11 @@ from app.schemas.schedule import (
     ScheduleRequestFromTemplateResult, ScheduleRequestSkippedItem,
 )
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
+from app.utils.timezone import (
+    assemble_break_datetime,
+    assemble_shift_datetimes,
+    net_minutes_from_datetimes,
+)
 
 
 class ScheduleRequestService:
@@ -31,6 +36,51 @@ class ScheduleRequestService:
             return None
         parts = t.split(":")
         return time(int(parts[0]), int(parts[1]))
+
+    @staticmethod
+    def _start_offset_of(sched) -> int:
+        """기존 스케줄의 start_at day-offset(영업일 대비, 0 또는 1)을 반환 — 새벽근무 보존용."""
+        anchor = getattr(sched, "operating_day", None) or getattr(sched, "work_date", None)
+        start_at = getattr(sched, "start_at", None)
+        if start_at is None or anchor is None:
+            return 0
+        return max(0, min(1, (start_at.date() - anchor).days))
+
+    @staticmethod
+    def _shift_fields(
+        anchor_date: date_type,
+        start_time: time | None,
+        end_time: time | None,
+        break_start: time | None = None,
+        break_end: time | None = None,
+        start_offset_days: int = 0,
+    ) -> dict:
+        """anchor_date(영업일) + 시각 → datetime 인코딩 + net을 담은 저장 dict.
+
+        전환기: operating_day/start_at/end_at/break_*_at + net_work_minutes 를 반환.
+        자정보정은 값(datetime)에 내장 — 인라인 +24h 계산을 대체한다.
+        start_offset_days: 새벽근무(+1d)의 시작 달력일 오프셋 보존용.
+        """
+        _sd = anchor_date + timedelta(days=start_offset_days) if start_offset_days else None
+        start_at, end_at = assemble_shift_datetimes(anchor_date, start_time, end_time, start_date=_sd)
+        bstart_at = assemble_break_datetime(_sd or anchor_date, start_time, break_start)
+        bend_at = assemble_break_datetime(_sd or anchor_date, start_time, break_end)
+        # 브레이크 짝/순서/포함 검증 (schedule_service._normalize_shift_input과 동일 규칙)
+        if (bstart_at is None) != (bend_at is None):
+            raise BadRequestError("Break start and end must be provided together.")
+        if bstart_at is not None and bend_at is not None:
+            if bend_at <= bstart_at:
+                raise BadRequestError("Break must start before it ends.")
+            if start_at is not None and end_at is not None and (bstart_at < start_at or bend_at > end_at):
+                raise BadRequestError("Break must be within the shift.")
+        return {
+            "operating_day": anchor_date,
+            "start_at": start_at,
+            "end_at": end_at,
+            "break_start_at": bstart_at,
+            "break_end_at": bend_at,
+            "net_work_minutes": net_minutes_from_datetimes(start_at, end_at, bstart_at, bend_at),
+        }
 
     @staticmethod
     def _format_time(t: time | None) -> str | None:
@@ -369,22 +419,8 @@ class ScheduleRequestService:
         break_start = self._parse_time(data.break_start_time) if data.break_start_time else None
         break_end = self._parse_time(data.break_end_time) if data.break_end_time else None
 
-        # net_work_minutes 계산 (break 제외)
-        net_minutes = 0
-        if start_time is not None and end_time is not None:
-            start_m = start_time.hour * 60 + start_time.minute
-            end_m = end_time.hour * 60 + end_time.minute
-            if end_m <= start_m:
-                end_m += 24 * 60
-            gross = max(end_m - start_m, 0)
-            break_m = 0
-            if break_start is not None and break_end is not None:
-                bs = break_start.hour * 60 + break_start.minute
-                be = break_end.hour * 60 + break_end.minute
-                if be <= bs:
-                    be += 24 * 60
-                break_m = max(be - bs, 0)
-            net_minutes = max(gross - break_m, 0)
+        # datetime 인코딩 + net (자정보정 내장)
+        sf = self._shift_fields(data.work_date, start_time, end_time, break_start, break_end)
 
         try:
             schedule = await schedule_repository.create(db, {
@@ -397,7 +433,7 @@ class ScheduleRequestService:
                 "end_time": end_time,
                 "break_start_time": break_start,
                 "break_end_time": break_end,
-                "net_work_minutes": net_minutes,
+                **sf,
                 "note": data.note,
                 "status": "requested",
                 "hourly_rate": hourly_rate,
@@ -454,17 +490,20 @@ class ScheduleRequestService:
                     if duplicate is not None:
                         if on_conflict == "replace" and duplicate.status == "requested":
                             # 기존 requested 스케줄 시간 업데이트
-                            net_minutes = 0
-                            if item.preferred_start_time is not None and item.preferred_end_time is not None:
-                                s_m = item.preferred_start_time.hour * 60 + item.preferred_start_time.minute
-                                e_m = item.preferred_end_time.hour * 60 + item.preferred_end_time.minute
-                                if e_m <= s_m:
-                                    e_m += 24 * 60
-                                net_minutes = max(e_m - s_m, 0)
+                            # 기존 브레이크 유지 — sf에 포함해 net과 break_*_at을 함께 재계산
+                            # (break 빠진 net + 낡은 break_at 방치로 불변식 ⑥이 깨지던 버그)
+                            sf = self._shift_fields(current, item.preferred_start_time, item.preferred_end_time,
+                                                    duplicate.break_start_time, duplicate.break_end_time,
+                                                    start_offset_days=self._start_offset_of(duplicate))
                             updated = await schedule_repository.update(db, duplicate.id, {
                                 "start_time": item.preferred_start_time,
                                 "end_time": item.preferred_end_time,
-                                "net_work_minutes": net_minutes,
+                                "operating_day": sf["operating_day"],
+                                "start_at": sf["start_at"],
+                                "end_at": sf["end_at"],
+                                "break_start_at": sf["break_start_at"],
+                                "break_end_at": sf["break_end_at"],
+                                "net_work_minutes": sf["net_work_minutes"],
                             })
                             result.replaced.append(await self._schedule_to_request_response(db, updated))  # type: ignore[arg-type]
                         else:
@@ -477,13 +516,7 @@ class ScheduleRequestService:
                             ))
                     else:
                         hourly_rate = await self._resolve_hourly_rate(db, user_id, store_id)
-                        net_minutes = 0
-                        if item.preferred_start_time is not None and item.preferred_end_time is not None:
-                            s_m = item.preferred_start_time.hour * 60 + item.preferred_start_time.minute
-                            e_m = item.preferred_end_time.hour * 60 + item.preferred_end_time.minute
-                            if e_m <= s_m:
-                                e_m += 24 * 60
-                            net_minutes = max(e_m - s_m, 0)
+                        sf = self._shift_fields(current, item.preferred_start_time, item.preferred_end_time)
                         schedule = await schedule_repository.create(db, {
                             "organization_id": organization_id,
                             "user_id": user_id,
@@ -492,7 +525,7 @@ class ScheduleRequestService:
                             "work_date": current,
                             "start_time": item.preferred_start_time,
                             "end_time": item.preferred_end_time,
-                            "net_work_minutes": net_minutes,
+                            **sf,
                             "status": "requested",
                             "hourly_rate": hourly_rate,
                             "submitted_at": datetime.now(timezone.utc),
@@ -561,17 +594,20 @@ class ScheduleRequestService:
 
                 if duplicate is not None:
                     if on_conflict == "replace" and duplicate.status == "requested":
-                        net_minutes = 0
-                        if prev_s.start_time is not None and prev_s.end_time is not None:
-                            s_m = prev_s.start_time.hour * 60 + prev_s.start_time.minute
-                            e_m = prev_s.end_time.hour * 60 + prev_s.end_time.minute
-                            if e_m <= s_m:
-                                e_m += 24 * 60
-                            net_minutes = max(e_m - s_m, 0)
+                        sf = self._shift_fields(new_date, prev_s.start_time, prev_s.end_time,
+                                                prev_s.break_start_time, prev_s.break_end_time,
+                                                start_offset_days=self._start_offset_of(prev_s))
                         updated = await schedule_repository.update(db, duplicate.id, {
                             "start_time": prev_s.start_time,
                             "end_time": prev_s.end_time,
-                            "net_work_minutes": net_minutes,
+                            "break_start_time": prev_s.break_start_time,
+                            "break_end_time": prev_s.break_end_time,
+                            "operating_day": sf["operating_day"],
+                            "start_at": sf["start_at"],
+                            "end_at": sf["end_at"],
+                            "break_start_at": sf["break_start_at"],
+                            "break_end_at": sf["break_end_at"],
+                            "net_work_minutes": sf["net_work_minutes"],
                             "note": prev_s.note,
                         })
                         result.replaced.append(await self._schedule_to_request_response(db, updated))  # type: ignore[arg-type]
@@ -585,13 +621,9 @@ class ScheduleRequestService:
                         ))
                 else:
                     hourly_rate = await self._resolve_hourly_rate(db, user_id, store_id)
-                    net_minutes = 0
-                    if prev_s.start_time is not None and prev_s.end_time is not None:
-                        s_m = prev_s.start_time.hour * 60 + prev_s.start_time.minute
-                        e_m = prev_s.end_time.hour * 60 + prev_s.end_time.minute
-                        if e_m <= s_m:
-                            e_m += 24 * 60
-                        net_minutes = max(e_m - s_m, 0)
+                    sf = self._shift_fields(new_date, prev_s.start_time, prev_s.end_time,
+                                            prev_s.break_start_time, prev_s.break_end_time,
+                                            start_offset_days=self._start_offset_of(prev_s))
                     schedule = await schedule_repository.create(db, {
                         "organization_id": organization_id,
                         "user_id": user_id,
@@ -600,7 +632,9 @@ class ScheduleRequestService:
                         "work_date": new_date,
                         "start_time": prev_s.start_time,
                         "end_time": prev_s.end_time,
-                        "net_work_minutes": net_minutes,
+                        "break_start_time": prev_s.break_start_time,
+                        "break_end_time": prev_s.break_end_time,
+                        **sf,
                         "note": prev_s.note,
                         "status": "requested",
                         "hourly_rate": hourly_rate,
@@ -640,16 +674,20 @@ class ScheduleRequestService:
         if data.note is not None:
             update_data["note"] = data.note
 
-        # start_time/end_time 변경 시 net_work_minutes 재계산
-        if "start_time" in update_data or "end_time" in update_data:
+        # 시간/날짜 변경 시 datetime 인코딩 재조립 + net 재계산
+        if any(k in update_data for k in ("start_time", "end_time", "work_date")):
             new_start = update_data.get("start_time") or schedule.start_time
             new_end = update_data.get("end_time") or schedule.end_time
-            if new_start is not None and new_end is not None:
-                s_m = new_start.hour * 60 + new_start.minute
-                e_m = new_end.hour * 60 + new_end.minute
-                if e_m <= s_m:
-                    e_m += 24 * 60
-                update_data["net_work_minutes"] = max(e_m - s_m, 0)
+            anchor = update_data.get("work_date") or schedule.operating_day or schedule.work_date
+            sf = self._shift_fields(anchor, new_start, new_end,
+                                    schedule.break_start_time, schedule.break_end_time,
+                                    start_offset_days=self._start_offset_of(schedule))
+            update_data["operating_day"] = sf["operating_day"]
+            update_data["start_at"] = sf["start_at"]
+            update_data["end_at"] = sf["end_at"]
+            update_data["break_start_at"] = sf["break_start_at"]
+            update_data["break_end_at"] = sf["break_end_at"]
+            update_data["net_work_minutes"] = sf["net_work_minutes"]
 
         try:
             if update_data:
@@ -800,13 +838,9 @@ class ScheduleRequestService:
 
         start_time = self._parse_time(data.preferred_start_time)
         end_time = self._parse_time(data.preferred_end_time)
-        net_minutes = 0
-        if start_time is not None and end_time is not None:
-            s_m = start_time.hour * 60 + start_time.minute
-            e_m = end_time.hour * 60 + end_time.minute
-            if e_m <= s_m:
-                e_m += 24 * 60
-            net_minutes = max(e_m - s_m, 0)
+        break_start = self._parse_time(data.break_start_time)
+        break_end = self._parse_time(data.break_end_time)
+        sf = self._shift_fields(data.work_date, start_time, end_time, break_start, break_end)
 
         try:
             schedule = await schedule_repository.create(db, {
@@ -817,9 +851,9 @@ class ScheduleRequestService:
                 "work_date": data.work_date,
                 "start_time": start_time,
                 "end_time": end_time,
-                "break_start_time": self._parse_time(data.break_start_time),
-                "break_end_time": self._parse_time(data.break_end_time),
-                "net_work_minutes": net_minutes,
+                "break_start_time": break_start,
+                "break_end_time": break_end,
+                **sf,
                 "note": data.note,
                 "status": "requested",
                 "created_by": created_by,
@@ -908,24 +942,20 @@ class ScheduleRequestService:
         if data.rejection_reason is not None:
             update_data["rejection_reason"] = data.rejection_reason
 
-        # Recalculate net_work_minutes whenever start/end/break changes
+        # start/end/break/date 변경 시 datetime 인코딩 재조립 + net 재계산
         new_start = update_data.get("start_time", schedule.start_time)
         new_end = update_data.get("end_time", schedule.end_time)
         new_break_start = update_data.get("break_start_time", schedule.break_start_time)
         new_break_end = update_data.get("break_end_time", schedule.break_end_time)
-        if new_start is not None and new_end is not None:
-            s_m = new_start.hour * 60 + new_start.minute
-            e_m = new_end.hour * 60 + new_end.minute
-            if e_m <= s_m:
-                e_m += 24 * 60
-            net = e_m - s_m
-            if new_break_start and new_break_end:
-                bs = new_break_start.hour * 60 + new_break_start.minute
-                be = new_break_end.hour * 60 + new_break_end.minute
-                if be <= bs:
-                    be += 24 * 60
-                net -= (be - bs)
-            update_data["net_work_minutes"] = max(net, 0)
+        anchor = update_data.get("work_date") or schedule.operating_day or schedule.work_date
+        sf = self._shift_fields(anchor, new_start, new_end, new_break_start, new_break_end,
+                                start_offset_days=self._start_offset_of(schedule))
+        update_data["operating_day"] = sf["operating_day"]
+        update_data["start_at"] = sf["start_at"]
+        update_data["end_at"] = sf["end_at"]
+        update_data["break_start_at"] = sf["break_start_at"]
+        update_data["break_end_at"] = sf["break_end_at"]
+        update_data["net_work_minutes"] = sf["net_work_minutes"]
 
         if has_value_change:
             update_data["modifications"] = modifications
@@ -1012,15 +1042,20 @@ class ScheduleRequestService:
                         from datetime import date as date_cls
                         revert_data["work_date"] = date_cls.fromisoformat(old_val) if old_val else None
 
-        # net_work_minutes 재계산
-        new_start = revert_data.get("start_time") or schedule.start_time
-        new_end = revert_data.get("end_time") or schedule.end_time
-        if new_start is not None and new_end is not None:
-            s_m = new_start.hour * 60 + new_start.minute
-            e_m = new_end.hour * 60 + new_end.minute
-            if e_m <= s_m:
-                e_m += 24 * 60
-            revert_data["net_work_minutes"] = max(e_m - s_m, 0)
+        # datetime 인코딩 재조립 + net_work_minutes 재계산.
+        # falsy-or 병합 금지 — 되돌림 값이 None(시각 제거)일 때 start_time=NULL인데
+        # start_at은 살아있는 desync(불변식 ④ 위반)가 생기던 버그.
+        new_start = revert_data["start_time"] if "start_time" in revert_data else schedule.start_time
+        new_end = revert_data["end_time"] if "end_time" in revert_data else schedule.end_time
+        _anchor_rd = revert_data.get("work_date")
+        anchor = _anchor_rd if _anchor_rd is not None else (schedule.operating_day or schedule.work_date)
+        sf = self._shift_fields(anchor, new_start, new_end,
+                                schedule.break_start_time, schedule.break_end_time,
+                                start_offset_days=self._start_offset_of(schedule))
+        revert_data["operating_day"] = sf["operating_day"]
+        revert_data["start_at"] = sf["start_at"]
+        revert_data["end_at"] = sf["end_at"]
+        revert_data["net_work_minutes"] = sf["net_work_minutes"]
 
         try:
             updated = await schedule_repository.update(db, request_id, revert_data)
@@ -1150,19 +1185,10 @@ class ScheduleRequestService:
                 errors.append(f"Schedule {s.id}: missing time information")
                 continue
 
-            # net_work_minutes 재계산 (work_role defaults 반영)
-            start_m = start_time.hour * 60 + start_time.minute
-            end_m = end_time.hour * 60 + end_time.minute
-            if end_m <= start_m:
-                end_m += 24 * 60
-            net = end_m - start_m
-            if break_start and break_end:
-                bs = break_start.hour * 60 + break_start.minute
-                be = break_end.hour * 60 + break_end.minute
-                if be <= bs:
-                    be += 24 * 60
-                net -= (be - bs)
-            net = max(net, 0)
+            # datetime 인코딩 + net (work_role defaults 반영)
+            anchor = s.operating_day or s.work_date
+            sf = self._shift_fields(anchor, start_time, end_time, break_start, break_end,
+                                    start_offset_days=self._start_offset_of(s))
 
             try:
                 # status만 confirmed로 변경 (새 행 생성 X)
@@ -1172,7 +1198,7 @@ class ScheduleRequestService:
                     "end_time": end_time,
                     "break_start_time": break_start,
                     "break_end_time": break_end,
-                    "net_work_minutes": net,
+                    **sf,
                     "approved_by": confirmed_by,
                 })
 

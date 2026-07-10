@@ -1,6 +1,6 @@
 """스케줄 레포지토리."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Sequence
 from uuid import UUID
 
@@ -108,27 +108,46 @@ class ScheduleRepository(BaseRepository[Schedule]):
         start_time_minutes: int,
         end_time_minutes: int,
         exclude_id: UUID | None = None,
+        cand_start_at: datetime | None = None,
+        cand_end_at: datetime | None = None,
     ) -> bool:
-        """같은 직원+같은 날 시간 겹침 확인. 시간은 분 단위로 비교."""
+        """같은 직원+같은 영업일 시간 겹침 확인.
+
+        벽시계 datetime 구간으로 비교(자정 넘김 자연 처리). start_at/end_at 우선,
+        없으면 work_date+time 조립 폴백. 후보는 cand_*_at 우선, 없으면 분(minutes)에서 조립.
+        """
+        midnight = datetime.combine(work_date, time(0, 0))
+        if cand_start_at is not None and cand_end_at is not None:
+            cs, ce = cand_start_at, cand_end_at
+        else:
+            ce_min = end_time_minutes if end_time_minutes > start_time_minutes else end_time_minutes + 24 * 60
+            cs = midnight + timedelta(minutes=start_time_minutes)
+            ce = midnight + timedelta(minutes=ce_min)
+
+        # 인접 영업일 포함 조회 — 전날 마감조(익일 새벽 종료)나 당일 새벽조(+1d start)가
+        # 이웃 영업일 근무와 물리적으로 겹치는 케이스를 놓치지 않도록 ±1일 범위로 비교.
         entries = await db.execute(
             select(Schedule).where(
                 Schedule.user_id == user_id,
-                Schedule.work_date == work_date,
+                Schedule.work_date.between(
+                    work_date - timedelta(days=1), work_date + timedelta(days=1)
+                ),
                 Schedule.status.notin_(["cancelled", "deleted"]),
             )
         )
         for entry in entries.scalars().all():
             if exclude_id and entry.id == exclude_id:
                 continue
-            existing_start = entry.start_time.hour * 60 + entry.start_time.minute
-            existing_end = entry.end_time.hour * 60 + entry.end_time.minute
-            # Handle overnight shifts
-            if existing_end <= existing_start:
-                existing_end += 24 * 60
-            check_end = end_time_minutes
-            if check_end <= start_time_minutes:
-                check_end += 24 * 60
-            if start_time_minutes < existing_end and check_end > existing_start:
+            if entry.start_at is not None and entry.end_at is not None:
+                es, ee = entry.start_at, entry.end_at
+            elif entry.start_time is not None and entry.end_time is not None:
+                es = datetime.combine(entry.work_date, entry.start_time)
+                ee = datetime.combine(entry.work_date, entry.end_time)
+                if ee <= es:
+                    ee += timedelta(days=1)
+            else:
+                continue
+            if cs < ee and ce > es:
                 return True
         return False
 

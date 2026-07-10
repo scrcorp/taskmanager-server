@@ -118,10 +118,40 @@ def _format_time_hhmm(t) -> str | None:
     return t.strftime("%H:%M")
 
 
+def _format_at(dt) -> str | None:
+    """naive datetime → 벽시계 ISO "YYYY-MM-DDTHH:MM" (전환기 datetime 인코딩)."""
+    if dt is None:
+        return None
+    return dt.strftime("%Y-%m-%dT%H:%M")
+
+
 def _parse_time_hhmm(s: str):
     from datetime import time as _time
     hh, mm = s.split(":")
     return _time(int(hh), int(mm))
+
+
+def _kiosk_shift_iso(today, day_start, start_hhmm: str, end_hhmm: str) -> tuple[str, str]:
+    """키오스크 HHmm 입력 → 영업일 창 기준 명시 벽시계 ISO(start_at, end_at).
+
+    키오스크는 "오늘(영업일)" 스케줄만 다루고 날짜를 표현할 UI가 없다. 영업일 D의
+    창은 [D의 경계, D+1의 경계)이므로, 경계(day_start, 기본 06:00) 이전 새벽 시각은
+    달력상 D+1이다. 이 번역이 없으면 저녁에 만든 새벽조(01:00~05:00)가 D 01:00
+    (이미 지난 시각)으로 앵커되어 즉시 no_show가 되는 실구멍이 있었다.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    from app.utils.timezone import resolve_day_start_time
+
+    t_start = _parse_time_hhmm(start_hhmm)
+    t_end = _parse_time_hhmm(end_hhmm)
+    next_day = today + _td(days=1)
+    boundary_next = resolve_day_start_time(day_start, next_day.weekday())
+    start_day = next_day if t_start < boundary_next else today
+    end_day = start_day + _td(days=1) if t_end <= t_start else start_day
+    return (
+        _dt.combine(start_day, t_start).strftime("%Y-%m-%dT%H:%M"),
+        _dt.combine(end_day, t_end).strftime("%Y-%m-%dT%H:%M"),
+    )
 
 
 async def _resolve_late_buffer(db: AsyncSession, organization_id, store_id) -> int:
@@ -235,6 +265,8 @@ async def manage_list_today_schedules(
             now=now_utc,
             store_tz=tz_info,
             late_buffer=late_buffer,
+            schedule_start_at=sched.start_at,
+            schedule_end_at=sched.end_at,
         )
         breaks = _break_entries(breaks_by_att.get(att.id, []), tz_info) if att else []
         result.append(
@@ -248,6 +280,9 @@ async def manage_list_today_schedules(
                 position_name=sched.position_snapshot,
                 start_time=_format_time_hhmm(sched.start_time),
                 end_time=_format_time_hhmm(sched.end_time),
+                operating_day=sched.operating_day or sched.work_date,
+                start_at=_format_at(sched.start_at),
+                end_at=_format_at(sched.end_at),
                 status=sched.status,
                 attendance_id=att.id if att else None,
                 state=state,
@@ -360,6 +395,11 @@ async def manage_create_schedule(
     store_tz, day_start = await get_store_day_config(db, device.store_id)
     today = get_work_date(store_tz, day_start, _dt.now(_tz.utc))
 
+    # 키오스크 HHmm → 영업일 창 기준 명시 datetime (클라가 명시 start_at을 보내면 그것 우선)
+    if data.start_at is None and data.start_time and data.end_time:
+        _s_iso, _e_iso = _kiosk_shift_iso(today, day_start, data.start_time, data.end_time)
+    else:
+        _s_iso, _e_iso = data.start_at, data.end_at
     payload = ScheduleCreate(
         store_id=str(device.store_id),
         user_id=str(data.user_id),
@@ -367,6 +407,9 @@ async def manage_create_schedule(
         work_date=today,
         start_time=data.start_time,
         end_time=data.end_time,
+        operating_day=data.operating_day or today,
+        start_at=_s_iso,
+        end_at=_e_iso,
         status="confirmed",
         force=True,
     )
@@ -404,11 +447,19 @@ async def manage_update_schedule(
     if sch.work_date != today:
         raise HTTPException(status_code=400, detail="Only today's schedule can be edited from kiosk")
 
+    # 키오스크 HHmm → 영업일 창 기준 명시 datetime (둘 다 온 경우만 번역, 명시 start_at 우선)
+    if data.start_at is None and data.start_time and data.end_time:
+        _s_iso, _e_iso = _kiosk_shift_iso(today, day_start, data.start_time, data.end_time)
+    else:
+        _s_iso, _e_iso = data.start_at, data.end_at
     payload = ScheduleUpdate(
         user_id=str(data.user_id) if data.user_id else None,
         work_role_id=str(data.work_role_id) if data.work_role_id else None,
         start_time=data.start_time,
         end_time=data.end_time,
+        operating_day=data.operating_day,
+        start_at=_s_iso,
+        end_at=_e_iso,
         force=True,
         reset_checklist=True,
     )
@@ -510,6 +561,8 @@ async def _manage_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> Mana
         now=now_utc,
         store_tz=tz_info,
         late_buffer=late_buffer,
+        schedule_start_at=sched.start_at,
+        schedule_end_at=sched.end_at,
     )
 
     breaks: list[ManageBreakEntry] = []
@@ -531,6 +584,9 @@ async def _manage_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> Mana
         position_name=sched.position_snapshot,
         start_time=_format_time_hhmm(sched.start_time),
         end_time=_format_time_hhmm(sched.end_time),
+        operating_day=sched.operating_day or sched.work_date,
+        start_at=_format_at(sched.start_at),
+        end_at=_format_at(sched.end_at),
         status=sched.status,
         attendance_id=att.id if att else None,
         state=state,
@@ -641,8 +697,20 @@ async def manage_change_attendance_status(
         raise HTTPException(status_code=404, detail="No attendance row for today")
 
     def _combine(hhmm: str):
+        """영업일(today) 기준 시각 → 실제 달력일 instant.
+
+        영업일 D의 창은 [D의 경계, D+1의 경계). 경계(day_start, 기본 06:00) 이전 새벽
+        시각은 달력상 D+1에 속한다 — 마감조 clock_out 02:00, 새벽 워크인 clock_in 01:30 등을
+        영업일 달력일(D)로 합성하면 하루 어긋나던 버그 수정.
+        """
+        from datetime import timedelta as _td
+        from app.utils.timezone import resolve_day_start_time
         hh, mm = hhmm.split(":")
-        return _dt.combine(today, _t(int(hh), int(mm)), tzinfo=tz_info)
+        t = _t(int(hh), int(mm))
+        next_day = today + _td(days=1)
+        boundary_next = resolve_day_start_time(day_start, next_day.weekday())
+        d = next_day if t < boundary_next else today
+        return _dt.combine(d, t, tzinfo=tz_info)
 
     # ── 시간 보정 (요청 본문 기반) ──
     corrections_to_add: list[AttendanceCorrection] = []

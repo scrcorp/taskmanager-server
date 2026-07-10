@@ -4,7 +4,7 @@ Timezone utility — helpers for resolving store/organization timezone.
 Includes day boundary logic for determining work_date.
 """
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta as _timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -159,6 +159,131 @@ async def get_store_day_config(db: AsyncSession, store_id: UUID) -> tuple[str, d
         return DEFAULT_TIMEZONE, None
     tz = row.timezone or row.org_timezone or DEFAULT_TIMEZONE
     return tz, row.day_start_time
+
+
+def assemble_shift_datetimes(
+    operating_day: date,
+    start_time: time | None,
+    end_time: time | None,
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> tuple[datetime | None, datetime | None]:
+    """[TRANSITION-ONLY] 시각(+선택적 명시 날짜)을 naive datetime으로 조립합니다.
+
+    ⚠️ 전환용 헬퍼 — 목표 상태에선 클라가 start_at/end_at(ISO)을 직접 보내므로 불필요.
+    쓰임은 둘뿐: ① 마이그레이션 백필(현재 SQL로 처리), ② Wave 1 구(舊) start_time 요청 shim.
+    Wave 3에서 제거. 영구 계산 헬퍼는 net_minutes_from_datetimes(순수 datetime).
+
+    - start_date 미지정 시 operating_day(영업일 라벨)를 앵커로 사용.
+    - end_date 미지정 시 start_date를 쓰되, end_time ≤ start_time이면 +1일(자정 넘김).
+    저장/해석은 store tz 벽시계. tz는 부여하지 않음(naive).
+    """
+    start_at = None
+    end_at = None
+    s_date = start_date or operating_day
+    if start_time is not None:
+        start_at = datetime.combine(s_date, start_time)
+    if end_time is not None:
+        if end_date is not None:
+            e_date = end_date
+        elif start_time is not None and end_time <= start_time:
+            e_date = s_date + _timedelta(days=1)
+        else:
+            e_date = s_date
+        end_at = datetime.combine(e_date, end_time)
+    return start_at, end_at
+
+
+def assemble_break_datetime(
+    anchor_date: date,
+    start_time: time | None,
+    break_time: time | None,
+) -> datetime | None:
+    """[TRANSITION-ONLY] 브레이크 시각을 naive datetime으로 조립합니다.
+
+    근무 시작 날짜(anchor_date)에 앵커하되, 브레이크 시각이 start_time보다 이르면
+    오버나잇 근무 내의 브레이크로 보아 +1일. 마이그레이션 백필과 동일 규칙.
+    """
+    if break_time is None:
+        return None
+    d = anchor_date
+    if start_time is not None and break_time < start_time:
+        d = d + _timedelta(days=1)
+    return datetime.combine(d, break_time)
+
+
+def parse_naive_iso(value: str | None) -> datetime | None:
+    """ISO 문자열("YYYY-MM-DDTHH:MM")을 naive datetime으로 파싱합니다.
+
+    벽시계 계약(tz 없음). tz-aware가 들어와도 벽시계 성분만 취해 naive로 만든다.
+    """
+    if not value:
+        return None
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    return dt
+
+
+def format_naive_iso(value: datetime | None) -> str | None:
+    """naive datetime → "YYYY-MM-DDTHH:MM" ISO 문자열 (분 단위)."""
+    if value is None:
+        return None
+    return value.strftime("%Y-%m-%dT%H:%M")
+
+
+def resolve_schedule_instants(
+    *,
+    start_at: datetime | None,
+    end_at: datetime | None,
+    work_date: date | None,
+    start_time: time | None,
+    end_time: time | None,
+    tz_name: str,
+) -> tuple[datetime | None, datetime | None]:
+    """스케줄의 시작/종료를 store tz aware datetime(절대 순간)으로 해석합니다.
+
+    start_at/end_at(naive 벽시계)이 있으면 그것을 store tz로 localize.
+    없으면(전환기 미백필 행) 구 combine(work_date, time) + 자정보정으로 폴백.
+    근태 비교(instant vs clock_in) 용.
+    """
+    zi = ZoneInfo(tz_name)
+    if start_at is not None:
+        s = start_at.replace(tzinfo=zi)
+    elif start_time is not None and work_date is not None:
+        s = datetime.combine(work_date, start_time, tzinfo=zi)
+    else:
+        s = None
+
+    if end_at is not None:
+        e = end_at.replace(tzinfo=zi)
+    elif end_time is not None and work_date is not None:
+        e = datetime.combine(work_date, end_time, tzinfo=zi)
+        if s is not None and e <= s:
+            e = e + _timedelta(days=1)
+    else:
+        e = None
+    return s, e
+
+
+def net_minutes_from_datetimes(
+    start_at: datetime | None,
+    end_at: datetime | None,
+    break_start_at: datetime | None = None,
+    break_end_at: datetime | None = None,
+) -> int:
+    """datetime 구간에서 순 근무 분을 계산합니다 (자정보정 특수처리 불필요).
+
+    Net work minutes = (end_at − start_at) − (break_end_at − break_start_at).
+    날짜가 값에 포함돼 있으므로 overnight `+24h` 보정이 없다.
+    """
+    if start_at is None or end_at is None:
+        return 0
+    total = int((end_at - start_at).total_seconds() // 60)
+    if break_start_at is not None and break_end_at is not None:
+        total -= int((break_end_at - break_start_at).total_seconds() // 60)
+    return max(total, 0)
 
 
 def calculate_cross_midnight_minutes(start_time: time, end_time: time) -> int:
