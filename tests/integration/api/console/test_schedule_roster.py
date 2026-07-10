@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date, time, timedelta
 from typing import AsyncIterator
 
 import pytest
@@ -113,13 +113,15 @@ async def sv_headers(test_users) -> dict[str, str]:
 
 
 async def _insert(store_id, user_info, *, status="confirmed", start=time(9, 0), end=time(17, 0),
-                  position=None, work_role_name=None, hourly_rate=None, net_work_minutes=0):
+                  position=None, work_role_name=None, hourly_rate=None, net_work_minutes=0,
+                  start_at=None, end_at=None, operating_day=None):
     async with async_session() as db:
         s = Schedule(
             organization_id=user_info["organization_id"], user_id=user_info["id"],
             store_id=store_id, work_date=FUTURE, start_time=start, end_time=end,
             status=status, position_snapshot=position, work_role_name_snapshot=work_role_name,
             net_work_minutes=net_work_minutes,
+            start_at=start_at, end_at=end_at, operating_day=operating_day,
         )
         if hourly_rate is not None:
             s.hourly_rate = hourly_rate
@@ -258,3 +260,52 @@ async def test_roster_cost_masked_for_sv(
     for r in body["roster"]:
         assert r["confirmed_cost"] is None
         assert r["effective_hourly_rate"] is None
+
+
+async def test_roster_day_plus1d_dawn_placed_on_operating_axis(
+    async_client, admin_headers, staff_in_test_store, test_store_id, _clear_future
+):
+    """+1d 새벽 근무(start_at 날짜=영업일+1)는 h25.. 컬럼(1A+1)에 배치되고
+    h1..(당일 아침)에는 배치되지 않아야 한다 — 물리 위치 오배치 회귀 방지."""
+    from datetime import datetime as _dt
+    await _insert(
+        test_store_id, staff_in_test_store,
+        start=time(1, 0), end=time(9, 0),
+        operating_day=FUTURE,
+        start_at=_dt.combine(FUTURE, time(1, 0)) + timedelta(days=1),
+        end_at=_dt.combine(FUTURE, time(9, 0)) + timedelta(days=1),
+    )
+    resp = await async_client.get(ROSTER_URL, headers=admin_headers, params={
+        "date_from": FUTURE.isoformat(), "date_to": FUTURE.isoformat(),
+        "granularity": "day", "store_ids": str(test_store_id),
+    })
+    assert resp.status_code == 200, resp.text
+    cols = {c["key"]: c for c in resp.json()["columns"]}
+    # 영업일 축 25..32 에 1인 배치
+    for h in range(25, 33):
+        assert cols[f"h{h}"]["team_confirmed"] == 1, f"h{h} 비어있음"
+    # 당일 아침 h1..h8 에는 컬럼 자체가 없거나 0 (h_lo 가 25부터 시작)
+    for h in range(1, 9):
+        assert f"h{h}" not in cols or cols[f"h{h}"]["team_confirmed"] == 0
+
+
+async def test_roster_day_plus1d_within_range_dawn_half_hour(
+    async_client, admin_headers, staff_in_test_store, test_store_id, _clear_future
+):
+    """+1d 00:30~02:00 → h24=0.5, h25=1 (30분 경계 + 오프셋 동시)."""
+    from datetime import datetime as _dt
+    await _insert(
+        test_store_id, staff_in_test_store,
+        start=time(0, 30), end=time(2, 0),
+        operating_day=FUTURE,
+        start_at=_dt.combine(FUTURE, time(0, 30)) + timedelta(days=1),
+        end_at=_dt.combine(FUTURE, time(2, 0)) + timedelta(days=1),
+    )
+    resp = await async_client.get(ROSTER_URL, headers=admin_headers, params={
+        "date_from": FUTURE.isoformat(), "date_to": FUTURE.isoformat(),
+        "granularity": "day", "store_ids": str(test_store_id),
+    })
+    assert resp.status_code == 200, resp.text
+    cols = {c["key"]: c for c in resp.json()["columns"]}
+    assert cols["h24"]["team_confirmed"] == 0.5
+    assert cols["h25"]["team_confirmed"] == 1
