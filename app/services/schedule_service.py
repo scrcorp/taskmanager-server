@@ -634,24 +634,37 @@ class ScheduleService:
         return "staff"
 
     @staticmethod
-    def _hour_occupancy(start: time | None, end: time | None, hour: int) -> float:
-        """스케줄이 [hour, hour+1) 1시간 슬롯에서 차지하는 비율(0~1). overnight 대응."""
+    def _start_offset_days(s: Schedule) -> int:
+        """+1d 새벽 근무(start_at 날짜 = 영업일+1)의 달력일 오프셋 (0|1).
+
+        일간 그리드는 영업일 축이라 +1d 새벽 01:00 은 hour 25(1A+1)에 위치한다 —
+        당일 아침 1시로 오배치하지 않도록 시간 계산 전에 이 오프셋을 더한다.
+        """
+        anchor = s.operating_day or s.work_date
+        if s.start_at is None or anchor is None:
+            return 0
+        return max(0, min(1, (s.start_at.date() - anchor).days))
+
+    @staticmethod
+    def _hour_occupancy(start: time | None, end: time | None, hour: int, offset_days: int = 0) -> float:
+        """스케줄이 [hour, hour+1) 1시간 슬롯에서 차지하는 비율(0~1). overnight 대응.
+        hour 는 영업일 축 기준(24 이상 = 익일). offset_days: +1d 새벽 물리위치 보정."""
         if start is None or end is None:
             return 0.0
-        s = start.hour + start.minute / 60.0
-        e = end.hour + end.minute / 60.0
+        s = start.hour + start.minute / 60.0 + offset_days * 24
+        e = end.hour + end.minute / 60.0 + offset_days * 24
         eff_end = e + 24 if e <= s else e
         overlap = min(eff_end, hour + 1) - max(s, hour)
         return max(0.0, min(1.0, overlap))
 
     @staticmethod
-    def _occupies_slot(start: time | None, end: time | None, slot_start: float) -> bool:
+    def _occupies_slot(start: time | None, end: time | None, slot_start: float, offset_days: int = 0) -> bool:
         """스케줄이 [slot_start, slot_start+0.5) 30분 슬롯과 겹치는지(overlap>0). overnight 대응.
-        _hour_occupancy 와 동일한 시간/overnight 규약을 사용한다."""
+        _hour_occupancy 와 동일한 시간/overnight/오프셋 규약을 사용한다."""
         if start is None or end is None:
             return False
-        s = start.hour + start.minute / 60.0
-        e = end.hour + end.minute / 60.0
+        s = start.hour + start.minute / 60.0 + offset_days * 24
+        e = end.hour + end.minute / 60.0 + offset_days * 24
         eff_end = e + 24 if e <= s else e
         overlap = min(eff_end, slot_start + 0.5) - max(s, slot_start)
         return overlap > 0
@@ -670,9 +683,12 @@ class ScheduleService:
                 return []
             starts: list[float] = []
             ends: list[float] = []
+            offs: dict = {}
             for s in scheds:
-                st = (s.start_time.hour + s.start_time.minute / 60.0) if s.start_time else 0.0
-                en = (s.end_time.hour + s.end_time.minute / 60.0) if s.end_time else 0.0
+                off = self._start_offset_days(s)
+                offs[s.id] = off
+                st = ((s.start_time.hour + s.start_time.minute / 60.0) if s.start_time else 0.0) + off * 24
+                en = ((s.end_time.hour + s.end_time.minute / 60.0) if s.end_time else 0.0) + off * 24
                 eff = en + 24 if en <= st else en
                 starts.append(st)
                 ends.append(eff)
@@ -681,15 +697,15 @@ class ScheduleService:
             conf = [s for s in scheds if s.status == "confirmed"]
             pend = [s for s in scheds if s.status == "requested"]
             for h in range(h_lo, h_hi):
-                conf_occ = sum(self._hour_occupancy(s.start_time, s.end_time, h) for s in conf)
-                pend_occ = sum(self._hour_occupancy(s.start_time, s.end_time, h) for s in pend)
-                conf_cost = sum(self._hour_occupancy(s.start_time, s.end_time, h) * float(s.hourly_rate or 0.0) for s in conf)
-                pend_cost = sum(self._hour_occupancy(s.start_time, s.end_time, h) * float(s.hourly_rate or 0.0) for s in pend)
+                conf_occ = sum(self._hour_occupancy(s.start_time, s.end_time, h, offs[s.id]) for s in conf)
+                pend_occ = sum(self._hour_occupancy(s.start_time, s.end_time, h, offs[s.id]) for s in pend)
+                conf_cost = sum(self._hour_occupancy(s.start_time, s.end_time, h, offs[s.id]) * float(s.hourly_rate or 0.0) for s in conf)
+                pend_cost = sum(self._hour_occupancy(s.start_time, s.end_time, h, offs[s.id]) * float(s.hourly_rate or 0.0) for s in pend)
                 # 첫/둘째 30분 슬롯 인원 (overlap>0 카운트). team_*(점유합)=(slot0+slot1)/2 와 일관.
-                conf_s0 = sum(1 for s in conf if self._occupies_slot(s.start_time, s.end_time, h))
-                conf_s1 = sum(1 for s in conf if self._occupies_slot(s.start_time, s.end_time, h + 0.5))
-                pend_s0 = sum(1 for s in pend if self._occupies_slot(s.start_time, s.end_time, h))
-                pend_s1 = sum(1 for s in pend if self._occupies_slot(s.start_time, s.end_time, h + 0.5))
+                conf_s0 = sum(1 for s in conf if self._occupies_slot(s.start_time, s.end_time, h, offs[s.id]))
+                conf_s1 = sum(1 for s in conf if self._occupies_slot(s.start_time, s.end_time, h + 0.5, offs[s.id]))
+                pend_s0 = sum(1 for s in pend if self._occupies_slot(s.start_time, s.end_time, h, offs[s.id]))
+                pend_s1 = sum(1 for s in pend if self._occupies_slot(s.start_time, s.end_time, h + 0.5, offs[s.id]))
                 cols.append(RosterColumn(
                     key=f"h{h}",
                     team_confirmed=round(conf_occ, 2), team_pending=round(pend_occ, 2),
