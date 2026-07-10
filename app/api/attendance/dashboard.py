@@ -35,7 +35,7 @@ from app.schemas.attendance_device import (
 )
 from app.services.attendance_service import compute_effective_status, compute_state_and_anomalies
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
-from app.utils.timezone import get_store_day_config, get_work_date
+from app.utils.timezone import get_store_day_config, get_work_date, resolve_schedule_instants
 
 
 router: APIRouter = APIRouter()
@@ -100,11 +100,6 @@ async def today_staff(
         late_buffer = 5
     SOON_THRESHOLD_MINUTES = 5
 
-    def combine(t):
-        if t is None:
-            return None
-        return dt.combine(today, t, tzinfo=tz_info)
-
     def display_store_tz(value):
         if value is None:
             return None
@@ -127,6 +122,8 @@ async def today_staff(
             store_tz=tz_info,
             late_buffer=late_buffer,
             soon_threshold_minutes=SOON_THRESHOLD_MINUTES,
+            schedule_start_at=schedule.start_at if schedule else None,
+            schedule_end_at=schedule.end_at if schedule else None,
         )
 
     result: list[TodayStaffRow] = []
@@ -163,15 +160,19 @@ async def today_staff(
             now=now,
             store_tz=tz_info,
             late_buffer=late_buffer,
+            schedule_start_at=schedule.start_at if schedule else None,
+            schedule_end_at=schedule.end_at if schedule else None,
         )
 
-        sched_start = combine(schedule.start_time) if schedule else None
-        sched_end = combine(schedule.end_time) if schedule else None
-        # Overnight shift (예: 21:00–02:00): end_time 이 start_time 보다 빠르면
-        # sched_end 가 today 02:00 으로 만들어지는데 실제로는 다음날 02:00 이어야 한다.
-        # early clock-out 사유 dialog 가 이 차이를 사용하므로 응답에서 보정.
-        if sched_start is not None and sched_end is not None and sched_end <= sched_start:
-            sched_end = sched_end + timedelta(days=1)
+        # start_at 우선, 없으면 combine 폴백 (overnight 보정 포함)
+        if schedule is not None:
+            sched_start, sched_end = resolve_schedule_instants(
+                start_at=schedule.start_at, end_at=schedule.end_at,
+                work_date=schedule.work_date, start_time=schedule.start_time,
+                end_time=schedule.end_time, tz_name=tz_info.key,
+            )
+        else:
+            sched_start = sched_end = None
         result.append(
             TodayStaffRow(
                 user_id=user.id,

@@ -157,10 +157,20 @@ class Schedule(Base):
     work_role_name_snapshot: Mapped[str | None] = mapped_column(String(100), nullable=True)
     position_snapshot: Mapped[str | None] = mapped_column(String(100), nullable=True)
     work_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # 영업일 귀속 라벨 — "이 근무가 표시/카운트되는 스케줄 날짜"(물리적 시각 아님, start_at이 그 역할).
+    # work_date를 대체(create-then-delete). 전환기(Wave 1): 둘 다 유지, 쓰기 시 동기화. Wave 3에서 work_date 제거.
+    operating_day: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     break_start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     break_end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    # Wall-clock datetime encoding (naive local, interpreted in store tz). 각 시각이 자기 날짜를 가짐.
+    # work_date는 영업일 앵커로 유지되며 start_at의 날짜와 다를 수 있음(자정 이후 근무).
+    # 전환기: 기존 *_time 컬럼과 공존(Wave 1). Wave 3에서 *_time 제거 예정.
+    start_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+    end_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+    break_start_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+    break_end_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
     net_work_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Status: draft / requested / confirmed / rejected / cancelled
     status: Mapped[str] = mapped_column(String(20), default="confirmed")
@@ -191,6 +201,9 @@ class Schedule(Base):
     __table_args__ = (
         Index("ix_schedules_org_store_date", "organization_id", "store_id", "work_date"),
         Index("ix_schedules_user_date", "user_id", "work_date"),
+        # operating_day 미러 인덱스(전환기). Wave 3에서 work_date 인덱스 제거 후 이것만 남김.
+        Index("ix_schedules_org_store_opday", "organization_id", "store_id", "operating_day"),
+        Index("ix_schedules_user_opday", "user_id", "operating_day"),
         Index("ix_schedules_status", "status"),
     )
 

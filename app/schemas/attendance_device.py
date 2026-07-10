@@ -271,6 +271,10 @@ class ManageScheduleRow(BaseModel):
     position_name: str | None
     start_time: str | None  # "HH:mm" (store tz)
     end_time: str | None
+    # 전환기 datetime 인코딩 — 벽시계 ISO "YYYY-MM-DDTHH:MM" (앱이 우선 소비)
+    operating_day: date | None = None
+    start_at: str | None = None
+    end_at: str | None = None
     status: str
     attendance_id: UUID | None
     # manage UI 재설계(Issue 10): clock 이벤트 기반 state + anomaly 분리 + breaks 리스트
@@ -330,6 +334,10 @@ class ManageScheduleCreateRequest(BaseModel):
     work_role_id: UUID | None = None
     start_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")  # "HH:mm"
     end_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    # 전환기: 벽시계 datetime 인코딩 (신 클라이언트가 보내면 서버가 우선 사용)
+    operating_day: date | None = None
+    start_at: str | None = None
+    end_at: str | None = None
 
     # 스케줄 시간은 30분 grid만 허용 (console 과 동일 규칙).
     _validate_times = field_validator("start_time", "end_time")(validate_30min_grid)
@@ -341,6 +349,9 @@ class ManageScheduleUpdateRequest(BaseModel):
     work_role_id: UUID | None = None
     start_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
     end_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    operating_day: date | None = None
+    start_at: str | None = None
+    end_at: str | None = None
 
     _validate_times = field_validator("start_time", "end_time")(validate_30min_grid)
 

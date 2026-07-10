@@ -32,6 +32,7 @@ from app.models.organization import Store
 from app.models.user import User
 from app.repositories.attendance_repository import attendance_repository
 from app.utils.exceptions import BadRequestError, NotFoundError, UnauthorizedError
+from app.utils.timezone import resolve_schedule_instants
 
 # clock action 타입
 ClockAction = Literal["clock_in", "break_start", "break_end", "clock_out"]
@@ -493,19 +494,20 @@ class AttendanceDeviceService:
                 now=now,
                 store_tz=tz_info,
                 late_buffer=late_buffer,
+                schedule_start_at=schedule.start_at if schedule else None,
+                schedule_end_at=schedule.end_at if schedule else None,
             )
 
             sched_start_utc: datetime | None = None
             sched_end_utc: datetime | None = None
-            if schedule and schedule.work_date is not None:
-                if schedule.start_time is not None:
-                    sched_start_utc = datetime.combine(
-                        schedule.work_date, schedule.start_time
-                    ).replace(tzinfo=tz_info).astimezone(timezone.utc)
-                if schedule.end_time is not None:
-                    sched_end_utc = datetime.combine(
-                        schedule.work_date, schedule.end_time
-                    ).replace(tzinfo=tz_info).astimezone(timezone.utc)
+            if schedule is not None:
+                _ss, _se = resolve_schedule_instants(
+                    start_at=schedule.start_at, end_at=schedule.end_at,
+                    work_date=schedule.work_date, start_time=schedule.start_time,
+                    end_time=schedule.end_time, tz_name=tz_info.key,
+                )
+                sched_start_utc = _ss.astimezone(timezone.utc) if _ss else None
+                sched_end_utc = _se.astimezone(timezone.utc) if _se else None
 
             cur_break: dict | None = None
             if eff_status == "on_break":
@@ -615,12 +617,23 @@ class AttendanceDeviceService:
 
         # Split shift 대응 — 하루 여러 row 가 있을 수 있으므로 list 로 조회.
         day_rows = await attendance_repository.list_user_day(db, user.id, today)
+        # 새벽 근무(라벨=전날 영업일)가 경계(day_start)를 넘겨 아직 진행 중일 수 있다 —
+        # break/clock-out 과 이중 clock-in 가드는 전날 라벨의 "열린"(clock_in 있고
+        # clock_out 없는) row 도 봐야 한다. 안 그러면 01:00~09:00 새벽조가 06:00 경계를
+        # 넘는 순간 퇴근/휴식이 전부 불가능해진다.
+        from datetime import timedelta as _td_prev
+        prev_rows = await attendance_repository.list_user_day(db, user.id, today - _td_prev(days=1))
+        open_prev = [
+            r for r in prev_rows
+            if r.clock_in is not None and r.clock_out is None
+        ]
+        rows_ext = list(day_rows) + open_prev
 
         # clock-in 외 액션(break/clock_out)은 "지금 활성" row 기준.
         # working → on_break → late 순으로 찾고, 없으면 None.
         def _active_row() -> Attendance | None:
             for target_status in ("working", "on_break", "late"):
-                for r in day_rows:
+                for r in rows_ext:
                     if r.status == target_status:
                         return r
             return None
@@ -632,7 +645,7 @@ class AttendanceDeviceService:
             #    late는 "스케줄 지났는데 미출근" 상태일 수 있어 clock_in 여부로 판단해야 한다 —
             #    이전 shift가 단순 미출근(late, clock_in IS NULL)이면 새 shift clock-in 허용.
             active = next(
-                (r for r in day_rows
+                (r for r in rows_ext
                  if r.clock_in is not None and r.clock_out is None
                  and r.status in ("working", "on_break", "late")),
                 None,
@@ -711,15 +724,17 @@ class AttendanceDeviceService:
 
             tz = _Zi(store_tz)
 
+            def _instants(s):
+                return resolve_schedule_instants(
+                    start_at=s.start_at, end_at=s.end_at, work_date=s.work_date,
+                    start_time=s.start_time, end_time=s.end_time, tz_name=tz.key,
+                )
+
             def _start_dt(s):
-                if s.start_time is None:
-                    return None
-                return datetime.combine(today, s.start_time, tzinfo=tz)
+                return _instants(s)[0]
 
             def _end_dt(s):
-                if s.end_time is None:
-                    return None
-                return datetime.combine(today, s.end_time, tzinfo=tz)
+                return _instants(s)[1]
 
             schedule = None
             # (Issue 8) client 가 명시적으로 schedule 을 선택한 경우 그것을 사용.
@@ -763,8 +778,8 @@ class AttendanceDeviceService:
 
             status_val = "working"
             anomalies: list[str] | None = None
-            if schedule.start_time is not None:
-                scheduled_start = datetime.combine(today, schedule.start_time, tzinfo=tz)
+            scheduled_start = _start_dt(schedule)
+            if scheduled_start is not None:
                 # Early clock-in threshold — 너무 일찍 clock-in 시도 차단.
                 try:
                     raw = await resolve_setting(
@@ -900,17 +915,11 @@ class AttendanceDeviceService:
                 _sch = await db.scalar(
                     select(_Schedule).where(_Schedule.id == attendance.schedule_id)
                 )
-                if _sch is not None and _sch.end_time is not None:
-                    _tz_obj = _Zi2(store_tz)
-                    sched_end_dt = datetime.combine(
-                        _sch.work_date, _sch.end_time, tzinfo=_tz_obj
+                if _sch is not None and (_sch.end_at is not None or _sch.end_time is not None):
+                    _, sched_end_dt = resolve_schedule_instants(
+                        start_at=_sch.start_at, end_at=_sch.end_at, work_date=_sch.work_date,
+                        start_time=_sch.start_time, end_time=_sch.end_time, tz_name=store_tz,
                     )
-                    if _sch.start_time is not None:
-                        _start_dt = datetime.combine(
-                            _sch.work_date, _sch.start_time, tzinfo=_tz_obj
-                        )
-                        if sched_end_dt <= _start_dt:
-                            sched_end_dt = sched_end_dt + _td2(days=1)
                     try:
                         _raw = await _resolve(
                             db,

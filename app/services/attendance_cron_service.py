@@ -22,7 +22,7 @@ from app.models.attendance import Attendance
 from app.models.organization import Store
 from app.models.schedule import Schedule
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
-from app.utils.timezone import get_store_day_config
+from app.utils.timezone import get_store_day_config, resolve_schedule_instants
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -66,13 +66,10 @@ async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
             tz = ZoneInfo(tz_name)
         except Exception:
             tz = ZoneInfo("UTC")
-        sched_start = datetime.combine(sch.work_date, sch.start_time, tzinfo=tz)
-        sched_end = (
-            datetime.combine(sch.work_date, sch.end_time, tzinfo=tz)
-            if sch.end_time is not None else None
+        sched_start, sched_end = resolve_schedule_instants(
+            start_at=sch.start_at, end_at=sch.end_at, work_date=sch.work_date,
+            start_time=sch.start_time, end_time=sch.end_time, tz_name=tz.key,
         )
-        if sched_end is not None and sched_end <= sched_start:
-            sched_end = sched_end + timedelta(days=1)
 
         # late_buffer setting per org/store
         try:
@@ -181,10 +178,10 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
             tz = ZoneInfo(tz_name)
         except Exception:
             tz = ZoneInfo("UTC")
-        sched_start = datetime.combine(sch.work_date, sch.start_time, tzinfo=tz) if sch.start_time else None
-        sched_end = datetime.combine(sch.work_date, sch.end_time, tzinfo=tz)
-        if sched_start is not None and sched_end <= sched_start:
-            sched_end = sched_end + timedelta(days=1)
+        sched_start, sched_end = resolve_schedule_instants(
+            start_at=sch.start_at, end_at=sch.end_at, work_date=sch.work_date,
+            start_time=sch.start_time, end_time=sch.end_time, tz_name=tz.key,
+        )
 
         try:
             raw = await resolve_setting(
@@ -290,14 +287,11 @@ async def _alert_overdue_clock_outs(db: AsyncSession) -> int:
             tz = ZoneInfo(tz_name)
         except Exception:
             tz = ZoneInfo("UTC")
-        sched_start = (
-            datetime.combine(sch.work_date, sch.start_time, tzinfo=tz)
-            if sch.start_time else None
+        sched_start, sched_end = resolve_schedule_instants(
+            start_at=sch.start_at, end_at=sch.end_at, work_date=sch.work_date,
+            start_time=sch.start_time, end_time=sch.end_time, tz_name=tz.key,
         )
-        sched_end = datetime.combine(sch.work_date, sch.end_time, tzinfo=tz)
-        if sched_start is not None and sched_end <= sched_start:
-            sched_end = sched_end + timedelta(days=1)
-        if now_utc < sched_end:
+        if sched_end is None or now_utc < sched_end:
             continue
 
         try:
