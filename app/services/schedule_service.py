@@ -17,6 +17,7 @@ from app.repositories.schedule_audit_log_repository import schedule_audit_log_re
 from app.repositories.schedule_repository import schedule_repository
 from app.repositories.work_role_repository import work_role_repository
 from app.schemas.schedule import (
+    SCHEDULE_STEP_MINUTES,
     ScheduleAuditLogResponse, ScheduleCancel,
     ScheduleCreate, ScheduleResponse, ScheduleSwitch, ScheduleUpdate,
     ScheduleValidation, FinalizeResult,
@@ -27,6 +28,13 @@ from app.schemas.schedule import (
 from app.core.permissions import GM_PRIORITY, OWNER_PRIORITY, SV_PRIORITY, hide_cost_for_priority
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
+from app.utils.timezone import (
+    assemble_break_datetime,
+    assemble_shift_datetimes,
+    format_naive_iso,
+    net_minutes_from_datetimes,
+    parse_naive_iso,
+)
 
 
 
@@ -52,18 +60,108 @@ class ScheduleService:
 
     @staticmethod
     def _calc_net_minutes(start: time, end: time, break_start: time | None, break_end: time | None) -> int:
-        start_m = start.hour * 60 + start.minute
-        end_m = end.hour * 60 + end.minute
-        if end_m <= start_m:
-            end_m += 24 * 60  # overnight
-        total = end_m - start_m
-        if break_start and break_end:
-            bs = break_start.hour * 60 + break_start.minute
-            be = break_end.hour * 60 + break_end.minute
-            if be <= bs:
-                be += 24 * 60
-            total -= (be - bs)
-        return max(total, 0)
+        """[LEGACY] time-of-day 기반 순근무 계산.
+
+        신 경로는 net_minutes_from_datetimes(start_at, end_at, ...)를 직접 사용한다.
+        이 헬퍼는 아직 time만 가진 호출부 호환용 — 내부적으로 datetime 헬퍼에 위임한다.
+        """
+        anchor = date(2000, 1, 1)
+        start_at, end_at = assemble_shift_datetimes(anchor, start, end)
+        bstart_at = assemble_break_datetime(anchor, start, break_start)
+        bend_at = assemble_break_datetime(anchor, start, break_end)
+        return net_minutes_from_datetimes(start_at, end_at, bstart_at, bend_at)
+
+    def _normalize_shift_input(
+        self,
+        *,
+        work_date: date | None,
+        operating_day: date | None,
+        start_time: str | None,
+        end_time: str | None,
+        break_start_time: str | None,
+        break_end_time: str | None,
+        start_at: str | None,
+        end_at: str | None,
+        break_start_at: str | None,
+        break_end_at: str | None,
+        legacy_start_offset_days: int = 0,
+        client_at_fields: set[str] | None = None,
+    ) -> dict:
+        """[TRANSITION] 구/신 입력을 정규화 — 두 인코딩을 동기화한 필드 dict 반환.
+
+        신 필드(start_at/operating_day)가 우선. 없으면 구 필드(work_date+HH:MM)에서 조립.
+        legacy_start_offset_days: 구-인코딩 조립 시 시작 달력일 = 앵커 + offset.
+          구 클라이언트(키오스크/벌크)가 시간만 수정할 때 기존 새벽근무(+1d)를
+          영업일로 당겨오지 않도록 기존 오프셋을 보존하는 용도.
+        반환: operating_day, start_at, end_at, break_start_at, break_end_at (datetime),
+              그리고 구 컬럼 동기화용 work_date, start_time, end_time, break_* (date/time).
+        어느 인코딩도 없으면 해당 값 None.
+        """
+        # 신 필드 우선 파싱
+        s_at = parse_naive_iso(start_at)
+        e_at = parse_naive_iso(end_at)
+        bs_at = parse_naive_iso(break_start_at)
+        be_at = parse_naive_iso(break_end_at)
+        sdate = operating_day
+
+        # 신 필드가 없고 구 필드가 있으면 조립 (Wave 1 구 클라이언트 shim)
+        if s_at is None and start_time is not None:
+            st = self._parse_time(start_time)
+            et = self._parse_time(end_time)
+            bs_t = self._parse_time(break_start_time)
+            be_t = self._parse_time(break_end_time)
+            anchor = sdate or work_date
+            if anchor is not None:
+                _sd = anchor + timedelta(days=legacy_start_offset_days) if legacy_start_offset_days else None
+                s_at, e_at = assemble_shift_datetimes(anchor, st, et, start_date=_sd)
+                bs_at = assemble_break_datetime(_sd or anchor, st, bs_t)
+                be_at = assemble_break_datetime(_sd or anchor, st, be_t)
+            if sdate is None:
+                sdate = work_date
+
+        # operating_day 기본값 = start_at의 날짜
+        if sdate is None and s_at is not None:
+            sdate = s_at.date()
+
+        # 30분 그리드 강제 — 클라이언트가 이번 요청에 보낸 ISO 필드에만 적용.
+        # (entry에서 캐리된 값·워크인의 실제 clock-in 분 등 기존 비그리드 시각은 허용 —
+        #  전체 조립값에 걸면 워크인 스케줄의 레거시 수정이 거부되는 회귀 발생)
+        if client_at_fields is None:
+            client_at_fields = {
+                f for f, v in (("start_at", start_at), ("end_at", end_at),
+                               ("break_start_at", break_start_at), ("break_end_at", break_end_at))
+                if v is not None
+            }
+        _grid_map = {"start_at": s_at, "end_at": e_at, "break_start_at": bs_at, "break_end_at": be_at}
+        for _f in client_at_fields:
+            _v = _grid_map.get(_f)
+            if _v is not None and (_v.minute % SCHEDULE_STEP_MINUTES != 0 or _v.second != 0):
+                raise BadRequestError("Time must be on the hour or half-hour (:00 or :30).")
+
+        # 브레이크 구간 검증 — 짝/순서/포함(적대 검증에서 확인된 구멍).
+        # 역전(be≤bs)은 net 과지급(음수 브레이크), 근무창 밖 브레이크는 0-클램프로
+        # net을 조용히 오염시켜 급여에 그대로 반영되던 문제를 원천 차단.
+        if (bs_at is None) != (be_at is None):
+            raise BadRequestError("Break start and end must be provided together.")
+        if bs_at is not None and be_at is not None:
+            if be_at <= bs_at:
+                raise BadRequestError("Break must start before it ends.")
+            if s_at is not None and e_at is not None and (bs_at < s_at or be_at > e_at):
+                raise BadRequestError("Break must be within the shift.")
+
+        # 구 컬럼 동기화 (전환기: 아직 start_time/work_date를 읽는 코드가 있음)
+        return {
+            "operating_day": sdate,
+            "work_date": sdate,  # 전환기 동기화
+            "start_at": s_at,
+            "end_at": e_at,
+            "break_start_at": bs_at,
+            "break_end_at": be_at,
+            "start_time": s_at.time() if s_at else None,
+            "end_time": e_at.time() if e_at else None,
+            "break_start_time": bs_at.time() if bs_at else None,
+            "break_end_time": be_at.time() if be_at else None,
+        }
 
     async def _to_response(self, db: AsyncSession, entry: Schedule) -> ScheduleResponse:
         """단일 entry → 응답. 행별 조회 (단건 호출용).
@@ -272,6 +370,11 @@ class ScheduleService:
             end_time=self._format_time(entry.end_time),  # type: ignore[arg-type]
             break_start_time=self._format_time(entry.break_start_time),
             break_end_time=self._format_time(entry.break_end_time),
+            operating_day=entry.operating_day or entry.work_date,
+            start_at=format_naive_iso(entry.start_at),
+            end_at=format_naive_iso(entry.end_at),
+            break_start_at=format_naive_iso(entry.break_start_at),
+            break_end_at=format_naive_iso(entry.break_end_at),
             net_work_minutes=entry.net_work_minutes,
             status=entry.status,
             created_by=str(entry.created_by) if entry.created_by else None,
@@ -383,6 +486,8 @@ class ScheduleService:
         break_end: time | None,
         force: bool = False,
         exclude_id: UUID | None = None,
+        cand_start_at: datetime | None = None,
+        cand_end_at: datetime | None = None,
     ) -> ScheduleValidation:
         errors: list[str] = []
         warnings: list[str] = []
@@ -390,12 +495,48 @@ class ScheduleService:
         start_m = self._time_to_minutes(start_time)
         end_m = self._time_to_minutes(end_time)
 
+        # 영업일 발산 제약 — start 달력일은 영업일 당일 또는 +1일(새벽조)만 허용.
+        # +1일인데 매장 영업일 경계(day_start, 기본 06:00) 이후 시작이면 다음 영업일
+        # 소속이어야 할 근무일 가능성이 높아 경고(저장은 가능, 프리플라이트에서 확인).
+        if cand_start_at is not None and work_date is not None:
+            _delta_days = (cand_start_at.date() - work_date).days
+            if _delta_days < 0 or _delta_days > 1:
+                errors.append(
+                    "Start date must be on the operating day or the next day"
+                    f" ({work_date.isoformat()} or +1 day)."
+                )
+            else:
+                from app.utils.timezone import get_store_day_config, resolve_day_start_time
+                _, _day_cfg = await get_store_day_config(db, store_id)
+                _boundary = resolve_day_start_time(_day_cfg, cand_start_at.date().weekday())
+                if _delta_days == 1 and cand_start_at.time() >= _boundary:
+                    warnings.append(
+                        f"Start is at or after the store's day boundary ({_boundary.strftime('%H:%M')})."
+                        f" This shift may belong to the next operating day ({cand_start_at.date().isoformat()})."
+                        " Verify the operating day before saving."
+                    )
+                elif _delta_days == 0 and cand_start_at.time() < _boundary:
+                    # 대칭 경고 — 당일 새벽 시각(경계 이전)은 영업일 판정상 전날 소속.
+                    # 이 영업일의 새벽조라면 start 날짜를 +1일로 지정해야 근태 매칭이 맞는다.
+                    warnings.append(
+                        f"Start is before the store's day boundary ({_boundary.strftime('%H:%M')}) —"
+                        " this time belongs to the previous operating day."
+                        " If this is an early-morning shift of THIS operating day,"
+                        " set the start date to the next day (+1d)."
+                    )
+
         # A-3: 0분 shift 차단
-        if start_m == end_m:
+        if cand_start_at is not None and cand_end_at is not None:
+            net_minutes = int((cand_end_at - cand_start_at).total_seconds() // 60)
+            if net_minutes <= 0:
+                errors.append("Shift duration must be greater than 0 minutes")
+        elif start_m == end_m:
             errors.append("Shift duration must be greater than 0 minutes")
+            net_minutes = 0
         else:
             # A-2 자정넘김: end < start는 overnight shift로 허용
             net_minutes = (end_m - start_m) if end_m > start_m else (end_m + 24 * 60 - start_m)
+        if net_minutes > 0:
             # A-6: 과도한 근무시간 경고 — org/store setting 기반 (fallback 16h)
             max_hours = 16.0
             store_org_id = await db.scalar(select(Store.organization_id).where(Store.id == store_id))
@@ -416,11 +557,17 @@ class ScheduleService:
                     f"Shift is longer than {max_hours:g} hours ({net_minutes // 60}h {net_minutes % 60}m). Verify before saving."
                 )
 
-        # 1. Time overlap check
+        # 1. Time overlap check (datetime 구간 비교, 자정 넘김 정확)
+        # 명시 cand instant(새벽근무 +1d 등)가 있으면 그것을, 없으면 영업일+시각 조립 폴백.
+        if cand_start_at is not None and cand_end_at is not None:
+            _cand_s, _cand_e = cand_start_at, cand_end_at
+        else:
+            _cand_s, _cand_e = assemble_shift_datetimes(work_date, start_time, end_time)
         if await schedule_repository.check_time_overlap(
-            db, user_id, work_date, start_m, end_m, exclude_id
+            db, user_id, work_date, start_m, end_m, exclude_id,
+            cand_start_at=_cand_s, cand_end_at=_cand_e,
         ):
-            errors.append("This employee already has an overlapping schedule on the same date")
+            errors.append("This employee already has an overlapping schedule")
 
         # 2. user-store relation + is_work_assignment check (A-8)
         # 직원이 해당 매장에 배정되어 있고, Work 플래그가 켜져있어야 스케줄 가능
@@ -710,13 +857,23 @@ class ScheduleService:
         from app.services.store_service import store_service
         await store_service.assert_open_for_create(db, store_id)
         user_id = UUID(data.user_id)
-        start_time = self._parse_time(data.start_time)  # type: ignore[arg-type]
-        end_time = self._parse_time(data.end_time)  # type: ignore[arg-type]
-        break_start = self._parse_time(data.break_start_time)
-        break_end = self._parse_time(data.break_end_time)
+        # 전환기 정규화 — 구(work_date+HH:MM)/신(operating_day+ISO) 입력을 하나로
+        norm = self._normalize_shift_input(
+            work_date=data.work_date, operating_day=data.operating_day,
+            start_time=data.start_time, end_time=data.end_time,
+            break_start_time=data.break_start_time, break_end_time=data.break_end_time,
+            start_at=data.start_at, end_at=data.end_at,
+            break_start_at=data.break_start_at, break_end_at=data.break_end_at,
+        )
+        start_time = norm["start_time"]
+        end_time = norm["end_time"]
+        break_start = norm["break_start_time"]
+        break_end = norm["break_end_time"]
 
-        if start_time is None or end_time is None:
-            raise BadRequestError("start_time and end_time are required")
+        if norm["start_at"] is None or norm["end_at"] is None:
+            raise BadRequestError("start/end time is required (start_time+end_time or start_at+end_at)")
+        if norm["operating_day"] is None:
+            raise BadRequestError("operating_day (or work_date) is required")
 
         # status 유효성 확인 — Validate status value (draft/requested/confirmed)
         allowed_statuses = {"draft", "requested", "confirmed"}
@@ -741,16 +898,19 @@ class ScheduleService:
                     # SV/Staff → "confirmed" 요청은 "requested"로 다운그레이드
                     entry_status = "requested"
 
-        # Validate
+        # Validate — 명시 instant(새벽근무 +1d)를 그대로 검증에 사용
         validation = await self._validate_entry(
-            db, user_id, store_id, data.work_date,
+            db, user_id, store_id, norm["operating_day"],
             start_time, end_time, break_start, break_end, data.force,
+            cand_start_at=norm["start_at"], cand_end_at=norm["end_at"],
         )
         if not validation.valid:
             detail = "; ".join(validation.errors + validation.warnings)
             raise BadRequestError(f"Validation failed: {detail}")
 
-        net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
+        net = net_minutes_from_datetimes(
+            norm["start_at"], norm["end_at"], norm["break_start_at"], norm["break_end_at"]
+        )
 
         # Resolve hourly rate: provided > user → store → org cascade
         if data.hourly_rate is not None:
@@ -773,11 +933,16 @@ class ScheduleService:
                 "work_role_id": work_role_uuid,
                 "work_role_name_snapshot": wr_name_snap,
                 "position_snapshot": pos_snap,
-                "work_date": data.work_date,
+                "work_date": norm["work_date"],
+                "operating_day": norm["operating_day"],
                 "start_time": start_time,
                 "end_time": end_time,
                 "break_start_time": break_start,
                 "break_end_time": break_end,
+                "start_at": norm["start_at"],
+                "end_at": norm["end_at"],
+                "break_start_at": norm["break_start_at"],
+                "break_end_at": norm["break_end_at"],
                 "net_work_minutes": net,
                 "hourly_rate": resolved_rate,
                 "status": entry_status,
@@ -863,11 +1028,11 @@ class ScheduleService:
 
         # 1) 시작 시각 = 실제 clock-in 시각(매장 tz)을 분 단위로 내림(초 버림).
         #    late 판정이 전역적으로 분 단위라, 같은 분에 출근한 워크인은 late 가 되지 않는다.
-        start_time = (
+        start_local = (
             clock_in_at.astimezone(ZoneInfo(store_tz))
-            .replace(second=0, microsecond=0)
-            .time()
+            .replace(second=0, microsecond=0, tzinfo=None)
         )
+        start_time = start_local.time()
 
         # 2) 근무 길이(분) — 레지스트리(기본 330)
         duration = 330
@@ -885,12 +1050,13 @@ class ScheduleService:
         if duration <= 0:
             duration = 330
 
-        # 3) 종료 시각 = 시작 + duration (NOT NULL 보장). 자정 넘김은 mod 로 wrap.
-        start_total = start_time.hour * 60 + start_time.minute
-        end_total = (start_total + duration) % (24 * 60)
-        end_time = time(end_total // 60, end_total % 60)
+        # 3) 종료 = 시작 + duration. datetime은 실제 순간으로(자정 넘김 자연 표현),
+        #    구 end_time은 mod 24h wrap(NOT NULL 보장, 전환기 동기화).
+        start_at = start_local
+        end_at = start_local + timedelta(minutes=duration)
+        end_time = end_at.time()
 
-        net = self._calc_net_minutes(start_time, end_time, None, None)
+        net = net_minutes_from_datetimes(start_at, end_at)
 
         # 4) hourly_rate — 직원 시급 있으면 적용, 없으면 0 (D3)
         user_hr = await db.scalar(select(User.hourly_rate).where(User.id == user_id))
@@ -902,8 +1068,11 @@ class ScheduleService:
             "user_id": user_id,
             "store_id": store_id,
             "work_date": work_date,
+            "operating_day": work_date,
             "start_time": start_time,
             "end_time": end_time,
+            "start_at": start_at,
+            "end_at": end_at,
             "net_work_minutes": net,
             "hourly_rate": hourly_rate,
             "status": "confirmed",
@@ -1112,6 +1281,8 @@ class ScheduleService:
                     item.end_time is not None,
                     item.break_start_time is not None,
                     item.break_end_time is not None,
+                    item.start_at is not None,
+                    item.end_at is not None,
                     item.note is not None,
                     item.hourly_rate is not None,
                     item.reset_checklist is not None,
@@ -1123,6 +1294,12 @@ class ScheduleService:
                         end_time=item.end_time,
                         break_start_time=item.break_start_time,
                         break_end_time=item.break_end_time,
+                        # 신 인코딩 pass-through (explicit None은 update_entry가 미제공 취급)
+                        operating_day=item.operating_day,
+                        start_at=item.start_at,
+                        end_at=item.end_at,
+                        break_start_at=item.break_start_at,
+                        break_end_at=item.break_end_at,
                         note=item.note,
                         hourly_rate=item.hourly_rate,
                         reset_checklist=item.reset_checklist,
@@ -1239,14 +1416,28 @@ class ScheduleService:
                 if start_time is None or end_time is None:
                     continue  # 시간 정보 없으면 건너뜀
 
-                net = self._calc_net_minutes(start_time, end_time, break_start, break_end)
+                # datetime 인코딩 조립 — 기존 새벽근무(+1d)의 day-offset 보존
+                anchor = s.operating_day or s.work_date
+                _off = 0
+                if s.start_at is not None and anchor is not None:
+                    _off = max(0, min(1, (s.start_at.date() - anchor).days))
+                _sd = anchor + timedelta(days=_off) if _off else None
+                start_at, end_at = assemble_shift_datetimes(anchor, start_time, end_time, start_date=_sd)
+                bstart_at = assemble_break_datetime(_sd or anchor, start_time, break_start)
+                bend_at = assemble_break_datetime(_sd or anchor, start_time, break_end)
+                net = net_minutes_from_datetimes(start_at, end_at, bstart_at, bend_at)
                 # status만 confirmed로 변경 (새 행 생성 X)
                 entry = await schedule_repository.update(db, s.id, {
                     "status": "confirmed",
+                    "operating_day": anchor,
                     "start_time": start_time,
                     "end_time": end_time,
                     "break_start_time": break_start,
                     "break_end_time": break_end,
+                    "start_at": start_at,
+                    "end_at": end_at,
+                    "break_start_at": bstart_at,
+                    "break_end_at": bend_at,
                     "net_work_minutes": net,
                     "approved_by": created_by,
                 })
@@ -1365,6 +1556,21 @@ class ScheduleService:
             if self._format_time(entry.break_end_time) != data.break_end_time:
                 _track("break_end_time", self._format_time(entry.break_end_time), data.break_end_time)
             update_data["break_end_time"] = new_break_end
+        # 신(datetime) 인코딩 입력 감지 (전환기 신 클라이언트) — 값은 아래 재조립 블록에서 반영.
+        # 비교는 동일 포맷(ISO "YYYY-MM-DDTHH:MM")으로 정규화 — str(datetime)와 클라 ISO의
+        # 포맷 차이로 같은 값이 항상 '변경'으로 기록되던 문제 방지.
+        for _f in ("operating_day", "start_at", "end_at", "break_start_at", "break_end_at"):
+            if _f in data.model_fields_set and getattr(data, _f) is not None:
+                _old = getattr(entry, _f, None)
+                _new = getattr(data, _f)
+                if _f == "operating_day":
+                    _olds = _old.isoformat() if _old is not None else None
+                    _news = str(_new)
+                else:
+                    _olds = format_naive_iso(_old)
+                    _news = format_naive_iso(parse_naive_iso(_new)) if isinstance(_new, str) else str(_new)
+                if _olds != _news:
+                    _track(_f, _olds, _news)
         if data.note is not None:
             if (entry.note or "") != (data.note or ""):
                 _track("note", entry.note, data.note)
@@ -1398,23 +1604,92 @@ class ScheduleService:
             else:
                 update_data["is_modified"] = True
 
-        if not update_data:
+        # 신 datetime 인코딩 필드는 아래 re-assembly 블록에서만 update_data를 채우므로,
+        # 그 필드만 온 PATCH를 여기서 조기반환하지 않도록 예외 처리.
+        _new_at_fields = {"start_at", "end_at", "break_start_at", "break_end_at"}
+        if not update_data and not (data.model_fields_set & _new_at_fields):
             return await self._to_response(db, entry)
 
-        # Validate with new values
+        # 전환기: datetime 인코딩 재조립 (검증보다 먼저 — 검증이 실제 instant를 쓰도록)
+        _time_fields = {
+            "work_date", "operating_day", "start_time", "end_time",
+            "break_start_time", "break_end_time",
+            "start_at", "end_at", "break_start_at", "break_end_at",
+        }
+        norm: dict | None = None
+        # 명시 None(=구 클라이언트가 모든 kwargs를 항상 넘기는 경우)은 "미제공"으로 취급 —
+        # model_fields_set만 보면 None이 신-인코딩 분기를 타서 start/end를 지워버린다.
+        _client_at = {
+            f for f in _new_at_fields
+            if f in data.model_fields_set and getattr(data, f) is not None
+        }
+        if data.model_fields_set & _time_fields:
+            # operating_day: 명시값 > work_date 변경 시 그것 > entry 기존값
+            if "operating_day" in data.model_fields_set and data.operating_day is not None:
+                _sdate = data.operating_day
+            elif "work_date" in data.model_fields_set:
+                _sdate = new_work_date
+            else:
+                _sdate = entry.operating_day
+            if _client_at:
+                # 신 인코딩 (부분) 업데이트: 생략된 *_at은 entry 기존값으로 fallback
+                # (부분 PATCH가 브레이크/종료를 무음 삭제하고 net을 오염시키던 버그 수정)
+                norm = self._normalize_shift_input(
+                    work_date=new_work_date, operating_day=_sdate,
+                    start_time=None, end_time=None,
+                    break_start_time=None, break_end_time=None,
+                    start_at=(data.start_at if "start_at" in _client_at
+                              else format_naive_iso(entry.start_at)),
+                    end_at=(data.end_at if "end_at" in _client_at
+                            else format_naive_iso(entry.end_at)),
+                    break_start_at=(data.break_start_at if "break_start_at" in _client_at
+                                    else format_naive_iso(entry.break_start_at)),
+                    break_end_at=(data.break_end_at if "break_end_at" in _client_at
+                                  else format_naive_iso(entry.break_end_at)),
+                    # 그리드 체크는 클라가 이번 PATCH에 실제로 보낸 필드만 (캐리값은 워크인 등 비그리드 허용)
+                    client_at_fields=_client_at,
+                )
+            else:
+                # 구 인코딩(또는 work_date/시간 변경): 병합된 시각 locals에서 재조립.
+                # 기존 새벽근무(+1d)의 day-offset을 보존 — 구 클라이언트(키오스크/벌크)가
+                # 시간만 수정해도 start_at 날짜가 영업일로 당겨지지 않도록.
+                _anchor_prev = entry.operating_day or entry.work_date
+                _off = 0
+                if entry.start_at is not None and _anchor_prev is not None:
+                    _off = max(0, min(1, (entry.start_at.date() - _anchor_prev).days))
+                norm = self._normalize_shift_input(
+                    work_date=new_work_date, operating_day=_sdate,
+                    start_time=self._format_time(new_start),
+                    end_time=self._format_time(new_end),
+                    break_start_time=self._format_time(new_break_start),
+                    break_end_time=self._format_time(new_break_end),
+                    start_at=None, end_at=None,
+                    break_start_at=None, break_end_at=None,
+                    legacy_start_offset_days=_off,
+                )
+
+        # Validate with new values — norm이 있으면 실제 instant로 검증(새벽근무 정확)
         validation = await self._validate_entry(
-            db, new_user_id, entry.store_id, new_work_date,
+            db, new_user_id, entry.store_id,
+            (norm["operating_day"] if norm else new_work_date),
             new_start, new_end, new_break_start, new_break_end,  # type: ignore[arg-type]
             data.force, exclude_id=entry.id,
+            cand_start_at=(norm["start_at"] if norm else entry.start_at),
+            cand_end_at=(norm["end_at"] if norm else entry.end_at),
         )
         if not validation.valid:
             detail = "; ".join(validation.errors + validation.warnings)
             raise BadRequestError(f"Validation failed: {detail}")
 
-        # Recalculate net_work_minutes
-        update_data["net_work_minutes"] = self._calc_net_minutes(
-            new_start, new_end, new_break_start, new_break_end  # type: ignore[arg-type]
-        )
+        if norm is not None:
+            for _k in ("operating_day", "work_date", "start_at", "end_at",
+                       "break_start_at", "break_end_at",
+                       "start_time", "end_time", "break_start_time", "break_end_time"):
+                update_data[_k] = norm[_k]
+            update_data["net_work_minutes"] = net_minutes_from_datetimes(
+                norm["start_at"], norm["end_at"], norm["break_start_at"], norm["break_end_at"]
+            )
+        # 시간 미변경 시 net_work_minutes는 그대로 둔다(불필요 재계산 방지).
 
         # 실제로 변경된 필드가 없으면 update/audit 모두 skip (no-op)
         if not modification_entries:
@@ -2209,7 +2484,8 @@ class ScheduleService:
                     start_m = self._time_to_minutes(entry.start_time)
                     end_m = self._time_to_minutes(entry.end_time)
                     overlap = await schedule_repository.check_time_overlap(
-                        db, entry.user_id, entry.work_date, start_m, end_m, exclude_id=entry.id  # type: ignore[arg-type]
+                        db, entry.user_id, entry.work_date, start_m, end_m, exclude_id=entry.id,  # type: ignore[arg-type]
+                        cand_start_at=entry.start_at, cand_end_at=entry.end_at,
                     )
                     if overlap:
                         skipped += 1
@@ -2258,16 +2534,23 @@ class ScheduleService:
     async def validate_entry(
         self, db: AsyncSession, organization_id: UUID, data: ScheduleCreate,
     ) -> ScheduleValidation:
-        start_time = self._parse_time(data.start_time)
-        end_time = self._parse_time(data.end_time)
-        if start_time is None or end_time is None:
-            return ScheduleValidation(valid=False, errors=["start_time and end_time are required"])
+        # 프리플라이트도 저장과 동일한 정규화(신 인코딩 우선)로 검증 — 새벽근무(+1d)의
+        # 경고/겹침이 실제 instant 기준으로 계산되도록.
+        norm = self._normalize_shift_input(
+            work_date=data.work_date, operating_day=data.operating_day,
+            start_time=data.start_time, end_time=data.end_time,
+            break_start_time=data.break_start_time, break_end_time=data.break_end_time,
+            start_at=data.start_at, end_at=data.end_at,
+            break_start_at=data.break_start_at, break_end_at=data.break_end_at,
+        )
+        if norm["start_at"] is None or norm["end_at"] is None:
+            return ScheduleValidation(valid=False, errors=["start/end time is required"])
         return await self._validate_entry(
-            db, UUID(data.user_id), UUID(data.store_id), data.work_date,
-            start_time, end_time,
-            self._parse_time(data.break_start_time),
-            self._parse_time(data.break_end_time),
+            db, UUID(data.user_id), UUID(data.store_id), norm["operating_day"],
+            norm["start_time"], norm["end_time"],
+            norm["break_start_time"], norm["break_end_time"],
             data.force,
+            cand_start_at=norm["start_at"], cand_end_at=norm["end_at"],
         )
 
     async def finalize_period_entries(

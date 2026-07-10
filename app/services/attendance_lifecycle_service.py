@@ -25,6 +25,7 @@ from app.models.attendance import Attendance
 from app.models.organization import Store
 from app.models.schedule import Schedule
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
+from app.utils.timezone import resolve_schedule_instants
 
 
 # 기본 late buffer (setting 미존재 시 fallback)
@@ -64,19 +65,20 @@ def _compute_initial_status(
     tz: ZoneInfo,
     late_buffer_min: int,
     now_utc: datetime,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
 ) -> tuple[str, list[str] | None]:
     """schedule 상태 + 시각 조합으로 attendance.status 와 anomalies 계산."""
     if schedule_status in ("cancelled", "rejected", "deleted"):
         return "cancelled", None
     # 시간이 없으면 일단 upcoming
-    if start_time is None and end_time is None:
+    if start_at is None and end_at is None and start_time is None and end_time is None:
         return "upcoming", None
-    # 지금과 비교 — store tz 기준 벽시계 → aware datetime
-    sched_start = datetime.combine(work_date, start_time, tzinfo=tz) if start_time else None
-    sched_end = datetime.combine(work_date, end_time, tzinfo=tz) if end_time else None
-    # overnight: end <= start 면 end 를 익일로
-    if sched_start and sched_end and sched_end <= sched_start:
-        sched_end = sched_end + timedelta(days=1)
+    # start_at 우선, 없으면 combine 폴백 (store tz aware)
+    sched_start, sched_end = resolve_schedule_instants(
+        start_at=start_at, end_at=end_at, work_date=work_date,
+        start_time=start_time, end_time=end_time, tz_name=tz.key,
+    )
 
     # late/no_show 판정은 분 단위로만 (초 버림). clock_in/out 은 초까지 저장하되,
     # 초 차이로 정시 출근이 late 로 찍히지 않게 한다.
@@ -113,6 +115,8 @@ async def ensure_attendance_for_schedule(
         tz,
         buffer,
         now,
+        schedule.start_at,
+        schedule.end_at,
     )
 
     if existing is None:
@@ -164,6 +168,8 @@ async def recompute_attendance_for_schedule_change(
         tz,
         buffer,
         now,
+        schedule.start_at,
+        schedule.end_at,
     )
     existing.status = status
     existing.anomalies = anomalies

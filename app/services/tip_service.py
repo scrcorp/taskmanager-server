@@ -449,7 +449,7 @@ class TipService:
         from app.models.user import User
         from datetime import datetime, time, timezone as tz_module
         from zoneinfo import ZoneInfo
-        from app.utils.timezone import get_store_day_config
+        from app.utils.timezone import get_store_day_config, resolve_schedule_instants
 
         # 1) 본인 schedule 로 store/date 확정
         sched = await db.scalar(
@@ -463,11 +463,16 @@ class TipService:
         if sched.user_id != asking_user_id:
             raise BadRequestError("Schedule does not belong to you")
 
-        # 2) 같은 매장 + 같은 날 + confirmed schedule 의 다른 user_id 들
+        # 2) 같은 매장 + 인접 영업일 라벨(±1) + confirmed schedule 의 다른 user_id 들.
+        #    라벨이 달라도 물리적으로 겹칠 수 있음(전날 마감조 vs 당일 새벽조) —
+        #    실제 겹침은 아래 instant overlap 필터가 판정.
+        from datetime import timedelta as _td_peer
         peer_rows = await db.execute(
             select(Schedule).where(
                 Schedule.store_id == sched.store_id,
-                Schedule.work_date == sched.work_date,
+                Schedule.work_date.between(
+                    sched.work_date - _td_peer(days=1), sched.work_date + _td_peer(days=1)
+                ),
                 Schedule.status == "confirmed",
                 Schedule.user_id != asking_user_id,
             )
@@ -484,15 +489,20 @@ class TipService:
         store_tz, _ = await get_store_day_config(db, sched.store_id)
         store_zone = ZoneInfo(store_tz)
 
-        def _to_dt(d, t: time | None) -> datetime | None:
-            """schedule date+time 을 store tz aware datetime 으로. clock_in 과 비교 가능하게 UTC 로 정규화."""
-            if t is None:
-                return None
-            local = datetime.combine(d, t).replace(tzinfo=store_zone)
-            return local.astimezone(tz_module.utc)
+        def _sched_utc(s) -> tuple[datetime | None, datetime | None]:
+            """schedule 의 start/end 를 UTC instant 로 (start_at 우선, 없으면 combine 폴백)."""
+            ss, ee = resolve_schedule_instants(
+                start_at=s.start_at, end_at=s.end_at, work_date=s.work_date,
+                start_time=s.start_time, end_time=s.end_time, tz_name=store_tz,
+            )
+            return (
+                ss.astimezone(tz_module.utc) if ss else None,
+                ee.astimezone(tz_module.utc) if ee else None,
+            )
 
-        my_start: datetime | None = my_att.clock_in if my_att and my_att.clock_in else _to_dt(sched.work_date, sched.start_time)
-        my_end: datetime | None = my_att.clock_out if my_att and my_att.clock_out else _to_dt(sched.work_date, sched.end_time)
+        _my_s_utc, _my_e_utc = _sched_utc(sched)
+        my_start: datetime | None = my_att.clock_in if my_att and my_att.clock_in else _my_s_utc
+        my_end: datetime | None = my_att.clock_out if my_att and my_att.clock_out else _my_e_utc
 
         # window 계산 못하면 시간 필터 skip (같은 날 같은 매장 모두 반환)
         skip_overlap = my_start is None or my_end is None
@@ -519,7 +529,7 @@ class TipService:
             other_start = att.clock_in
             # peer 가 아직 clock-out 안 했으면 schedule end 또는 현재 시각 추정 대신
             # 안전하게 포함 (본인은 이미 clock-out 한 시점이므로 overlap 가능성 큼).
-            other_end = att.clock_out or _to_dt(s.work_date, s.end_time)
+            other_end = att.clock_out or _sched_utc(s)[1]
             if other_end is None:
                 eligible_user_ids.append(s.user_id)
                 continue

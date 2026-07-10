@@ -97,16 +97,21 @@ class AttendanceActionService:
         from app.utils.timezone import get_store_day_config
         from sqlalchemy import select
 
+        from app.utils.timezone import resolve_schedule_instants
         if attendance.schedule_id is None:
             return "working", None
         sch = await db.scalar(
             select(Schedule).where(Schedule.id == attendance.schedule_id)
         )
-        if sch is None or sch.start_time is None:
+        if sch is None or (sch.start_at is None and sch.start_time is None):
             return "working", None
         store_tz, _ = await get_store_day_config(db, attendance.store_id)
-        tz = ZoneInfo(store_tz)
-        scheduled_start = datetime.combine(sch.work_date, sch.start_time, tzinfo=tz)
+        scheduled_start, _ = resolve_schedule_instants(
+            start_at=sch.start_at, end_at=sch.end_at, work_date=sch.work_date,
+            start_time=sch.start_time, end_time=sch.end_time, tz_name=store_tz,
+        )
+        if scheduled_start is None:
+            return "working", None
         # at 이 UTC 인지 store-local 인지 정규화 — UTC 비교 기준으로 변환
         at_utc = at.astimezone(timezone.utc)
         scheduled_start_utc = scheduled_start.astimezone(timezone.utc)

@@ -28,6 +28,7 @@ from app.models.schedule import Schedule
 from app.models.user import User
 from app.repositories.attendance_repository import attendance_repository, qr_code_repository
 from app.utils.exceptions import BadRequestError, NotFoundError
+from app.utils.timezone import resolve_schedule_instants
 
 
 # 지각/조퇴/휴식 anomaly 임계치 (분 단위) — defaults
@@ -50,6 +51,8 @@ def compute_effective_status(
     store_tz: ZoneInfo,
     late_buffer: int,
     soon_threshold_minutes: int = SOON_THRESHOLD_MINUTES,
+    schedule_start_at: datetime | None = None,
+    schedule_end_at: datetime | None = None,
 ) -> str:
     """attendance status + 시각 + late_buffer 로 표시용 effective status 계산.
 
@@ -72,16 +75,15 @@ def compute_effective_status(
         if att_status == "late":
             return "working"
         return att_status
-    if att_status not in {"upcoming", "late"} or schedule_start_time is None or schedule_work_date is None:
+    if att_status not in {"upcoming", "late"}:
         return att_status
-    sched_start = datetime.combine(schedule_work_date, schedule_start_time, tzinfo=store_tz)
-    sched_end = (
-        datetime.combine(schedule_work_date, schedule_end_time, tzinfo=store_tz)
-        if schedule_end_time is not None else None
+    sched_start, sched_end = resolve_schedule_instants(
+        start_at=schedule_start_at, end_at=schedule_end_at,
+        work_date=schedule_work_date, start_time=schedule_start_time,
+        end_time=schedule_end_time, tz_name=store_tz.key,
     )
-    # Overnight shift: end 가 start 보다 빠르면 다음날로 보정
-    if sched_end is not None and sched_end <= sched_start:
-        sched_end = sched_end + timedelta(days=1)
+    if sched_start is None:
+        return att_status
     # 판정은 분 단위로만 (초 버림) — 정시가 초 차이로 late 로 보이지 않게.
     now_min = now.replace(second=0, microsecond=0)
     if sched_end is not None and now_min >= sched_end:
@@ -111,6 +113,8 @@ def compute_state_and_anomalies(
     now: datetime,
     store_tz: ZoneInfo,
     late_buffer: int,
+    schedule_start_at: datetime | None = None,
+    schedule_end_at: datetime | None = None,
 ) -> tuple[str, list[str]]:
     """clock 이벤트 기반 state + anomaly 목록 계산 (manage UI 재설계용).
 
@@ -149,6 +153,8 @@ def compute_state_and_anomalies(
             now=now,
             store_tz=store_tz,
             late_buffer=late_buffer,
+            schedule_start_at=schedule_start_at,
+            schedule_end_at=schedule_end_at,
         )
         if eff == "no_show":
             return state, ["no_show"]
@@ -394,15 +400,16 @@ class AttendanceService:
             schedule = await _find_schedule_for_attendance(db, user_id, store_id, today)
             new_status = "working"
             anomalies: list[str] = []
-            if schedule and schedule.start_time is not None:
-                # store timezone 기준 schedule 시작 시각
-                from datetime import datetime as _dt
-                from zoneinfo import ZoneInfo
-                tz = ZoneInfo(effective_tz)
-                scheduled_start = _dt.combine(today, schedule.start_time, tzinfo=tz)
+            if schedule and (schedule.start_at is not None or schedule.start_time is not None):
+                # store timezone 기준 schedule 시작 순간 (start_at 우선, 없으면 combine 폴백)
                 from datetime import timedelta as _td
+                scheduled_start, _ = resolve_schedule_instants(
+                    start_at=schedule.start_at, end_at=schedule.end_at,
+                    work_date=schedule.work_date, start_time=schedule.start_time,
+                    end_time=schedule.end_time, tz_name=effective_tz,
+                )
                 # late 판정은 분 단위 (clock_in 은 초까지 저장하되 초로 late 찍지 않음)
-                if now.replace(second=0, microsecond=0) > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
+                if scheduled_start is not None and now.replace(second=0, microsecond=0) > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
                     new_status = "late"
                     anomalies.append("late")
             attendance = await attendance_repository.create(
@@ -487,21 +494,24 @@ class AttendanceService:
                 )
                 schedule = schedule_result.scalar_one_or_none()
 
-            if schedule and schedule.end_time is not None:
-                from datetime import datetime as _dt, timedelta as _td
-                from zoneinfo import ZoneInfo
-                tz = ZoneInfo(effective_tz)
-                scheduled_end = _dt.combine(today, schedule.end_time, tzinfo=tz)
-                # 조퇴 (분 단위 판정)
-                if now.replace(second=0, microsecond=0) < scheduled_end - _td(minutes=EARLY_LEAVE_THRESHOLD_MINUTES):
-                    _add_anomaly(attendance, "early_leave")
-                # 초과근무
-                if attendance.total_work_minutes is not None:
-                    scheduled_minutes = (
-                        (scheduled_end - _dt.combine(today, schedule.start_time, tzinfo=tz)).total_seconds() / 60
-                    )
-                    if attendance.total_work_minutes > scheduled_minutes + 30:
-                        _add_anomaly(attendance, "overtime")
+            if schedule and (schedule.end_at is not None or schedule.end_time is not None):
+                from datetime import timedelta as _td
+                scheduled_start, scheduled_end = resolve_schedule_instants(
+                    start_at=schedule.start_at, end_at=schedule.end_at,
+                    work_date=schedule.work_date, start_time=schedule.start_time,
+                    end_time=schedule.end_time, tz_name=effective_tz,
+                )
+                if scheduled_end is not None:
+                    # 조퇴 (분 단위 판정)
+                    if now.replace(second=0, microsecond=0) < scheduled_end - _td(minutes=EARLY_LEAVE_THRESHOLD_MINUTES):
+                        _add_anomaly(attendance, "early_leave")
+                    # 초과근무
+                    if attendance.total_work_minutes is not None and scheduled_start is not None:
+                        scheduled_minutes = (
+                            (scheduled_end - scheduled_start).total_seconds() / 60
+                        )
+                        if attendance.total_work_minutes > scheduled_minutes + 30:
+                            _add_anomaly(attendance, "overtime")
 
             # 휴식 미사용 + 연속 근무 임계치 초과 체크
             from app.repositories.break_rule_repository import break_rule_repository
@@ -872,14 +882,17 @@ class AttendanceService:
         s_start_time = None
         s_end_time = None
         s_work_date = None
+        s_start_at = None
+        s_end_at = None
         if attendance.schedule_id is not None:
             sch_result = await db.execute(
-                select(Schedule.start_time, Schedule.end_time, Schedule.work_date)
+                select(Schedule.start_time, Schedule.end_time, Schedule.work_date,
+                       Schedule.start_at, Schedule.end_at)
                 .where(Schedule.id == attendance.schedule_id)
             )
             sch_row = sch_result.one_or_none()
             if sch_row is not None:
-                s_start_time, s_end_time, s_work_date = sch_row
+                s_start_time, s_end_time, s_work_date, s_start_at, s_end_at = sch_row
                 # store.timezone이 None이면 organization timezone 조회 (fallback)
                 if store_tz_name is None:
                     from app.models.organization import Organization
@@ -895,10 +908,10 @@ class AttendanceService:
                 except Exception:
                     from zoneinfo import ZoneInfo
                     tz = ZoneInfo("UTC")
-                if s_start_time is not None:
-                    scheduled_start = datetime.combine(s_work_date, s_start_time, tzinfo=tz)
-                if s_end_time is not None:
-                    scheduled_end = datetime.combine(s_work_date, s_end_time, tzinfo=tz)
+                scheduled_start, scheduled_end = resolve_schedule_instants(
+                    start_at=s_start_at, end_at=s_end_at, work_date=s_work_date,
+                    start_time=s_start_time, end_time=s_end_time, tz_name=tz.key,
+                )
 
         # break 로드 (미리 주입되지 않았다면 fetch) — Load breaks if not provided
         if breaks is None:
@@ -996,6 +1009,8 @@ class AttendanceService:
                 now=datetime.now(timezone.utc),
                 store_tz=display_tz,
                 late_buffer=LATE_BUFFER_MINUTES,
+                schedule_start_at=s_start_at,
+                schedule_end_at=s_end_at,
             ),
             "anomalies": attendance.anomalies,
             "total_work_minutes": attendance.total_work_minutes,
