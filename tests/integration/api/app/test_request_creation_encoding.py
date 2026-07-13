@@ -59,7 +59,7 @@ async def staff_assigned(test_user, test_store_id) -> AsyncIterator[dict]:
         await db.execute(delete(Attendance).where(
             Attendance.user_id == test_user["id"], Attendance.work_date.in_(ALL_DATES)))
         await db.execute(delete(Schedule).where(
-            Schedule.user_id == test_user["id"], Schedule.work_date.in_(ALL_DATES)))
+            Schedule.user_id == test_user["id"], Schedule.operating_day.in_(ALL_DATES)))
         await db.commit()
 
 
@@ -144,8 +144,7 @@ async def test_copy_last_period_preserves_dawn_offset(async_client, staff_header
         db.add(Schedule(
             organization_id=staff_assigned["organization_id"],
             user_id=staff_assigned["id"], store_id=staff_assigned["store_id"],
-            work_date=prev_day, operating_day=prev_day,
-            start_time=time(1, 0), end_time=time(9, 0),
+            operating_day=prev_day,
             start_at=datetime.combine(prev_day + timedelta(days=1), time(1, 0)),
             end_at=datetime.combine(prev_day + timedelta(days=1), time(9, 0)),
             net_work_minutes=480, status="requested",
@@ -177,9 +176,7 @@ async def test_copy_replace_keeps_break_consistent(async_client, staff_headers, 
         db.add(Schedule(
             organization_id=staff_assigned["organization_id"],
             user_id=staff_assigned["id"], store_id=staff_assigned["store_id"],
-            work_date=prev_day, operating_day=prev_day,
-            start_time=time(9, 0), end_time=time(17, 0),
-            break_start_time=time(12, 0), break_end_time=time(13, 0),
+            operating_day=prev_day,
             start_at=datetime.combine(prev_day, time(9, 0)),
             end_at=datetime.combine(prev_day, time(17, 0)),
             break_start_at=datetime.combine(prev_day, time(12, 0)),
@@ -190,8 +187,7 @@ async def test_copy_replace_keeps_break_consistent(async_client, staff_headers, 
         db.add(Schedule(
             organization_id=staff_assigned["organization_id"],
             user_id=staff_assigned["id"], store_id=staff_assigned["store_id"],
-            work_date=new_day, operating_day=new_day,
-            start_time=time(10, 0), end_time=time(15, 0),
+            operating_day=new_day,
             start_at=datetime.combine(new_day, time(10, 0)),
             end_at=datetime.combine(new_day, time(15, 0)),
             net_work_minutes=300, status="requested",

@@ -87,14 +87,14 @@ class ScheduleService:
         legacy_start_offset_days: int = 0,
         client_at_fields: set[str] | None = None,
     ) -> dict:
-        """[TRANSITION] 구/신 입력을 정규화 — 두 인코딩을 동기화한 필드 dict 반환.
+        """구/신 입력을 정규화 — 신 인코딩 필드 dict 반환 (Wave 3: 구 컬럼 제거로 구 입력만 받아 조립).
 
-        신 필드(start_at/operating_day)가 우선. 없으면 구 필드(work_date+HH:MM)에서 조립.
+        신 필드(start_at/operating_day)가 우선. 없으면 구 입력(work_date+HH:MM 파라미터,
+        이제 DB 컬럼은 아니고 API 하위호환 입력 값)에서 조립.
         legacy_start_offset_days: 구-인코딩 조립 시 시작 달력일 = 앵커 + offset.
           구 클라이언트(키오스크/벌크)가 시간만 수정할 때 기존 새벽근무(+1d)를
           영업일로 당겨오지 않도록 기존 오프셋을 보존하는 용도.
-        반환: operating_day, start_at, end_at, break_start_at, break_end_at (datetime),
-              그리고 구 컬럼 동기화용 work_date, start_time, end_time, break_* (date/time).
+        반환: operating_day, start_at, end_at, break_start_at, break_end_at (datetime).
         어느 인코딩도 없으면 해당 값 None.
         """
         # 신 필드 우선 파싱
@@ -149,18 +149,12 @@ class ScheduleService:
             if s_at is not None and e_at is not None and (bs_at < s_at or be_at > e_at):
                 raise BadRequestError("Break must be within the shift.")
 
-        # 구 컬럼 동기화 (전환기: 아직 start_time/work_date를 읽는 코드가 있음)
         return {
             "operating_day": sdate,
-            "work_date": sdate,  # 전환기 동기화
             "start_at": s_at,
             "end_at": e_at,
             "break_start_at": bs_at,
             "break_end_at": be_at,
-            "start_time": s_at.time() if s_at else None,
-            "end_time": e_at.time() if e_at else None,
-            "break_start_time": bs_at.time() if bs_at else None,
-            "break_end_time": be_at.time() if be_at else None,
         }
 
     async def _to_response(self, db: AsyncSession, entry: Schedule) -> ScheduleResponse:
@@ -881,10 +875,10 @@ class ScheduleService:
             start_at=data.start_at, end_at=data.end_at,
             break_start_at=data.break_start_at, break_end_at=data.break_end_at,
         )
-        start_time = norm["start_time"]
-        end_time = norm["end_time"]
-        break_start = norm["break_start_time"]
-        break_end = norm["break_end_time"]
+        start_time = norm["start_at"].time() if norm["start_at"] else None
+        end_time = norm["end_at"].time() if norm["end_at"] else None
+        break_start = norm["break_start_at"].time() if norm["break_start_at"] else None
+        break_end = norm["break_end_at"].time() if norm["break_end_at"] else None
 
         if norm["start_at"] is None or norm["end_at"] is None:
             raise BadRequestError("start/end time is required (start_time+end_time or start_at+end_at)")
@@ -949,12 +943,7 @@ class ScheduleService:
                 "work_role_id": work_role_uuid,
                 "work_role_name_snapshot": wr_name_snap,
                 "position_snapshot": pos_snap,
-                "work_date": norm["work_date"],
                 "operating_day": norm["operating_day"],
-                "start_time": start_time,
-                "end_time": end_time,
-                "break_start_time": break_start,
-                "break_end_time": break_end,
                 "start_at": norm["start_at"],
                 "end_at": norm["end_at"],
                 "break_start_at": norm["break_start_at"],
@@ -1048,7 +1037,6 @@ class ScheduleService:
             clock_in_at.astimezone(ZoneInfo(store_tz))
             .replace(second=0, microsecond=0, tzinfo=None)
         )
-        start_time = start_local.time()
 
         # 2) 근무 길이(분) — 레지스트리(기본 330)
         duration = 330
@@ -1066,11 +1054,9 @@ class ScheduleService:
         if duration <= 0:
             duration = 330
 
-        # 3) 종료 = 시작 + duration. datetime은 실제 순간으로(자정 넘김 자연 표현),
-        #    구 end_time은 mod 24h wrap(NOT NULL 보장, 전환기 동기화).
+        # 3) 종료 = 시작 + duration. datetime은 실제 순간으로(자정 넘김 자연 표현).
         start_at = start_local
         end_at = start_local + timedelta(minutes=duration)
-        end_time = end_at.time()
 
         net = net_minutes_from_datetimes(start_at, end_at)
 
@@ -1083,10 +1069,7 @@ class ScheduleService:
             "organization_id": organization_id,
             "user_id": user_id,
             "store_id": store_id,
-            "work_date": work_date,
             "operating_day": work_date,
-            "start_time": start_time,
-            "end_time": end_time,
             "start_at": start_at,
             "end_at": end_at,
             "net_work_minutes": net,
@@ -1401,10 +1384,10 @@ class ScheduleService:
             select(ScheduleModel).where(
                 ScheduleModel.store_id == store_id,
                 ScheduleModel.organization_id == organization_id,
-                ScheduleModel.work_date >= date_from,
-                ScheduleModel.work_date <= date_to,
+                ScheduleModel.operating_day >= date_from,
+                ScheduleModel.operating_day <= date_to,
                 ScheduleModel.status == "requested",
-            ).order_by(ScheduleModel.work_date, ScheduleModel.start_time)
+            ).order_by(ScheduleModel.operating_day, ScheduleModel.start_at)
         )
         pending = list(db_result.scalars().all())
 
@@ -1433,7 +1416,7 @@ class ScheduleService:
                     continue  # 시간 정보 없으면 건너뜀
 
                 # datetime 인코딩 조립 — 기존 새벽근무(+1d)의 day-offset 보존
-                anchor = s.operating_day or s.work_date
+                anchor = s.operating_day
                 _off = 0
                 if s.start_at is not None and anchor is not None:
                     _off = max(0, min(1, (s.start_at.date() - anchor).days))
@@ -1446,10 +1429,6 @@ class ScheduleService:
                 entry = await schedule_repository.update(db, s.id, {
                     "status": "confirmed",
                     "operating_day": anchor,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "break_start_time": break_start,
-                    "break_end_time": break_end,
                     "start_at": start_at,
                     "end_at": end_at,
                     "break_start_at": bstart_at,
@@ -1537,9 +1516,8 @@ class ScheduleService:
             update_data["user_id"] = new_user_id
         if data.work_date is not None:
             new_work_date = data.work_date
-            if entry.work_date != data.work_date:
-                _track("work_date", str(entry.work_date), str(data.work_date))
-            update_data["work_date"] = new_work_date
+            if entry.operating_day != data.work_date:
+                _track("work_date", str(entry.operating_day), str(data.work_date))
         if data.work_role_id is not None:
             if str(entry.work_role_id or "") != data.work_role_id:
                 _track("work_role_id",
@@ -1555,23 +1533,19 @@ class ScheduleService:
             new_start = self._parse_time(data.start_time)  # type: ignore[assignment]
             if self._format_time(entry.start_time) != data.start_time:
                 _track("start_time", self._format_time(entry.start_time), data.start_time)
-            update_data["start_time"] = new_start
         if data.end_time is not None:
             new_end = self._parse_time(data.end_time)  # type: ignore[assignment]
             if self._format_time(entry.end_time) != data.end_time:
                 _track("end_time", self._format_time(entry.end_time), data.end_time)
-            update_data["end_time"] = new_end
         # Break fields: explicitly sent null = clear break, sent value = update
         if "break_start_time" in data.model_fields_set:
             new_break_start = self._parse_time(data.break_start_time) if data.break_start_time else None
             if self._format_time(entry.break_start_time) != data.break_start_time:
                 _track("break_start_time", self._format_time(entry.break_start_time), data.break_start_time)
-            update_data["break_start_time"] = new_break_start
         if "break_end_time" in data.model_fields_set:
             new_break_end = self._parse_time(data.break_end_time) if data.break_end_time else None
             if self._format_time(entry.break_end_time) != data.break_end_time:
                 _track("break_end_time", self._format_time(entry.break_end_time), data.break_end_time)
-            update_data["break_end_time"] = new_break_end
         # 신(datetime) 인코딩 입력 감지 (전환기 신 클라이언트) — 값은 아래 재조립 블록에서 반영.
         # 비교는 동일 포맷(ISO "YYYY-MM-DDTHH:MM")으로 정규화 — str(datetime)와 클라 ISO의
         # 포맷 차이로 같은 값이 항상 '변경'으로 기록되던 문제 방지.
@@ -1620,18 +1594,20 @@ class ScheduleService:
             else:
                 update_data["is_modified"] = True
 
-        # 신 datetime 인코딩 필드는 아래 re-assembly 블록에서만 update_data를 채우므로,
+        # 시각/영업일 필드(구·신)는 아래 re-assembly 블록에서만 update_data를 채우므로,
         # 그 필드만 온 PATCH를 여기서 조기반환하지 않도록 예외 처리.
+        # (Wave 3: 구 컬럼 직접쓰기 제거로, 레거시 start_time-only PATCH도 재조립 경로로만
+        #  반영된다 — _new_at_fields만 보면 조기반환돼 시각 수정이 유실되던 회귀)
         _new_at_fields = {"start_at", "end_at", "break_start_at", "break_end_at"}
-        if not update_data and not (data.model_fields_set & _new_at_fields):
-            return await self._to_response(db, entry)
-
-        # 전환기: datetime 인코딩 재조립 (검증보다 먼저 — 검증이 실제 instant를 쓰도록)
         _time_fields = {
             "work_date", "operating_day", "start_time", "end_time",
             "break_start_time", "break_end_time",
             "start_at", "end_at", "break_start_at", "break_end_at",
         }
+        if not update_data and not (data.model_fields_set & _time_fields):
+            return await self._to_response(db, entry)
+
+        # 전환기: datetime 인코딩 재조립 (검증보다 먼저 — 검증이 실제 instant를 쓰도록)
         norm: dict | None = None
         # 명시 None(=구 클라이언트가 모든 kwargs를 항상 넘기는 경우)은 "미제공"으로 취급 —
         # model_fields_set만 보면 None이 신-인코딩 분기를 타서 start/end를 지워버린다.
@@ -1669,7 +1645,7 @@ class ScheduleService:
                 # 구 인코딩(또는 work_date/시간 변경): 병합된 시각 locals에서 재조립.
                 # 기존 새벽근무(+1d)의 day-offset을 보존 — 구 클라이언트(키오스크/벌크)가
                 # 시간만 수정해도 start_at 날짜가 영업일로 당겨지지 않도록.
-                _anchor_prev = entry.operating_day or entry.work_date
+                _anchor_prev = entry.operating_day
                 _off = 0
                 if entry.start_at is not None and _anchor_prev is not None:
                     _off = max(0, min(1, (entry.start_at.date() - _anchor_prev).days))
@@ -1698,9 +1674,8 @@ class ScheduleService:
             raise BadRequestError(f"Validation failed: {detail}")
 
         if norm is not None:
-            for _k in ("operating_day", "work_date", "start_at", "end_at",
-                       "break_start_at", "break_end_at",
-                       "start_time", "end_time", "break_start_time", "break_end_time"):
+            for _k in ("operating_day", "start_at", "end_at",
+                       "break_start_at", "break_end_at"):
                 update_data[_k] = norm[_k]
             update_data["net_work_minutes"] = net_minutes_from_datetimes(
                 norm["start_at"], norm["end_at"], norm["break_start_at"], norm["break_end_at"]
@@ -2481,8 +2456,8 @@ class ScheduleService:
             select(Schedule).where(
                 Schedule.organization_id == organization_id,
                 Schedule.store_id == store_id,
-                Schedule.work_date >= date_from,
-                Schedule.work_date <= date_to,
+                Schedule.operating_day >= date_from,
+                Schedule.operating_day <= date_to,
                 Schedule.status == "requested",
             )
         )
@@ -2563,8 +2538,9 @@ class ScheduleService:
             return ScheduleValidation(valid=False, errors=["start/end time is required"])
         return await self._validate_entry(
             db, UUID(data.user_id), UUID(data.store_id), norm["operating_day"],
-            norm["start_time"], norm["end_time"],
-            norm["break_start_time"], norm["break_end_time"],
+            norm["start_at"].time(), norm["end_at"].time(),
+            norm["break_start_at"].time() if norm["break_start_at"] else None,
+            norm["break_end_at"].time() if norm["break_end_at"] else None,
             data.force,
             cand_start_at=norm["start_at"], cand_end_at=norm["end_at"],
         )

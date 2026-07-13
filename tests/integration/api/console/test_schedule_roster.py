@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import AsyncIterator
 
 import pytest
@@ -66,7 +66,7 @@ async def _clear_future(test_store_id) -> AsyncIterator[None]:
     async def _wipe():
         async with async_session() as db:
             await db.execute(delete(Schedule).where(
-                Schedule.store_id == test_store_id, Schedule.work_date == FUTURE,
+                Schedule.store_id == test_store_id, Schedule.operating_day == FUTURE,
             ))
             await db.commit()
     await _wipe()
@@ -115,13 +115,21 @@ async def sv_headers(test_users) -> dict[str, str]:
 async def _insert(store_id, user_info, *, status="confirmed", start=time(9, 0), end=time(17, 0),
                   position=None, work_role_name=None, hourly_rate=None, net_work_minutes=0,
                   start_at=None, end_at=None, operating_day=None):
+    # Wave 3: 구 컬럼 제거 — start/end(HH:MM) 는 operating_day 기준 datetime 으로 조립.
+    op_day = operating_day or FUTURE
+    if start_at is None and start is not None:
+        start_at = datetime.combine(op_day, start)
+    if end_at is None and end is not None:
+        end_at = datetime.combine(op_day, end)
+        if start_at is not None and end_at <= start_at:
+            end_at += timedelta(days=1)
     async with async_session() as db:
         s = Schedule(
             organization_id=user_info["organization_id"], user_id=user_info["id"],
-            store_id=store_id, work_date=FUTURE, start_time=start, end_time=end,
+            store_id=store_id, operating_day=op_day,
             status=status, position_snapshot=position, work_role_name_snapshot=work_role_name,
             net_work_minutes=net_work_minutes,
-            start_at=start_at, end_at=end_at, operating_day=operating_day,
+            start_at=start_at, end_at=end_at,
         )
         if hourly_rate is not None:
             s.hourly_rate = hourly_rate

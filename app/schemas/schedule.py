@@ -410,7 +410,8 @@ class ScheduleResponse(BaseModel):
     end_time: str | None
     break_start_time: str | None
     break_end_time: str | None
-    # 신: 전환기 datetime 인코딩 (구 필드와 동시 노출). Wave 3에서 구 필드 제거.
+    # 신 인코딩이 SoT. 위 구 필드(work_date/start_time 등)는 DB 컬럼이 아니라 모델
+    # read-only shim에서 계산 방출 — 옛 앱 하위호환(D2). Wave 4(강제 업데이트)에서 제거.
     operating_day: date | None = None
     start_at: str | None = None  # "YYYY-MM-DDTHH:MM" 벽시계
     end_at: str | None = None

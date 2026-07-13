@@ -470,7 +470,7 @@ class TipService:
         peer_rows = await db.execute(
             select(Schedule).where(
                 Schedule.store_id == sched.store_id,
-                Schedule.work_date.between(
+                Schedule.operating_day.between(
                     sched.work_date - _td_peer(days=1), sched.work_date + _td_peer(days=1)
                 ),
                 Schedule.status == "confirmed",

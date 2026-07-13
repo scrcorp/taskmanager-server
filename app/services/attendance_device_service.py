@@ -664,10 +664,10 @@ class AttendanceDeviceService:
                 .where(
                     Schedule.user_id == user.id,
                     Schedule.store_id == store_id,
-                    Schedule.work_date == today,
+                    Schedule.operating_day == today,
                     Schedule.status == "confirmed",
                 )
-                .order_by(Schedule.start_time.asc().nulls_last())
+                .order_by(Schedule.start_at.asc().nulls_last())
             )
             all_candidates = list(sch_result.scalars().all())
 

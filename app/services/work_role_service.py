@@ -220,7 +220,7 @@ class WorkRoleService:
         result = await db.execute(
             select(Schedule).where(
                 Schedule.work_role_id == work_role_id,
-                Schedule.work_date >= today,
+                Schedule.operating_day >= today,
                 Schedule.status.notin_(["cancelled", "deleted"]),
                 ~Schedule.id.in_(
                     select(ChecklistInstance.schedule_id).where(
