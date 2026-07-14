@@ -63,6 +63,7 @@ from app.api.app.schedule_requests import router as schedule_requests_router
 from app.api.app.request_templates import router as request_templates_router
 from app.api.app.work_roles import router as app_work_roles_router
 from app.api.app.schedules import router as schedule_entries_router
+from app.api.app.availability import router as app_availability_router
 from app.api.app.tips import router as tips_router
 
 from app.config import settings
@@ -135,6 +136,7 @@ app_router.include_router(app_work_roles_router, prefix="/my", tags=["My Work Ro
 app_router.include_router(request_templates_router, prefix="/my", tags=["My Schedule Templates"])
 app_router.include_router(schedule_requests_router, prefix="/my", tags=["My Schedule Requests"])
 app_router.include_router(schedule_entries_router, prefix="/my", tags=["My Schedules"])
+app_router.include_router(app_availability_router, prefix="/my", tags=["My Availability"])
 
 # ---------------------------------------------------------------------------
 # Tips 라우터 등록 — Tip entries (Stage A: 직원 입력 + 분배 + audit log)
