@@ -11,7 +11,7 @@ conftest 는 단일 org(org1)를 세션 시드한다. 이 파일은 함수 스�
 
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date, datetime, time
 from typing import AsyncIterator
 
 import pytest_asyncio
@@ -66,9 +66,9 @@ async def org2() -> AsyncIterator[dict]:
             organization_id=org.id,
             user_id=user.id,
             store_id=store.id,
-            work_date=date(2026, 1, 15),
-            start_time=time(9, 0),
-            end_time=time(17, 0),
+            operating_day=date(2026, 1, 15),
+            start_at=datetime(2026, 1, 15, 9, 0),
+            end_at=datetime(2026, 1, 15, 17, 0),
             status="requested",
         )
         db.add(sched)

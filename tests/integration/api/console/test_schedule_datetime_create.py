@@ -48,7 +48,7 @@ async def staff_assigned(test_user, test_store_id) -> AsyncIterator[dict]:
             ))
             await db.execute(delete(Schedule).where(
                 Schedule.user_id == test_user["id"],
-                Schedule.work_date.in_([FUTURE, date(2026, 12, 5)]),
+                Schedule.operating_day.in_([FUTURE, date(2026, 12, 5)]),
             ))
             await db.execute(delete(UserStore).where(
                 UserStore.user_id == test_user["id"],

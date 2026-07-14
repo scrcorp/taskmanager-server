@@ -106,6 +106,15 @@ SETTINGS_SEED: list[SettingDefinition] = [
         default_value=False,
         category="Approval Workflow",
     ),
+    # ─── Work Availability ─────────────────────────────
+    SettingDefinition(
+        key="availability.allow_staff_self",
+        label="Allow staff to set their own availability",
+        description="When enabled, staff can submit their weekly work availability themselves (via the self-entry link). When disabled, only managers set it in the console; the app stays view-only.",
+        value_type="boolean",
+        default_value=False,
+        category="Work Availability",
+    ),
     # ─── Work Rules ────────────────────────────────────
     SettingDefinition(
         key="work.default_schedule_duration_minutes",

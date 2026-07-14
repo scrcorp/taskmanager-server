@@ -371,7 +371,7 @@ async def collect_cells_and_issues(
             .outerjoin(StoreWorkRole, Schedule.work_role_id == StoreWorkRole.id)
             .where(
                 Schedule.organization_id == organization_id,
-                Schedule.work_date.in_(target_dates),
+                Schedule.operating_day.in_(target_dates),
                 Schedule.status.in_(CONFIRMED_STATUSES),
             )
         )

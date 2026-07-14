@@ -49,7 +49,7 @@ async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
             Attendance.status.in_(["upcoming", "late"]),
             Attendance.work_date >= two_days_ago,
             Attendance.work_date <= today_utc,
-            Schedule.start_time.isnot(None),
+            Schedule.start_at.isnot(None),
         )
     )
     rows_list = list(rows.all())
@@ -143,7 +143,7 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
             Attendance.clock_out.is_(None),
             Attendance.work_date >= two_days_ago,
             Attendance.work_date <= today_utc,
-            Schedule.end_time.isnot(None),
+            Schedule.end_at.isnot(None),
         )
     )
     rows_list = list(rows.all())
@@ -275,7 +275,7 @@ async def _alert_overdue_clock_outs(db: AsyncSession) -> int:
             Attendance.clock_out.is_(None),
             Attendance.work_date >= two_days_ago,
             Attendance.work_date <= today_utc,
-            Schedule.end_time.isnot(None),
+            Schedule.end_at.isnot(None),
         )
     )
     rows_list = list(rows.all())

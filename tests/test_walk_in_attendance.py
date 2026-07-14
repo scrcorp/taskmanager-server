@@ -408,9 +408,9 @@ async def _make_overdue_walk_in_attendance(
             organization_id=test_user["organization_id"],
             user_id=test_user["id"],
             store_id=store_id,
-            work_date=yesterday,
-            start_time=time(9, 0),
-            end_time=time(12, 0),
+            operating_day=yesterday,
+            start_at=datetime.combine(yesterday, time(9, 0)),
+            end_at=datetime.combine(yesterday, time(12, 0)),
             status="confirmed",
             origin="walk_in",
         )

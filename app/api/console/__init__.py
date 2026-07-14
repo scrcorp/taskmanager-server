@@ -38,6 +38,7 @@ from app.api.console.super_owner import router as super_owner_router
 from app.api.console.stores import router as stores_router
 from app.api.console.roles import router as roles_router
 from app.api.console.users import router as users_router
+from app.api.console.availability import router as availability_router
 from app.api.console.shifts import router as shifts_router
 from app.api.console.positions import router as positions_router
 
@@ -223,6 +224,7 @@ console_router.include_router(work_roles_router, tags=["Work Roles"])
 console_router.include_router(break_rules_router, tags=["Break Rules"])
 console_router.include_router(schedule_requests_router, prefix="/schedule-requests", tags=["Schedule Requests"])
 console_router.include_router(schedule_entries_router, prefix="/schedules", tags=["Schedules"])
+console_router.include_router(availability_router, prefix="/availability", tags=["Availability"])
 
 # Settings (Registry + Org/Store/Staff overrides)
 from app.api.console.settings import router as settings_router  # noqa: E402

@@ -135,6 +135,10 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     # ── Schedule Settings ──
     ("schedule_settings:manage", "schedule_settings", "manage", "Access and modify schedule settings", False),
 
+    # ── Work Availability (직원 근무가능시간 — 콘솔 매니저 조회/편집. 스태프 셀프는 JWT + 최초 1회(미설정) 게이트 — 설정키 미사용(당분간)) ──
+    ("availability:read",   "availability", "read",   "View staff work availability", False),
+    ("availability:manage", "availability", "manage", "Set and edit staff work availability", False),
+
     # ── Notices ──
     ("notices:read",   "notices", "read",   "View notices", False),
     ("notices:create", "notices", "create", "Create notices", False),
@@ -295,6 +299,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         "inventory:read", "inventory:create",
         "org:read",
         "schedule_history:read",
+        # SV 는 스케줄을 짜므로 근무가능시간 조회·편집 가능 (owner/gm 은 자동 부여).
+        "availability:read", "availability:manage",
         # 가이드 §1.1: 사이클 확정은 Owner/GM 위주. SV 는 entry 수정·누락 추가만.
         "tips:read", "tips:edit_own", "tips:edit_all", "tips:add_for_others",
         "tips:form_view",

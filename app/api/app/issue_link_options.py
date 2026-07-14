@@ -55,9 +55,9 @@ async def get_link_options(
     sched_rows = await db.execute(
         select(Schedule).where(
             Schedule.store_id == store_id,
-            Schedule.work_date >= date_from,
-            Schedule.work_date <= today,
-        ).order_by(Schedule.work_date.desc())
+            Schedule.operating_day >= date_from,
+            Schedule.operating_day <= today,
+        ).order_by(Schedule.operating_day.desc())
     )
     schedules = sched_rows.scalars().all()
     # work_role / position / user 이름은 schedule 모델이 이미 join 되어있지 않을 수 있어 별도 fetch

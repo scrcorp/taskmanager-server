@@ -89,9 +89,9 @@ class ScheduleAuditLogRepository:
         if event_type is not None:
             base = base.where(ScheduleAuditLog.event_type == event_type)
         if date_from is not None:
-            base = base.where(Schedule.work_date >= date_from)
+            base = base.where(Schedule.operating_day >= date_from)
         if date_to is not None:
-            base = base.where(Schedule.work_date <= date_to)
+            base = base.where(Schedule.operating_day <= date_to)
 
         # Total count
         count_q = select(func.count()).select_from(base.subquery())

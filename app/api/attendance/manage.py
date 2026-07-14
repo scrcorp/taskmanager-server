@@ -221,10 +221,10 @@ async def manage_list_today_schedules(
         .outerjoin(Shift, Shift.id == StoreWorkRole.shift_id)
         .where(
             Schedule.store_id == device.store_id,
-            Schedule.work_date == today,
+            Schedule.operating_day == today,
             Schedule.status.in_(("draft", "requested", "confirmed")),
         )
-        .order_by(Schedule.start_time.asc().nulls_last(), User.full_name.asc())
+        .order_by(Schedule.start_at.asc().nulls_last(), User.full_name.asc())
     )
     all_rows = rows.all()
 
@@ -827,7 +827,7 @@ async def _ensure_active_schedule_for_user(
         select(Schedule.id).where(
             Schedule.user_id == user_id,
             Schedule.store_id == device.store_id,
-            Schedule.work_date == today,
+            Schedule.operating_day == today,
             Schedule.status.in_(("draft", "requested", "confirmed")),
         )
     )

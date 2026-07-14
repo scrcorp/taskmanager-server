@@ -144,7 +144,7 @@ async def recompute_attendance_for_schedule_change(
     db: AsyncSession,
     schedule: Schedule,
 ) -> None:
-    """Schedule.work_date / start_time / end_time 이 바뀐 후 attendance.status 재계산.
+    """Schedule.operating_day / start_at / end_at 이 바뀐 후 attendance.status 재계산.
 
     clock_in 이 이미 기록된 row 는 건드리지 않는다 (출근 기록 보존). clock_in 이 없는
     upcoming/late/no_show row 는 새 시간 기준으로 다시 계산해서 cron 의 강등/승격

@@ -105,7 +105,7 @@ async def _night_cleanup(test_user: dict, night_store: dict) -> AsyncIterator[No
         await db.execute(delete(Attendance).where(
             Attendance.user_id == test_user["id"], Attendance.work_date.in_(days)))
         await db.execute(delete(Schedule).where(
-            Schedule.user_id == test_user["id"], Schedule.work_date.in_(days)))
+            Schedule.user_id == test_user["id"], Schedule.operating_day.in_(days)))
         await db.commit()
 
 
@@ -170,7 +170,7 @@ async def test_early_morning_walkin_full_lifecycle(
             Schedule.user_id == test_user["id"],
             Schedule.store_id == test_store_id,
             Schedule.origin == "walk_in",
-            Schedule.work_date == op_day,
+            Schedule.operating_day == op_day,
         ))).scalar_one_or_none()
     assert sched is not None, "새벽 워크인 스케줄이 영업일(전날)로 귀속되어야 함"
     # 실제 시각은 오늘 달력일 새벽이어야 함 (영업일로 당겨지면 안 됨)
@@ -245,7 +245,7 @@ async def test_kiosk_dawn_create_anchors_next_calendar_day(
 
     async with async_session() as db:
         sched = (await db.execute(select(Schedule).where(
-            Schedule.user_id == test_user["id"], Schedule.work_date == op_day,
+            Schedule.user_id == test_user["id"], Schedule.operating_day == op_day,
             Schedule.store_id == test_store_id, Schedule.origin == "manual",
         ))).scalar_one()
         assert sched.start_at.date() == sl_today
