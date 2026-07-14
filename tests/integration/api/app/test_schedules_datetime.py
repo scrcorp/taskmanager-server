@@ -42,10 +42,7 @@ async def early_morning_schedule(test_user, test_store_id) -> AsyncIterator[str]
             organization_id=test_user["organization_id"],
             user_id=test_user["id"],
             store_id=test_store_id,
-            work_date=WD,
             operating_day=WD,
-            start_time=time(1, 0),
-            end_time=time(9, 0),
             start_at=datetime(2026, 12, 23, 1, 0),
             end_at=datetime(2026, 12, 23, 9, 0),
             net_work_minutes=480,
@@ -58,7 +55,7 @@ async def early_morning_schedule(test_user, test_store_id) -> AsyncIterator[str]
         yield sid
     finally:
         async with async_session() as db:
-            await db.execute(delete(Schedule).where(Schedule.work_date == WD))
+            await db.execute(delete(Schedule).where(Schedule.operating_day == WD))
             await db.commit()
 
 

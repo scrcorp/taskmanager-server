@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import AsyncIterator
 from uuid import UUID
 
@@ -409,13 +409,19 @@ async def make_schedule(test_store_id: UUID, _tracked_schedule_ids: list):
             sid = store_id or test_store_id
             tz_name, day_cfg = await get_store_day_config(db, sid)
             wd = work_date or get_work_date(tz_name, day_cfg, datetime.now(timezone.utc))
+            # Wave 3: 구 컬럼 제거 — operating_day + start_at/end_at 로 생성.
+            # end<=start(자정 넘김)면 end_at 을 익일로.
+            s_at = datetime.combine(wd, start_time) if start_time else None
+            e_at = datetime.combine(wd, end_time) if end_time else None
+            if s_at and e_at and e_at <= s_at:
+                e_at += timedelta(days=1)
             sched = Schedule(
                 organization_id=user_info["organization_id"],
                 user_id=user_info["id"],
                 store_id=sid,
-                work_date=wd,
-                start_time=start_time,
-                end_time=end_time,
+                operating_day=wd,
+                start_at=s_at,
+                end_at=e_at,
                 status="confirmed",
             )
             db.add(sched)

@@ -46,9 +46,9 @@ class ScheduleRepository(BaseRepository[Schedule]):
         if user_ids:
             query = query.where(Schedule.user_id.in_(user_ids))
         if date_from is not None:
-            query = query.where(Schedule.work_date >= date_from)
+            query = query.where(Schedule.operating_day >= date_from)
         if date_to is not None:
-            query = query.where(Schedule.work_date <= date_to)
+            query = query.where(Schedule.operating_day <= date_to)
         if status is not None:
             query = query.where(Schedule.status == status)
         else:
@@ -60,9 +60,9 @@ class ScheduleRepository(BaseRepository[Schedule]):
                 excluded.extend(["cancelled", "rejected"])
             query = query.where(Schedule.status.notin_(excluded))
         if sort_desc:
-            query = query.order_by(Schedule.work_date.desc(), Schedule.start_time.desc())
+            query = query.order_by(Schedule.operating_day.desc(), Schedule.start_at.desc())
         else:
-            query = query.order_by(Schedule.work_date, Schedule.start_time)
+            query = query.order_by(Schedule.operating_day, Schedule.start_at)
         return await self.get_paginated(db, query, page, per_page)
 
     async def get_all_in_period(
@@ -83,8 +83,8 @@ class ScheduleRepository(BaseRepository[Schedule]):
         """
         query: Select = select(Schedule).where(
             Schedule.organization_id == organization_id,
-            Schedule.work_date >= date_from,
-            Schedule.work_date <= date_to,
+            Schedule.operating_day >= date_from,
+            Schedule.operating_day <= date_to,
             Schedule.status.in_(["confirmed", "requested"]),
         )
         if accessible_store_ids is not None:
@@ -129,7 +129,7 @@ class ScheduleRepository(BaseRepository[Schedule]):
         entries = await db.execute(
             select(Schedule).where(
                 Schedule.user_id == user_id,
-                Schedule.work_date.between(
+                Schedule.operating_day.between(
                     work_date - timedelta(days=1), work_date + timedelta(days=1)
                 ),
                 Schedule.status.notin_(["cancelled", "deleted"]),
@@ -138,15 +138,9 @@ class ScheduleRepository(BaseRepository[Schedule]):
         for entry in entries.scalars().all():
             if exclude_id and entry.id == exclude_id:
                 continue
-            if entry.start_at is not None and entry.end_at is not None:
-                es, ee = entry.start_at, entry.end_at
-            elif entry.start_time is not None and entry.end_time is not None:
-                es = datetime.combine(entry.work_date, entry.start_time)
-                ee = datetime.combine(entry.work_date, entry.end_time)
-                if ee <= es:
-                    ee += timedelta(days=1)
-            else:
+            if entry.start_at is None or entry.end_at is None:
                 continue
+            es, ee = entry.start_at, entry.end_at
             if cs < ee and ce > es:
                 return True
         return False
@@ -163,7 +157,7 @@ class ScheduleRepository(BaseRepository[Schedule]):
             select(func.coalesce(func.sum(Schedule.net_work_minutes), 0))
             .where(
                 Schedule.user_id == user_id,
-                Schedule.work_date == work_date,
+                Schedule.operating_day == work_date,
                 Schedule.status.notin_(["cancelled", "deleted"]),
             )
         )
@@ -187,8 +181,8 @@ class ScheduleRepository(BaseRepository[Schedule]):
             select(func.coalesce(func.sum(Schedule.net_work_minutes), 0))
             .where(
                 Schedule.user_id == user_id,
-                Schedule.work_date >= week_start,
-                Schedule.work_date <= week_end,
+                Schedule.operating_day >= week_start,
+                Schedule.operating_day <= week_end,
                 Schedule.status.notin_(["cancelled", "deleted"]),
             )
         )
@@ -208,11 +202,11 @@ class ScheduleRepository(BaseRepository[Schedule]):
             select(Schedule)
             .where(
                 Schedule.store_id == store_id,
-                Schedule.work_date >= date_from,
-                Schedule.work_date <= date_to,
+                Schedule.operating_day >= date_from,
+                Schedule.operating_day <= date_to,
                 Schedule.status != "deleted",
             )
-            .order_by(Schedule.work_date, Schedule.start_time)
+            .order_by(Schedule.operating_day, Schedule.start_at)
         )
         return list(result.scalars().all())
 

@@ -55,6 +55,7 @@ from app.models.tip import TipEntry, TipDistribution, TipAuditLog, TipPeriod, Fo
 from app.models.schedule_report import ScheduleReportSnapshot
 from app.models.file import File, FileUsage
 from app.models.changelog import ChangelogPost
+from app.models.availability import StaffAvailability, StaffAvailabilityHistory, StaffAvailabilityPreset
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -91,4 +92,5 @@ __all__ = [
     "ScheduleReportSnapshot",
     "File", "FileUsage",
     "ChangelogPost",
+    "StaffAvailability", "StaffAvailabilityHistory", "StaffAvailabilityPreset",
 ]

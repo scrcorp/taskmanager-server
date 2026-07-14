@@ -191,7 +191,7 @@ async def _find_schedule_for_attendance(
         select(Schedule).where(
             Schedule.user_id == user_id,
             Schedule.store_id == store_id,
-            Schedule.work_date == work_date,
+            Schedule.operating_day == work_date,
             Schedule.status == "confirmed",
         ).limit(1)
     )
@@ -879,20 +879,17 @@ class AttendanceService:
         # 연결된 스케줄 조회 (있으면) — scheduled_start/end + effective_status 계산용 raw 값
         scheduled_start: datetime | None = None
         scheduled_end: datetime | None = None
-        s_start_time = None
-        s_end_time = None
-        s_work_date = None
+        s_operating_day = None
         s_start_at = None
         s_end_at = None
         if attendance.schedule_id is not None:
             sch_result = await db.execute(
-                select(Schedule.start_time, Schedule.end_time, Schedule.work_date,
-                       Schedule.start_at, Schedule.end_at)
+                select(Schedule.operating_day, Schedule.start_at, Schedule.end_at)
                 .where(Schedule.id == attendance.schedule_id)
             )
             sch_row = sch_result.one_or_none()
             if sch_row is not None:
-                s_start_time, s_end_time, s_work_date, s_start_at, s_end_at = sch_row
+                s_operating_day, s_start_at, s_end_at = sch_row
                 # store.timezone이 None이면 organization timezone 조회 (fallback)
                 if store_tz_name is None:
                     from app.models.organization import Organization
@@ -909,8 +906,8 @@ class AttendanceService:
                     from zoneinfo import ZoneInfo
                     tz = ZoneInfo("UTC")
                 scheduled_start, scheduled_end = resolve_schedule_instants(
-                    start_at=s_start_at, end_at=s_end_at, work_date=s_work_date,
-                    start_time=s_start_time, end_time=s_end_time, tz_name=tz.key,
+                    start_at=s_start_at, end_at=s_end_at, work_date=s_operating_day,
+                    start_time=None, end_time=None, tz_name=tz.key,
                 )
 
         # break 로드 (미리 주입되지 않았다면 fetch) — Load breaks if not provided
@@ -1003,9 +1000,9 @@ class AttendanceService:
             "effective_status": compute_effective_status(
                 att_status=attendance.status,
                 att_clock_in=attendance.clock_in,
-                schedule_start_time=s_start_time,
-                schedule_end_time=s_end_time,
-                schedule_work_date=s_work_date,
+                schedule_start_time=s_start_at.time() if s_start_at else None,
+                schedule_end_time=s_end_at.time() if s_end_at else None,
+                schedule_work_date=s_operating_day,
                 now=datetime.now(timezone.utc),
                 store_tz=display_tz,
                 late_buffer=LATE_BUFFER_MINUTES,

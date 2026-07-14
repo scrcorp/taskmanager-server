@@ -347,10 +347,10 @@ class ScheduleRequestService:
             Schedule.status == "requested",
         )
         if date_from is not None:
-            query = query.where(Schedule.work_date >= date_from)
+            query = query.where(Schedule.operating_day >= date_from)
         if date_to is not None:
-            query = query.where(Schedule.work_date <= date_to)
-        query = query.order_by(Schedule.work_date, Schedule.start_time)
+            query = query.where(Schedule.operating_day <= date_to)
+        query = query.order_by(Schedule.operating_day, Schedule.start_at)
         db_result = await db.execute(query)
         schedules = db_result.scalars().all()
 
@@ -378,10 +378,10 @@ class ScheduleRequestService:
         if store_id is not None:
             query = query.where(Schedule.store_id == store_id)
         if date_from is not None:
-            query = query.where(Schedule.work_date >= date_from)
+            query = query.where(Schedule.operating_day >= date_from)
         if date_to is not None:
-            query = query.where(Schedule.work_date <= date_to)
-        query = query.order_by(Schedule.work_date, Schedule.start_time)
+            query = query.where(Schedule.operating_day <= date_to)
+        query = query.order_by(Schedule.operating_day, Schedule.start_at)
         schedules, total = await schedule_repository.get_paginated(db, query, page, per_page)
         responses = [await self._schedule_to_request_response(db, s) for s in schedules]
         return responses, total
@@ -396,7 +396,7 @@ class ScheduleRequestService:
         # schedules 테이블에서 중복 신청 체크 (requested/confirmed 상태, 같은 날짜+역할)
         dup_query = select(Schedule).where(
             Schedule.user_id == user_id,
-            Schedule.work_date == data.work_date,
+            Schedule.operating_day == data.work_date,
             Schedule.status.in_(["requested", "confirmed"]),
         )
         if work_role_id is not None:
@@ -428,11 +428,6 @@ class ScheduleRequestService:
                 "user_id": user_id,
                 "store_id": store_id,
                 "work_role_id": work_role_id,
-                "work_date": data.work_date,
-                "start_time": start_time,
-                "end_time": end_time,
-                "break_start_time": break_start,
-                "break_end_time": break_end,
                 **sf,
                 "note": data.note,
                 "status": "requested",
@@ -479,7 +474,7 @@ class ScheduleRequestService:
                     # 중복 체크: schedules 테이블에서 requested/confirmed 상태
                     dup_query = select(Schedule).where(
                         Schedule.user_id == user_id,
-                        Schedule.work_date == current,
+                        Schedule.operating_day == current,
                         Schedule.status.in_(["requested", "confirmed"]),
                     )
                     if item.work_role_id is not None:
@@ -496,8 +491,6 @@ class ScheduleRequestService:
                                                     duplicate.break_start_time, duplicate.break_end_time,
                                                     start_offset_days=self._start_offset_of(duplicate))
                             updated = await schedule_repository.update(db, duplicate.id, {
-                                "start_time": item.preferred_start_time,
-                                "end_time": item.preferred_end_time,
                                 "operating_day": sf["operating_day"],
                                 "start_at": sf["start_at"],
                                 "end_at": sf["end_at"],
@@ -522,9 +515,6 @@ class ScheduleRequestService:
                             "user_id": user_id,
                             "store_id": store_id,
                             "work_role_id": item.work_role_id,
-                            "work_date": current,
-                            "start_time": item.preferred_start_time,
-                            "end_time": item.preferred_end_time,
                             **sf,
                             "status": "requested",
                             "hourly_rate": hourly_rate,
@@ -563,10 +553,10 @@ class ScheduleRequestService:
             select(Schedule).where(
                 Schedule.store_id == store_id,
                 Schedule.user_id == user_id,
-                Schedule.work_date >= prev_date_from,
-                Schedule.work_date <= prev_date_to,
+                Schedule.operating_day >= prev_date_from,
+                Schedule.operating_day <= prev_date_to,
                 Schedule.status == "requested",
-            ).order_by(Schedule.work_date)
+            ).order_by(Schedule.operating_day)
         )
         prev_schedules = list(prev_result.scalars().all())
         if not prev_schedules:
@@ -584,7 +574,7 @@ class ScheduleRequestService:
                 # 중복 체크
                 dup_query = select(Schedule).where(
                     Schedule.user_id == user_id,
-                    Schedule.work_date == new_date,
+                    Schedule.operating_day == new_date,
                     Schedule.status.in_(["requested", "confirmed"]),
                 )
                 if prev_s.work_role_id is not None:
@@ -598,10 +588,6 @@ class ScheduleRequestService:
                                                 prev_s.break_start_time, prev_s.break_end_time,
                                                 start_offset_days=self._start_offset_of(prev_s))
                         updated = await schedule_repository.update(db, duplicate.id, {
-                            "start_time": prev_s.start_time,
-                            "end_time": prev_s.end_time,
-                            "break_start_time": prev_s.break_start_time,
-                            "break_end_time": prev_s.break_end_time,
                             "operating_day": sf["operating_day"],
                             "start_at": sf["start_at"],
                             "end_at": sf["end_at"],
@@ -629,11 +615,6 @@ class ScheduleRequestService:
                         "user_id": user_id,
                         "store_id": store_id,
                         "work_role_id": prev_s.work_role_id,
-                        "work_date": new_date,
-                        "start_time": prev_s.start_time,
-                        "end_time": prev_s.end_time,
-                        "break_start_time": prev_s.break_start_time,
-                        "break_end_time": prev_s.break_end_time,
                         **sf,
                         "note": prev_s.note,
                         "status": "requested",
@@ -818,7 +799,7 @@ class ScheduleRequestService:
         # 중복 신청 체크: schedules 테이블에서 requested/confirmed 상태
         dup_query = select(Schedule).where(
             Schedule.user_id == user_id,
-            Schedule.work_date == data.work_date,
+            Schedule.operating_day == data.work_date,
             Schedule.status.in_(["requested", "confirmed"]),
         )
         if work_role_id is not None:
@@ -848,11 +829,6 @@ class ScheduleRequestService:
                 "user_id": user_id,
                 "store_id": store_id,
                 "work_role_id": work_role_id,
-                "work_date": data.work_date,
-                "start_time": start_time,
-                "end_time": end_time,
-                "break_start_time": break_start,
-                "break_end_time": break_end,
                 **sf,
                 "note": data.note,
                 "status": "requested",
@@ -1021,6 +997,7 @@ class ScheduleRequestService:
         }
 
         # modifications JSONB에서 각 필드의 최초 원본값(첫 번째 기록) 복원
+        revert_times: dict = {}
         if schedule.modifications:
             # 필드별 첫 번째 수정 기록만 사용 (최초 원본값)
             seen_fields: set = set()
@@ -1029,25 +1006,25 @@ class ScheduleRequestService:
                 if field and field not in seen_fields:
                     seen_fields.add(field)
                     old_val = mod.get("old_value")
+                    # 시각/영업일 복원값은 컬럼이 아니라 재조립 입력(revert_times)으로만 사용
                     if field == "start_time":
-                        from datetime import time as time_type
-                        revert_data["start_time"] = self._parse_time(old_val) if old_val else None
+                        revert_times["start_time"] = self._parse_time(old_val) if old_val else None
                     elif field == "end_time":
-                        revert_data["end_time"] = self._parse_time(old_val) if old_val else None
+                        revert_times["end_time"] = self._parse_time(old_val) if old_val else None
                     elif field == "work_role_id":
                         revert_data["work_role_id"] = UUID(old_val) if old_val else None
                     elif field == "user_id":
                         revert_data["user_id"] = UUID(old_val) if old_val else None
                     elif field == "work_date":
                         from datetime import date as date_cls
-                        revert_data["work_date"] = date_cls.fromisoformat(old_val) if old_val else None
+                        revert_times["work_date"] = date_cls.fromisoformat(old_val) if old_val else None
 
         # datetime 인코딩 재조립 + net_work_minutes 재계산.
         # falsy-or 병합 금지 — 되돌림 값이 None(시각 제거)일 때 start_time=NULL인데
         # start_at은 살아있는 desync(불변식 ④ 위반)가 생기던 버그.
-        new_start = revert_data["start_time"] if "start_time" in revert_data else schedule.start_time
-        new_end = revert_data["end_time"] if "end_time" in revert_data else schedule.end_time
-        _anchor_rd = revert_data.get("work_date")
+        new_start = revert_times["start_time"] if "start_time" in revert_times else schedule.start_time
+        new_end = revert_times["end_time"] if "end_time" in revert_times else schedule.end_time
+        _anchor_rd = revert_times.get("work_date")
         anchor = _anchor_rd if _anchor_rd is not None else (schedule.operating_day or schedule.work_date)
         sf = self._shift_fields(anchor, new_start, new_end,
                                 schedule.break_start_time, schedule.break_end_time,
@@ -1086,10 +1063,10 @@ class ScheduleRequestService:
         db_result = await db.execute(
             select(Schedule).where(
                 Schedule.store_id == store_id,
-                Schedule.work_date >= date_from,
-                Schedule.work_date <= date_to,
+                Schedule.operating_day >= date_from,
+                Schedule.operating_day <= date_to,
                 Schedule.status.in_(["requested", "rejected"]),
-            ).order_by(Schedule.work_date, Schedule.start_time)
+            ).order_by(Schedule.operating_day, Schedule.start_at)
         )
         schedules = list(db_result.scalars().all())
 
@@ -1144,10 +1121,10 @@ class ScheduleRequestService:
         db_result = await db.execute(
             select(Schedule).where(
                 Schedule.store_id == store_id,
-                Schedule.work_date >= date_from,
-                Schedule.work_date <= date_to,
+                Schedule.operating_day >= date_from,
+                Schedule.operating_day <= date_to,
                 Schedule.status.in_(["requested", "rejected"]),
-            ).order_by(Schedule.work_date, Schedule.start_time)
+            ).order_by(Schedule.operating_day, Schedule.start_at)
         )
         schedules = list(db_result.scalars().all())
 
@@ -1194,10 +1171,6 @@ class ScheduleRequestService:
                 # status만 confirmed로 변경 (새 행 생성 X)
                 await schedule_repository.update(db, s.id, {
                     "status": "confirmed",
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "break_start_time": break_start,
-                    "break_end_time": break_end,
                     **sf,
                     "approved_by": confirmed_by,
                 })
@@ -1246,10 +1219,10 @@ class ScheduleRequestService:
         db_result = await db.execute(
             select(Schedule).where(
                 Schedule.store_id == store_id,
-                Schedule.work_date >= date_from,
-                Schedule.work_date <= date_to,
+                Schedule.operating_day >= date_from,
+                Schedule.operating_day <= date_to,
                 Schedule.status.in_(["requested", "rejected"]),
-            ).order_by(Schedule.work_date, Schedule.start_time)
+            ).order_by(Schedule.operating_day, Schedule.start_at)
         )
         schedules = list(db_result.scalars().all())
 

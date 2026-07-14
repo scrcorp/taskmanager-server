@@ -156,21 +156,40 @@ class Schedule(Base):
     # Work Role snapshot — work role 이름/포지션이 변경/삭제되어도 스케줄 시점의 값을 보존
     work_role_name_snapshot: Mapped[str | None] = mapped_column(String(100), nullable=True)
     position_snapshot: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    work_date: Mapped[date] = mapped_column(Date, nullable=False)
     # 영업일 귀속 라벨 — "이 근무가 표시/카운트되는 스케줄 날짜"(물리적 시각 아님, start_at이 그 역할).
-    # work_date를 대체(create-then-delete). 전환기(Wave 1): 둘 다 유지, 쓰기 시 동기화. Wave 3에서 work_date 제거.
-    operating_day: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
-    end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
-    break_start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
-    break_end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    # Wave 3: 구 work_date 컬럼 제거 완료, operating_day가 유일한 라벨 (NOT NULL).
+    operating_day: Mapped[date] = mapped_column(Date, nullable=False)
     # Wall-clock datetime encoding (naive local, interpreted in store tz). 각 시각이 자기 날짜를 가짐.
-    # work_date는 영업일 앵커로 유지되며 start_at의 날짜와 다를 수 있음(자정 이후 근무).
-    # 전환기: 기존 *_time 컬럼과 공존(Wave 1). Wave 3에서 *_time 제거 예정.
+    # operating_day는 영업일 라벨이며 start_at의 날짜와 다를 수 있음(+1일, 자정 이후 근무).
+    # Wave 3: 구 *_time 컬럼 제거 완료 — 아래 read-only 프로퍼티 shim이 API 응답 하위호환 제공.
     start_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
     end_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
     break_start_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
     break_end_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+
+    # ── 구 인코딩 read-only shim (Wave 3) ─────────────────────────────
+    # 구 컬럼은 신 컬럼의 순수 투영이었으므로(work_date=operating_day, start_time=start_at.time())
+    # 프로덕션의 옛 앱 빌드가 읽는 응답 필드를 계산으로 계속 방출한다 (D2 결정 — 강제 업데이트와 분리).
+    # 쓰기는 불가(setter 없음) — 쓰려는 코드는 남은 Wave 3 미이행 지점이므로 즉시 드러난다.
+    @property
+    def work_date(self) -> date:
+        return self.operating_day
+
+    @property
+    def start_time(self) -> Optional[time]:
+        return self.start_at.time() if self.start_at is not None else None
+
+    @property
+    def end_time(self) -> Optional[time]:
+        return self.end_at.time() if self.end_at is not None else None
+
+    @property
+    def break_start_time(self) -> Optional[time]:
+        return self.break_start_at.time() if self.break_start_at is not None else None
+
+    @property
+    def break_end_time(self) -> Optional[time]:
+        return self.break_end_at.time() if self.break_end_at is not None else None
     net_work_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Status: draft / requested / confirmed / rejected / cancelled
     status: Mapped[str] = mapped_column(String(20), default="confirmed")
@@ -199,9 +218,6 @@ class Schedule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
-        Index("ix_schedules_org_store_date", "organization_id", "store_id", "work_date"),
-        Index("ix_schedules_user_date", "user_id", "work_date"),
-        # operating_day 미러 인덱스(전환기). Wave 3에서 work_date 인덱스 제거 후 이것만 남김.
         Index("ix_schedules_org_store_opday", "organization_id", "store_id", "operating_day"),
         Index("ix_schedules_user_opday", "user_id", "operating_day"),
         Index("ix_schedules_status", "status"),

@@ -23,11 +23,8 @@ class TestLegacyInput:
     def test_legacy_same_day(self):
         r = _norm(work_date=date(2026, 7, 8), start_time="09:00", end_time="17:00")
         assert r["operating_day"] == date(2026, 7, 8)
-        assert r["work_date"] == date(2026, 7, 8)  # 동기화
         assert r["start_at"] == datetime(2026, 7, 8, 9, 0)
         assert r["end_at"] == datetime(2026, 7, 8, 17, 0)
-        assert r["start_time"] == time(9, 0)
-        assert r["end_time"] == time(17, 0)
 
     def test_legacy_overnight_rolls_end(self):
         r = _norm(work_date=date(2026, 7, 8), start_time="22:00", end_time="02:00")
@@ -49,8 +46,6 @@ class TestNewInput:
         assert r["start_at"] == datetime(2026, 7, 8, 9, 0)
         assert r["end_at"] == datetime(2026, 7, 8, 17, 0)
         # 구 컬럼 동기화
-        assert r["start_time"] == time(9, 0)
-        assert r["end_time"] == time(17, 0)
 
     def test_new_early_morning_explicit_date(self):
         # 영업일 7/8 이지만 실제 근무는 7/9 새벽 1시 (사용자 핵심 시나리오)
@@ -58,7 +53,6 @@ class TestNewInput:
                   start_at="2026-07-09T01:00", end_at="2026-07-09T09:00")
         assert r["operating_day"] == date(2026, 7, 8)      # 영업일 라벨 유지
         assert r["start_at"] == datetime(2026, 7, 9, 1, 0)  # 실제 시각은 7/9
-        assert r["work_date"] == date(2026, 7, 8)           # 구 동기화도 영업일
 
     def test_operating_day_defaults_to_start_at_date(self):
         r = _norm(start_at="2026-07-08T09:00", end_at="2026-07-08T17:00")
