@@ -49,3 +49,6 @@ APScheduler==3.10.4
 # Image pipeline — WebP 인코딩/썸네일 (storage_service). 이전엔 weasyprint 의
 # transitive 의존이었으나 직접 사용하므로 명시 고정.
 Pillow==12.2.0
+# HEIC/HEIF 디코드 — 아이폰 사진(HEIC)을 WebP 로 변환하기 위한 Pillow 플러그인.
+# manylinux/macOS wheel 에 libheif 번들 포함 → prod EC2 에 시스템 패키지 불필요.
+pillow-heif==0.21.0

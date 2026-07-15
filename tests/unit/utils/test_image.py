@@ -28,6 +28,13 @@ def _png_rgba(w: int, h: int) -> bytes:
     return buf.getvalue()
 
 
+def _heic(w: int, h: int, color=(200, 100, 50)) -> bytes:
+    # pillow-heif 가 등록돼 있으면 Pillow 로 HEIF 저장 가능(테스트 픽스처).
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), color).save(buf, "HEIF")
+    return buf.getvalue()
+
+
 def _dims(data: bytes) -> tuple[int, int]:
     with Image.open(io.BytesIO(data)) as img:
         return img.size
@@ -144,6 +151,24 @@ def test_rgba_png_encodes_to_webp() -> None:
 def test_non_image_passthrough_empty() -> None:
     assert im.render_derivatives(b"%PDF-1.4 doc", im.VERIFY_PHOTO) == {}
     assert im.render_derivatives(b"\x00random", im.VERIFY_PHOTO) == {}
+
+
+# ── HEIC (아이폰 사진) ─────────────────────────────────────────
+
+
+@pytest.mark.skipif(not im._HEIF_ENABLED, reason="pillow-heif 미설치")
+def test_heic_sniffed_as_image() -> None:
+    # HEIC 바이트가 이제 이미지로 인식된다(pass-through 대상 아님).
+    assert im.sniff_image_format(_heic(10, 10)) is not None
+
+
+@pytest.mark.skipif(not im._HEIF_ENABLED, reason="pillow-heif 미설치")
+def test_heic_transcoded_to_webp() -> None:
+    # HEIC → full/thumb WebP 로 변환(브라우저/콘솔에서 표시 가능).
+    d = im.render_derivatives(_heic(3000, 2000), im.VERIFY_PHOTO)
+    assert set(d) == {"full", "thumb"}
+    assert _fmt(d["full"]) == "WEBP"
+    assert max(_dims(d["full"])) == 2048
 
 
 def test_doc_profile_skips_even_image() -> None:
