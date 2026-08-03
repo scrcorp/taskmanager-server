@@ -20,6 +20,7 @@ from app.schemas.empid_import import (
     EmpidImportEntry,
     EmpidImportPerson,
     EmpidImportPreviewResponse,
+    EmpidRosterStore,
 )
 from app.services import empid_import_service as svc
 from app.utils.exceptions import BadRequestError
@@ -41,6 +42,7 @@ def _person_out(p: svc.PersonRow) -> EmpidImportPerson:
         note=p.note,
         similar=p.similar,
         members=p.members,
+        similar_users=p.similar_users,
     )
 
 
@@ -77,14 +79,27 @@ async def preview_empid_import(
     )
 
 
+@router.get("/roster", response_model=list[EmpidRosterStore])
+async def get_empid_roster(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:read"))],
+) -> list[EmpidRosterStore]:
+    """매장별 배정·empid 현황 — 파일 없이 직접 편집하는 bulk 에디터용."""
+    rows = await svc.roster(db, current_user.organization_id)
+    return [EmpidRosterStore(**r) for r in rows]
+
+
 @router.post("/commit", response_model=EmpidImportCommitResponse)
 async def commit_empid_import(
     data: EmpidImportCommitRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("users:update"))],
 ) -> EmpidImportCommitResponse:
-    """체크된 (user, store, empid) 목록을 매장 단위 3-phase 로 반영합니다 (멱등)."""
-    assignments: list[tuple[UUID, UUID, int]] = []
+    """체크된 (user, store, empid) 목록을 매장 단위 3-phase 로 반영합니다 (멱등).
+
+    empid=null 은 번호 삭제(배정 행 유지). 임포트 탭·bulk 에디터·스태프 상세가 공용.
+    """
+    assignments: list[tuple[UUID, UUID, int | None]] = []
     for item in data.assignments:
         try:
             assignments.append((UUID(item.user_id), UUID(item.store_id), item.empid))

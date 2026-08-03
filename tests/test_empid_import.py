@@ -447,3 +447,87 @@ async def test_commit_group_scope_renumber_after_sibling_writes(
     # 그룹 스코프 전체에서 중복 없음
     all_values = [v for v in list(a.values()) + list(b.values()) if v is not None]
     assert len(all_values) == len(set(all_values))
+
+
+# ---------------------------------------------------------------------------
+# commit — (n) empid=None 은 번호 삭제 (배정 행 유지, 재채번 없음, 멱등)
+# ---------------------------------------------------------------------------
+
+
+async def test_commit_null_clears_number(db: AsyncSession, ctx: Ctx) -> None:
+    store = await _make_store(db, ctx, "A")
+    u = await _make_user(db, ctx, "cl", f"cl.{ctx.sfx}@example.com")
+    await _give_empid(db, ctx, u, store, 5)
+    await db.commit()
+
+    r = await svc.commit(db, ctx.org_id, [(u, store, None)])
+    assert len(r.applied) == 1 and r.applied[0]["empid"] is None
+    assert not r.renumbered and not r.rejected
+    assert (await _empids_in_store(db, store))[u] is None  # 행 유지, 번호만 해제
+
+    # 재실행 — nothing to clear 로 스킵 (멱등)
+    r2 = await svc.commit(db, ctx.org_id, [(u, store, None)])
+    assert not r2.applied
+    assert len(r2.skipped) == 1 and r2.skipped[0]["reason"] == "nothing to clear"
+
+
+# ---------------------------------------------------------------------------
+# preview — (o) placeholder/deferred 행이 needs_user 로 등록 가능해짐
+# ---------------------------------------------------------------------------
+
+
+async def test_preview_needs_user_for_placeholder_and_deferred(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    store = await _make_store(db, ctx, "A")
+    # 이름 유사 매칭 대상 유저 (파일과 이메일은 다름)
+    await _make_user(db, ctx, "sim", f"sim.{ctx.sfx}@example.com")
+    await db.commit()
+
+    company = f"IMPTEST STORE A {ctx.sfx}"
+    content = _xlsx([
+        # 공유 이메일(서로 다른 두 사람) → placeholder, 행별 needs_user
+        [company, None, "PERSON ONE", "11", f"shared.{ctx.sfx}@example.com"],
+        [company, None, "OTHER TWO", "12", f"shared.{ctx.sfx}@example.com"],
+        # DB 에 없는 이메일 → deferred, needs_user + similar_users 구조화
+        [company, None, "Imp Test sim", "13", f"nobody.{ctx.sfx}@example.com"],
+    ])
+    res = await svc.preview(db, ctx.org_id, content, "list.xlsx")
+
+    assert len(res.placeholder) == 1
+    ph = res.placeholder[0]
+    assert len(ph.entries) == 2
+    assert all(e.action == "needs_user" for e in ph.entries)
+    assert {e.person_name for e in ph.entries} == {"PERSON ONE", "OTHER TWO"}
+    assert all(e.store_id == str(store) and e.emp_id in (11, 12) for e in ph.entries)
+
+    assert len(res.deferred) == 1
+    df = res.deferred[0]
+    assert df.entries[0].action == "needs_user" and df.entries[0].emp_id == 13
+    # 이름 유사 유저가 구조화 후보로 제공됨 (picker 프리필용)
+    assert any(su["full_name"] == "Imp Test sim" for su in df.similar_users)
+
+    assert res.counts()["needs_user"] == 3
+
+
+# ---------------------------------------------------------------------------
+# roster — (p) 매장별 배정·empid 현황 (empid 오름차순, 없는 사람 뒤)
+# ---------------------------------------------------------------------------
+
+
+async def test_roster_lists_store_members_sorted(db: AsyncSession, ctx: Ctx) -> None:
+    store = await _make_store(db, ctx, "A")
+    u1 = await _make_user(db, ctx, "r1", f"r1.{ctx.sfx}@example.com")
+    u2 = await _make_user(db, ctx, "r2", f"r2.{ctx.sfx}@example.com")
+    u3 = await _make_user(db, ctx, "r3", f"r3.{ctx.sfx}@example.com")
+    await _give_empid(db, ctx, u1, store, 7)
+    await _give_empid(db, ctx, u2, store, 3)
+    # u3 는 배정만, 번호 없음
+    db.add(OrgMemberStore(org_member_id=await _member_id(db, ctx, u3), store_id=store))
+    await db.commit()
+
+    rows = await svc.roster(db, ctx.org_id)
+    mine = next(r for r in rows if r["store_id"] == str(store))
+    empids = [m["empid"] for m in mine["members"]]
+    assert empids == [3, 7, None]  # 오름차순 + 번호 없는 사람 마지막
+    assert {m["user_id"] for m in mine["members"]} == {str(u1), str(u2), str(u3)}

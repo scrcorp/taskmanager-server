@@ -47,6 +47,7 @@ ACTION_REBIND = "rebind"                  # 값이 다름 → 재기입 후보 (
 ACTION_NEW_ASSIGNMENT = "new_assignment"  # 매장 배정 행 없음 → 배정 생성 + 번호 등록
 ACTION_UNMATCHED_STORE = "unmatched_store"  # COMPANY 를 org 매장으로 못 찾음 → 생략(리포트)
 ACTION_INVALID = "invalid"                # emp_id 정수화 실패 / org_member 없음 등
+ACTION_NEEDS_USER = "needs_user"          # 매장·번호 유효하나 유저 미확정 → 운영자가 직접 선택해 등록
 
 
 def _norm_key(value: str | None) -> str:
@@ -102,6 +103,7 @@ class ImportEntry:
     action: str                # ACTION_* 값
     warning: str | None = None  # 그룹 스코프 충돌 등 경고 (블록 아님)
     dormant: bool = False      # 휴면 배정(is_work_assignment=False) 여부 — 번호만 쓰고 재활성화 안 함
+    person_name: str | None = None  # 파일 행의 인물 이름 — placeholder(공유 이메일)에서 행별 picker 라벨
 
 
 @dataclass
@@ -114,8 +116,10 @@ class PersonRow:
     user_full_name: str | None
     entries: list[ImportEntry] = field(default_factory=list)
     note: str = ""
-    similar: list[str] = field(default_factory=list)  # deferred 이름 유사 힌트
-    members: list[str] = field(default_factory=list)  # placeholder — 파일 내 인물 나열
+    similar: list[str] = field(default_factory=list)  # deferred 이름 유사 힌트 (표시용)
+    members: list[str] = field(default_factory=list)  # placeholder — 파일 내 인물 나열 (표시용)
+    # 유저 picker 기본값 후보 — 이름 유사 DB 유저 (구조화, 콘솔 select 프리필용)
+    similar_users: list[dict] = field(default_factory=list)  # {user_id, full_name, email}
 
 
 @dataclass
@@ -130,6 +134,12 @@ class ImportPreview:
 
     def counts(self) -> dict[str, int]:
         entry_actions = [e.action for p in self.people for e in p.entries]
+        # placeholder/deferred 의 needs_user 도 집계 — 운영자가 유저를 골라 등록 가능한 건수
+        pickable = [
+            e.action
+            for p in list(self.placeholder) + list(self.deferred)
+            for e in p.entries
+        ]
         return {
             "people": len(self.people),
             "same": entry_actions.count(ACTION_SAME),
@@ -137,6 +147,7 @@ class ImportPreview:
             "new_assignment": entry_actions.count(ACTION_NEW_ASSIGNMENT),
             "unmatched_store": entry_actions.count(ACTION_UNMATCHED_STORE),
             "invalid": entry_actions.count(ACTION_INVALID),
+            "needs_user": pickable.count(ACTION_NEEDS_USER),
             "placeholder": len(self.placeholder),
             "deferred": len(self.deferred),
             "excluded_rows": self.excluded_rows,
@@ -218,21 +229,35 @@ async def preview(
         if toks:
             name_index.append((toks, u))
 
-    def _similar(name: str) -> list[str]:
+    def _similar_users(name: str) -> list:
         toks = _name_tokens(name)
         if not toks:
             return []
-        out = []
-        for u_toks, u in name_index:
-            if _name_similar(toks, u_toks):
-                out.append(f"{getattr(u, 'full_name', '')} <{getattr(u, 'email', None) or '-'}>")
-        return out[:5]
+        return [u for u_toks, u in name_index if _name_similar(toks, u_toks)][:5]
 
-    # 이메일 없는 행 → deferred
+    def _similar(name: str) -> list[str]:
+        return [
+            f"{getattr(u, 'full_name', '')} <{getattr(u, 'email', None) or '-'}>"
+            for u in _similar_users(name)
+        ]
+
+    def _similar_structured(name: str) -> list[dict]:
+        """유저 picker 프리필용 — {user_id, full_name, email}."""
+        return [
+            {
+                "user_id": str(u.id),
+                "full_name": getattr(u, "full_name", ""),
+                "email": getattr(u, "email", None),
+            }
+            for u in _similar_users(name)
+        ]
+
+    # 이메일 없는 행 → deferred (유저 선택으로 등록 가능 — needs_user)
     for r in (row for row in emp_rows if not row.email):
         result.deferred.append(PersonRow(
             email=None, name=r.name, user_id=None, user_full_name=None,
             note="no email", similar=_similar(r.name),
+            similar_users=_similar_structured(r.name),
             entries=[_build_entry(r, store_index, None, None, {})],
         ))
 
@@ -247,14 +272,16 @@ async def preview(
         rep_name = rows[0].name
         db_users = users_by_email.get(email, [])
 
-        # 더미/공유 이메일 → 리포트만 (파일 내 인물+번호 나열)
+        # 더미/공유 이메일 → 행별로 유저를 골라 등록 가능 (needs_user). members 는 표시용 유지.
         if _is_placeholder_email(email) or not same_person:
             reason = ("internal email — shared placeholder" if _is_placeholder_email(email)
                       else "shared email — multiple people")
-            members = list(dict.fromkeys(f"{r.name} = {r.emp_id} ({r.company})" for r in rows))
+            unique_rows = list({(r.name, r.emp_id, r.company): r for r in rows}.values())
+            members = [f"{r.name} = {r.emp_id} ({r.company})" for r in unique_rows]
             result.placeholder.append(PersonRow(
                 email=email, name=rep_name, user_id=None, user_full_name=None,
                 note=reason, members=members,
+                entries=[_build_entry(r, store_index, None, None, {}) for r in unique_rows],
             ))
             continue
 
@@ -262,6 +289,7 @@ async def preview(
             result.deferred.append(PersonRow(
                 email=email, name=rep_name, user_id=None, user_full_name=None,
                 note="email present, no DB user", similar=_similar(rep_name),
+                similar_users=_similar_structured(rep_name),
                 entries=[_build_entry(r, store_index, None, None, {}) for r in rows],
             ))
             continue
@@ -326,20 +354,21 @@ def _build_entry(
             store_id=None, store_name=None, company=r.company,
             emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=None,
             has_assignment=False, action=ACTION_UNMATCHED_STORE,
-            warning="no matching store in this org",
+            warning="no matching store in this org", person_name=r.name,
         )
     if emp_int is None:
         return ImportEntry(
             store_id=str(store.id), store_name=store.name, company=r.company,
             emp_id_raw=r.emp_id, emp_id=None, current_empid=None,
             has_assignment=False, action=ACTION_INVALID,
-            warning="emp_id is not a positive integer",
+            warning="emp_id is not a positive integer", person_name=r.name,
         )
     if member_id is None:
+        # 매장·번호는 유효, 유저만 미확정 — 운영자가 picker 로 유저를 골라 등록 가능.
         return ImportEntry(
             store_id=str(store.id), store_name=store.name, company=r.company,
             emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=None,
-            has_assignment=False, action=ACTION_INVALID,
+            has_assignment=False, action=ACTION_NEEDS_USER, person_name=r.name,
         )
     key = (member_id, store.id)
     has_row = key in empid_map
@@ -364,6 +393,60 @@ def _build_entry(
     )
 
 
+async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
+    """매장별 배정·empid 현황 — 파일 없이 직접 편집하는 bulk 에디터용.
+
+    live 매장(sort_order 순)별로 배정 인원과 현재 empid 를 나열한다.
+    """
+    from app.models.user import User
+
+    stores = await store_repository.get_by_org(db, organization_id, include_closed=False)
+    if not stores:
+        return []
+    store_ids = [s.id for s in stores]
+    rows = (
+        await db.execute(
+            select(
+                OrgMemberStore.store_id,
+                OrgMemberStore.empid,
+                OrgMemberStore.is_work_assignment,
+                OrgMemberStore.is_manager,
+                OrgMember.user_id,
+                User.full_name,
+                User.email,
+            )
+            .join(OrgMember, OrgMember.id == OrgMemberStore.org_member_id)
+            .join(User, User.id == OrgMember.user_id)
+            .where(
+                OrgMemberStore.store_id.in_(store_ids),
+                OrgMember.organization_id == organization_id,
+            )
+        )
+    ).all()
+    by_store: dict[UUID, list[dict]] = {}
+    for r in rows:
+        by_store.setdefault(r.store_id, []).append({
+            "user_id": str(r.user_id),
+            "full_name": r.full_name,
+            "email": r.email,
+            "empid": r.empid,
+            "is_work_assignment": r.is_work_assignment,
+            "is_manager": r.is_manager,
+        })
+    out: list[dict] = []
+    for s in stores:
+        members = by_store.get(s.id, [])
+        # empid 오름차순 (없는 사람은 뒤), 그 다음 이름순
+        members.sort(key=lambda m: (m["empid"] is None, m["empid"] or 0, m["full_name"] or ""))
+        out.append({
+            "store_id": str(s.id),
+            "store_name": s.name,
+            "group_id": str(s.group_id) if s.group_id else None,
+            "members": members,
+        })
+    return out
+
+
 @dataclass
 class CommitResult:
     """commit 결과 — 반영/재채번/스킵/거절 내역."""
@@ -377,10 +460,11 @@ class CommitResult:
 async def commit(
     db: AsyncSession,
     organization_id: UUID,
-    assignments: list[tuple[UUID, UUID, int]],  # (user_id, store_id, empid)
+    assignments: list[tuple[UUID, UUID, int | None]],  # (user_id, store_id, empid|None=번호 삭제)
 ) -> CommitResult:
     """확정 — 매장 단위 3-phase 로 empid 재기입. 단일 트랜잭션, 멱등.
 
+    empid=None 은 번호 삭제(비우기) — 배정 행은 유지, 번호만 해제되어 재사용 가능.
     users.employee_no 는 기록하지 않는다 (폐기 방향).
     """
     result = CommitResult()
@@ -395,10 +479,17 @@ async def commit(
     for u in await user_repository.get_by_org(db, organization_id):
         user_names[u.id] = u.full_name
 
+    def _label(member_id: UUID, store_id: UUID) -> tuple[str, str]:
+        user_id = member_user.get(member_id)
+        return (
+            user_names.get(user_id, str(user_id)) if user_id else str(member_id),
+            store_by_id[store_id].name,
+        )
+
     # 매장별 mapping 구성 — {store_id: {org_member_id: empid}}.
     # claims 는 매장별 역맵(empid→member) — 같은 매장에 같은 번호를 두 사람이 요청하면
     # 현재 보유자를 우선하고 나머지는 거절한다 (전체 롤백/무단 재채번 방지).
-    per_store: dict[UUID, dict[UUID, int]] = {}
+    per_store: dict[UUID, dict[UUID, int | None]] = {}
     claims: dict[UUID, dict[int, UUID]] = {}
     for user_id, store_id, empid in assignments:
         if store_id not in store_by_id:
@@ -410,7 +501,7 @@ async def commit(
             result.rejected.append({"user_id": str(user_id), "store_id": str(store_id),
                                     "reason": "no org membership"})
             continue
-        if empid < 1:
+        if empid is not None and empid < 1:
             result.rejected.append({"user_id": str(user_id), "store_id": str(store_id),
                                     "reason": "empid must be >= 1"})
             continue
@@ -419,6 +510,15 @@ async def commit(
         if member_id in mapping and mapping[member_id] != empid:
             result.rejected.append({"user_id": str(user_id), "store_id": str(store_id),
                                     "reason": "conflicting values for the same store in request"})
+            continue
+        if empid is None:
+            # 번호 삭제 — 값 충돌 검사 대상 아님. 배정 행이 없으면 할 일 없음(스킵).
+            if (member_id, store_id) not in empid_map or empid_map[(member_id, store_id)] is None:
+                name, store_name = _label(member_id, store_id)
+                result.skipped.append({"user": name, "store": store_name,
+                                       "empid": None, "reason": "nothing to clear"})
+                continue
+            mapping[member_id] = None
             continue
         other = store_claims.get(empid)
         if other is not None and other != member_id:
@@ -437,13 +537,6 @@ async def commit(
                 continue
         store_claims[empid] = member_id
         mapping[member_id] = empid
-
-    def _label(member_id: UUID, store_id: UUID) -> tuple[str, str]:
-        user_id = member_user.get(member_id)
-        return (
-            user_names.get(user_id, str(user_id)) if user_id else str(member_id),
-            store_by_id[store_id].name,
-        )
 
     try:
         # Pass 1 — 매장별: 멱등 스킵 → 스코프 락 → 비우기 → 기입. 재채번은 미룬다.
@@ -470,7 +563,8 @@ async def commit(
                 )
             ).scalars().all()
             by_member = {row.org_member_id: row for row in rows}
-            wanted_values = set(mapping.values())
+            # None(번호 삭제)은 값 충돌 대상 아님
+            wanted_values = {v for v in mapping.values() if v is not None}
 
             # phase 1 — 비우기: 대상 행 + 원하는 값을 점유 중인 행의 empid 를 NULL 로.
             cleared: list[OrgMemberStore] = []
