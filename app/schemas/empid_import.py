@@ -1,0 +1,70 @@
+"""EMPID 임포트 Pydantic 스키마 — preview/commit 요청·응답.
+
+EMPID import request/response schemas for the console bulk tab
+(/users/bulk/empid). Writes org_member_stores.empid only —
+users.employee_no is deprecated and untouched.
+"""
+
+from pydantic import BaseModel, Field
+
+
+class EmpidImportEntry(BaseModel):
+    """사람×매장 1건 — preview 행."""
+
+    store_id: str | None = None       # 매칭된 매장 UUID (null = unmatched)
+    store_name: str | None = None     # 매칭된 매장 이름
+    company: str                      # 파일 COMPANY 원문
+    emp_id_raw: str                   # 파일 emp_id 원문 (선행 0 보존)
+    emp_id: int | None = None         # 정수 정규화 값 (null = invalid)
+    current_empid: int | None = None  # 현재 org_member_stores.empid
+    has_assignment: bool = False      # 매장 배정 행 존재 여부
+    action: str                       # same|rebind|new_assignment|unmatched_store|invalid
+    warning: str | None = None        # 경고 (그룹 스코프 충돌 등 — 블록 아님)
+    dormant: bool = False             # 휴면 배정 — 번호만 기록되고 재활성화되지 않음
+
+
+class EmpidImportPerson(BaseModel):
+    """사람 1명 — preview 그룹."""
+
+    email: str | None = None
+    name: str
+    user_id: str | None = None
+    user_full_name: str | None = None
+    entries: list[EmpidImportEntry] = []
+    note: str = ""
+    similar: list[str] = []   # deferred — 이름 유사 DB 유저 힌트
+    members: list[str] = []   # placeholder — 파일 내 인물 나열
+
+
+class EmpidImportPreviewResponse(BaseModel):
+    """preview 응답 — 버킷별 사람 목록 + 카운트."""
+
+    people: list[EmpidImportPerson] = []       # user 매칭 성공 (액션 가능)
+    placeholder: list[EmpidImportPerson] = []  # 더미/공유 이메일 (리포트)
+    deferred: list[EmpidImportPerson] = []     # DB 미매칭 (리포트)
+    counts: dict[str, int] = {}
+    excluded_rows: int = 0
+    total_rows: int = 0
+
+
+class EmpidImportCommitItem(BaseModel):
+    """commit 1건 — (user, store) 에 empid 기입."""
+
+    user_id: str
+    store_id: str
+    empid: int = Field(ge=1)
+
+
+class EmpidImportCommitRequest(BaseModel):
+    """commit 요청 — 운영자가 체크한 (user, store, empid) 목록."""
+
+    assignments: list[EmpidImportCommitItem]
+
+
+class EmpidImportCommitResponse(BaseModel):
+    """commit 응답 — 반영/재채번/스킵/거절 내역."""
+
+    applied: list[dict] = []      # {user, store, empid, created}
+    renumbered: list[dict] = []   # {user, store, old, new} — 번호를 뺏긴 기존 인원 재채번
+    skipped: list[dict] = []      # {user, store, empid, reason}
+    rejected: list[dict] = []     # {user_id, store_id, reason}

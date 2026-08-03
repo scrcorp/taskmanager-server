@@ -20,7 +20,7 @@ Modules:
     daily_report: 일일 보고서 템플릿, 보고서, 섹션, 코멘트 (Daily report templates, reports, sections, comments)
 """
 
-from app.models.organization import Organization, Store, ShiftPreset, LaborLawSetting
+from app.models.organization import Organization, Store, StoreGroup, ShiftPreset, LaborLawSetting
 from app.models.user import Role, User
 from app.models.org_member import OrgMember, OrgMemberStore
 from app.models.platform_admin import PlatformAdmin

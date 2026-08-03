@@ -78,6 +78,19 @@ class StoreService:
                 code="store_closed",
             )
 
+    async def _validate_group_org(
+        self, db: AsyncSession, group_id: UUID, organization_id: UUID
+    ) -> None:
+        """group_id 가 이 org 소속인지 검증 — 타 org 그룹 배정 차단 (404, 존재 누설 방지)."""
+        from sqlalchemy import select
+        from app.models.organization import StoreGroup
+
+        org = await db.scalar(
+            select(StoreGroup.organization_id).where(StoreGroup.id == group_id)
+        )
+        if org is None or org != organization_id:
+            raise NotFoundError("Store group not found")
+
     @staticmethod
     def _base_fields(store: Store) -> dict:
         """Store 모델 → 응답 공통 필드 dict.
@@ -104,6 +117,8 @@ class StoreService:
             "timezone": store.timezone,
             "default_hourly_rate": float(store.default_hourly_rate) if store.default_hourly_rate is not None else None,
             "accepting_signups": store.accepting_signups,
+            "group_id": str(store.group_id) if store.group_id else None,
+            "number_range_start": store.number_range_start,
             "created_at": store.created_at,
         }
 
@@ -231,6 +246,11 @@ class StoreService:
             create_data["timezone"] = data.timezone
         if data.default_hourly_rate is not None:
             create_data["default_hourly_rate"] = data.default_hourly_rate
+        if data.group_id is not None:
+            await self._validate_group_org(db, data.group_id, organization_id)
+            create_data["group_id"] = data.group_id
+        if data.number_range_start is not None:
+            create_data["number_range_start"] = data.number_range_start
         try:
             store: Store = await store_repository.create(db, create_data)
             # 매장 생성 즉시 v0 (DEFAULT_FORM_CONFIG) published row 자동 삽입.
@@ -313,6 +333,17 @@ class StoreService:
                 update_data["deleted_at"] = datetime.now(_tz.utc)
             else:
                 update_data["deleted_at"] = None
+        # group_id: 명시적 null=그룹 해제 허용, 값이 있으면 org 소속 검증 + str→UUID.
+        group_changed: bool = False
+        if "group_id" in update_data:
+            # model_dump(python 모드)가 UUID 객체를 그대로 주므로 수동 변환 불필요 (잘못된 값은 422).
+            if update_data["group_id"] is not None:
+                await self._validate_group_org(db, update_data["group_id"], organization_id)
+            from sqlalchemy import select as _select
+            old_group = await db.scalar(
+                _select(Store.group_id).where(Store.id == store_id)
+            )
+            group_changed = old_group != update_data["group_id"]
         try:
             store: Store | None = await store_repository.update(
                 db, store_id, update_data, organization_id
@@ -320,7 +351,16 @@ class StoreService:
             if store is None:
                 raise NotFoundError("Store not found")
             await db.commit()
-            return self._to_response(store)
+            response = self._to_response(store)
+            # 그룹 편성 직후 공유 스코프 내 기존 empid 중복 경고 (블록하지 않음 — 정책 A).
+            if group_changed and store.group_id is not None:
+                from app.services.org_numbering import (
+                    duplicate_empids_in_scope,
+                    empid_scope_store_ids,
+                )
+                scope = await empid_scope_store_ids(db, store.id)
+                response.duplicate_empids = await duplicate_empids_in_scope(db, scope)
+            return response
         except Exception:
             await db.rollback()
             raise
