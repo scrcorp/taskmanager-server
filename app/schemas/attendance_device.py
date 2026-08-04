@@ -253,11 +253,42 @@ class ManageSessionRequest(BaseModel):
 
 
 class ManageSessionResponse(BaseModel):
-    """admin session 발급 결과."""
+    """admin session 발급 결과.
+
+    `can_*_pins` 는 UI 게이팅용. manage 모드 진입 문턱(SV+)보다 PIN 문턱(GM+ 기본)이
+    높아서, 세션이 있다는 것만으로 PIN 메뉴를 열면 안 된다. 서버도 매 요청마다
+    다시 검사하므로 이 플래그는 표시 여부만 결정한다.
+    """
     manage_token: str
     manager_user_id: UUID
     manager_name: str
     expires_at: datetime
+    can_read_pins: bool = False
+    can_update_pins: bool = False
+
+
+# ── Kiosk 관리자 모드 — 직원 PIN 관리 ──────────────────────
+
+
+class ManageStaffPinRow(BaseModel):
+    """PIN 목록의 직원 1명. **평문 PIN 을 담지 않는다** (reveal 로만 노출)."""
+    user_id: UUID
+    full_name: str
+    employee_no: str | None = None
+    role_name: str | None = None
+    has_pin: bool
+    works_today: bool
+
+
+class ManageStaffPinRevealResponse(BaseModel):
+    """평문 PIN 1건 — 이 응답이 나갈 때마다 감사 로그가 남는다."""
+    user_id: UUID
+    clockin_pin: str | None
+
+
+class ManageStaffPinUpdateRequest(BaseModel):
+    """매니저가 직원 PIN 을 직접 지정. 4~6자리 숫자."""
+    clockin_pin: str = Field(..., pattern=r"^\d{4,6}$")
 
 
 class ManageScheduleRow(BaseModel):

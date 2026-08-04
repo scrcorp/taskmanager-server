@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -37,6 +37,9 @@ from app.schemas.attendance_device import (
     ManageScheduleUpdateRequest,
     ManageSessionRequest,
     ManageSessionResponse,
+    ManageStaffPinRevealResponse,
+    ManageStaffPinRow,
+    ManageStaffPinUpdateRequest,
     AdminStatusChangeRequest,
     ManageWorkRoleOption,
 )
@@ -91,11 +94,19 @@ async def manage_open_session(
         organization_id=device.organization_id,
         store_id=device.store_id,
     )
+    # PIN 메뉴 노출 여부 — manage 진입(SV+)과 별개로 GM+ 기본인 clockin_pin permission 검사.
+    from app.api.deps import user_has_permissions
+
+    can_read_pins = await user_has_permissions(db, manager, "clockin_pin:read")
+    can_update_pins = await user_has_permissions(db, manager, "clockin_pin:update")
+
     return ManageSessionResponse(
         manage_token=session.token,
         manager_user_id=manager.id,
         manager_name=manager.full_name or manager.username,
         expires_at=session.expires_at,
+        can_read_pins=can_read_pins,
+        can_update_pins=can_update_pins,
     )
 
 
@@ -987,3 +998,235 @@ async def _manage_cancel_clock_out(
     return response
 
 
+
+# ── 직원 PIN 관리 (Staff PINs) ─────────────────────────────
+#
+# manage 세션 진입 문턱은 SV+ 인데 PIN 문턱은 GM+ 기본(`clockin_pin:*`).
+# 세션 토큰만으로 열면 SV 가 부하 직원 PIN 을 전부 보게 되므로, 매 요청마다
+# 세션의 manager 로 permission 을 다시 검사한다. 대상 직원은 반드시
+# **이 기기의 매장에 배정된 사람**이어야 한다 — 이 스코프 검사가 빠지면
+# org 전체 PIN 이 키오스크에서 열린다.
+
+
+async def _require_pin_permission(
+    db: AsyncSession, manager: User, *codes: str
+) -> None:
+    """manage 세션 매니저가 PIN permission 을 가졌는지 검사."""
+    from app.api.deps import user_has_permissions
+
+    if not await user_has_permissions(db, manager, *codes):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission required: {codes[0]}",
+        )
+
+
+async def _load_store_staff(
+    db: AsyncSession, device: AttendanceDevice, user_id: uuid.UUID
+) -> User:
+    """이 기기 매장에 배정된 직원 1명 로드. 아니면 404 (존재 여부 노출 안 함)."""
+    result = await db.execute(
+        select(User)
+        .join(UserStore, UserStore.user_id == User.id)
+        .where(
+            User.id == user_id,
+            User.organization_id == device.organization_id,
+            UserStore.store_id == device.store_id,
+            User.is_active.is_(True),
+            User.deleted_at.is_(None),
+        )
+        .limit(1)
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="Employee not found in this store")
+    return user
+
+
+@router.get("/manage/staff-pins", response_model=list[ManageStaffPinRow])
+async def manage_list_staff_pins(
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    q: str | None = None,
+) -> list[ManageStaffPinRow]:
+    """이 매장 직원 목록 — 오늘 근무자 우선, 그다음 이름순.
+
+    평문 PIN 은 담지 않는다(`has_pin` 만). 평문은 reveal 엔드포인트로만 나가고
+    그때 감사 로그가 남는다.
+    """
+    from datetime import datetime as _dt2, timezone as _tz2
+    from app.models.schedule import Schedule
+    from app.utils.timezone import get_store_day_config, get_work_date
+
+    device, _session, manager = auth
+    await _require_pin_permission(db, manager, "clockin_pin:read")
+
+    store_tz, day_start = await get_store_day_config(db, device.store_id)
+    today = get_work_date(store_tz, day_start, _dt2.now(_tz2.utc))
+
+    # 오늘 이 매장에 살아있는 스케줄이 있는 user 집합 — 정렬 키로만 쓴다(필터 아님).
+    today_rows = await db.execute(
+        select(Schedule.user_id).where(
+            Schedule.store_id == device.store_id,
+            Schedule.operating_day == today,
+            Schedule.status.in_(("draft", "requested", "confirmed")),
+        )
+    )
+    works_today_ids = {r for (r,) in today_rows.all()}
+
+    stmt = (
+        select(User, Role)
+        .join(Role, User.role_id == Role.id)
+        .join(UserStore, UserStore.user_id == User.id)
+        .where(
+            UserStore.store_id == device.store_id,
+            User.organization_id == device.organization_id,
+            User.is_active.is_(True),
+            User.deleted_at.is_(None),
+        )
+    )
+    if q:
+        term = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                User.full_name.ilike(term),
+                User.username.ilike(term),
+                User.employee_no.ilike(term),
+            )
+        )
+    rows = (await db.execute(stmt)).all()
+
+    items = [
+        ManageStaffPinRow(
+            user_id=u.id,
+            full_name=u.full_name or u.username,
+            employee_no=u.employee_no,
+            role_name=r.name if r else None,
+            has_pin=u.clockin_pin is not None,
+            works_today=u.id in works_today_ids,
+        )
+        for u, r in rows
+    ]
+    # 오늘 근무자 우선 → 이름순
+    items.sort(key=lambda i: (not i.works_today, i.full_name.lower()))
+    return items
+
+
+@router.get(
+    "/manage/staff-pins/{user_id}/reveal",
+    response_model=ManageStaffPinRevealResponse,
+)
+async def manage_reveal_staff_pin(
+    user_id: uuid.UUID,
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ManageStaffPinRevealResponse:
+    """평문 PIN 1건 + 감사 기록. 목록이 아니라 여기서만 평문이 나간다."""
+    from app.models.clockin_pin_audit import PIN_AUDIT_REVEAL
+    from app.repositories.clockin_pin_audit_repository import (
+        clockin_pin_audit_repository,
+    )
+
+    device, session_obj, manager = auth
+    await _require_pin_permission(db, manager, "clockin_pin:read")
+    target = await _load_store_staff(db, device, user_id)
+
+    await clockin_pin_audit_repository.record(
+        db,
+        organization_id=device.organization_id,
+        actor_user_id=manager.id,
+        target_user_id=target.id,
+        action=PIN_AUDIT_REVEAL,
+        device_id=device.id,
+        store_id=session_obj.store_id,
+        meta={"source": "kiosk_manage"},
+    )
+    await db.commit()
+    return ManageStaffPinRevealResponse(
+        user_id=target.id, clockin_pin=target.clockin_pin
+    )
+
+
+@router.patch(
+    "/manage/staff-pins/{user_id}", response_model=ManageStaffPinRevealResponse
+)
+async def manage_update_staff_pin(
+    user_id: uuid.UUID,
+    data: ManageStaffPinUpdateRequest,
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ManageStaffPinRevealResponse:
+    """직원 PIN 을 직접 지정 (4~6자리). 중복·prefix 충돌 시 409."""
+    from app.models.clockin_pin_audit import PIN_AUDIT_UPDATE
+    from app.repositories.clockin_pin_audit_repository import (
+        clockin_pin_audit_repository,
+    )
+    from app.services.attendance_device_service import (
+        assert_no_pin_prefix_conflict,
+        commit_pin_or_409,
+    )
+
+    device, session_obj, manager = auth
+    await _require_pin_permission(db, manager, "clockin_pin:update")
+    target = await _load_store_staff(db, device, user_id)
+
+    await assert_no_pin_prefix_conflict(
+        db, device.organization_id, data.clockin_pin, exclude_user_id=target.id
+    )
+    target.clockin_pin = data.clockin_pin
+    await clockin_pin_audit_repository.record(
+        db,
+        organization_id=device.organization_id,
+        actor_user_id=manager.id,
+        target_user_id=target.id,
+        action=PIN_AUDIT_UPDATE,
+        device_id=device.id,
+        store_id=session_obj.store_id,
+        meta={"pin_length": len(data.clockin_pin), "source": "kiosk_manage"},
+    )
+    await commit_pin_or_409(db)
+    return ManageStaffPinRevealResponse(
+        user_id=target.id, clockin_pin=target.clockin_pin
+    )
+
+
+@router.post(
+    "/manage/staff-pins/{user_id}/regenerate",
+    response_model=ManageStaffPinRevealResponse,
+)
+async def manage_regenerate_staff_pin(
+    user_id: uuid.UUID,
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ManageStaffPinRevealResponse:
+    """직원 PIN 랜덤 재발급 (6자리). 새 PIN 을 그대로 반환해 바로 안내 가능."""
+    from app.models.clockin_pin_audit import PIN_AUDIT_REGENERATE
+    from app.repositories.clockin_pin_audit_repository import (
+        clockin_pin_audit_repository,
+    )
+    from app.services.attendance_device_service import (
+        commit_pin_or_409,
+        generate_unique_clockin_pin,
+    )
+
+    device, session_obj, manager = auth
+    await _require_pin_permission(db, manager, "clockin_pin:update")
+    target = await _load_store_staff(db, device, user_id)
+
+    target.clockin_pin = await generate_unique_clockin_pin(
+        db, device.organization_id, exclude_user_id=target.id
+    )
+    await clockin_pin_audit_repository.record(
+        db,
+        organization_id=device.organization_id,
+        actor_user_id=manager.id,
+        target_user_id=target.id,
+        action=PIN_AUDIT_REGENERATE,
+        device_id=device.id,
+        store_id=session_obj.store_id,
+        meta={"pin_length": len(target.clockin_pin), "source": "kiosk_manage"},
+    )
+    await commit_pin_or_409(db)
+    return ManageStaffPinRevealResponse(
+        user_id=target.id, clockin_pin=target.clockin_pin
+    )

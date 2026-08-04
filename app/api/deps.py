@@ -254,6 +254,25 @@ async def get_user_permissions(db: AsyncSession, role_id: UUID) -> set[str]:
     return await permission_repository.get_permissions_by_role_id(db, role_id)
 
 
+async def user_has_permissions(
+    db: AsyncSession, user: User, *permission_codes: str
+) -> bool:
+    """user 가 지정된 permission code 를 **모두** 가졌는지 판정.
+
+    `require_permission()` 과 동일한 규칙(super_owner 통과 / owner bypass)을 쓰되
+    Depends 체인 밖에서도 호출할 수 있다. attendance manage session 처럼
+    JWT 가 아닌 경로로 인증된 매니저의 권한을 검사할 때 필요.
+    """
+    # Super Owner 는 항상 통과 (모든 권한 보유).
+    if is_super_owner(user):
+        return True
+    # Owner 는 super_owner 전용 permission 이 아닌 경우에만 bypass.
+    if is_owner(user) and not any(c in SUPER_OWNER_ONLY for c in permission_codes):
+        return True
+    user_perms = await get_user_permissions(db, user.role_id)
+    return all(code in user_perms for code in permission_codes)
+
+
 def require_permission(*permission_codes: str) -> Callable[..., Awaitable[User]]:
     """Permission 기반 권한 검사 의존성 팩토리.
 

@@ -536,10 +536,14 @@ class AuthService:
 
         # 사용자 생성 — Create user (email_verified=True since token was validated)
         # Attendance device 용 clockin_pin 자동 발급
-        from app.services.attendance_device_service import generate_clockin_pin
+        from app.services.attendance_device_service import (
+            generate_unique_clockin_pin,
+        )
 
         password_hash: str = hash_password(data.password)
-        clockin_pin = generate_clockin_pin()
+        # prefix 충돌 회피 — 기존 4자리 PIN 을 앞에 두는 6자리가 뽑히면
+        # 그 사람으로 오인식될 수 있다.
+        clockin_pin = await generate_unique_clockin_pin(db, organization_id)
         user: User = User(
             organization_id=organization_id,
             role_id=staff_role.id,

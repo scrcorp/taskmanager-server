@@ -15,7 +15,7 @@ from datetime import date, datetime, timezone
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -81,6 +81,74 @@ def generate_clockin_pin() -> str:
     Bulk 케이스(마이그레이션 등) 에선 set 채우기 방식으로 사전 회피.
     """
     return f"{secrets.randbelow(1_000_000):06d}"
+
+
+async def generate_unique_clockin_pin(
+    db: AsyncSession,
+    organization_id: UUID,
+    exclude_user_id: UUID | None = None,
+    attempts: int = 10,
+) -> str:
+    """org 안에서 중복·prefix 충돌이 없는 6자리 PIN 생성.
+
+    `generate_clockin_pin()` 은 uniqueness 를 보장하지 않는데, 4~6자리 가변 도입 후엔
+    "기존 4자리 PIN 을 prefix 로 갖는 6자리" 가 뽑힐 수 있어 재시도가 필요하다.
+    (예: 기존 `1234` 가 있으면 `123456` 은 뽑으면 안 된다)
+
+    `attempts` 회 모두 실패하면 마지막 후보를 그대로 반환 — 최종 방어는
+    unique 제약(`commit_pin_or_409`) 이다. org 당 PIN 수를 감안하면 실제로는
+    1회차에 거의 끝난다.
+    """
+    from fastapi import HTTPException
+
+    pin = generate_clockin_pin()
+    for _ in range(attempts):
+        try:
+            await assert_no_pin_prefix_conflict(
+                db, organization_id, pin, exclude_user_id
+            )
+            return pin
+        except HTTPException:
+            pin = generate_clockin_pin()
+    return pin
+
+
+async def assert_no_pin_prefix_conflict(
+    db: AsyncSession,
+    organization_id: UUID,
+    pin: str,
+    exclude_user_id: UUID | None = None,
+) -> None:
+    """org 안에서 PIN prefix 충돌을 막는다. 충돌 시 409.
+
+    PIN 길이가 4~6 로 가변이라 `uq_user_org_clockin_pin`(정확 일치) 만으로는 부족하다.
+    A=`1234`, B=`123456` 이 공존하면 B 가 앞 4자리만 누르고 확인을 눌렀을 때 A 로 식별돼
+    **남의 이름으로 출퇴근이 찍힌다.** 그래서 다음 두 방향을 모두 거부한다.
+
+        - 신규 PIN 이 기존 PIN 의 prefix        (new=`1234`,   기존=`123456`)
+        - 기존 PIN 이 신규 PIN 의 prefix        (new=`123456`, 기존=`1234`)
+
+    정확히 같은 값도 이 조건에 걸리므로 중복 검사까지 겸한다(선 검사 → 친절한 409,
+    동시성으로 빠져나간 경우는 `commit_pin_or_409` 의 unique 위반이 최종 방어).
+    """
+    from fastapi import HTTPException, status
+
+    stmt = select(User.id).where(
+        User.organization_id == organization_id,
+        User.clockin_pin.isnot(None),
+        or_(
+            User.clockin_pin.startswith(pin),
+            literal(pin).startswith(User.clockin_pin),
+        ),
+    )
+    if exclude_user_id is not None:
+        stmt = stmt.where(User.id != exclude_user_id)
+
+    result = await db.execute(stmt.limit(1))
+    if result.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Not available"
+        )
 
 
 async def commit_pin_or_409(db: AsyncSession) -> None:
