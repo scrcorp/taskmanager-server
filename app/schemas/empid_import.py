@@ -36,6 +36,7 @@ class EmpidImportPerson(BaseModel):
     similar: list[str] = []   # deferred — 이름 유사 DB 유저 힌트 (표시용)
     members: list[str] = []   # placeholder — 파일 내 인물 나열 (표시용)
     similar_users: list[dict] = []  # 유저 picker 프리필 후보 {user_id, full_name, email}
+    matched_by: str | None = None   # "crewid" = 파일 CREWID 로 정확 매칭됨
 
 
 class EmpidImportPreviewResponse(BaseModel):
@@ -81,6 +82,7 @@ class EmpidRosterMember(BaseModel):
     empid: int | None = None
     is_work_assignment: bool = True
     is_manager: bool = False
+    crewid: int | None = None          # org 번호 (export crewid 컬럼 — 정확 매칭 키)
     role_name: str | None = None       # 역할 (owner/general_manager/supervisor/staff/커스텀)
     role_priority: int | None = None   # 정렬용 우선순위 (낮을수록 상위)
     department: str | None = None      # FOH/BOH (nullable)

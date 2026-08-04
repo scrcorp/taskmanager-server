@@ -578,6 +578,124 @@ async def test_template_export_filters(db: AsyncSession, ctx: Ctx) -> None:
     assert all((r[3] in (None, "")) and (r[4] in (None, "")) for r in rows)
 
 
+async def _set_crewid(db: AsyncSession, ctx: Ctx, user_id: UUID, crewid: int) -> None:
+    from app.models.org_member import OrgMember as _OM
+    member = (
+        await db.execute(
+            select(_OM).where(_OM.user_id == user_id, _OM.organization_id == ctx.org_id)
+        )
+    ).scalar_one()
+    member.crewid = crewid
+    await db.flush()
+
+
+def _xlsx6(rows: list[list]) -> bytes:
+    """crewid 컬럼 포함 6열 xlsx."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["COMPANY", "CORP_ABR_3", "Name", "emp_id", "Email", "crewid"])
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+async def test_crewid_exact_match_beats_email(db: AsyncSession, ctx: Ctx) -> None:
+    """CREWID 가 있으면 email/이름이 달라도 정확 매칭 (개별 가입 시나리오)."""
+    store = await _make_store(db, ctx, "A")
+    u = await _make_user(db, ctx, "cw", f"new.signup.{ctx.sfx}@gmail.com")  # 새로 가입한 이메일
+    await _set_crewid(db, ctx, u, 42)
+    await _give_empid(db, ctx, u, store, 3)
+    await db.commit()
+
+    company = f"IMPTEST STORE A {ctx.sfx}"
+    # 파일엔 레거시 이메일/다른 이름 — crewid 42 로만 매칭 가능
+    content = _xlsx6([
+        [company, None, "Legacy Name", "310", f"old.legacy.{ctx.sfx}@corp.example", "42"],
+    ])
+    res = await svc.preview(db, ctx.org_id, content, "list.xlsx")
+
+    assert not res.deferred and not res.placeholder
+    assert len(res.people) == 1
+    p = res.people[0]
+    assert p.matched_by == "crewid" and p.user_id == str(u)
+    e = p.entries[0]
+    assert e.action == ACTION_REBIND and e.current_empid == 3 and e.emp_id == 310
+    assert "matched by CREWID" in (e.warning or "")  # 이메일 상이 표기
+
+
+async def test_crewid_disambiguates_shared_email_and_no_email(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    """공유 이메일·무이메일 행도 CREWID 만 있으면 확정 매칭 — placeholder/deferred 로 안 빠짐."""
+    store = await _make_store(db, ctx, "A")
+    u1 = await _make_user(db, ctx, "sh1", f"sh1.{ctx.sfx}@example.com")
+    u2 = await _make_user(db, ctx, "sh2", f"sh2.{ctx.sfx}@example.com")
+    await _set_crewid(db, ctx, u1, 101)
+    await _set_crewid(db, ctx, u2, 102)
+    await db.commit()
+
+    company = f"IMPTEST STORE A {ctx.sfx}"
+    shared = f"shared.{ctx.sfx}@example.com"
+    content = _xlsx6([
+        # 서로 다른 두 사람이 같은 이메일 — 원래 placeholder 감이지만 crewid 로 각각 확정
+        [company, None, "PERSON ONE", "11", shared, "101"],
+        [company, None, "OTHER TWO", "12", shared, "102"],
+    ])
+    res = await svc.preview(db, ctx.org_id, content, "list.xlsx")
+    assert not res.placeholder
+    assert {p.user_id for p in res.people} == {str(u1), str(u2)}
+    assert all(p.matched_by == "crewid" for p in res.people)
+
+    # 무이메일 + crewid → deferred 아님
+    content2 = _xlsx6([[company, None, "No Mail", "13", None, "101"]])
+    res2 = await svc.preview(db, ctx.org_id, content2, "list.xlsx")
+    assert not res2.deferred and len(res2.people) == 1
+
+
+async def test_crewid_not_found_falls_back_to_email(db: AsyncSession, ctx: Ctx) -> None:
+    """CREWID 미해결이면 email 매칭 폴백 + 경고 표기."""
+    store = await _make_store(db, ctx, "A")
+    u = await _make_user(db, ctx, "fb", f"fb.{ctx.sfx}@example.com")
+    await _give_empid(db, ctx, u, store, 4)
+    await db.commit()
+
+    company = f"IMPTEST STORE A {ctx.sfx}"
+    content = _xlsx6([
+        [company, None, "Imp Test fb", "320", f"fb.{ctx.sfx}@example.com", "99999"],
+    ])
+    res = await svc.preview(db, ctx.org_id, content, "list.xlsx")
+    assert len(res.people) == 1
+    p = res.people[0]
+    assert p.matched_by is None and p.user_id == str(u)  # email 폴백
+    assert "not found" in (p.entries[0].warning or "")
+
+
+async def test_export_includes_crewid_column(db: AsyncSession, ctx: Ctx) -> None:
+    """export 6번째 컬럼에 crewid — 재업로드 시 정확 매칭 키가 된다."""
+    from openpyxl import load_workbook
+
+    store = await _make_store(db, ctx, "A")
+    u = await _make_user(db, ctx, "ex", f"ex.{ctx.sfx}@example.com")
+    await _set_crewid(db, ctx, u, 77)
+    await _give_empid(db, ctx, u, store, 5)
+    await db.commit()
+
+    content = await svc.build_selected_export_xlsx(db, ctx.org_id, [(u, store)])
+    ws = load_workbook(io.BytesIO(content)).worksheets[0]
+    header = [c.value for c in ws[1]]
+    assert header == ["COMPANY", "CORP_ABR_3", "Name", "emp_id", "Email", "crewid"]
+    row = [list(r) for r in ws.iter_rows(min_row=2, values_only=True)][0]
+    assert row[5] == 77
+
+    # 왕복: export 재업로드 → crewid 정확 매칭 + same
+    res = await svc.preview(db, ctx.org_id, content, "empid_export.xlsx")
+    mine = [p for p in res.people if p.user_id == str(u)]
+    assert len(mine) == 1 and mine[0].matched_by == "crewid"
+    assert mine[0].entries[0].action == ACTION_SAME
+
+
 async def test_selected_export_and_split_sheets(db: AsyncSession, ctx: Ctx) -> None:
     """사람 단위 선택 export — 선택된 (user,store)만 + split_by 시트 구분."""
     from openpyxl import load_workbook

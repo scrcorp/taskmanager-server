@@ -44,6 +44,7 @@ def _person_out(p: svc.PersonRow) -> EmpidImportPerson:
         similar=p.similar,
         members=p.members,
         similar_users=p.similar_users,
+        matched_by=p.matched_by,
     )
 
 

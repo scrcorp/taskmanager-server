@@ -121,6 +121,7 @@ class PersonRow:
     members: list[str] = field(default_factory=list)  # placeholder — 파일 내 인물 나열 (표시용)
     # 유저 picker 기본값 후보 — 이름 유사 DB 유저 (구조화, 콘솔 select 프리필용)
     similar_users: list[dict] = field(default_factory=list)  # {user_id, full_name, email}
+    matched_by: str | None = None  # "crewid" = 파일의 CREWID 로 정확 매칭 (email/이름 달라도 확정)
 
 
 @dataclass
@@ -259,17 +260,89 @@ async def preview(
             for u in _similar_users(name)
         ]
 
+    # ── CREWID 정확 매칭 (optional 컬럼) ────────────────────────────────
+    # 개별 가입이라 email/이름이 레거시와 다를 수 있음 — 파일에 CREWID(org 번호)가 있으면
+    # 그걸로 확정 매칭한다 (공유 이메일도 구분됨). 없거나 미매칭이면 email 파이프라인 폴백.
+    users_by_id = {u.id: u for u in users}
+    crew_rows = (
+        await db.execute(
+            select(OrgMember.user_id, OrgMember.id, OrgMember.crewid).where(
+                OrgMember.organization_id == organization_id,
+                OrgMember.crewid.isnot(None),
+            )
+        )
+    ).all()
+    member_by_crewid: dict[int, tuple[UUID, UUID]] = {
+        r.crewid: (r.user_id, r.id) for r in crew_rows
+    }
+
+    def _crewid_int(r: EmpRow) -> int | None:
+        if not r.crewid or not r.crewid.strip().isdigit():
+            return None
+        return int(r.crewid)
+
+    def _crewid_warn(r: EmpRow) -> str | None:
+        """email 폴백 행에 붙일 CREWID 미해결 경고 (해결된 행은 이 파이프라인에 없음)."""
+        if r.crewid is None:
+            return None
+        v = _crewid_int(r)
+        if v is None:
+            return f"CREWID '{r.crewid}' is not a number — matched by email instead"
+        return f"CREWID {v} not found in this org — matched by email instead"
+
+    crewid_persons: dict[str, PersonRow] = {}   # user_id(str) → PersonRow
+    person_seen: dict[str, set[tuple[str, str]]] = {}  # (company, emp_id) 중복 행 제거
+    leftover: list[EmpRow] = []
+    for r in emp_rows:
+        cid = _crewid_int(r)
+        resolved = member_by_crewid.get(cid) if cid is not None else None
+        user = users_by_id.get(resolved[0]) if resolved else None
+        if resolved is None or user is None:
+            leftover.append(r)
+            continue
+        user_id, member_id = resolved
+        key = str(user_id)
+        person = crewid_persons.get(key)
+        if person is None:
+            person = PersonRow(
+                email=_norm_email(getattr(user, "email", None)), name=r.name,
+                user_id=key, user_full_name=user.full_name,
+                matched_by="crewid", note=f"matched by CREWID {cid}",
+            )
+            crewid_persons[key] = person
+            person_seen[key] = set()
+            result.people.append(person)
+        pair = (r.company, r.emp_id)
+        if pair in person_seen[key]:
+            continue
+        person_seen[key].add(pair)
+        entry = _build_entry(r, store_index, member_id, user, empid_map, work_map)
+        if entry.store_id and entry.emp_id is not None:
+            others = await _scope_other_empids(UUID(entry.store_id))
+            if entry.emp_id in others:
+                entry.warning = "same number already used by another store in this group"
+        # 파일 email 이 계정과 다르면 표기 — CREWID 가 이겼음을 명시
+        if r.email and r.email != _norm_email(getattr(user, "email", None)):
+            note = "file email differs from account — matched by CREWID"
+            entry.warning = f"{entry.warning}; {note}" if entry.warning else note
+        person.entries.append(entry)
+
     # 이메일 없는 행 → deferred (유저 선택으로 등록 가능 — needs_user)
-    for r in (row for row in emp_rows if not row.email):
-        result.deferred.append(PersonRow(
+    for r in (row for row in leftover if not row.email):
+        pr = PersonRow(
             email=None, name=r.name, user_id=None, user_full_name=None,
             note="no email", similar=_similar(r.name),
             similar_users=_similar_structured(r.name),
             entries=[_build_entry(r, store_index, None, None, {})],
-        ))
+        )
+        warn = _crewid_warn(r)
+        if warn:
+            for e in pr.entries:
+                e.warning = f"{e.warning}; {warn}" if e.warning else warn
+        result.deferred.append(pr)
 
     groups: dict[str, list[EmpRow]] = {}
-    for r in emp_rows:
+    for r in leftover:
         if r.email:
             groups.setdefault(r.email, []).append(r)
 
@@ -285,25 +358,40 @@ async def preview(
                       else "shared email — multiple people")
             unique_rows = list({(r.name, r.emp_id, r.company): r for r in rows}.values())
             members = [f"{r.name} = {r.emp_id} ({r.company})" for r in unique_rows]
+            ph_entries = []
+            for r in unique_rows:
+                e = _build_entry(r, store_index, None, None, {})
+                warn = _crewid_warn(r)
+                if warn:
+                    e.warning = f"{e.warning}; {warn}" if e.warning else warn
+                ph_entries.append(e)
             result.placeholder.append(PersonRow(
                 email=email, name=rep_name, user_id=None, user_full_name=None,
-                note=reason, members=members,
-                entries=[_build_entry(r, store_index, None, None, {}) for r in unique_rows],
+                note=reason, members=members, entries=ph_entries,
             ))
             continue
 
         if not db_users:
+            df_entries = []
+            for r in rows:
+                e = _build_entry(r, store_index, None, None, {})
+                warn = _crewid_warn(r)
+                if warn:
+                    e.warning = f"{e.warning}; {warn}" if e.warning else warn
+                df_entries.append(e)
             result.deferred.append(PersonRow(
                 email=email, name=rep_name, user_id=None, user_full_name=None,
                 note="email present, no DB user", similar=_similar(rep_name),
                 similar_users=_similar_structured(rep_name),
-                entries=[_build_entry(r, store_index, None, None, {}) for r in rows],
+                entries=df_entries,
             ))
             continue
 
         user = db_users[0]
         member_id = member_by_user.get(user.id)
-        person = PersonRow(
+        # 같은 유저가 CREWID 로 이미 매칭되어 있으면 그 PersonRow 에 병합 (사람 카드 1개 유지)
+        merged = crewid_persons.get(str(user.id))
+        person = merged if merged is not None else PersonRow(
             email=email, name=rep_name,
             user_id=str(user.id), user_full_name=user.full_name,
         )
@@ -313,11 +401,13 @@ async def preview(
             for e in person.entries:
                 e.action = ACTION_INVALID
                 e.warning = "no org_member row"
-            result.people.append(person)
+            if merged is None:
+                result.people.append(person)
             continue
 
         # 같은 (매장, 사람) 중복 행 제거 후 매장별 엔트리 구성
-        seen_pairs: set[tuple[str, str]] = set()
+        # (CREWID 병합 시 이미 추가된 (company, emp_id) 쌍은 person_seen 으로 건너뜀)
+        seen_pairs: set[tuple[str, str]] = person_seen.get(str(user.id), set())
         for r in rows:
             pair = (r.company, r.emp_id)
             if pair in seen_pairs:
@@ -329,6 +419,10 @@ async def preview(
                 others = await _scope_other_empids(UUID(entry.store_id))
                 if entry.emp_id in others:
                     entry.warning = "same number already used by another store in this group"
+            # CREWID 미해결 행은 email 폴백임을 표기
+            warn = _crewid_warn(r)
+            if warn:
+                entry.warning = f"{entry.warning}; {warn}" if entry.warning else warn
             person.entries.append(entry)
 
         # 같은 매장에 서로 다른 두 값이 오는 경우 — 뒤 값에 경고
@@ -340,7 +434,8 @@ async def preview(
                     e.warning = "conflicting numbers for the same store in file"
                 else:
                     by_store[e.store_id] = e.emp_id
-        result.people.append(person)
+        if merged is None:
+            result.people.append(person)
 
     return result
 
@@ -420,6 +515,7 @@ async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
                 OrgMemberStore.is_work_assignment,
                 OrgMemberStore.is_manager,
                 OrgMember.user_id,
+                OrgMember.crewid,
                 OrgMember.department,
                 User.full_name,
                 User.email,
@@ -444,6 +540,7 @@ async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
             "empid": r.empid,
             "is_work_assignment": r.is_work_assignment,
             "is_manager": r.is_manager,
+            "crewid": r.crewid,
             "role_name": r.role_name,
             "role_priority": r.role_priority,
             "department": r.department,
@@ -494,12 +591,12 @@ def _roster_export_sheets(sheets: list[tuple[str, list[list]]]) -> bytes:
             first = False
         else:
             ws = wb.create_sheet(name)
-        ws.append(["COMPANY", "CORP_ABR_3", "Name", "emp_id", "Email"])
+        ws.append(["COMPANY", "CORP_ABR_3", "Name", "emp_id", "Email", "crewid"])
         for c in ws[1]:
             c.font = Font(bold=True)
         for r in rows:
             ws.append(r)
-        for col, width in zip("ABCDE", (34, 12, 26, 10, 32)):
+        for col, width in zip("ABCDEF", (34, 12, 26, 10, 32, 10)):
             ws.column_dimensions[col].width = width
         ws.freeze_panes = "A2"
 
@@ -512,6 +609,7 @@ def _roster_export_sheets(sheets: list[tuple[str, list[list]]]) -> bytes:
         ("Name", "Person's name (display only — matching uses Email)"),
         ("emp_id", "Number to register for that person at that store. Rows with an empty emp_id are skipped."),
         ("Email", "Person's email — used to match the user in the system"),
+        ("crewid", "Optional exact-match key — the person's org number (CREWID). When present, the person is matched by CREWID even if email/name differ (useful when staff signed up with a different email)."),
         (),
         ("Tip", "Export current EMPIDs, edit the emp_id column, then upload the file back on the EMPID Import tab."),
         ("Note", "Import reads the FIRST sheet only — if this file was exported split into multiple sheets, merge rows into the first sheet (or re-export unsplit) before re-uploading."),
@@ -565,6 +663,7 @@ async def build_template_xlsx(
                     m["full_name"],
                     (m["empid"] if m["empid"] is not None else "") if include_numbers else "",
                     (m["email"] or "") if include_email else "",
+                    m["crewid"] if m["crewid"] is not None else "",
                 ])
     return _roster_export_sheets([("Roster", rows)])
 
@@ -602,6 +701,7 @@ async def build_selected_export_xlsx(
                     m["full_name"],
                     (m["empid"] if m["empid"] is not None else "") if include_numbers else "",
                     (m["email"] or "") if include_email else "",
+                    m["crewid"] if m["crewid"] is not None else "",
                 ],
                 "store_name": st["store_name"],
                 "role_name": m["role_name"],

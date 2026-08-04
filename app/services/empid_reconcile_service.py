@@ -93,6 +93,9 @@ class EmpRow:
     name: str
     emp_id: str  # 문자열 보존(선행0)
     email: str | None
+    # 신규 empid 임포트(empid_import_service)의 정확 매칭 키 — org 번호(CREWID). optional.
+    # 레거시 employee_no 도구(이 모듈)는 사용하지 않음.
+    crewid: str | None = None
 
 
 @dataclass
@@ -152,7 +155,7 @@ def _hkey(s: object) -> str:
 _HEADER_ALIASES = {
     "company": "company", "corp_abr_3": "corp_abr", "corpabr3": "corp_abr",
     "name": "name", "emp_id": "emp_id", "empid": "emp_id",
-    "email": "email",
+    "email": "email", "crewid": "crewid", "crew_id": "crewid",
 }
 
 
@@ -177,6 +180,7 @@ def _build_row(cells: dict[str, object]) -> EmpRow | None:
         name=str(cells.get("name") or "").strip(),
         emp_id=emp_id,
         email=_norm_email(cells.get("email")),
+        crewid=_emp_id_str(cells.get("crewid")),  # 숫자 문자열 정규화 재사용 (float→int, 공백→None)
     )
 
 
