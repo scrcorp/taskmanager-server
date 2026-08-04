@@ -79,6 +79,25 @@ async def preview_empid_import(
     )
 
 
+@router.get("/template")
+async def download_empid_template(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:read"))],
+    mode: str = "blank",
+):
+    """임포트용 xlsx 다운로드 — mode=blank(빈 템플릿) | current(현황 export, 왕복 편집용)."""
+    from fastapi.responses import Response
+
+    prefill = mode == "current"
+    content = await svc.build_template_xlsx(db, current_user.organization_id, prefill)
+    filename = "empid_export.xlsx" if prefill else "empid_import_template.xlsx"
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/roster", response_model=list[EmpidRosterStore])
 async def get_empid_roster(
     db: Annotated[AsyncSession, Depends(get_db)],

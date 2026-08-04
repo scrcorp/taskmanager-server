@@ -515,6 +515,28 @@ async def test_preview_needs_user_for_placeholder_and_deferred(
 # ---------------------------------------------------------------------------
 
 
+async def test_template_export_roundtrip(db: AsyncSession, ctx: Ctx) -> None:
+    """current export 를 그대로 재업로드하면 전부 same — 왕복 무손실."""
+    store = await _make_store(db, ctx, "A")
+    u1 = await _make_user(db, ctx, "t1", f"t1.{ctx.sfx}@example.com")
+    u2 = await _make_user(db, ctx, "t2", f"t2.{ctx.sfx}@example.com")
+    await _give_empid(db, ctx, u1, store, 5)
+    await _give_empid(db, ctx, u2, store, 7)
+    await db.commit()
+
+    content = await svc.build_template_xlsx(db, ctx.org_id, prefill=True)
+    res = await svc.preview(db, ctx.org_id, content, "empid_export.xlsx")
+    mine = [p for p in res.people if p.email and f".{ctx.sfx}@" in p.email]
+    assert len(mine) == 2
+    for p in mine:
+        assert all(e.action == ACTION_SAME for e in p.entries)
+
+    # 빈 템플릿 — 데이터 0행 (Instructions 시트는 파싱에 안 잡힘)
+    blank = await svc.build_template_xlsx(db, ctx.org_id, prefill=False)
+    res2 = await svc.preview(db, ctx.org_id, blank, "empid_import_template.xlsx")
+    assert res2.total_rows == 0
+
+
 async def test_roster_lists_store_members_sorted(db: AsyncSession, ctx: Ctx) -> None:
     store = await _make_store(db, ctx, "A")
     u1 = await _make_user(db, ctx, "r1", f"r1.{ctx.sfx}@example.com")

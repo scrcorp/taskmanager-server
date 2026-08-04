@@ -17,6 +17,7 @@ users.employee_no 는 건드리지 않는다 (employee_no 는 폐기 방향 — 
 
 from __future__ import annotations
 
+import io
 import re
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -451,6 +452,71 @@ async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
             "members": members,
         })
     return out
+
+
+def _roster_export_sheets(rows: list[list]) -> bytes:
+    """임포트 형식 xlsx 생성 — Roster(데이터, 첫 시트) + Instructions.
+
+    parse_emplist 는 첫 번째 시트만 읽으므로 데이터 시트가 반드시 먼저다.
+    """
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Roster"
+    ws.append(["COMPANY", "CORP_ABR_3", "Name", "emp_id", "Email"])
+    from openpyxl.styles import Font
+
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    for r in rows:
+        ws.append(r)
+    for col, width in zip("ABCDE", (34, 12, 26, 10, 32)):
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "A2"
+
+    info = wb.create_sheet("Instructions")
+    for line in (
+        ("EMPID import format",),
+        (),
+        ("COMPANY", "Store name (matched against this org's store names)"),
+        ("CORP_ABR_3", "Store code (fallback match, e.g. IFO / SWC)"),
+        ("Name", "Person's name (display only — matching uses Email)"),
+        ("emp_id", "Number to register for that person at that store. Rows with an empty emp_id are skipped."),
+        ("Email", "Person's email — used to match the user in the system"),
+        (),
+        ("Tip", "Export current EMPIDs, edit the emp_id column, then upload the file back on the EMPID Import tab."),
+    ):
+        info.append(list(line))
+    info.column_dimensions["A"].width = 14
+    info.column_dimensions["B"].width = 90
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+async def build_template_xlsx(
+    db: AsyncSession, organization_id: UUID, prefill: bool
+) -> bytes:
+    """임포트용 템플릿/현황 export xlsx.
+
+    prefill=False: 헤더 + 안내 시트만 (빈 템플릿).
+    prefill=True: 현재 배정·번호를 전부 채워서 export — 수정 후 그대로 재업로드 가능(왕복).
+    """
+    rows: list[list] = []
+    if prefill:
+        stores = await store_repository.get_by_org(db, organization_id, include_closed=False)
+        code_by_id = {str(s.id): (s.code or "") for s in stores}
+        for st in await roster(db, organization_id):
+            for m in st["members"]:
+                rows.append([
+                    st["store_name"],
+                    code_by_id.get(st["store_id"], ""),
+                    m["full_name"],
+                    m["empid"] if m["empid"] is not None else "",
+                    m["email"] or "",
+                ])
+    return _roster_export_sheets(rows)
 
 
 @dataclass
