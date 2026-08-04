@@ -129,6 +129,15 @@ class User(Base):
     # [Model B] 계정 상태 — active / deactivated / deleted (계정 레벨, org별 status와 별개).
     # 탈퇴/비활성해도 org 데이터는 무기한 보존(관리자 명시 purge만 삭제).
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
+    # 미가입(유령) 계정 — 관리자가 미리 만들어 둔 자리. 아직 본인이 앱에 가입하지 않았다.
+    # 반드시 is_active=False 와 함께 쓴다(fail-closed): 로그인·PIN 출근·알림·팁·리포트가
+    # 전부 is_active 를 게이트로 쓰므로 자동 차단되고, 스케줄 후보에만 명시적으로 포함시킨다.
+    # 본인이 claim_code 로 가입하면 이 행을 그대로 인수 → is_provisional=False, is_active=True.
+    is_provisional: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false", index=True
+    )
+    # 인수 코드 — 미가입 계정을 본인이 이어받을 때 쓰는 코드. 인수 완료 시 NULL.
+    claim_code: Mapped[str | None] = mapped_column(String(12), nullable=True)
     # 이메일 인증 여부 — Whether email has been verified
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     # 로그인 실패 횟수 — Failed login attempt counter (reset on success)
@@ -187,6 +196,14 @@ class User(Base):
             "employee_no",
             unique=True,
             postgresql_where=text("employee_no IS NOT NULL"),
+        ),
+        # 인수 코드 — 조직 내 non-null 값만 고유 (인수 완료 시 NULL 로 반납, 다중 허용).
+        Index(
+            "uq_user_org_claim_code",
+            "organization_id",
+            "claim_code",
+            unique=True,
+            postgresql_where=text("claim_code IS NOT NULL"),
         ),
     )
 

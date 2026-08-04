@@ -202,6 +202,9 @@ class UserResponse(BaseModel):
     employee_no: str | None = None  # 사번 (Company employee number, nullable) [레거시]
     crewid: int | None = None  # CREWID — org 안 1부터 순번 (org 번호)
     is_active: bool  # 계정 활성 상태 (Account active flag)
+    # 미가입(유령) 계정 — 관리자가 미리 만든 자리, 본인 가입 전. 항상 is_active=False.
+    is_provisional: bool = False
+    claim_code: str | None = None  # 인수 코드 (유령만, 인수 완료 시 NULL)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
 
@@ -232,7 +235,36 @@ class UserListResponse(BaseModel):
     employee_no: str | None = None  # 사번 (Company employee number, nullable) [레거시]
     crewid: int | None = None  # CREWID — org 안 1부터 순번 (org 번호)
     is_active: bool  # 계정 활성 상태 (Account active flag)
+    # 미가입(유령) 계정 — 관리자가 미리 만든 자리, 본인 가입 전. 항상 is_active=False.
+    is_provisional: bool = False
+    claim_code: str | None = None  # 인수 코드 (유령만, 인수 완료 시 NULL)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
+
+
+# === 미가입(Provisional) 직원 스키마 ===
+
+
+class ProvisionalUserCreate(BaseModel):
+    """미가입 직원 생성 요청 — 이름·역할·매장만. username/비밀번호는 서버가 자동 생성."""
+
+    full_name: str
+    role_id: str
+    store_ids: list[str] = []
+    department: str | None = None
+    hourly_rate: float | None = None
+
+
+class ProvisionalUserBulkCreate(BaseModel):
+    """미가입 직원 다건 생성 (임포트·스케줄 화면에서 여러 명 한 번에)."""
+
+    people: list[ProvisionalUserCreate]
+
+
+class ClaimCodeResponse(BaseModel):
+    """인수 코드 응답 — 관리자가 직원에게 전달할 코드."""
+
+    user_id: str
+    claim_code: str
 
 
 # === 매장 배정 (Store Assignment) 스키마 ===

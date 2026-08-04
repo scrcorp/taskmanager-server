@@ -759,7 +759,12 @@ class ScheduleService:
         from app.services.user_service import user_service
 
         # 1) 후보 staff — 그리드와 동일하게 store-scoped users 재사용
-        user_filters: dict[str, Any] = {"store_ids": store_ids, "is_active": True}
+        # 미가입(유령) 직원도 배정 대상이라 포함 — 유령은 is_active=False 라 명시 개방 필요
+        user_filters: dict[str, Any] = {
+            "store_ids": store_ids,
+            "is_active": True,
+            "include_provisional": True,
+        }
         users = await user_service.list_users(db, organization_id, user_filters)
         if staff_ids:
             sset = {str(u) for u in staff_ids}

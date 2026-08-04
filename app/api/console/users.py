@@ -16,6 +16,9 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse
 from app.schemas.user import (
+    ClaimCodeResponse,
+    ProvisionalUserBulkCreate,
+    ProvisionalUserCreate,
     SyncUserStoresRequest,
     UserBulkUpdate,
     UserBulkUpdateResult,
@@ -38,11 +41,15 @@ async def list_users(
     store_ids: Annotated[str | None, Query(description="매장 ID 필터 (복수, 콤마 구분)")] = None,
     role_id: Annotated[UUID | None, Query(description="역할 ID 필터")] = None,
     is_active: Annotated[bool | None, Query(description="활성 상태 필터")] = None,
+    include_provisional: Annotated[bool, Query(description="미가입(유령) 계정을 is_active 필터에서 면제")] = False,
+    provisional_only: Annotated[bool, Query(description="미가입(유령) 계정만 조회")] = False,
 ) -> list[UserListResponse]:
     """사용자 목록을 필터 조건으로 조회합니다.
 
     List users with optional filters (store_id/store_ids, role_id, is_active).
     store_ids는 콤마로 구분된 UUID 문자열 (예: "uuid1,uuid2").
+    미가입 계정은 is_active=False 라 is_active 필터가 걸리면 사라진다 —
+    include_provisional=true 로 면제하거나 provisional_only=true 로 유령만 조회.
     """
     org_id: UUID = current_user.organization_id
     # store_ids가 있으면 store_id보다 우선
@@ -55,6 +62,8 @@ async def list_users(
         "store_ids": parsed_store_ids,
         "role_id": role_id,
         "is_active": is_active,
+        "include_provisional": include_provisional,
+        "provisional_only": provisional_only,
     }
     users = await user_service.list_users(db, org_id, filters)
     if hide_cost_for(current_user):
@@ -78,6 +87,86 @@ async def get_user(
     if hide_cost_for(current_user):
         scrub_cost_fields(user)
     return user
+
+
+@router.post("/provisional", response_model=UserResponse, status_code=201)
+async def create_provisional_user(
+    data: ProvisionalUserCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:create"))],
+) -> UserResponse:
+    """미가입(유령) 직원을 생성합니다 — 아직 앱에 가입하지 않은 직원 자리.
+
+    이름·역할·매장만으로 생성되고 username/비밀번호는 자동. 로그인은 불가하며
+    (is_active=False) 스케줄 배정·empid 부여는 가능. 응답의 claim_code 를 직원에게
+    전달하면 본인이 가입할 때 이 계정을 그대로 인수한다.
+    """
+    from app.services import provisional_staff_service as prov_svc
+
+    org_id: UUID = current_user.organization_id
+    user = await prov_svc.create_provisional_user(
+        db,
+        org_id,
+        full_name=data.full_name,
+        role_id=UUID(data.role_id),
+        store_ids=[UUID(s) for s in data.store_ids],
+        department=data.department,
+        hourly_rate=data.hourly_rate,
+        caller=current_user,
+    )
+    detail = await user_service.get_user(db, user.id, org_id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(detail)
+    return detail
+
+
+@router.post("/provisional/bulk", response_model=list[UserResponse], status_code=201)
+async def create_provisional_users_bulk(
+    data: ProvisionalUserBulkCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:create"))],
+) -> list[UserResponse]:
+    """미가입 직원을 여러 명 한 번에 생성합니다 (단일 트랜잭션)."""
+    from app.services import provisional_staff_service as prov_svc
+
+    org_id: UUID = current_user.organization_id
+    users = await prov_svc.create_provisional_users_bulk(
+        db,
+        org_id,
+        [
+            {
+                "full_name": p.full_name,
+                "role_id": UUID(p.role_id),
+                "store_ids": [UUID(s) for s in p.store_ids],
+                "department": p.department,
+                "hourly_rate": p.hourly_rate,
+            }
+            for p in data.people
+        ],
+        caller=current_user,
+    )
+    out: list[UserResponse] = []
+    for u in users:
+        detail = await user_service.get_user(db, u.id, org_id)
+        if hide_cost_for(current_user):
+            scrub_cost_fields(detail)
+        out.append(detail)
+    return out
+
+
+@router.post("/{user_id}/claim-code", response_model=ClaimCodeResponse)
+async def regenerate_claim_code(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> ClaimCodeResponse:
+    """인수 코드를 재발급합니다 (코드 분실·유출 시). 미가입 계정만 가능."""
+    from app.services import provisional_staff_service as prov_svc
+
+    code = await prov_svc.regenerate_claim_code(
+        db, current_user.organization_id, user_id
+    )
+    return ClaimCodeResponse(user_id=str(user_id), claim_code=code)
 
 
 @router.post("", response_model=UserResponse, status_code=201)

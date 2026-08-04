@@ -78,6 +78,8 @@ class UserService:
             employee_no=user.employee_no,
             crewid=crewid,
             is_active=user.is_active,
+            is_provisional=user.is_provisional,
+            claim_code=user.claim_code,
             created_at=user.created_at,
         )
 
@@ -98,6 +100,8 @@ class UserService:
             department=user.department,
             employee_no=user.employee_no,
             is_active=user.is_active,
+            is_provisional=user.is_provisional,
+            claim_code=user.claim_code,
             created_at=user.created_at,
         )
 
