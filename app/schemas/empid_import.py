@@ -73,7 +73,7 @@ class EmpidImportCommitResponse(BaseModel):
 
 
 class EmpidRosterMember(BaseModel):
-    """roster 1인 — 매장 배정 + 현재 empid."""
+    """roster 1인 — 매장 배정 + 현재 empid + 역할/부서 (export 필터 축)."""
 
     user_id: str
     full_name: str
@@ -81,6 +81,25 @@ class EmpidRosterMember(BaseModel):
     empid: int | None = None
     is_work_assignment: bool = True
     is_manager: bool = False
+    role_name: str | None = None       # 역할 (owner/general_manager/supervisor/staff/커스텀)
+    role_priority: int | None = None   # 정렬용 우선순위 (낮을수록 상위)
+    department: str | None = None      # FOH/BOH (nullable)
+
+
+class EmpidExportItem(BaseModel):
+    """export 1행 — 콘솔에서 개별 선택된 (user, store)."""
+
+    user_id: str
+    store_id: str
+
+
+class EmpidExportRequest(BaseModel):
+    """사람 단위 선택 export 요청 — 필터링은 클라이언트 몫, 서버는 목록을 그대로 굽는다."""
+
+    items: list[EmpidExportItem]
+    include_email: bool = True    # false = Email 셀 공란 (재업로드 매칭 불가 — 공유용)
+    include_numbers: bool = True  # false = emp_id 셀 공란 (작성용 양식)
+    split_by: str = "none"        # none | store | role | band — 시트 구분(1차/2차식 배포)
 
 
 class EmpidRosterStore(BaseModel):

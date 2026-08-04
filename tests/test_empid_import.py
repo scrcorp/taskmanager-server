@@ -578,6 +578,46 @@ async def test_template_export_filters(db: AsyncSession, ctx: Ctx) -> None:
     assert all((r[3] in (None, "")) and (r[4] in (None, "")) for r in rows)
 
 
+async def test_selected_export_and_split_sheets(db: AsyncSession, ctx: Ctx) -> None:
+    """사람 단위 선택 export — 선택된 (user,store)만 + split_by 시트 구분."""
+    from openpyxl import load_workbook
+
+    store_a = await _make_store(db, ctx, "A")
+    store_b = await _make_store(db, ctx, "B")
+    u1 = await _make_user(db, ctx, "s1", f"s1.{ctx.sfx}@example.com")  # A, 5
+    u2 = await _make_user(db, ctx, "s2", f"s2.{ctx.sfx}@example.com")  # A, 310
+    u3 = await _make_user(db, ctx, "s3", f"s3.{ctx.sfx}@example.com")  # B, 7 (미선택)
+    await _give_empid(db, ctx, u1, store_a, 5)
+    await _give_empid(db, ctx, u2, store_a, 310)
+    await _give_empid(db, ctx, u3, store_b, 7)
+    await db.commit()
+
+    # 미선택(u3) 제외 확인 — 단일 시트
+    content = await svc.build_selected_export_xlsx(
+        db, ctx.org_id, [(u1, store_a), (u2, store_a)])
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb.worksheets[0]
+    body = [list(r) for r in ws.iter_rows(min_row=2, values_only=True)]
+    assert {r[2] for r in body} == {"Imp Test s1", "Imp Test s2"}
+
+    # split_by=band — 1-99 / 300-399 시트 구분 (Instructions 마지막)
+    content = await svc.build_selected_export_xlsx(
+        db, ctx.org_id, [(u1, store_a), (u2, store_a)], split_by="band")
+    wb = load_workbook(io.BytesIO(content))
+    assert wb.sheetnames[:2] == ["1-99", "300-399"]
+    assert wb.sheetnames[-1] == "Instructions"
+
+    # split_by=store — 매장별 시트
+    content = await svc.build_selected_export_xlsx(
+        db, ctx.org_id, [(u1, store_a), (u3, store_b)], split_by="store")
+    wb = load_workbook(io.BytesIO(content))
+    assert len(wb.sheetnames) == 3  # 매장 2 + Instructions
+    # roster 에 role 정보가 실리는지 (export 필터 축)
+    rows = await svc.roster(db, ctx.org_id)
+    mine = next(r for r in rows if r["store_id"] == str(store_a))
+    assert all(m["role_name"] == "staff" for m in mine["members"])
+
+
 async def test_roster_lists_store_members_sorted(db: AsyncSession, ctx: Ctx) -> None:
     store = await _make_store(db, ctx, "A")
     u1 = await _make_user(db, ctx, "r1", f"r1.{ctx.sfx}@example.com")

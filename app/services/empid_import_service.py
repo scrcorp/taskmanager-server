@@ -401,11 +401,12 @@ def _build_entry(
 
 
 async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
-    """매장별 배정·empid 현황 — 파일 없이 직접 편집하는 bulk 에디터용.
+    """매장별 배정·empid 현황 — bulk 에디터·export 필터의 데이터 소스.
 
-    live 매장(sort_order 순)별로 배정 인원과 현재 empid 를 나열한다.
+    live 매장(sort_order 순)별로 배정 인원과 현재 empid + 역할/부서를 나열한다.
+    (역할·부서는 export 필터 축 — SV/Manager 등 role, FOH/BOH department.)
     """
-    from app.models.user import User
+    from app.models.user import Role, User
 
     stores = await store_repository.get_by_org(db, organization_id, include_closed=False)
     if not stores:
@@ -419,11 +420,15 @@ async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
                 OrgMemberStore.is_work_assignment,
                 OrgMemberStore.is_manager,
                 OrgMember.user_id,
+                OrgMember.department,
                 User.full_name,
                 User.email,
+                Role.name.label("role_name"),
+                Role.priority.label("role_priority"),
             )
             .join(OrgMember, OrgMember.id == OrgMemberStore.org_member_id)
             .join(User, User.id == OrgMember.user_id)
+            .join(Role, Role.id == OrgMember.role_id)
             .where(
                 OrgMemberStore.store_id.in_(store_ids),
                 OrgMember.organization_id == organization_id,
@@ -439,6 +444,9 @@ async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
             "empid": r.empid,
             "is_work_assignment": r.is_work_assignment,
             "is_manager": r.is_manager,
+            "role_name": r.role_name,
+            "role_priority": r.role_priority,
+            "department": r.department,
         })
     out: list[dict] = []
     for s in stores:
@@ -454,26 +462,46 @@ async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
     return out
 
 
-def _roster_export_sheets(rows: list[list]) -> bytes:
-    """임포트 형식 xlsx 생성 — Roster(데이터, 첫 시트) + Instructions.
+def _sheet_title(raw: str) -> str:
+    """Excel 시트명 제약 대응 — 금지문자 제거 + 31자 제한."""
+    cleaned = re.sub(r"[\[\]:*?/\\]", "-", raw).strip() or "Sheet"
+    return cleaned[:31]
+
+
+def _roster_export_sheets(sheets: list[tuple[str, list[list]]]) -> bytes:
+    """임포트 형식 xlsx 생성 — 데이터 시트들(구분 export 시 복수) + Instructions.
 
     parse_emplist 는 첫 번째 시트만 읽으므로 데이터 시트가 반드시 먼저다.
+    (시트를 나눈 파일을 재업로드하면 첫 시트만 임포트됨 — Instructions 에 명시.)
     """
     import openpyxl
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Roster"
-    ws.append(["COMPANY", "CORP_ABR_3", "Name", "emp_id", "Email"])
     from openpyxl.styles import Font
 
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    for r in rows:
-        ws.append(r)
-    for col, width in zip("ABCDE", (34, 12, 26, 10, 32)):
-        ws.column_dimensions[col].width = width
-    ws.freeze_panes = "A2"
+    wb = openpyxl.Workbook()
+    first = True
+    used_titles: set[str] = set()
+    for title, rows in sheets or [("Roster", [])]:
+        base = _sheet_title(title)
+        name = base
+        n = 2
+        while name in used_titles:  # 시트명 중복 방지
+            name = _sheet_title(f"{base[:28]}-{n}")
+            n += 1
+        used_titles.add(name)
+        if first:
+            ws = wb.active
+            ws.title = name
+            first = False
+        else:
+            ws = wb.create_sheet(name)
+        ws.append(["COMPANY", "CORP_ABR_3", "Name", "emp_id", "Email"])
+        for c in ws[1]:
+            c.font = Font(bold=True)
+        for r in rows:
+            ws.append(r)
+        for col, width in zip("ABCDE", (34, 12, 26, 10, 32)):
+            ws.column_dimensions[col].width = width
+        ws.freeze_panes = "A2"
 
     info = wb.create_sheet("Instructions")
     for line in (
@@ -486,6 +514,7 @@ def _roster_export_sheets(rows: list[list]) -> bytes:
         ("Email", "Person's email — used to match the user in the system"),
         (),
         ("Tip", "Export current EMPIDs, edit the emp_id column, then upload the file back on the EMPID Import tab."),
+        ("Note", "Import reads the FIRST sheet only — if this file was exported split into multiple sheets, merge rows into the first sheet (or re-export unsplit) before re-uploading."),
     ):
         info.append(list(line))
     info.column_dimensions["A"].width = 14
@@ -537,7 +566,91 @@ async def build_template_xlsx(
                     (m["empid"] if m["empid"] is not None else "") if include_numbers else "",
                     (m["email"] or "") if include_email else "",
                 ])
-    return _roster_export_sheets(rows)
+    return _roster_export_sheets([("Roster", rows)])
+
+
+async def build_selected_export_xlsx(
+    db: AsyncSession,
+    organization_id: UUID,
+    selected: list[tuple[UUID, UUID]],  # (user_id, store_id) — 콘솔에서 사람 단위로 확정한 목록
+    *,
+    include_email: bool = True,
+    include_numbers: bool = True,
+    split_by: str = "none",  # none | store | role | band(백 단위 번호대)
+) -> bytes:
+    """사람 단위 선택 export — 콘솔이 필터·개별 넣고빼기로 확정한 (user, store) 목록을 그대로 굽는다.
+
+    필터 축(역할/부서/번호대/매장/개인)은 전부 클라이언트 몫 — 서버는 선택 결과만 받아
+    어떤 새 축이 생겨도 변경이 필요 없다. split_by 로 시트를 구분(1차/2차식 배포용):
+    store=매장별, role=역할별, band=백 단위 번호대별. 재업로드는 첫 시트만 읽힌다.
+    """
+    wanted = set(selected)
+    if not wanted:
+        return _roster_export_sheets([("Roster", [])])
+    stores = await store_repository.get_by_org(db, organization_id, include_closed=False)
+    code_by_id = {str(s.id): (s.code or "") for s in stores}
+
+    entries: list[dict] = []
+    for st in await roster(db, organization_id):
+        for m in st["members"]:
+            if (UUID(m["user_id"]), UUID(st["store_id"])) not in wanted:
+                continue
+            entries.append({
+                "row": [
+                    st["store_name"],
+                    code_by_id.get(st["store_id"], ""),
+                    m["full_name"],
+                    (m["empid"] if m["empid"] is not None else "") if include_numbers else "",
+                    (m["email"] or "") if include_email else "",
+                ],
+                "store_name": st["store_name"],
+                "role_name": m["role_name"],
+                "empid": m["empid"],
+            })
+
+    if split_by == "store":
+        keys: list[str] = []
+        grouped: dict[str, list[list]] = {}
+        for e in entries:
+            k = e["store_name"]
+            if k not in grouped:
+                grouped[k] = []
+                keys.append(k)
+            grouped[k].append(e["row"])
+        sheets = [(k, grouped[k]) for k in keys]
+    elif split_by == "role":
+        keys = []
+        grouped = {}
+        for e in entries:
+            k = e["role_name"] or "No role"
+            if k not in grouped:
+                grouped[k] = []
+                keys.append(k)
+            grouped[k].append(e["row"])
+        sheets = [(k, grouped[k]) for k in keys]
+    elif split_by == "band":
+        # 백 단위 번호대 — 1-99, 100-199, 300-399 … 번호 없는 사람은 "No number" 시트 마지막
+        def band_key(empid: int | None) -> tuple[int, str]:
+            if empid is None:
+                return (10**9, "No number")
+            base = (empid // 100) * 100
+            lo = base if base > 0 else 1
+            return (base, f"{lo}-{base + 99}")
+
+        tagged = sorted(
+            ((band_key(e["empid"]), e["row"]) for e in entries), key=lambda t: t[0][0]
+        )
+        keys = []
+        grouped = {}
+        for (order, label), row in tagged:
+            if label not in grouped:
+                grouped[label] = []
+                keys.append(label)
+            grouped[label].append(row)
+        sheets = [(k, grouped[k]) for k in keys]
+    else:
+        sheets = [("Roster", [e["row"] for e in entries])]
+    return _roster_export_sheets(sheets)
 
 
 @dataclass

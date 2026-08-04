@@ -15,6 +15,7 @@ from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.empid_import import (
+    EmpidExportRequest,
     EmpidImportCommitRequest,
     EmpidImportCommitResponse,
     EmpidImportEntry,
@@ -118,6 +119,38 @@ async def download_empid_template(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/export")
+async def export_selected_empids(
+    data: EmpidExportRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:read"))],
+):
+    """사람 단위 선택 export — 콘솔 필터·개별 선택 결과를 임포트 형식 xlsx 로.
+
+    split_by(store|role|band)로 시트 구분 가능. 재업로드는 첫 시트만 읽힌다.
+    """
+    from fastapi.responses import Response
+
+    if data.split_by not in ("none", "store", "role", "band"):
+        raise BadRequestError("split_by must be none|store|role|band")
+    selected: list[tuple[UUID, UUID]] = []
+    for item in data.items:
+        try:
+            selected.append((UUID(item.user_id), UUID(item.store_id)))
+        except ValueError:
+            continue  # 잘못된 UUID 는 무시 (프론트 방어)
+    content = await svc.build_selected_export_xlsx(
+        db, current_user.organization_id, selected,
+        include_email=data.include_email, include_numbers=data.include_numbers,
+        split_by=data.split_by,
+    )
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="empid_export.xlsx"'},
     )
 
 
