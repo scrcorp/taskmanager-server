@@ -269,3 +269,148 @@ async def test_bulk_create_and_regenerate_claim_code(
     await db.commit()
     with pytest.raises(BadRequestError):
         await prov_svc.regenerate_claim_code(db, ctx.org_id, real_id)
+
+
+# ---------------------------------------------------------------------------
+# ⑤ 인수(claim) — 병합 없이 그 행을 이어받고 empid·스케줄·배정이 따라온다
+# ---------------------------------------------------------------------------
+
+
+async def _issue_verification_token(db: AsyncSession, email: str) -> str:
+    """가입에 필요한 이메일 인증 토큰을 테스트용으로 직접 발급."""
+    import uuid as _uuid
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.email_verification import EmailVerificationCode
+
+    token = _uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    db.add(
+        EmailVerificationCode(
+            email=email.strip().lower(),
+            code="000000",
+            purpose="registration",
+            expires_at=now + timedelta(minutes=10),
+            is_used=True,
+            verification_token=token,
+        )
+    )
+    await db.commit()
+    return str(token)
+
+
+async def test_claim_takes_over_row_keeping_empid_and_schedule(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    from app.models.schedule import Schedule
+    from app.schemas.auth import RegisterRequest
+    from app.services.auth_service import auth_service
+
+    store = await _make_store(db, ctx, "A")
+    # staff role priority 40 이어야 가입 경로가 찾는다 (ctx 의 role 이 이미 40)
+    await db.commit()
+
+    ghost = await prov_svc.create_provisional_user(
+        db, ctx.org_id, full_name="Ghost Claim", role_id=ctx.role_id, store_ids=[store]
+    )
+    ghost_id, code = ghost.id, ghost.claim_code
+
+    member = (
+        await db.execute(
+            select(OrgMember).where(OrgMember.user_id == ghost_id)
+        )
+    ).scalar_one()
+    ms = (
+        await db.execute(
+            select(OrgMemberStore).where(
+                OrgMemberStore.org_member_id == member.id,
+                OrgMemberStore.store_id == store,
+            )
+        )
+    ).scalar_one()
+    empid_before, crewid_before = ms.empid, member.crewid
+
+    # 관리자가 유령에게 스케줄을 미리 배정해 둔 상태
+    from datetime import date, datetime
+
+    db.add(
+        Schedule(
+            organization_id=ctx.org_id,
+            store_id=store,
+            user_id=ghost_id,
+            operating_day=date(2026, 8, 10),
+            start_at=datetime(2026, 8, 10, 9, 0),
+            end_at=datetime(2026, 8, 10, 17, 0),
+        )
+    )
+    await db.commit()
+
+    email = f"claim.{ctx.sfx}@example.com"
+    token = await _issue_verification_token(db, email)
+    result = await auth_service.app_register(
+        db,
+        RegisterRequest(
+            username=f"claimed_{ctx.sfx}",
+            password="Str0ngPass!",
+            full_name="Real Person",
+            email=email,
+            verification_token=token,
+            store_ids=[],
+            claim_code=code,
+        ),
+        ctx.org_id,
+    )
+    assert result.access_token
+
+    # 새 계정이 생기지 않고 그 행이 활성화됐다
+    users = (
+        await db.execute(select(User).where(User.organization_id == ctx.org_id))
+    ).scalars().all()
+    assert len(users) == 1, "인수는 새 행을 만들지 않는다 (병합 불필요)"
+    claimed = users[0]
+    assert claimed.id == ghost_id
+    assert claimed.is_provisional is False and claimed.is_active is True
+    assert claimed.claim_code is None, "코드는 반납된다"
+    assert claimed.username == f"claimed_{ctx.sfx}"
+    assert claimed.email == email and claimed.email_verified is True
+    assert claimed.clockin_pin is not None, "인수 후에는 PIN 발급 (기기 출근 가능)"
+
+    # empid / crewid / 스케줄이 그대로 따라온다
+    await db.refresh(ms)
+    await db.refresh(member)
+    assert ms.empid == empid_before and member.crewid == crewid_before
+    sched_owner = (
+        await db.execute(select(Schedule.user_id).where(Schedule.store_id == store))
+    ).scalar_one()
+    assert sched_owner == ghost_id
+
+    # 이제 로그인 가능
+    from app.schemas.auth import LoginRequest
+
+    tokens = await auth_service.app_login(
+        db, LoginRequest(username=claimed.username, password="Str0ngPass!"), ctx.org_id
+    )
+    assert tokens.access_token
+
+
+async def test_claim_code_is_single_use_and_case_insensitive(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    from app.services.auth_service import auth_service
+
+    ghost = await prov_svc.create_provisional_user(
+        db, ctx.org_id, full_name="Ghost Once", role_id=ctx.role_id
+    )
+    code = ghost.claim_code
+
+    # 소문자로 입력해도 찾는다
+    found = await auth_service.find_provisional_by_claim_code(
+        db, ctx.org_id, code.lower()
+    )
+    assert found is not None and found.id == ghost.id
+
+    # 인수 완료(코드 반납)를 흉내내면 더는 못 찾는다
+    ghost.claim_code = None
+    ghost.is_provisional = False
+    await db.commit()
+    assert await auth_service.find_provisional_by_claim_code(db, ctx.org_id, code) is None

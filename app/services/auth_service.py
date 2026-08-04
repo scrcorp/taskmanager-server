@@ -301,6 +301,120 @@ class AuthService:
             await db.rollback()
             raise
 
+    async def find_provisional_by_claim_code(
+        self, db: AsyncSession, organization_id: UUID, claim_code: str
+    ) -> User | None:
+        """인수 코드로 미가입(유령) 계정 조회 — 코드는 대소문자 무시."""
+        code = (claim_code or "").strip().upper()
+        if not code:
+            return None
+        result = await db.execute(
+            select(User).where(
+                User.organization_id == organization_id,
+                User.claim_code == code,
+                User.is_provisional == True,  # noqa: E712
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def _claim_provisional_account(
+        self,
+        db: AsyncSession,
+        data: RegisterRequest,
+        organization_id: UUID,
+    ) -> TokenResponse:
+        """미가입(유령) 계정 인수 — 새 행을 만들지 않고 그 행을 활성 계정으로 전환한다.
+
+        org_member / 매장 배정 / empid / 스케줄은 이미 이 user_id 에 붙어 있으므로
+        건드리지 않는다 (계정 병합 불필요).
+        """
+        ghost = await self.find_provisional_by_claim_code(
+            db, organization_id, data.claim_code or ""
+        )
+        if ghost is None:
+            raise BadRequestError("Invalid or already used claim code")
+
+        # username 은 전역 unique — 인수하며 본인이 정한 값으로 바꾼다.
+        existing: User | None = await auth_repository.get_user_by_username(
+            db, data.username
+        )
+        if existing is not None and existing.id != ghost.id:
+            raise DuplicateError("Username already exists")
+        from app.models.hiring import Candidate as _Candidate
+
+        cand_clash = await db.execute(
+            select(_Candidate).where(_Candidate.username == data.username)
+        )
+        if cand_clash.scalar_one_or_none() is not None:
+            raise DuplicateError("Username already exists")
+
+        # 이메일 인증 토큰 검증 — 일반 가입과 동일한 수준을 요구한다.
+        from app.services.email_verification_service import email_verification_service
+
+        await email_verification_service.validate_verification_token(
+            db, data.verification_token, data.email
+        )
+
+        from app.services.attendance_device_service import generate_clockin_pin
+
+        clockin_pin = generate_clockin_pin()
+        ghost.username = data.username
+        ghost.password_hash = hash_password(data.password)
+        ghost.email = data.email
+        ghost.email_verified = True
+        ghost.full_name = data.full_name or ghost.full_name
+        ghost.is_active = True
+        ghost.is_provisional = False
+        ghost.claim_code = None  # 코드 반납 (재사용 가능)
+        ghost.clockin_pin = clockin_pin
+        if getattr(data, "preferred_language", None):
+            ghost.preferred_language = data.preferred_language
+
+        # org_member 에도 PIN 미러 (일반 가입과 동일)
+        from app.models.org_member import OrgMember
+
+        member = (
+            await db.execute(
+                select(OrgMember).where(
+                    OrgMember.user_id == ghost.id,
+                    OrgMember.organization_id == organization_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if member is not None:
+            member.clockin_pin = clockin_pin
+            member.status = "active"
+
+        # 인수 시 추가 매장을 고른 경우에만 배정 추가 (기존 배정은 유지)
+        from app.services.org_numbering import ensure_member_store
+
+        for sid in data.store_ids or []:
+            store_uuid = UUID(sid)
+            already = await db.execute(
+                select(UserStore).where(
+                    UserStore.user_id == ghost.id, UserStore.store_id == store_uuid
+                )
+            )
+            if already.scalar_one_or_none() is None:
+                db.add(UserStore(user_id=ghost.id, store_id=store_uuid))
+                await db.flush()
+                await ensure_member_store(db, ghost.id, store_uuid)
+        await db.flush()
+
+        role = await role_repository.get_by_id(db, ghost.role_id, organization_id)
+        try:
+            result = await self._generate_tokens(
+                db, ghost, role,
+                client_type="app",
+                user_agent=None,
+                ip_address=None,
+            )
+            await db.commit()
+            return result
+        except Exception:
+            await db.rollback()
+            raise
+
     async def app_register(
         self,
         db: AsyncSession,
@@ -334,6 +448,11 @@ class AuthService:
         )
         if org_result.scalar_one_or_none() is None:
             raise NotFoundError("Organization not found or inactive")
+
+        # 인수 코드가 오면 새 계정을 만들지 않고 미가입(유령) 행을 이어받는다.
+        # empid·스케줄·매장 배정은 그 행에 이미 달려 있으므로 손대지 않아도 그대로 따라온다.
+        if getattr(data, "claim_code", None):
+            return await self._claim_provisional_account(db, data, organization_id)
 
         # 사용자명 중복 확인 — users + candidates 양쪽에서 체크.
         # 회원가입 경로(register, direct-signup) 모두 이 함수를 거치므로

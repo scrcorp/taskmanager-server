@@ -18,7 +18,15 @@ from app.database import get_db
 from app.api.deps import get_current_user
 from app.models.organization import Organization, Store
 from app.models.user import User
-from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
+from app.repositories.role_repository import role_repository
+from app.schemas.auth import (
+    ClaimPreviewRequest,
+    ClaimPreviewResponse,
+    LoginRequest,
+    RegisterRequest,
+    TokenResponse,
+)
+from app.utils.exceptions import NotFoundError
 from app.repositories.store_repository import store_repository
 from app.schemas.email_verification import (
     SendVerificationCodeRequest,
@@ -130,6 +138,46 @@ async def get_stores_by_company_code(
         for s in stores
         if s.deleted_at is None  # closed 만 제외 (preparing/open/paused 노출)
     ]
+
+
+@router.post("/claim/preview", response_model=ClaimPreviewResponse)
+async def preview_claim_code(
+    data: ClaimPreviewRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ClaimPreviewResponse:
+    """인수 코드로 이어받을 계정을 미리 확인합니다 (가입 전 본인 확인용).
+
+    관리자가 미리 만들어 둔 미가입 계정의 이름·역할·매장만 보여준다.
+    코드가 유효하지 않으면 404 — 존재 여부 외 정보는 노출하지 않는다.
+    """
+    from sqlalchemy import select as _select
+
+    from app.models.organization import Store as _Store
+    from app.models.user_store import UserStore as _UserStore
+
+    organization_id = await auth_service.resolve_company_code(db, data.company_code)
+    ghost = await auth_service.find_provisional_by_claim_code(
+        db, organization_id, data.claim_code
+    )
+    if ghost is None:
+        raise NotFoundError("Invalid claim code")
+
+    role = await role_repository.get_by_id(db, ghost.role_id, organization_id)
+    store_names = list(
+        (
+            await db.execute(
+                _select(_Store.name)
+                .join(_UserStore, _UserStore.store_id == _Store.id)
+                .where(_UserStore.user_id == ghost.id)
+                .order_by(_Store.sort_order)
+            )
+        ).scalars().all()
+    )
+    return ClaimPreviewResponse(
+        full_name=ghost.full_name,
+        role_name=role.name if role else "",
+        store_names=store_names,
+    )
 
 
 @router.post("/register", response_model=TokenResponse, status_code=201)
