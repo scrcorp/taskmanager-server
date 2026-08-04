@@ -408,22 +408,44 @@ async def preview(
         # 같은 (매장, 사람) 중복 행 제거 후 매장별 엔트리 구성
         # (CREWID 병합 시 이미 추가된 (company, emp_id) 쌍은 person_seen 으로 건너뜀)
         seen_pairs: set[tuple[str, str]] = person_seen.get(str(user.id), set())
+        confirm_rows: list[EmpRow] = []  # CREWID 미해결 행 — 자동 등록 금지, 확인 대기
         for r in rows:
             pair = (r.company, r.emp_id)
             if pair in seen_pairs:
                 continue
             seen_pairs.add(pair)
+            # CREWID 가 주어졌는데 해석 불가(오타 가능성) → email 이 맞아도 자동 매칭하지 않고
+            # 확인 대기로 분리 — email 유저를 picker 프리필 후보로 제시, 운영자가 명시 체크.
+            if _crewid_warn(r):
+                confirm_rows.append(r)
+                continue
             entry = _build_entry(r, store_index, member_id, user, empid_map, work_map)
             # 그룹 공유 스코프 내 타 매장 번호와 충돌 경고 (막지 않음 — D2 결정)
             if entry.store_id and entry.emp_id is not None:
                 others = await _scope_other_empids(UUID(entry.store_id))
                 if entry.emp_id in others:
                     entry.warning = "same number already used by another store in this group"
-            # CREWID 미해결 행은 email 폴백임을 표기
-            warn = _crewid_warn(r)
-            if warn:
-                entry.warning = f"{entry.warning}; {warn}" if entry.warning else warn
             person.entries.append(entry)
+
+        if confirm_rows:
+            cf_entries = []
+            for r in confirm_rows:
+                e = _build_entry(r, store_index, None, None, {})  # member 미확정 → needs_user
+                warn = _crewid_warn(r)
+                if warn:
+                    e.warning = f"{e.warning}; {warn}" if e.warning else warn
+                cf_entries.append(e)
+            result.deferred.append(PersonRow(
+                email=email, name=rep_name, user_id=None, user_full_name=None,
+                note="CREWID mismatch — email matches an account, confirm before registering",
+                similar=[f"{user.full_name} <{email}>"],
+                similar_users=[{
+                    "user_id": str(user.id),
+                    "full_name": user.full_name,
+                    "email": email,
+                }],
+                entries=cf_entries,
+            ))
 
         # 같은 매장에 서로 다른 두 값이 오는 경우 — 뒤 값에 경고
         by_store: dict[str, int] = {}
@@ -434,7 +456,8 @@ async def preview(
                     e.warning = "conflicting numbers for the same store in file"
                 else:
                     by_store[e.store_id] = e.emp_id
-        if merged is None:
+        # 전 행이 확인 대기로 빠졌으면 빈 카드를 만들지 않는다
+        if merged is None and person.entries:
             result.people.append(person)
 
     return result

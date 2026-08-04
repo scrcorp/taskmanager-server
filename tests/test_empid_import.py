@@ -654,8 +654,9 @@ async def test_crewid_disambiguates_shared_email_and_no_email(
     assert not res2.deferred and len(res2.people) == 1
 
 
-async def test_crewid_not_found_falls_back_to_email(db: AsyncSession, ctx: Ctx) -> None:
-    """CREWID 미해결이면 email 매칭 폴백 + 경고 표기."""
+async def test_crewid_not_found_requires_confirmation(db: AsyncSession, ctx: Ctx) -> None:
+    """CREWID 미해결(오타 가능성)이면 email 이 맞아도 자동 등록하지 않는다 —
+    email 유저를 프리필 후보로 제시하는 확인 대기(needs_user)로 분리."""
     store = await _make_store(db, ctx, "A")
     u = await _make_user(db, ctx, "fb", f"fb.{ctx.sfx}@example.com")
     await _give_empid(db, ctx, u, store, 4)
@@ -666,10 +667,23 @@ async def test_crewid_not_found_falls_back_to_email(db: AsyncSession, ctx: Ctx) 
         [company, None, "Imp Test fb", "320", f"fb.{ctx.sfx}@example.com", "99999"],
     ])
     res = await svc.preview(db, ctx.org_id, content, "list.xlsx")
-    assert len(res.people) == 1
-    p = res.people[0]
-    assert p.matched_by is None and p.user_id == str(u)  # email 폴백
-    assert "not found" in (p.entries[0].warning or "")
+    assert not res.people  # 자동 매칭 카드 없음 (빈 카드도 없음)
+    assert len(res.deferred) == 1
+    p = res.deferred[0]
+    assert "CREWID mismatch" in p.note
+    assert p.similar_users and p.similar_users[0]["user_id"] == str(u)  # 프리필 후보
+    e = p.entries[0]
+    assert e.action == "needs_user" and "not found" in (e.warning or "")
+
+    # crewid 없는 행이 섞여 있으면 그 행은 정상 자동 매칭 유지
+    content2 = _xlsx6([
+        [company, None, "Imp Test fb", "320", f"fb.{ctx.sfx}@example.com", "99999"],
+        [company, None, "Imp Test fb", "321", f"fb.{ctx.sfx}@example.com", None],
+    ])
+    res2 = await svc.preview(db, ctx.org_id, content2, "list.xlsx")
+    assert len(res2.people) == 1 and len(res2.people[0].entries) == 1
+    assert res2.people[0].entries[0].emp_id == 321
+    assert len(res2.deferred) == 1  # 99999 행은 확인 대기
 
 
 async def test_export_includes_crewid_column(db: AsyncSession, ctx: Ctx) -> None:
