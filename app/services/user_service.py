@@ -277,9 +277,11 @@ class UserService:
             hourly_rate = float(org_rate) if org_rate else None
 
         # Attendance device 용 clockin_pin 자동 발급
-        from app.services.attendance_device_service import generate_clockin_pin
+        from app.services.attendance_device_service import (
+            generate_unique_clockin_pin,
+        )
 
-        clockin_pin = generate_clockin_pin()
+        clockin_pin = await generate_unique_clockin_pin(db, organization_id)
 
         try:
             create_data: dict = {

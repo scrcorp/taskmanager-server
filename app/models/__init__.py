@@ -56,6 +56,7 @@ from app.models.schedule_report import ScheduleReportSnapshot
 from app.models.file import File, FileUsage
 from app.models.changelog import ChangelogPost
 from app.models.availability import StaffAvailability, StaffAvailabilityHistory, StaffAvailabilityPreset
+from app.models.clockin_pin_audit import ClockinPinAudit
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -88,6 +89,7 @@ __all__ = [
     "StoreHiringForm", "Candidate", "Application", "CandidateBlock",
     "InterviewSlot", "InterviewSlotPreference",
     "AppVersion",
+    "ClockinPinAudit",
     "TipEntry", "TipDistribution", "TipAuditLog", "TipPeriod", "Form4070Document",
     "ScheduleReportSnapshot",
     "File", "FileUsage",
