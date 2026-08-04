@@ -134,8 +134,9 @@ class ImportPreview:
 
     def counts(self) -> dict[str, int]:
         entry_actions = [e.action for p in self.people for e in p.entries]
-        # placeholder/deferred 의 needs_user 도 집계 — 운영자가 유저를 골라 등록 가능한 건수
-        pickable = [
+        # unmatched/invalid 는 세 버킷 전체 엔트리에서 집계 — 미지 이메일 행(deferred/placeholder
+        # 안의 매장 미매칭·비정수)이 타일에서 누락되면 카운터가 운영자를 오도한다.
+        all_actions = entry_actions + [
             e.action
             for p in list(self.placeholder) + list(self.deferred)
             for e in p.entries
@@ -145,11 +146,16 @@ class ImportPreview:
             "same": entry_actions.count(ACTION_SAME),
             "rebind": entry_actions.count(ACTION_REBIND),
             "new_assignment": entry_actions.count(ACTION_NEW_ASSIGNMENT),
-            "unmatched_store": entry_actions.count(ACTION_UNMATCHED_STORE),
-            "invalid": entry_actions.count(ACTION_INVALID),
-            "needs_user": pickable.count(ACTION_NEEDS_USER),
+            "unmatched_store": all_actions.count(ACTION_UNMATCHED_STORE),
+            "invalid": all_actions.count(ACTION_INVALID),
+            "needs_user": all_actions.count(ACTION_NEEDS_USER),
             "placeholder": len(self.placeholder),
-            "deferred": len(self.deferred),
+            # deferred = 등록 가능(needs_user) 엔트리가 있는 사람 수 — 리포트 온리 행만 있는
+            # 사람은 unmatched/invalid 타일이 이미 설명한다.
+            "deferred": sum(
+                1 for p in self.deferred
+                if any(e.action == ACTION_NEEDS_USER for e in p.entries)
+            ),
             "excluded_rows": self.excluded_rows,
             "total_rows": self.total_rows,
         }

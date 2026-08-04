@@ -229,6 +229,25 @@ async def test_number_range_start_group_floor_and_store_override(
     await db.commit()
 
 
+async def test_shared_group_ignores_store_range_start(db: AsyncSession, ctx: Ctx) -> None:
+    """Shared 그룹은 그룹 대역만 사용 — 매장 개별 range 무시 (QA 발견 회귀).
+
+    과거 Per-store 시절 남은 매장값(예: 700)이 Shared 공유 시퀀스를
+    엉뚱한 대역으로 밀어올리면 안 된다.
+    """
+    shared = await _make_group(
+        db, ctx, "sifloor", numbering_mode=NUMBERING_MODE_GROUP, number_range_start=300
+    )
+    # 매장에 잔존 개별값 700 — Shared 모드에선 무시되어야 함
+    store_a = await _make_store(db, ctx, "sa", group_id=shared, number_range_start=700)
+    store_b = await _make_store(db, ctx, "sb", group_id=shared)
+    u1 = await _make_user(db, ctx, "s1")
+    u2 = await _make_user(db, ctx, "s2")
+    assert await _assign(db, u1, store_a) == 300  # 700 아님 — 그룹 대역
+    assert await _assign(db, u2, store_b) == 301  # 공유 연번
+    await db.commit()
+
+
 # ---------------------------------------------------------------------------
 # ⑤ 한 사람이 공유 그룹의 A,B 두 매장 배정 → empid 행 2개, 서로 다른 값
 # ---------------------------------------------------------------------------

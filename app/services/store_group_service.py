@@ -57,10 +57,21 @@ class StoreGroupService:
         db: AsyncSession,
         organization_id: UUID,
     ) -> list[StoreGroupResponse]:
-        """조직의 그룹 목록 — sort_order 순, 소속 매장 수 포함."""
+        """조직의 그룹 목록 — sort_order 순, 소속 매장 수 + 공유 스코프 중복 경고 포함.
+
+        duplicate_empids 를 목록에서도 계산해야 Manage Groups 재오픈 시
+        기존 중복 경고 배너가 유지된다 (Save 응답에만 의존하면 재오픈 시 사라짐).
+        """
         groups = await store_group_repository.get_by_org(db, organization_id)
         counts = await store_group_repository.store_counts(db, organization_id)
-        return [self._to_response(g, counts.get(g.id, 0)) for g in groups]
+        out: list[StoreGroupResponse] = []
+        for g in groups:
+            duplicates: list[dict[str, int]] = []
+            if g.numbering_mode == NUMBERING_MODE_GROUP:
+                scope = await self._group_store_ids(db, g.id)
+                duplicates = await duplicate_empids_in_scope(db, scope)
+            out.append(self._to_response(g, counts.get(g.id, 0), duplicates))
+        return out
 
     async def create_group(
         self,

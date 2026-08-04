@@ -58,18 +58,31 @@ async def empid_scope_store_ids(db: AsyncSession, store_id: UUID) -> list[UUID]:
 
 
 async def _empid_floor(db: AsyncSession, store_id: UUID) -> int:
-    """empid 번호대 시작값 — store.number_range_start > group.number_range_start > 1."""
-    from app.models.organization import Store, StoreGroup
+    """empid 번호대 시작값.
+
+    - Shared(numbering_mode="group") 그룹: 그룹 번호대만 적용 — 매장 개별값은 무시한다.
+      (그룹 = 하나의 공유 대역. UI 도 Shared 모드에선 매장별 입력을 숨긴다. 과거 Per-store
+      시절 남은 매장값이 공유 시퀀스를 엉뚱한 대역으로 밀어올리는 것 방지 — QA 발견.)
+    - Per-store 그룹: 매장값 > 그룹 기본값(Default range) > 1.
+    - 미그룹: 매장값 > 1.
+    """
+    from app.models.organization import NUMBERING_MODE_GROUP, Store, StoreGroup
 
     row = (
         await db.execute(
-            select(Store.number_range_start, StoreGroup.number_range_start.label("group_start"))
+            select(
+                Store.number_range_start,
+                StoreGroup.number_range_start.label("group_start"),
+                StoreGroup.numbering_mode,
+            )
             .outerjoin(StoreGroup, StoreGroup.id == Store.group_id)
             .where(Store.id == store_id)
         )
     ).first()
     if row is None:
         return 1
+    if row.numbering_mode == NUMBERING_MODE_GROUP:
+        return row.group_start or 1
     return row.number_range_start or row.group_start or 1
 
 
