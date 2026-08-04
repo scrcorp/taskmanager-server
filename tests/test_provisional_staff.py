@@ -414,3 +414,213 @@ async def test_claim_code_is_single_use_and_case_insensitive(
     ghost.is_provisional = False
     await db.commit()
     assert await auth_service.find_provisional_by_claim_code(db, ctx.org_id, code) is None
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 흡수(absorb) — 코드를 안 쓰고 따로 가입해버린 경우의 폴백
+# ---------------------------------------------------------------------------
+
+
+async def test_absorb_moves_assignments_and_retires_ghost(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    """유령의 매장·empid·스케줄이 실제 계정으로 옮겨지고 유령 행은 폐기된다."""
+    from datetime import date, datetime
+
+    from app.models.schedule import Schedule
+    from app.services import provisional_absorb_service as absorb_svc
+
+    store = await _make_store(db, ctx, "A")
+    real_id = await _make_real_user(db, ctx, "dup")  # 따로 가입해버린 진짜 계정
+    await db.commit()
+
+    ghost = await prov_svc.create_provisional_user(
+        db, ctx.org_id, full_name="Ghost Absorb", role_id=ctx.role_id, store_ids=[store]
+    )
+    g_member = (
+        await db.execute(select(OrgMember).where(OrgMember.user_id == ghost.id))
+    ).scalar_one()
+    ms = (
+        await db.execute(
+            select(OrgMemberStore).where(OrgMemberStore.org_member_id == g_member.id)
+        )
+    ).scalar_one()
+    empid_before, crewid_before = ms.empid, g_member.crewid
+
+    db.add(
+        Schedule(
+            organization_id=ctx.org_id,
+            store_id=store,
+            user_id=ghost.id,
+            operating_day=date(2026, 8, 11),
+            start_at=datetime(2026, 8, 11, 9, 0),
+            end_at=datetime(2026, 8, 11, 17, 0),
+        )
+    )
+    await db.commit()
+
+    # preview 는 DB 를 바꾸지 않는다
+    plan = await absorb_svc.preview_absorb(db, ctx.org_id, ghost.id, real_id)
+    assert plan.provisional_name == "Ghost Absorb"
+    assert plan.moves.get("schedules") == 1
+    assert any(t["action"] == "move" for t in plan.store_transfers)
+    await db.refresh(ghost)
+    assert ghost.is_provisional is True, "preview 는 변경 없음"
+
+    await absorb_svc.absorb(db, ctx.org_id, ghost.id, real_id)
+
+    # 스케줄이 실제 계정으로 이동
+    sched_owner = (
+        await db.execute(select(Schedule.user_id).where(Schedule.store_id == store))
+    ).scalar_one()
+    assert sched_owner == real_id
+
+    # 매장 배정 + empid 가 실제 계정의 org_member 로 승계
+    t_member = (
+        await db.execute(
+            select(OrgMember).where(
+                OrgMember.user_id == real_id, OrgMember.organization_id == ctx.org_id
+            )
+        )
+    ).scalar_one()
+    moved = (
+        await db.execute(
+            select(OrgMemberStore).where(
+                OrgMemberStore.org_member_id == t_member.id,
+                OrgMemberStore.store_id == store,
+            )
+        )
+    ).scalar_one()
+    assert moved.empid == empid_before, "empid 그대로 승계"
+    assert t_member.crewid == crewid_before, "대상에 crewid 없었으므로 승계"
+
+    # 유령은 폐기 — 로그인 불가 상태로 소프트 삭제되고 username 을 비켜준다
+    await db.refresh(ghost)
+    assert ghost.is_active is False and ghost.is_provisional is False
+    assert ghost.deleted_at is not None
+    assert ghost.username.startswith("absorbed_")
+    assert ghost.claim_code is None
+
+
+async def test_absorb_keeps_target_number_on_store_conflict(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    """같은 매장에 둘 다 배정돼 있으면 대상 번호를 유지하고 유령 번호는 버린다."""
+    from app.models.user_store import UserStore
+    from app.services import provisional_absorb_service as absorb_svc
+    from app.services.org_numbering import ensure_member_store
+
+    store = await _make_store(db, ctx, "A")
+    real_id = await _make_real_user(db, ctx, "conf")
+    db.add(UserStore(user_id=real_id, store_id=store, is_work_assignment=True))
+    await db.flush()
+    await ensure_member_store(db, real_id, store)
+    await db.commit()
+
+    t_member = (
+        await db.execute(select(OrgMember).where(OrgMember.user_id == real_id))
+    ).scalar_one()
+    t_ms = (
+        await db.execute(
+            select(OrgMemberStore).where(
+                OrgMemberStore.org_member_id == t_member.id,
+                OrgMemberStore.store_id == store,
+            )
+        )
+    ).scalar_one()
+    target_empid = t_ms.empid
+
+    ghost = await prov_svc.create_provisional_user(
+        db, ctx.org_id, full_name="Ghost Conflict", role_id=ctx.role_id, store_ids=[store]
+    )
+
+    plan = await absorb_svc.preview_absorb(db, ctx.org_id, ghost.id, real_id)
+    assert any(t["action"] == "keep_target" for t in plan.store_transfers)
+    assert plan.conflicts, "충돌은 미리 알려줘야 한다"
+
+    await absorb_svc.absorb(db, ctx.org_id, ghost.id, real_id)
+
+    rows = (
+        await db.execute(
+            select(OrgMemberStore).where(
+                OrgMemberStore.org_member_id == t_member.id,
+                OrgMemberStore.store_id == store,
+            )
+        )
+    ).scalars().all()
+    assert len(rows) == 1, "매장당 한 행만 남는다 (uq_org_member_store)"
+    assert rows[0].empid == target_empid, "대상 번호 유지"
+
+
+async def test_absorb_rejects_bad_pairs(db: AsyncSession, ctx: Ctx) -> None:
+    from app.services import provisional_absorb_service as absorb_svc
+    from app.utils.exceptions import BadRequestError
+
+    real_id = await _make_real_user(db, ctx, "x1")
+    await db.commit()
+    ghost = await prov_svc.create_provisional_user(
+        db, ctx.org_id, full_name="Ghost Bad", role_id=ctx.role_id
+    )
+
+    with pytest.raises(BadRequestError):  # 자기 자신
+        await absorb_svc.preview_absorb(db, ctx.org_id, ghost.id, ghost.id)
+    with pytest.raises(BadRequestError):  # 출발지가 유령이 아님
+        await absorb_svc.preview_absorb(db, ctx.org_id, real_id, ghost.id)
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 가입 소프트 가드 — 이름이 비슷한 유령이 있으면 인수 코드 사용을 안내
+# ---------------------------------------------------------------------------
+
+
+async def test_signup_warns_when_lookalike_provisional_exists(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    from app.schemas.auth import RegisterRequest
+    from app.services.auth_service import auth_service
+    from app.utils.exceptions import ConflictError
+
+    await prov_svc.create_provisional_user(
+        db, ctx.org_id, full_name="Maria Santos", role_id=ctx.role_id
+    )
+
+    email = f"guard.{ctx.sfx}@example.com"
+    token = await _issue_verification_token(db, email)
+
+    def _req(**over):
+        base = dict(
+            username=f"guard_{ctx.sfx}",
+            password="Str0ngPass!",
+            full_name="Maria Santos",
+            email=email,
+            verification_token=token,
+            store_ids=[],
+        )
+        base.update(over)
+        return RegisterRequest(**base)
+
+    # 이름이 겹치면 그냥 가입이 막히고 인수 코드를 안내한다
+    with pytest.raises(ConflictError):
+        await auth_service.app_register(db, _req(), ctx.org_id)
+
+    # "아니오, 새 계정입니다" → 통과
+    token2 = await _issue_verification_token(db, email)
+    result = await auth_service.app_register(
+        db, _req(skip_claim_check=True, verification_token=token2), ctx.org_id
+    )
+    assert result.access_token
+
+    # 이름이 안 겹치면 가드가 걸리지 않는다
+    email3 = f"other.{ctx.sfx}@example.com"
+    token3 = await _issue_verification_token(db, email3)
+    result3 = await auth_service.app_register(
+        db,
+        _req(
+            username=f"other_{ctx.sfx}",
+            full_name="Zebulon Quartzfield",
+            email=email3,
+            verification_token=token3,
+        ),
+        ctx.org_id,
+    )
+    assert result3.access_token

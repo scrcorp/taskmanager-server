@@ -260,6 +260,23 @@ class ProvisionalUserBulkCreate(BaseModel):
     people: list[ProvisionalUserCreate]
 
 
+class AbsorbRequest(BaseModel):
+    """흡수 요청 — 유령 계정을 이 대상 계정으로 합친다."""
+
+    target_user_id: str
+
+
+class AbsorbPlanResponse(BaseModel):
+    """흡수 계획/결과 — 무엇이 옮겨지고 무엇이 충돌하는지."""
+
+    provisional_name: str = ""
+    target_name: str = ""
+    moves: dict[str, int] = {}          # 테이블 → 옮길 행 수
+    store_transfers: list[dict] = []    # {store_name, empid, action: move|keep_target}
+    conflicts: list[str] = []           # 사람이 읽는 충돌 설명
+    crewid_action: str = ""
+
+
 class ClaimCodeResponse(BaseModel):
     """인수 코드 응답 — 관리자가 직원에게 전달할 코드."""
 

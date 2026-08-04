@@ -69,6 +69,8 @@ class RegisterRequest(BaseModel):
     # 인수 코드 — 관리자가 미리 만들어 둔 미가입(유령) 계정을 이어받을 때. 있으면 새 계정을
     # 만들지 않고 그 행을 인수하므로 기존 empid·스케줄·매장 배정이 그대로 따라온다.
     claim_code: str | None = None
+    # 소프트 가드 우회 — "아니오, 새 계정입니다"를 고른 경우 true 로 재요청.
+    skip_claim_check: bool = False
     preferred_language: PreferredLanguage = "en"  # 선호 언어 (정보 수집용, default en)
 
 

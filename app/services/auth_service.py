@@ -31,6 +31,7 @@ from app.schemas.auth import (
 )
 from app.utils.exceptions import (
     BadRequestError,
+    ConflictError,
     DuplicateError,
     ForbiddenError,
     NotFoundError,
@@ -301,6 +302,31 @@ class AuthService:
             await db.rollback()
             raise
 
+    async def _warn_if_provisional_lookalike(
+        self, db: AsyncSession, organization_id: UUID, full_name: str
+    ) -> None:
+        """같은 org 에 이름이 비슷한 미가입 계정이 있으면 409 로 인수 코드 사용을 안내."""
+        from app.services.empid_reconcile_service import _name_similar, _name_tokens
+
+        tokens = _name_tokens(full_name)
+        if not tokens:
+            return
+        ghosts = (
+            await db.execute(
+                select(User).where(
+                    User.organization_id == organization_id,
+                    User.is_provisional == True,  # noqa: E712
+                )
+            )
+        ).scalars().all()
+        for g in ghosts:
+            if _name_similar(tokens, _name_tokens(g.full_name)):
+                raise ConflictError(
+                    "An account may already be set up for you — "
+                    "ask your manager for the claim code, or continue to create a new account.",
+                    code="provisional_candidate_exists",
+                )
+
     async def find_provisional_by_claim_code(
         self, db: AsyncSession, organization_id: UUID, claim_code: str
     ) -> User | None:
@@ -453,6 +479,12 @@ class AuthService:
         # empid·스케줄·매장 배정은 그 행에 이미 달려 있으므로 손대지 않아도 그대로 따라온다.
         if getattr(data, "claim_code", None):
             return await self._claim_provisional_account(db, data, organization_id)
+
+        # 소프트 가드 — 이름이 비슷한 미가입(유령) 계정이 있으면 인수 코드 사용을 안내한다.
+        # 그냥 가입하면 계정이 2개가 되어 관리자가 absorb 로 정리해야 하므로, 그 전에 한 번 막는다.
+        # 사용자가 "아니오, 새 계정입니다"를 고르면 skip_claim_check=true 로 재요청해 통과.
+        if not getattr(data, "skip_claim_check", False):
+            await self._warn_if_provisional_lookalike(db, organization_id, data.full_name)
 
         # 사용자명 중복 확인 — users + candidates 양쪽에서 체크.
         # 회원가입 경로(register, direct-signup) 모두 이 함수를 거치므로

@@ -16,6 +16,8 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse
 from app.schemas.user import (
+    AbsorbPlanResponse,
+    AbsorbRequest,
     ClaimCodeResponse,
     ProvisionalUserBulkCreate,
     ProvisionalUserCreate,
@@ -152,6 +154,42 @@ async def create_provisional_users_bulk(
             scrub_cost_fields(detail)
         out.append(detail)
     return out
+
+
+@router.post("/{user_id}/absorb/preview", response_model=AbsorbPlanResponse)
+async def preview_absorb_provisional(
+    user_id: UUID,
+    data: AbsorbRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> AbsorbPlanResponse:
+    """미가입 계정을 실제 계정으로 흡수하기 전 계획을 확인합니다 (DB 변경 없음).
+
+    정상 경로는 인수 코드(claim)라 데이터 이동이 없다. 이 기능은 직원이 코드를 안 쓰고
+    따로 가입해 계정이 2개가 된 경우의 폴백이다.
+    """
+    from app.services import provisional_absorb_service as absorb_svc
+
+    plan = await absorb_svc.preview_absorb(
+        db, current_user.organization_id, user_id, UUID(data.target_user_id)
+    )
+    return AbsorbPlanResponse(**plan.__dict__)
+
+
+@router.post("/{user_id}/absorb", response_model=AbsorbPlanResponse)
+async def absorb_provisional(
+    user_id: UUID,
+    data: AbsorbRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> AbsorbPlanResponse:
+    """미가입 계정의 배정·번호·스케줄을 실제 계정으로 옮기고 미가입 행을 폐기합니다."""
+    from app.services import provisional_absorb_service as absorb_svc
+
+    plan = await absorb_svc.absorb(
+        db, current_user.organization_id, user_id, UUID(data.target_user_id)
+    )
+    return AbsorbPlanResponse(**plan.__dict__)
 
 
 @router.post("/{user_id}/claim-code", response_model=ClaimCodeResponse)
