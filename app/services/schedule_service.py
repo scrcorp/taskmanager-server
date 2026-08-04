@@ -224,14 +224,24 @@ class ScheduleService:
         work_role_ids = {e.work_role_id for e in entries if e.work_role_id}
         org_ids = {e.organization_id for e in entries if e.organization_id}
 
-        # User: full_name / department / hourly_rate
+        # User: full_name / department (개인 시급은 org_members 가 canonical — 아래 map)
         users: dict[UUID, Any] = {}
         if user_ids:
             rows = await db.execute(
-                select(User.id, User.full_name, User.department, User.hourly_rate)
+                select(User.id, User.full_name, User.department)
                 .where(User.id.in_(user_ids))
             )
             users = {r.id: r for r in rows}
+
+        # 개인 시급 — org_members(+이력) 일괄 resolve (R6 canonical)
+        from app.services.rate_service import rate_service
+
+        rate_pairs = {
+            (e.user_id, e.organization_id)
+            for e in entries
+            if e.user_id and e.organization_id
+        }
+        person_rates = await rate_service.person_rates_map(db, rate_pairs)
 
         # Store: name / default_hourly_rate
         stores: dict[UUID, Any] = {}
@@ -297,7 +307,7 @@ class ScheduleService:
                 effective_source: str | None = "schedule"
             else:
                 effective_rate, effective_source = self._resolve_rate_from_maps(
-                    entry, users, stores, orgs,
+                    entry, person_rates, stores, orgs,
                 )
 
             responses.append(self._build_response(
@@ -314,17 +324,22 @@ class ScheduleService:
     @staticmethod
     def _resolve_rate_from_maps(
         entry: Schedule,
-        users: dict[UUID, Any],
+        person_rates: dict[tuple[UUID, UUID], Any],
         stores: dict[UUID, Any],
         orgs: dict[UUID, Any],
     ) -> tuple[float | None, str | None]:
         """prefetch된 map으로 user→store→org cascade 시급 결정.
 
         `_resolve_hourly_rate_with_source`와 동일 규칙. 어디서도 없으면 (None, None).
+        개인 rate 는 org_members 기반 person_rates map (R6 canonical).
         """
-        u = users.get(entry.user_id) if entry.user_id else None
-        if u is not None and u.hourly_rate is not None:
-            return float(u.hourly_rate), "user"
+        person = (
+            person_rates.get((entry.user_id, entry.organization_id))
+            if entry.user_id and entry.organization_id
+            else None
+        )
+        if person is not None:
+            return float(person), "user"
         st = stores.get(entry.store_id) if entry.store_id else None
         if st is not None and st.default_hourly_rate is not None:
             return float(st.default_hourly_rate), "store"
@@ -453,11 +468,18 @@ class ScheduleService:
     async def _resolve_hourly_rate_with_source(
         self, db: AsyncSession, user_id: UUID, store_id: UUID, organization_id: UUID,
     ) -> tuple[float, str | None]:
-        """cascade + 출처 레이어 반환. 어디서도 없으면 (0.0, None)."""
-        user_row = await db.execute(select(User.hourly_rate).where(User.id == user_id))
-        user_hr = user_row.scalar()
-        if user_hr is not None:
-            return float(user_hr), "user"
+        """cascade + 출처 레이어 반환. 어디서도 없으면 (0.0, None).
+
+        개인 rate 는 org_members(이력 포함)가 canonical (R6) — users.hourly_rate 는
+        전환기 미러라 직접 읽지 않는다.
+        """
+        from app.services.rate_service import rate_service
+
+        person = await rate_service.person_rate_at(
+            db, user_id=user_id, organization_id=organization_id,
+        )
+        if person is not None:
+            return float(person), "user"
         store_row = await db.execute(select(Store.default_hourly_rate).where(Store.id == store_id))
         store_hr = store_row.scalar()
         if store_hr is not None:
@@ -890,6 +912,11 @@ class ScheduleService:
         if norm["operating_day"] is None:
             raise BadRequestError("operating_day (or work_date) is required")
 
+        # (L3) 소급 차단 — 확정된 pay period 안의 과거 날짜로 스케줄 생성 금지.
+        # 미래/미확정 날짜는 confirmed 기간이 없으므로 자연히 통과한다.
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(db, store_id=store_id, work_date=norm["operating_day"])
+
         # status 유효성 확인 — Validate status value (draft/requested/confirmed)
         allowed_statuses = {"draft", "requested", "confirmed"}
         entry_status = data.status if data.status in allowed_statuses else "confirmed"
@@ -1030,7 +1057,7 @@ class ScheduleService:
           end_time 은 start + work.default_schedule_duration_minutes(매장/조직 설정, 기본 330)로 둔다.
           schedules 의 create-guard 상 시각 NULL 이 금지이므로 항상 채운다.
         - 실제 출근 시각을 계획 시작으로 쓰므로 워크인엔 지각 오판정이 생기지 않는다.
-        - hourly_rate 는 직원 시급(User.hourly_rate)이 있으면 그 값, 없으면 0 (D3).
+        - hourly_rate 는 직원 시급(org_members 기반, R6 canonical)이 있으면 그 값, 없으면 0 (D3).
         - confirmed 매뉴얼 스케줄과 동일하게 attendance row + checklist instance 를 파생한다.
         - **commit 하지 않는다** — 호출자(perform_clock_action)의 트랜잭션이 소유.
         """
@@ -1065,9 +1092,13 @@ class ScheduleService:
 
         net = net_minutes_from_datetimes(start_at, end_at)
 
-        # 4) hourly_rate — 직원 시급 있으면 적용, 없으면 0 (D3)
-        user_hr = await db.scalar(select(User.hourly_rate).where(User.id == user_id))
-        hourly_rate = float(user_hr) if user_hr is not None else 0.0
+        # 4) hourly_rate — 직원 시급(org_members canonical, R6) 있으면 적용, 없으면 0 (D3)
+        from app.services.rate_service import rate_service
+
+        person_rate = await rate_service.person_rate_at(
+            db, user_id=user_id, organization_id=organization_id,
+        )
+        hourly_rate = float(person_rate) if person_rate is not None else 0.0
 
         now_utc = datetime.now(timezone.utc)
         entry = await schedule_repository.create(db, {
@@ -1131,11 +1162,18 @@ class ScheduleService:
         errors: list[str] = []
         items: list = []
 
+        from app.services.payroll_lock_service import PayPeriodLockedError
+
         for i, data in enumerate(entries_data):
             try:
                 result = await self.create_entry(db, organization_id, data, created_by)
                 items.append(result)
                 created += 1
+            except PayPeriodLockedError as e:
+                # (L3) locked 날짜는 conflict-skip 대상이 아니라 항상 실패로 집계 —
+                # 소급 생성이 조용히 사라지면 안 된다.
+                failed += 1
+                errors.append(f"[{i}] failed: {e.detail}")
             except BadRequestError as e:
                 if skip_on_conflict:
                     skipped += 1
@@ -1271,6 +1309,7 @@ class ScheduleService:
           그 외 / 같은 status: no-op (skip)
         """
         from app.schemas.schedule import BulkUpdateResult, ScheduleUpdate
+        from app.services.payroll_lock_service import PayPeriodLockedError
 
         updated = 0
         failed = 0
@@ -1335,7 +1374,7 @@ class ScheduleService:
                         raise BadRequestError(f"Cannot transition status from '{current}' to '{target}'")
 
                 updated += 1
-            except (BadRequestError, ForbiddenError, NotFoundError) as exc:
+            except (BadRequestError, ForbiddenError, NotFoundError, PayPeriodLockedError) as exc:
                 failed += 1
                 errors.append(f"[{item.id}] {exc.detail if hasattr(exc, 'detail') else str(exc)}")
             except Exception as exc:
@@ -1353,6 +1392,7 @@ class ScheduleService:
     ) -> "BulkDeleteResult":
         """벌크 스케줄 삭제 (soft delete)."""
         from app.schemas.schedule import BulkDeleteResult
+        from app.services.payroll_lock_service import PayPeriodLockedError
 
         deleted = 0
         failed = 0
@@ -1363,7 +1403,7 @@ class ScheduleService:
                 entry_id = UUID(id_str)
                 await self.delete_entry(db, entry_id, organization_id, actor=actor)
                 deleted += 1
-            except (BadRequestError, ForbiddenError, NotFoundError) as exc:
+            except (BadRequestError, ForbiddenError, NotFoundError, PayPeriodLockedError) as exc:
                 failed += 1
                 errors.append(f"[{id_str}] {exc.detail if hasattr(exc, 'detail') else str(exc)}")
             except Exception as exc:
@@ -1395,6 +1435,12 @@ class ScheduleService:
             ).order_by(ScheduleModel.operating_day, ScheduleModel.start_at)
         )
         pending = list(db_result.scalars().all())
+
+        # (L3) 범위 안에 locked 날짜의 requested 가 있으면 전체 거부 —
+        # 부분 성공으로 조용히 빠지는 것보다 범위를 좁히도록 명확히 실패시킨다.
+        from app.services.payroll_lock_service import ensure_not_locked
+        for s in pending:
+            await ensure_not_locked(db, store_id=s.store_id, work_date=s.operating_day)
 
         results = []
         try:
@@ -1489,6 +1535,11 @@ class ScheduleService:
         # confirmed 스케줄 수정은 GM+ 권한 필요
         if entry.status == "confirmed" and actor is not None:
             self._require_gm_or_above(actor, "modify confirmed schedule")
+
+        # (L3) 확정된 pay period 안의 스케줄은 수정 불가. 새 영업일이 locked 기간으로
+        # 이동하는 것도 아래(norm 계산 후)에서 추가로 막는다.
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(db, store_id=entry.store_id, work_date=entry.operating_day)
 
         update_data: dict = {}
         # requested 스케줄 수정 시 변경 이력 기록용
@@ -1678,6 +1729,13 @@ class ScheduleService:
             detail = "; ".join(validation.errors + validation.warnings)
             raise BadRequestError(f"Validation failed: {detail}")
 
+        # (L3) 영업일이 바뀌는 수정이면 **새 날짜**도 locked 기간이 아니어야 한다 —
+        # 미확정 날짜의 스케줄을 확정 기간 안으로 소급 이동시키는 우회 차단.
+        if norm is not None and norm["operating_day"] != entry.operating_day:
+            await ensure_not_locked(
+                db, store_id=entry.store_id, work_date=norm["operating_day"]
+            )
+
         if norm is not None:
             for _k in ("operating_day", "start_at", "end_at",
                        "break_start_at", "break_end_at"):
@@ -1846,6 +1904,10 @@ class ScheduleService:
         # confirmed 스케줄 삭제는 GM+ 권한 필요
         if entry.status == "confirmed" and actor is not None:
             self._require_gm_or_above(actor, "delete confirmed schedule")
+
+        # (L3) 확정된 pay period 안의 스케줄은 삭제 불가 (소급 차단).
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(db, store_id=entry.store_id, work_date=entry.operating_day)
         prior_status = entry.status
         try:
             await self._log_audit(
@@ -1877,6 +1939,10 @@ class ScheduleService:
             raise NotFoundError("Schedule not found")
         if entry.status != "requested":
             raise BadRequestError(f"Only requested schedules can be confirmed (current status: {entry.status})")
+
+        # (L3) 확정된 pay period 안의 날짜로 confirmed 스케줄 소급 생성 금지.
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(db, store_id=entry.store_id, work_date=entry.operating_day)
 
         try:
             updated = await schedule_repository.update(
@@ -2035,6 +2101,12 @@ class ScheduleService:
             raise NotFoundError("Schedule not found")
         if entry.status not in ("confirmed", "cancelled"):
             raise BadRequestError(f"Only confirmed or cancelled schedules can be reverted (current status: {entry.status})")
+
+        # (L3) 확정된 pay period 안의 confirmed 스케줄 되돌리기 금지 —
+        # payroll 스냅샷의 근거(confirmed 상태)를 소급 해제하는 행위.
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(db, store_id=entry.store_id, work_date=entry.operating_day)
+
         was_cancelled = entry.status == "cancelled"
         try:
             update_payload: dict[str, Any] = {
@@ -2085,6 +2157,11 @@ class ScheduleService:
             raise NotFoundError("Schedule not found")
         if entry.status != "confirmed":
             raise BadRequestError(f"Only confirmed schedules can be cancelled (current status: {entry.status})")
+
+        # (L3) 확정된 pay period 안의 confirmed 스케줄 취소 금지 (소급 차단).
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(db, store_id=entry.store_id, work_date=entry.operating_day)
+
         try:
             updated = await schedule_repository.update(
                 db, entry_id,
@@ -2135,6 +2212,12 @@ class ScheduleService:
             raise NotFoundError("Schedule not found")
         if a.status != "confirmed" or b.status != "confirmed":
             raise BadRequestError("Both schedules must be confirmed to switch")
+
+        # (L3) 어느 한쪽이라도 확정된 pay period 안이면 switch 불가 —
+        # user 교환은 급여 귀속을 바꾸는 소급 변경이다.
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(db, store_id=a.store_id, work_date=a.operating_day)
+        await ensure_not_locked(db, store_id=b.store_id, work_date=b.operating_day)
 
         a_user = a.user_id
         b_user = b.user_id
@@ -2472,8 +2555,25 @@ class ScheduleService:
         skipped = 0
         errors: list[str] = []
 
+        # (L3) locked 날짜의 entry 는 confirm 하지 않고 skip + 에러 명시 (무음 금지).
+        from app.services.payroll_lock_service import (
+            PAY_PERIOD_LOCKED_MESSAGE,
+            is_locked_cached,
+        )
+        lock_cache: dict = {}
+
         try:
             for entry in entries:
+                if await is_locked_cached(
+                    db, lock_cache,
+                    store_id=entry.store_id, work_date=entry.operating_day,
+                ):
+                    skipped += 1
+                    errors.append(
+                        f"Schedule {entry.id} skipped: {PAY_PERIOD_LOCKED_MESSAGE}"
+                        f" ({entry.operating_day.isoformat()})"
+                    )
+                    continue
                 # 같은 user+date에 이미 confirmed 스케줄이 있으면 건너뜀 (시간 겹침 체크)
                 # Skip if there is already a confirmed schedule for same user+date with overlapping time
                 if entry.start_time and entry.end_time:
@@ -2566,8 +2666,26 @@ class ScheduleService:
         failed = 0
         errors: list[str] = []
 
+        # (L3) locked 날짜의 entry 는 확정하지 않고 실패로 집계 (무음 금지).
+        from app.services.payroll_lock_service import (
+            PAY_PERIOD_LOCKED_MESSAGE,
+            is_locked_cached,
+        )
+        lock_cache: dict = {}
+
         for entry in entries:
             if entry.status == "cancelled":
+                continue
+
+            if await is_locked_cached(
+                db, lock_cache,
+                store_id=entry.store_id, work_date=entry.operating_day,
+            ):
+                failed += 1
+                errors.append(
+                    f"Schedule {entry.id}: {PAY_PERIOD_LOCKED_MESSAGE}"
+                    f" ({entry.operating_day.isoformat()})"
+                )
                 continue
 
             entry.status = "confirmed"

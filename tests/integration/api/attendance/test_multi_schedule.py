@@ -72,9 +72,13 @@ async def test_identify_returns_all_today_attendances_sorted(
         status="clocked_out",
     )
 
-    # 오후 (곧 시작): 1시간 후 시작
-    aft_start = (now_local + timedelta(hours=1)).time().replace(microsecond=0)
-    aft_end = (now_local + timedelta(hours=5)).time().replace(microsecond=0)
+    # 오후 (곧 시작): 1시간 후 시작. 자정을 넘기면 end_at 이 오늘 새벽으로 뒤집혀
+    # no_show 판정되므로 (시각 의존 flaky) 당일 23:59 안으로 clamp
+    day_end = now_local.replace(hour=23, minute=59, second=0, microsecond=0)
+    aft_start_dt = min(now_local + timedelta(hours=1), day_end - timedelta(minutes=2))
+    aft_end_dt = min(now_local + timedelta(hours=5), day_end)
+    aft_start = aft_start_dt.time().replace(microsecond=0)
+    aft_end = aft_end_dt.time().replace(microsecond=0)
     afternoon = await make_schedule(test_user, start_time=aft_start, end_time=aft_end)
     await _ensure_attendance(afternoon)
     await _set_attendance(afternoon, clock_in=None, status="upcoming")

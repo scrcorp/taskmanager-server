@@ -136,9 +136,21 @@ async def test_list_rate_cascade(
     user_with_rate = users[0]
     user_without_rate = users[1]
 
-    # user[0] 에만 개인 시급 부여, store 에 기본 시급 부여
+    # user[0] 에만 개인 시급 부여, store 에 기본 시급 부여.
+    # R6 canonical: 개인 시급 출처는 org_members — users.hourly_rate 는 일부러
+    # 다른 값(99)으로 두어 org_members 가 소스임을 증명한다.
+    from app.models.org_member import OrgMember
+
     await db.execute(
-        update(User).where(User.id == user_with_rate["id"]).values(hourly_rate=20)
+        update(OrgMember)
+        .where(
+            OrgMember.user_id == user_with_rate["id"],
+            OrgMember.organization_id == org_id,
+        )
+        .values(hourly_rate=20)
+    )
+    await db.execute(
+        update(User).where(User.id == user_with_rate["id"]).values(hourly_rate=99)
     )
     await db.execute(
         update(Store).where(Store.id == test_store_id).values(default_hourly_rate=15)
@@ -169,6 +181,14 @@ async def test_list_rate_cascade(
             assert single[uid].effective_rate_source == r.effective_rate_source
             assert single[uid].effective_rate == r.effective_rate
     finally:
+        await db.execute(
+            update(OrgMember)
+            .where(
+                OrgMember.user_id == user_with_rate["id"],
+                OrgMember.organization_id == org_id,
+            )
+            .values(hourly_rate=None)
+        )
         await db.execute(
             update(User).where(User.id == user_with_rate["id"]).values(hourly_rate=None)
         )

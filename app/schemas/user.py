@@ -110,14 +110,17 @@ class UserCreate(BaseModel):
     @model_validator(mode="after")
     def _compose_full_name(self) -> "UserCreate":
         """이름 규칙: first/last 경로면 둘 다 필수(middle 선택), full_name 합성.
+        조합 규칙은 app/utils/names.compose_full_name 단일 규칙을 따른다.
         레거시로 full_name 만 직접 준 경우는 그대로 허용(호환)."""
+        from app.utils.names import compose_full_name
+
         first = (self.first_name or "").strip()
         mid = (self.middle_name or "").strip()
         last = (self.last_name or "").strip()
-        if first or last:
+        if first or mid or last:
             if not first or not last:
                 raise ValueError("First name and last name are required")
-            self.full_name = " ".join(p for p in (first, mid, last) if p)
+            self.full_name = compose_full_name(first, mid, last)
         if not (self.full_name and self.full_name.strip()):
             raise ValueError("Name is required")
         return self
@@ -138,7 +141,12 @@ class UserUpdate(BaseModel):
     """
 
     username: str | None = None  # 변경할 로그인 아이디 (New username, optional)
-    full_name: str | None = None  # 변경할 실명 (New name, optional)
+    full_name: str | None = None  # 변경할 실명 — 레거시 경로 (New name, optional)
+    # 구조화 이름 변경 — 하나라도 보내면 first+last 필수(middle 선택),
+    # full_name 은 서버가 compose_full_name 단일 규칙으로 재합성(동기화).
+    first_name: str | None = None
+    middle_name: str | None = None
+    last_name: str | None = None
     email: str | None = None  # 변경할 이메일 (New email, optional)
     role_id: str | None = None  # 변경할 역할 UUID (New role, optional)
     is_active: bool | None = None  # 활성 상태 변경 (Activate/deactivate, optional)
@@ -192,6 +200,10 @@ class UserResponse(BaseModel):
     id: str  # 사용자 UUID 문자열 (User UUID as string)
     username: str  # 로그인 아이디 (Login username)
     full_name: str  # 실명 (Full display name)
+    # 구조화 이름 — [Model B] 부분 백필 상태라 nullable (표시엔 display_name 규칙 사용)
+    first_name: str | None = None
+    middle_name: str | None = None
+    last_name: str | None = None
     email: str | None  # 이메일 (Email, may be null)
     email_verified: bool  # 이메일 인증 여부 (Email verification status)
     role_name: str  # 역할 이름 — 조인된 값 (Role name, resolved from Role table)

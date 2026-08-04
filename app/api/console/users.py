@@ -15,6 +15,7 @@ from app.api.deps import hide_cost_for, require_permission, scrub_cost_fields
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse
+from app.schemas.rate import RateChangeCreate, RateChangeEntry, RateChangeResult
 from app.schemas.user import (
     AbsorbPlanResponse,
     AbsorbRequest,
@@ -239,7 +240,9 @@ async def bulk_update_users(
     org_id: UUID = current_user.organization_id
     # model_fields_set 으로 "보낸 필드"만 추출 (user_ids 제외)
     changes = data.model_dump(include=data.model_fields_set - {"user_ids"})
-    count = await user_service.bulk_update_users(db, org_id, data.user_ids, changes)
+    count = await user_service.bulk_update_users(
+        db, org_id, data.user_ids, changes, caller=current_user
+    )
     return UserBulkUpdateResult(updated_count=count)
 
 
@@ -375,6 +378,60 @@ async def admin_reset_password(
         "temporary_password": temp_password,
         "message": "Password reset successfully",
     }
+
+
+# ── Rate changes (시급 변경 이력 — Payroll v1 Phase 1) ───────────────────────
+# 쓰기 권한 = 기존 hourly_rate 편집 경로(PUT /users/{id})와 동일한 users:update.
+# 추가로 cost 가시성(GM+) 게이트 — SV/Staff 는 permission 이 있어도 시급 접근 불가
+# (scrub_cost_fields 와 같은 규칙. 목록/상세는 스크럽이지만 여긴 이력 전체가
+# cost 데이터라 403 으로 차단).
+
+
+def _require_cost_visibility(current_user: User) -> None:
+    """cost(시급) 가시성 게이트 — GM 미만이면 403 (원인+대상 역할 명시)."""
+    if hide_cost_for(current_user):
+        from app.utils.exceptions import ForbiddenError
+
+        raise ForbiddenError(
+            "Hourly rate information is only available to GM and above"
+        )
+
+
+@router.post("/{user_id}/rate-changes", response_model=RateChangeResult)
+async def create_user_rate_change(
+    user_id: UUID,
+    data: RateChangeCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> RateChangeResult:
+    """개인 시급 변경 등록 — 이력 + org_members/users dual-write + 스케줄 갱신.
+
+    effective_date 생략 시 즉시(오늘 UTC) 적용, 미래 날짜는 일일 잡이 반영.
+    같은 값 재등록은 no-op (recorded=False). 0 이하 시급은 400.
+    """
+    _require_cost_visibility(current_user)
+    return await user_service.create_rate_change(
+        db,
+        user_id,
+        current_user.organization_id,
+        new_rate=data.new_rate,
+        effective_date=data.effective_date,
+        reason=data.reason,
+        caller=current_user,
+    )
+
+
+@router.get("/{user_id}/rate-changes", response_model=list[RateChangeEntry])
+async def list_user_rate_changes(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:read"))],
+) -> list[RateChangeEntry]:
+    """개인 시급 변경 이력 목록 (최신 우선 — effective_date DESC, created_at DESC)."""
+    _require_cost_visibility(current_user)
+    return await user_service.list_rate_changes(
+        db, user_id, current_user.organization_id
+    )
 
 
 # ── Clockin PIN (attendance device 용) ───────────────────────────

@@ -6,6 +6,7 @@ Provides checklist completion rates, attendance summary, and overtime summary.
 
 from datetime import date, datetime, timedelta
 from io import BytesIO
+from typing import Mapping, Sequence
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -15,12 +16,97 @@ from sqlalchemy import func, select, case, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attendance import Attendance
+from app.models.attendance_break import AttendanceBreak
 from app.models.checklist import ChecklistInstance
 from app.models.schedule import Schedule
 from app.models.evaluation import Evaluation
-from app.models.organization import LaborLawSetting, Organization, Store
+from app.models.organization import Organization, Store
 from app.models.user import User
+from app.services.attendance_service import compute_net_work_minutes
+from app.services.labor_law_service import (
+    DEFAULT_MAX_WEEKLY_HOURS,
+    resolve_weekly_max_hours,
+)
 from app.utils.timezone import DEFAULT_TIMEZONE
+
+
+def week_start_of(d: date) -> date:
+    """해당 날짜가 속한 주의 시작일(일요일) — 주는 항상 Sun→Sat."""
+    return d - timedelta(days=(d.weekday() + 1) % 7)
+
+
+def build_weekly_overtime_rows(
+    attendances: Sequence[Attendance],
+    breaks_map: Mapping[UUID, Sequence[AttendanceBreak]],
+    max_weekly_by_store: Mapping[UUID, int],
+) -> list[dict]:
+    """user × 주(일요일 시작) 단위로 net 근무시간을 집계하고 주간 한도와 비교한다.
+
+    P0-4: 기존 버그 — 조회 범위 전체 합계를 한 주 한도와 비교해 초과근무가
+    부풀려졌음. 주 단위로 쪼개 각 주의 net 합을 그 주 한도와 비교한다.
+    - net 은 attendance 별 C1 공식(compute_net_work_minutes) 합산 (gross 금지)
+    - 멀티 매장 주간은 min() 기준 적용 — overtime alerts 와 동일한 보수적 결정
+    - store 유실(SET NULL) 또는 map 에 없는 매장은 기본 40h
+
+    Returns (week_start, user_id 순 정렬):
+        {user_id, week_start, week_end, total_hours, max_weekly, overtime_hours}
+    """
+    agg: dict[tuple[UUID, date], dict] = {}
+    for att in attendances:
+        key = (att.user_id, week_start_of(att.work_date))
+        entry = agg.setdefault(key, {"net": 0, "store_ids": set()})
+        entry["net"] += compute_net_work_minutes(att, breaks_map.get(att.id, [])) or 0
+        if att.store_id is not None:
+            entry["store_ids"].add(att.store_id)
+
+    rows: list[dict] = []
+    for (uid, wk_start), entry in sorted(
+        agg.items(), key=lambda kv: (kv[0][1], str(kv[0][0]))
+    ):
+        if entry["store_ids"]:
+            max_weekly = min(
+                max_weekly_by_store.get(sid, DEFAULT_MAX_WEEKLY_HOURS)
+                for sid in entry["store_ids"]
+            )
+        else:
+            max_weekly = DEFAULT_MAX_WEEKLY_HOURS
+        total_hours = entry["net"] / 60
+        rows.append({
+            "user_id": uid,
+            "week_start": wk_start,
+            "week_end": wk_start + timedelta(days=6),
+            "total_hours": round(total_hours, 1),
+            "max_weekly": max_weekly,
+            "overtime_hours": round(max(0.0, total_hours - max_weekly), 1),
+        })
+    return rows
+
+
+async def _load_breaks_map(
+    db: AsyncSession,
+    attendance_ids: list[UUID],
+) -> dict[UUID, list[AttendanceBreak]]:
+    """attendance 별 break 세션 일괄 로드 — C1 net 계산용."""
+    if not attendance_ids:
+        return {}
+    result = await db.execute(
+        select(AttendanceBreak)
+        .where(AttendanceBreak.attendance_id.in_(attendance_ids))
+        .order_by(AttendanceBreak.started_at.asc())
+    )
+    out: dict[UUID, list[AttendanceBreak]] = {}
+    for br in result.scalars().all():
+        out.setdefault(br.attendance_id, []).append(br)
+    return out
+
+
+async def _resolve_max_weekly_map(
+    db: AsyncSession,
+    attendances: Sequence[Attendance],
+) -> dict[UUID, int]:
+    """attendance 에 등장하는 매장별 주간 한도 resolve — 매장당 1회 조회."""
+    involved = {att.store_id for att in attendances if att.store_id is not None}
+    return {sid: await resolve_weekly_max_hours(db, sid) for sid in involved}
 
 
 class DashboardService:
@@ -155,51 +241,47 @@ class DashboardService:
         week_date: date | None = None,
         store_id: UUID | None = None,
     ) -> dict:
-        """초과근무 현황 요약."""
+        """초과근무 현황 요약.
+
+        - 주간 시간은 attendance 별 C1 net(compute_net_work_minutes) 합산
+        - 기준(max weekly)은 매장별 LaborLawSetting cascade — resolve_weekly_max_hours
+          (기존 버그: org 내 임의 row .limit(1) + gross 분 합산)
+        """
         today = await self._resolve_today(db, organization_id, store_id)
         target_date = week_date or today
-        weekday = target_date.weekday()
-        week_start = target_date - timedelta(days=(weekday + 1) % 7)
+        week_start = week_start_of(target_date)
         week_end = week_start + timedelta(days=6)
 
-        # 노동법 기준
-        max_weekly = 40
-        law_result = await db.execute(
-            select(LaborLawSetting)
-            .where(LaborLawSetting.organization_id == organization_id)
-            .limit(1)
-        )
-        law = law_result.scalar_one_or_none()
-        if law:
-            max_weekly = law.store_max_weekly or law.state_max_weekly or law.federal_max_weekly
-
         query = (
-            select(
-                Attendance.user_id,
-                func.sum(Attendance.total_work_minutes).label("total_minutes"),
-            )
+            select(Attendance)
             .where(
                 Attendance.organization_id == organization_id,
                 Attendance.work_date >= week_start,
                 Attendance.work_date <= week_end,
             )
-            .group_by(Attendance.user_id)
         )
         if store_id:
             query = query.where(Attendance.store_id == store_id)
 
         result = await db.execute(query)
-        rows = result.all()
+        attendances = list(result.scalars().all())
+
+        breaks_map = await _load_breaks_map(db, [a.id for a in attendances])
+        max_weekly_by_store = await _resolve_max_weekly_map(db, attendances)
+        rows = build_weekly_overtime_rows(attendances, breaks_map, max_weekly_by_store)
 
         total_users = len(rows)
-        overtime_users = 0
-        total_overtime_hours = 0.0
+        overtime_users = sum(1 for r in rows if r["overtime_hours"] > 0)
+        total_overtime_hours = round(sum(r["overtime_hours"] for r in rows), 1)
 
-        for row in rows:
-            total_hours = (row.total_minutes or 0) / 60
-            if total_hours > max_weekly:
-                overtime_users += 1
-                total_overtime_hours += total_hours - max_weekly
+        # 표시용 한도: store 필터 시 그 매장 기준, 아니면 관련 매장 중 가장 엄격한 값.
+        # (판정 자체는 user 별 근무 매장 기준 — build_weekly_overtime_rows)
+        if store_id:
+            max_weekly = await resolve_weekly_max_hours(db, store_id)
+        elif max_weekly_by_store:
+            max_weekly = min(max_weekly_by_store.values())
+        else:
+            max_weekly = DEFAULT_MAX_WEEKLY_HOURS
 
         return {
             "week_start": str(week_start),
@@ -207,7 +289,7 @@ class DashboardService:
             "max_weekly_hours": max_weekly,
             "total_users_with_attendance": total_users,
             "overtime_users": overtime_users,
-            "total_overtime_hours": round(total_overtime_hours, 1),
+            "total_overtime_hours": total_overtime_hours,
         }
 
     async def get_evaluation_summary(
@@ -341,56 +423,53 @@ class DashboardService:
             ws2.column_dimensions[ws2.cell(row=1, column=i).column_letter].width = w
 
         # --- Sheet 3: Overtime ---
+        # P0-4: 조회 범위를 일요일 시작 주(Sun–Sat)로 쪼개 user × 주 단위로
+        # net 근무시간을 각 주의 매장별 한도와 비교한다.
+        # (기존 버그: 범위 전체 gross 합 vs 한 주 한도 → 초과근무 부풀림)
         ws3 = wb.create_sheet("Overtime")
         headers3 = ["User", "Week Start", "Week End", "Total Hours", "Max Weekly", "Overtime Hours"]
         style_headers(ws3, headers3)
 
-        # Calculate weekly overtime for the date range
-        # Use Monday of date_from week to Sunday of date_to week
-        weekday = date_from.weekday()
-        week_start = date_from - timedelta(days=(weekday + 1) % 7)
-        week_end_of_range = date_to + timedelta(days=6 - (date_to.weekday() + 1) % 7)
-
-        max_weekly = 40
-        law_result = await db.execute(
-            select(LaborLawSetting)
-            .where(LaborLawSetting.organization_id == organization_id)
-            .limit(1)
-        )
-        law = law_result.scalar_one_or_none()
-        if law:
-            max_weekly = law.store_max_weekly or law.state_max_weekly or law.federal_max_weekly
+        # 경계 주는 통째로 포함 — date_from 이 속한 주 일요일부터
+        # date_to 가 속한 주 토요일까지 (주간 합계가 잘리지 않도록)
+        range_start = week_start_of(date_from)
+        range_end = week_start_of(date_to) + timedelta(days=6)
 
         ot_query = (
-            select(
-                Attendance.user_id,
-                func.sum(Attendance.total_work_minutes).label("total_minutes"),
-            )
+            select(Attendance)
             .where(
                 Attendance.organization_id == organization_id,
-                Attendance.work_date >= week_start,
-                Attendance.work_date <= week_end_of_range,
+                Attendance.work_date >= range_start,
+                Attendance.work_date <= range_end,
             )
-            .group_by(Attendance.user_id)
         )
         if store_id:
             ot_query = ot_query.where(Attendance.store_id == store_id)
 
         result = await db.execute(ot_query)
-        for row in result.all():
-            total_hours = (row.total_minutes or 0) / 60
-            overtime = max(0, total_hours - max_weekly)
-            user_result = await db.execute(
-                select(User.full_name).where(User.id == row.user_id)
+        attendances = list(result.scalars().all())
+
+        breaks_map = await _load_breaks_map(db, [a.id for a in attendances])
+        max_weekly_by_store = await _resolve_max_weekly_map(db, attendances)
+        ot_rows = build_weekly_overtime_rows(attendances, breaks_map, max_weekly_by_store)
+
+        # 사용자 이름 일괄 조회 — row 당 개별 쿼리 제거
+        user_ids = list({r["user_id"] for r in ot_rows})
+        names_map: dict[UUID, str] = {}
+        if user_ids:
+            names_result = await db.execute(
+                select(User.id, User.full_name).where(User.id.in_(user_ids))
             )
-            user_name = user_result.scalar() or "Unknown"
+            names_map = {row.id: row.full_name for row in names_result}
+
+        for r in ot_rows:
             ws3.append([
-                user_name,
-                str(week_start),
-                str(week_end_of_range),
-                round(total_hours, 1),
-                max_weekly,
-                round(overtime, 1),
+                names_map.get(r["user_id"]) or "Unknown",
+                str(r["week_start"]),
+                str(r["week_end"]),
+                r["total_hours"],
+                r["max_weekly"],
+                r["overtime_hours"],
             ])
 
         for i, w in enumerate([20, 15, 15, 12, 12, 15], 1):

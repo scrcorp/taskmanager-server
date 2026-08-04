@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
@@ -57,7 +57,16 @@ async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
     late_count = 0
     no_show_count = 0
 
+    # (L3) 확정된 pay period 안의 row 는 cron 도 건드리지 않는다 —
+    # (store, work_date) 별 1회만 조회하는 저비용 캐시.
+    from app.services.payroll_lock_service import is_locked_cached
+    lock_cache: dict = {}
+
     for att, sch, store in rows_list:
+        if await is_locked_cached(
+            db, lock_cache, store_id=att.store_id, work_date=att.work_date
+        ):
+            continue
         # store.timezone 이 None 이면 organization.timezone 으로 fallback —
         # 그냥 store.timezone or "UTC" 하면 매장 미설정 시 UTC 로 떨어져
         # sched_end 시각을 잘못 계산한다.
@@ -89,7 +98,9 @@ async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
         #    단 clock_in 이 이미 있으면(출근 완료) "late" 그대로 유지 — 출근한 직원을
         #    no_show 로 표시하면 키오스크 "Clocked In" 섹션에서 사라진다.
         if sched_end is not None and now_min >= sched_end:
-            if att.clock_in is not None:
+            # clock_in 또는 clock_out 이 있으면(실제 근무 기록 존재) no_show 로
+            # 강등하지 않는다 — 실제 기록이 status 정합화(reconcile)보다 우선.
+            if att.clock_in is not None or att.clock_out is not None:
                 continue
             if att.status != "no_show":
                 att.status = "no_show"
@@ -152,7 +163,15 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
     # F9: 틱마다 행 수만큼 resolve 하지 않도록 매장당 1회 resolve 후 캐시.
     auto_enabled_cache: dict = {}
 
+    # (L3) 확정된 pay period 안의 row 는 자동퇴근 처리하지 않는다 (저비용 skip).
+    from app.services.payroll_lock_service import is_locked_cached
+    lock_cache: dict = {}
+
     for att, sch, store in rows_list:
+        if await is_locked_cached(
+            db, lock_cache, store_id=att.store_id, work_date=att.work_date
+        ):
+            continue
         # N2: 매장의 auto_clock_out_enabled 토글 가드. OFF 매장은 자동 퇴근 skip
         # (미퇴근 관리자 알림은 별도 경로에서 유지 — D11).
         if att.store_id in auto_enabled_cache:
@@ -197,11 +216,46 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
         if now_utc < sched_end + timedelta(minutes=after_minutes):
             continue
 
+        # AL-4 가드 1 (세션 내): 어떤 경로로든 clock_out 이 이미 있으면 절대
+        # 덮어쓰지 않는다. 쿼리에서 clock_out IS NULL 로 걸렀지만 방어적으로 재확인.
+        if att.clock_out is not None:
+            continue
+
         # 자동 clock-out 시점은 sched_end (UTC로 저장)
         cutoff = sched_end.astimezone(timezone.utc)
 
-        # 진행중 break 종료 (cutoff 기준)
-        if att.status == "on_break":
+        # AL-4 가드 2 (write-time, 원자적): fetch 이후 per-row await 동안 직원이
+        # 실제로 clock-out 했을 수 있다 (race window). WHERE clock_out IS NULL
+        # 조건부 UPDATE 로 원자적으로 잠금 — 동시 clock-out 이 먼저 커밋됐으면
+        # rowcount=0 이 되고, 이 attendance 는 일절 수정하지 않는다
+        # (break/이상치/correction 도 건드리지 않음 → 급여는 실제 퇴근시각 기준 유지).
+        was_on_break = att.status == "on_break"
+        claim = await db.execute(
+            update(Attendance)
+            .where(
+                Attendance.id == att.id,
+                Attendance.clock_out.is_(None),
+            )
+            .values(
+                clock_out=cutoff,
+                clock_out_timezone=tz_name,
+                status="clocked_out",
+            )
+        )
+        if claim.rowcount == 0:
+            # 실제 clock-out 이 이미 기록됨 — 세션 내 stale 상태 폐기 후 skip.
+            # (expire 후 attribute 접근은 async 세션에서 lazy load 를 유발하므로
+            #  id 를 먼저 캡처해 로그에 사용)
+            att_id = att.id
+            db.expire(att)
+            logger.info(
+                f"[attendance_cron] skip auto clock-out for {att_id}: "
+                "clock_out already set (raced with real clock-out)"
+            )
+            continue
+
+        # 진행중 break 종료 (cutoff 기준) — claim 성공한 row 에만 적용.
+        if was_on_break:
             br_rows = await db.execute(
                 select(AttendanceBreak).where(
                     AttendanceBreak.attendance_id == att.id,
@@ -214,6 +268,7 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
                 br.duration_minutes = max(0, int((end_at - br.started_at).total_seconds() / 60))
             att.break_end = cutoff
 
+        # ORM 객체도 동기화 (synchronize_session 전략과 무관하게 일관 보장)
         att.clock_out = cutoff
         att.clock_out_timezone = tz_name
         att.status = "clocked_out"
@@ -250,6 +305,35 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
     if auto_count:
         await db.commit()
     return auto_count
+
+
+async def _reconcile_closed_attendance_status(db: AsyncSession) -> int:
+    """clock_out 이 이미 있는데 status 가 아직 open(working/on_break/late)인
+    stale row 의 status 만 clocked_out 으로 정합화한다 (AL-4).
+
+    - clock_out / 시각·분 필드는 절대 수정하지 않는다 — 실제 퇴근 기록이 진실.
+    - break 도 건드리지 않는다 (이미 닫힌 attendance 의 break 는 cron 소관 아님).
+    - 이렇게 정합화해 두면 status 기반 선택을 쓰는 다른 경로가 닫힌 row 를
+      다시 집어 자동 퇴근으로 덮어쓸 여지가 없어진다.
+    """
+    now_utc = datetime.now(timezone.utc)
+    today_utc = now_utc.date()
+    two_days_ago = today_utc - timedelta(days=2)
+
+    result = await db.execute(
+        update(Attendance)
+        .where(
+            Attendance.status.in_(["working", "on_break", "late"]),
+            Attendance.clock_out.isnot(None),
+            Attendance.work_date >= two_days_ago,
+            Attendance.work_date <= today_utc,
+        )
+        .values(status="clocked_out")
+    )
+    count = result.rowcount or 0
+    if count:
+        await db.commit()
+    return count
 
 
 async def _alert_overdue_clock_outs(db: AsyncSession) -> int:
@@ -368,12 +452,16 @@ async def run_attendance_state_tick() -> None:
     """APScheduler에서 호출되는 진입점. 1분마다 실행."""
     try:
         async with async_session() as db:
+            # AL-4: status/clock_out 불일치 row 를 먼저 정합화 —
+            # 이후 status 기반 선택이 닫힌 row 를 집을 수 없게 한다.
+            reconciled_cnt = await _reconcile_closed_attendance_status(db)
             late_cnt, no_show_cnt = await _persist_late_and_no_show(db)
             auto_out_cnt = await _auto_clock_out_overdue(db)
             alert_cnt = await _alert_overdue_clock_outs(db)
-            if late_cnt or no_show_cnt or auto_out_cnt or alert_cnt:
+            if reconciled_cnt or late_cnt or no_show_cnt or auto_out_cnt or alert_cnt:
                 logger.info(
-                    f"[attendance_cron] persist late={late_cnt} no_show={no_show_cnt} "
+                    f"[attendance_cron] reconciled={reconciled_cnt} "
+                    f"persist late={late_cnt} no_show={no_show_cnt} "
                     f"auto_clock_out={auto_out_cnt} overdue_alerts={alert_cnt}"
                 )
     except Exception as e:

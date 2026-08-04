@@ -271,3 +271,9 @@ console_router.include_router(app_versions_router, prefix="/app-versions", tags=
 # Schedule Daily Report 라우터 등록 — Owner 전용 수동 트리거
 # ---------------------------------------------------------------------------
 console_router.include_router(schedule_reports_router, prefix="/schedule-report", tags=["Schedule Report"])
+
+# ---------------------------------------------------------------------------
+# Payroll 라우터 등록 — pay periods/확정(payroll:*, 기본 Owner) + 이벤트 태깅
+# ---------------------------------------------------------------------------
+from app.api.console.payroll import router as payroll_router  # noqa: E402
+console_router.include_router(payroll_router, prefix="/payroll", tags=["Payroll"])

@@ -206,6 +206,67 @@ def _add_anomaly(attendance: Attendance, code: str) -> None:
     attendance.anomalies = current
 
 
+# paid break 세션당 유급 인정 시간(분) — 초과분은 순 근무시간에서 차감 (결정 C1).
+PAID_BREAK_PAYABLE_MINUTES = 10
+
+
+def summarize_break_sessions(
+    breaks: Sequence[AttendanceBreak],
+) -> tuple[int, int, int, list[dict]]:
+    """break 세션 목록을 paid/unpaid 집계 + paid 10분 초과분 + dict 리스트로 요약.
+
+    Returns:
+        (paid_total, unpaid_total, paid_overage, items)
+        - paid_total: 모든 paid_10min(구: paid_short) 세션 duration 합
+        - unpaid_total: 모든 unpaid_meal(구: unpaid_long) 세션 duration 합
+        - paid_overage: 각 paid 세션별 (duration - 10, 0 하한) 합. 근무시간에서 추가 차감 대상.
+        - items: 타임라인용 dict 목록
+
+    진행 중(ended_at NULL) 세션은 집계에서 제외하고 items 에만 포함.
+    """
+    paid: int = 0
+    unpaid: int = 0
+    paid_overage: int = 0
+    items: list[dict] = []
+    for br in breaks:
+        duration = br.duration_minutes or 0
+        if br.ended_at is not None:
+            if br.break_type in PAID_BREAK_TYPES:
+                paid += duration
+                paid_overage += max(0, duration - PAID_BREAK_PAYABLE_MINUTES)
+            elif br.break_type in UNPAID_BREAK_TYPES:
+                unpaid += duration
+        items.append({
+            "id": str(br.id),
+            "started_at": br.started_at,
+            "ended_at": br.ended_at,
+            "break_type": br.break_type,
+            "duration_minutes": br.duration_minutes,
+        })
+    return paid, unpaid, paid_overage, items
+
+
+def compute_net_work_minutes(
+    attendance: Attendance,
+    breaks: Sequence[AttendanceBreak],
+) -> int | None:
+    """순 근무시간(분) — 결정 C1 공식의 단일 구현.
+
+    net = max(0, total_work_minutes - unpaid break 전체 - paid break 세션별 10분 초과분)
+    - unpaid break(unpaid_meal): 전체 비근무 차감
+    - paid break(paid_10min): 세션당 첫 10분 유급, 초과분만 차감
+    - 진행 중(ended_at NULL) break 세션은 차감하지 않음
+    - total_work_minutes 가 None(clock-out 전)이면 None 반환
+
+    build_response / get_weekly_summary / get_overtime_alerts 등 급여·집계
+    로직은 반드시 이 함수를 사용한다 (공식 중복 금지, P0-1).
+    """
+    if attendance.total_work_minutes is None:
+        return None
+    _, unpaid_minutes, paid_overage, _ = summarize_break_sessions(breaks)
+    return max(0, attendance.total_work_minutes - unpaid_minutes - paid_overage)
+
+
 class AttendanceService:
     """근태 관리 서비스.
 
@@ -652,6 +713,41 @@ class AttendanceService:
         # 근태 기록 조회 — Fetch attendance record
         attendance: Attendance = await self.get_attendance(db, attendance_id, organization_id)
 
+        # (L3) 확정된 pay period 안의 근태는 수정 불가 — 409.
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(
+            db, store_id=attendance.store_id, work_date=attendance.work_date
+        )
+
+        # (AK-1) 시각 정정값 해석 — 저장 전에 UTC instant 로 정규화.
+        # naive ISO 는 매장 타임존 벽시계로 해석한다. 이전에는 naive 값이 그대로
+        # TIMESTAMPTZ 에 저장돼 UTC 로 오기록됐다 (디바이스/브라우저 로컬 시각이
+        # 매장 시각인 척 들어오면 instant 가 시간 단위로 밀려 payroll 오염).
+        corrected_dt: datetime | None = None
+        store_tz: str | None = None
+        if field_name in time_fields:
+            from app.utils.timezone import get_store_timezone, interpret_clock_time
+
+            try:
+                parsed: datetime = datetime.fromisoformat(corrected_value)
+            except ValueError:
+                raise BadRequestError(
+                    f"Invalid datetime for {field_name}: {corrected_value!r}. "
+                    "Use ISO format (e.g. 2026-08-03T09:00 or with explicit offset)."
+                )
+            store_tz = await get_store_timezone(db, attendance.store_id)
+            corrected_dt = interpret_clock_time(parsed, store_tz)
+            # audit trail 도 실제 저장 instant 와 일치하도록 정규화된 값 기록
+            corrected_value = corrected_dt.isoformat()
+
+        # clock_in 없이 clock_out 만 설정 금지 — 반쪽 펀치는 근무시간이 NULL 로
+        # 남아 payroll 게이트 어디에도 안 걸리고 조용히 0원이 된다 (edge 테스트 발견).
+        if field_name == "clock_out" and attendance.clock_in is None:
+            raise BadRequestError(
+                "Cannot set clock-out on a record with no clock-in. "
+                "Correct clock-in first, then clock-out."
+            )
+
         # 기존 값 가져오기 — Get original value
         original_value: str | None = None
         original_raw = getattr(attendance, field_name, None)
@@ -676,8 +772,11 @@ class AttendanceService:
 
         # 근태 기록 업데이트 — Update attendance field with corrected value
         if field_name in time_fields:
-            corrected_dt: datetime = datetime.fromisoformat(corrected_value)
             setattr(attendance, field_name, corrected_dt)
+            # clock_in/clock_out 은 tz-name snapshot 컬럼도 함께 갱신 —
+            # 저장 instant(UTC)와 해석 기준 타임존이 항상 짝을 이루도록.
+            if field_name in ("clock_in", "clock_out") and store_tz is not None:
+                setattr(attendance, f"{field_name}_timezone", store_tz)
         else:
             setattr(attendance, field_name, corrected_value)
 
@@ -707,6 +806,14 @@ class AttendanceService:
             and attendance.status in ("working", "late")
         ):
             attendance.status = "clocked_out"
+
+        # (L6) 자동퇴근 record 의 clock_out 을 사람이 정정하면 = 확인(confirm)으로 간주.
+        # 매니저가 실제 퇴근 시각을 직접 고쳤다는 것 자체가 human-verified 이므로
+        # 별도 confirm-auto-clockout 호출 없이 확인 상태를 함께 기록한다.
+        # anomaly 'auto_clocked_out' 는 이력(자동퇴근이 있었다는 사실)이므로 지우지 않는다.
+        self._mark_auto_clock_out_confirmed_if_applicable(
+            attendance, field_name, corrected_by
+        )
 
         await db.flush()
 
@@ -749,6 +856,74 @@ class AttendanceService:
         await db.commit()
         await db.refresh(correction)
         return correction
+
+    # ─── 자동퇴근 확인 (L6 — payroll 마감 게이트 ①의 일상 플로우) ─────────
+
+    @staticmethod
+    def _mark_auto_clock_out_confirmed_if_applicable(
+        attendance: Attendance,
+        field_name: str,
+        by_user_id: UUID,
+    ) -> None:
+        """clock_out 정정 시 auto_clocked_out record 를 확인(confirmed) 처리.
+
+        corrected == human-verified 규칙 (L6). 이미 확인된 record 는 최초
+        확인자/시각을 보존한다 (덮어쓰지 않음).
+        """
+        if (
+            field_name == "clock_out"
+            and "auto_clocked_out" in (attendance.anomalies or [])
+            and attendance.auto_clock_out_confirmed_at is None
+        ):
+            attendance.auto_clock_out_confirmed_by = by_user_id
+            attendance.auto_clock_out_confirmed_at = datetime.now(timezone.utc)
+
+    async def confirm_auto_clock_out(
+        self,
+        db: AsyncSession,
+        *,
+        attendance_id: UUID,
+        organization_id: UUID,
+        confirmed_by: UUID,
+    ) -> Attendance:
+        """자동퇴근(auto_clocked_out) record 를 매니저가 확인(confirm) 처리.
+
+        L6 일상 플로우 — 당일/익일 매니저·SV 가 근태 화면에서 자동퇴근 건을
+        확인한다. 이 확인 상태가 payroll 마감 게이트 ①(미확인 자동퇴근 0건)의
+        판정 근거다.
+
+        규칙:
+            - 'auto_clocked_out' anomaly 가 없는 record 는 400 (확인할 게 없음)
+            - 이미 확인된 record 재확인은 **no-op (멱등)** — 최초 확인자/시각을
+              보존한 채 200 으로 성공 반환. 콘솔 더블클릭/재시도에 안전.
+            - L3 lock 가드 없음 (의도) — 확인은 시간·금액 데이터가 아니라 검증
+              메타데이터라 lock 이후에도 기록 가능해야 한다 (force-confirm 케이스).
+
+        Raises:
+            NotFoundError: attendance 없음/타 org
+            BadRequestError: auto_clocked_out anomaly 가 아닌 record
+        """
+        attendance = await self.get_attendance(db, attendance_id, organization_id)
+
+        if "auto_clocked_out" not in (attendance.anomalies or []):
+            raise BadRequestError(
+                "This attendance was not auto clocked out — there is nothing to confirm."
+            )
+
+        # 멱등 no-op: 이미 확인됨 — 최초 확인 기록 보존
+        if attendance.auto_clock_out_confirmed_at is not None:
+            return attendance
+
+        attendance.auto_clock_out_confirmed_by = confirmed_by
+        attendance.auto_clock_out_confirmed_at = datetime.now(timezone.utc)
+        await db.flush()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+        await db.refresh(attendance)
+        return attendance
 
     async def get_corrections(
         self,
@@ -810,40 +985,6 @@ class AttendanceService:
         for br in result.scalars().all():
             out.setdefault(br.attendance_id, []).append(br)
         return out
-
-    @staticmethod
-    def _summarize_breaks(
-        breaks: list[AttendanceBreak],
-    ) -> tuple[int, int, int, list[dict]]:
-        """break 목록을 paid/unpaid 집계 + paid 10분 초과분 + dict 리스트.
-
-        Returns:
-            (paid_total, unpaid_total, paid_overage, items)
-            - paid_total: 모든 paid_10min(구: paid_short) 세션 duration 합
-            - unpaid_total: 모든 unpaid_meal(구: unpaid_long) 세션 duration 합
-            - paid_overage: 각 paid 세션별 (duration - 10, 0 하한) 합. 근무시간에서 추가 차감 대상.
-            - items: 타임라인용 dict 목록
-        """
-        paid: int = 0
-        unpaid: int = 0
-        paid_overage: int = 0
-        items: list[dict] = []
-        for br in breaks:
-            duration = br.duration_minutes or 0
-            if br.ended_at is not None:
-                if br.break_type in PAID_BREAK_TYPES:
-                    paid += duration
-                    paid_overage += max(0, duration - 10)
-                elif br.break_type in UNPAID_BREAK_TYPES:
-                    unpaid += duration
-            items.append({
-                "id": str(br.id),
-                "started_at": br.started_at,
-                "ended_at": br.ended_at,
-                "break_type": br.break_type,
-                "duration_minutes": br.duration_minutes,
-            })
-        return paid, unpaid, paid_overage, items
 
     async def build_response(
         self,
@@ -920,7 +1061,7 @@ class AttendanceService:
             breaks = list(br_result.scalars().all())
 
         paid_break_minutes, unpaid_break_minutes, paid_overage_minutes, break_items = (
-            self._summarize_breaks(breaks)
+            summarize_break_sessions(breaks)
         )
 
         # store tz 기준 "HH:MM" display formatter — admin UI 가 브라우저 로컬 tz 변환
@@ -965,16 +1106,8 @@ class AttendanceService:
             else attendance.total_break_minutes
         )
 
-        # 순 근무시간 계산 — Net work minutes
-        # = total_work
-        #   - unpaid_break 전체 (일 안 한 시간)
-        #   - paid break 10분 초과분 (10분은 유급, 초과는 비근무 처리)
-        total_work = attendance.total_work_minutes or 0
-        net_work_minutes: int | None = None
-        if attendance.total_work_minutes is not None:
-            net_work_minutes = max(
-                0, total_work - unpaid_break_minutes - paid_overage_minutes
-            )
+        # 순 근무시간 — 결정 C1 단일 공식 (compute_net_work_minutes 공용)
+        net_work_minutes: int | None = compute_net_work_minutes(attendance, breaks)
 
         return {
             "id": str(attendance.id),
@@ -1018,6 +1151,12 @@ class AttendanceService:
             "net_work_minutes": net_work_minutes,
             "breaks": break_items,
             "note": attendance.note,
+            # L6 — 자동퇴근 확인 상태 (콘솔 미확인 배지용). 미확인이면 둘 다 None.
+            "auto_clock_out_confirmed_at": attendance.auto_clock_out_confirmed_at,
+            "auto_clock_out_confirmed_by": (
+                str(attendance.auto_clock_out_confirmed_by)
+                if attendance.auto_clock_out_confirmed_by is not None else None
+            ),
             "created_at": attendance.created_at,
         }
 
@@ -1072,10 +1211,10 @@ class AttendanceService:
         """주간 근무시간 요약 — 사용자별 일일/주간 근무시간.
 
         Weekly work time summary — per-user daily and weekly totals.
-        Computes net_work_minutes (total - break) per day and aggregates weekly.
+        net_work_minutes 는 attendance 별 C1 공식(compute_net_work_minutes)의 합 —
+        gross - 전체 break 가 아니라, unpaid 전체 + paid 10분 초과분만 차감 (P0-1).
         """
         import datetime as dt
-        from sqlalchemy import func
 
         target_date = week_date or date.today()
         weekday = target_date.weekday()
@@ -1083,18 +1222,12 @@ class AttendanceService:
         week_end = week_start + dt.timedelta(days=6)
 
         query = (
-            select(
-                Attendance.user_id,
-                func.sum(Attendance.total_work_minutes).label("total_work"),
-                func.sum(Attendance.total_break_minutes).label("total_break"),
-                func.count(Attendance.id).label("days_worked"),
-            )
+            select(Attendance)
             .where(
                 Attendance.organization_id == organization_id,
                 Attendance.work_date >= week_start,
                 Attendance.work_date <= week_end,
             )
-            .group_by(Attendance.user_id)
         )
         if user_id:
             query = query.where(Attendance.user_id == user_id)
@@ -1104,31 +1237,41 @@ class AttendanceService:
             query = query.where(Attendance.store_id.in_(store_ids))
 
         result = await db.execute(query)
-        rows = result.all()
+        attendances = list(result.scalars().all())
+
+        # break 세션 일괄 로드 — attendance 별 C1 net 계산용
+        breaks_map = await self._load_breaks_map(db, [a.id for a in attendances])
+
+        # 사용자별 집계 — net 은 per-attendance C1 net 의 합
+        aggregates: dict[UUID, dict] = {}
+        for att in attendances:
+            agg = aggregates.setdefault(att.user_id, {
+                "total_work": 0, "total_break": 0, "net": 0, "days": 0,
+            })
+            agg["days"] += 1
+            agg["total_work"] += att.total_work_minutes or 0
+            agg["total_break"] += att.total_break_minutes or 0
+            net = compute_net_work_minutes(att, breaks_map.get(att.id, []))
+            agg["net"] += net or 0
 
         # 사용자 이름 일괄 조회 — Batch load user names
-        user_ids = [row.user_id for row in rows]
         names_result = await db.execute(
-            select(User.id, User.full_name).where(User.id.in_(user_ids))
+            select(User.id, User.full_name).where(User.id.in_(list(aggregates.keys())))
         )
         names_map = {row.id: row.full_name for row in names_result}
 
         summaries: list[dict] = []
-        for row in rows:
-            user_name = names_map.get(row.user_id) or "Unknown"
-            total_work = row.total_work or 0
-            total_break = row.total_break or 0
-            net_minutes = max(0, total_work - total_break)
+        for uid, agg in aggregates.items():
             summaries.append({
-                "user_id": str(row.user_id),
-                "user_name": user_name,
+                "user_id": str(uid),
+                "user_name": names_map.get(uid) or "Unknown",
                 "week_start": str(week_start),
                 "week_end": str(week_end),
-                "days_worked": row.days_worked,
-                "total_work_minutes": total_work,
-                "total_break_minutes": total_break,
-                "net_work_minutes": net_minutes,
-                "net_work_hours": round(net_minutes / 60, 1),
+                "days_worked": agg["days"],
+                "total_work_minutes": agg["total_work"],
+                "total_break_minutes": agg["total_break"],
+                "net_work_minutes": agg["net"],
+                "net_work_hours": round(agg["net"] / 60, 1),
             })
         return summaries
 
@@ -1142,40 +1285,30 @@ class AttendanceService:
     ) -> list[dict]:
         """주간 초과근무 경고 목록 조회.
 
-        Get overtime alerts — users whose weekly total exceeds threshold.
+        Get overtime alerts — users whose weekly NET hours exceed threshold.
+        - 주간 시간은 attendance 별 C1 net(compute_net_work_minutes) 합산 (P0-2)
+        - 기준(max weekly)은 매장별 LaborLawSetting cascade — resolve_weekly_max_hours (P0-3)
+          한 주에 여러 매장 근무 시 가장 엄격한(작은) 기준으로 판정.
         """
         import datetime as dt
-        from sqlalchemy import func
-        from app.models.organization import LaborLawSetting
+        from app.services.labor_law_service import (
+            DEFAULT_MAX_WEEKLY_HOURS,
+            resolve_weekly_max_hours,
+        )
 
         target_date = week_date or date.today()
         weekday = target_date.weekday()
         week_start = target_date - dt.timedelta(days=(weekday + 1) % 7)
         week_end = week_start + dt.timedelta(days=6)
 
-        # 노동법 기준 조회
-        max_weekly = 40
-        law_result = await db.execute(
-            select(LaborLawSetting)
-            .where(LaborLawSetting.organization_id == organization_id)
-            .limit(1)
-        )
-        law = law_result.scalar_one_or_none()
-        if law:
-            max_weekly = law.store_max_weekly or law.state_max_weekly or law.federal_max_weekly
-
-        # 주간 근무시간 합산 (사용자별)
+        # 주간 attendance rows 조회 — C1 net 계산에 break 세션 필요, 집계 SQL 대신 row 로드
         query = (
-            select(
-                Attendance.user_id,
-                func.sum(Attendance.total_work_minutes).label("total_minutes"),
-            )
+            select(Attendance)
             .where(
                 Attendance.organization_id == organization_id,
                 Attendance.work_date >= week_start,
                 Attendance.work_date <= week_end,
             )
-            .group_by(Attendance.user_id)
         )
         if store_id:
             query = query.where(Attendance.store_id == store_id)
@@ -1183,19 +1316,42 @@ class AttendanceService:
             query = query.where(Attendance.store_id.in_(store_ids))
 
         result = await db.execute(query)
-        rows = result.all()
+        attendances = list(result.scalars().all())
+
+        breaks_map = await self._load_breaks_map(db, [a.id for a in attendances])
+
+        # 사용자별 주간 net 합산 + 근무 매장 수집
+        net_by_user: dict[UUID, int] = {}
+        stores_by_user: dict[UUID, set[UUID]] = {}
+        for att in attendances:
+            net = compute_net_work_minutes(att, breaks_map.get(att.id, [])) or 0
+            net_by_user[att.user_id] = net_by_user.get(att.user_id, 0) + net
+            if att.store_id is not None:
+                stores_by_user.setdefault(att.user_id, set()).add(att.store_id)
+
+        # 매장별 주간 최대시간 resolve — 매장당 1회 조회
+        involved_store_ids = {sid for sids in stores_by_user.values() for sid in sids}
+        max_weekly_by_store: dict[UUID, int] = {}
+        for sid in involved_store_ids:
+            max_weekly_by_store[sid] = await resolve_weekly_max_hours(db, sid)
 
         alerts: list[dict] = []
-        for row in rows:
-            total_minutes = row.total_minutes or 0
-            total_hours = total_minutes / 60
+        for uid, net_minutes in net_by_user.items():
+            user_store_ids = stores_by_user.get(uid)
+            if user_store_ids:
+                # 여러 매장 근무 주간이면 가장 엄격한(작은) 기준 적용 — 보수적 판정
+                max_weekly = min(max_weekly_by_store[sid] for sid in user_store_ids)
+            else:
+                # store 유실(SET NULL) row 만 있는 경우 — 기본값으로 판정
+                max_weekly = DEFAULT_MAX_WEEKLY_HOURS
+            total_hours = net_minutes / 60
             if total_hours > max_weekly:
                 user_result = await db.execute(
-                    select(User.full_name).where(User.id == row.user_id)
+                    select(User.full_name).where(User.id == uid)
                 )
                 user_name = user_result.scalar() or "Unknown"
                 alerts.append({
-                    "user_id": str(row.user_id),
+                    "user_id": str(uid),
                     "user_name": user_name,
                     "week_start": str(week_start),
                     "week_end": str(week_end),
@@ -1279,10 +1435,25 @@ class AttendanceService:
         break_type: str,
     ) -> AttendanceBreak:
         """admin 이 새 break 세션을 attendance 에 추가."""
+        attendance = await self.get_attendance(db, attendance_id, organization_id)
+
+        # naive 입력은 store 벽시계로 해석 (P0-5와 동일 규칙) — 미정규화 시
+        # 기존 aware 세션과의 겹침 비교에서 TypeError(500)가 났다.
+        from app.utils.timezone import get_store_timezone, interpret_clock_time
+        store_tz = await get_store_timezone(db, attendance.store_id)
+        started_at = interpret_clock_time(started_at, store_tz)
+        if ended_at is not None:
+            ended_at = interpret_clock_time(ended_at, store_tz)
+
         self._validate_break_session(started_at, ended_at, break_type)
         from app.models.attendance_break import normalize_break_type
         break_type = normalize_break_type(break_type)
-        attendance = await self.get_attendance(db, attendance_id, organization_id)
+
+        # (L3) 확정된 pay period 안의 근태는 break 추가 불가 — 409.
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(
+            db, store_id=attendance.store_id, work_date=attendance.work_date
+        )
 
         # 기존 세션 로드 + 겹침 검증
         existing = await db.execute(
@@ -1334,12 +1505,27 @@ class AttendanceService:
                             False 면 ended_at 인자 그대로 (None 인자는 "변경 안 함").
         """
         attendance = await self.get_attendance(db, attendance_id, organization_id)
+
+        # (L3) 확정된 pay period 안의 근태는 break 수정 불가 — 409.
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(
+            db, store_id=attendance.store_id, work_date=attendance.work_date
+        )
+
         target = await db.scalar(
             select(AttendanceBreak)
             .where(AttendanceBreak.id == break_id, AttendanceBreak.attendance_id == attendance_id)
         )
         if target is None:
             raise NotFoundError("Break session not found")
+
+        # naive 입력은 store 벽시계로 해석 (add_break와 동일)
+        from app.utils.timezone import get_store_timezone, interpret_clock_time
+        store_tz = await get_store_timezone(db, attendance.store_id)
+        if started_at is not None:
+            started_at = interpret_clock_time(started_at, store_tz)
+        if ended_at is not None:
+            ended_at = interpret_clock_time(ended_at, store_tz)
 
         new_started = started_at if started_at is not None else target.started_at
         if clear_ended_at:
@@ -1388,6 +1574,13 @@ class AttendanceService:
     ) -> None:
         """admin 이 break 세션을 삭제. attendance 의 누적 분 재계산."""
         attendance = await self.get_attendance(db, attendance_id, organization_id)
+
+        # (L3) 확정된 pay period 안의 근태는 break 삭제 불가 — 409.
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(
+            db, store_id=attendance.store_id, work_date=attendance.work_date
+        )
+
         target = await db.scalar(
             select(AttendanceBreak)
             .where(AttendanceBreak.id == break_id, AttendanceBreak.attendance_id == attendance_id)

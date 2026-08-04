@@ -5,6 +5,7 @@ Handles user management including creation, update, activation toggle,
 and user-store association management.
 """
 
+from datetime import date
 from uuid import UUID
 
 from sqlalchemy import select
@@ -36,6 +37,7 @@ from app.schemas.user import (
     _normalize_employee_no,
 )
 from app.utils.exceptions import BadRequestError, DuplicateError, ForbiddenError, NotFoundError
+from app.utils.names import compose_full_name
 from app.utils.password import hash_password, verify_password
 
 
@@ -47,33 +49,49 @@ class UserService:
     """
 
     @staticmethod
-    def _effective_rate(user_rate, org_rate) -> float | None:
-        """effective hourly rate = user.hourly_rate (if set) → org default → None.
+    def _effective_rate(user_rate, store_rate, org_rate) -> float | None:
+        """effective hourly rate = 개인 rate → store default → org default → None.
 
         DB 레벨에서는 상속 의미를 보존 (NULL은 '상속'). 응답 시점에만 계산.
+        (기존 버그 수정: store 단계를 건너뛰고 org 로 바로 떨어지던 것을
+        user > store > org cascade 로 정렬 — 스키마 주석과 일치.)
         """
         if user_rate is not None:
             return float(user_rate)
+        if store_rate is not None:
+            return float(store_rate)
         if org_rate is not None:
             return float(org_rate)
         return None
 
     def _to_response(
-        self, user: User, org_rate: float | None = None, crewid: int | None = None
+        self,
+        user: User,
+        org_rate: float | None = None,
+        crewid: int | None = None,
+        *,
+        raw_rate: float | None = None,
+        store_rate: float | None = None,
     ) -> UserResponse:
-        """사용자 모델을 상세 응답 스키마로 변환 (effective rate 포함)."""
+        """사용자 모델을 상세 응답 스키마로 변환 (effective rate 포함).
+
+        raw_rate: 개인 시급 — org_members.hourly_rate 소스 (R6 canonical).
+                  호출측이 `_member_raw_rate`/`_get_member_rate_map` 으로 계산해 전달.
+        """
         role: Role = user.role
-        raw_rate = float(user.hourly_rate) if user.hourly_rate is not None else None
         return UserResponse(
             id=str(user.id),
             username=user.username,
             full_name=user.full_name,
+            first_name=user.first_name,
+            middle_name=user.middle_name,
+            last_name=user.last_name,
             email=user.email,
             email_verified=user.email_verified,
             role_name=role.name,
             role_priority=role.priority,
             hourly_rate=raw_rate,
-            effective_hourly_rate=self._effective_rate(raw_rate, org_rate),
+            effective_hourly_rate=self._effective_rate(raw_rate, store_rate, org_rate),
             department=user.department,
             employee_no=user.employee_no,
             crewid=crewid,
@@ -83,10 +101,16 @@ class UserService:
             created_at=user.created_at,
         )
 
-    def _to_list_response(self, user: User, org_rate: float | None = None) -> UserListResponse:
+    def _to_list_response(
+        self,
+        user: User,
+        org_rate: float | None = None,
+        *,
+        raw_rate: float | None = None,
+        store_rate: float | None = None,
+    ) -> UserListResponse:
         """사용자 모델을 목록 응답 스키마로 변환 (effective rate 포함)."""
         role: Role = user.role
-        raw_rate = float(user.hourly_rate) if user.hourly_rate is not None else None
         return UserListResponse(
             id=str(user.id),
             username=user.username,
@@ -96,7 +120,7 @@ class UserService:
             role_name=role.name,
             role_priority=role.priority,
             hourly_rate=raw_rate,
-            effective_hourly_rate=self._effective_rate(raw_rate, org_rate),
+            effective_hourly_rate=self._effective_rate(raw_rate, store_rate, org_rate),
             department=user.department,
             employee_no=user.employee_no,
             is_active=user.is_active,
@@ -112,6 +136,71 @@ class UserService:
         )
         val = r.scalar()
         return float(val) if val is not None else None
+
+    async def _get_member_rate_map(
+        self, db: AsyncSession, organization_id: UUID, user_ids: list[UUID]
+    ) -> dict[UUID, float | None]:
+        """user_id → org_members.hourly_rate (R6 canonical 개인 시급).
+
+        키가 없으면 org_member 미생성(레거시) — 호출측에서 users.hourly_rate fallback.
+        키가 있고 None 이면 '개인 rate 미지정' (fallback 금지 — org_members 가 진실).
+        """
+        from app.models.org_member import OrgMember
+
+        if not user_ids:
+            return {}
+        rows = await db.execute(
+            select(OrgMember.user_id, OrgMember.hourly_rate).where(
+                OrgMember.organization_id == organization_id,
+                OrgMember.user_id.in_(user_ids),
+            )
+        )
+        return {
+            r.user_id: (float(r.hourly_rate) if r.hourly_rate is not None else None)
+            for r in rows
+        }
+
+    @staticmethod
+    def _raw_rate_from_map(user: User, member_rates: dict[UUID, float | None]) -> float | None:
+        """member map 기반 개인 시급 — 멤버 행이 없을 때만 users.hourly_rate fallback."""
+        if user.id in member_rates:
+            return member_rates[user.id]
+        return float(user.hourly_rate) if user.hourly_rate is not None else None
+
+    async def _member_raw_rate(
+        self, db: AsyncSession, organization_id: UUID, user: User
+    ) -> float | None:
+        """단건용 — org_members 기반 개인 시급 (없으면 users fallback)."""
+        member_rates = await self._get_member_rate_map(db, organization_id, [user.id])
+        return self._raw_rate_from_map(user, member_rates)
+
+    async def _get_store_rate_map(
+        self, db: AsyncSession, user_ids: list[UUID]
+    ) -> dict[UUID, float]:
+        """user_id → 배정 매장 중 첫 non-null default_hourly_rate (effective 계산용).
+
+        여러 매장 배정 시 배정 순(created_at) 첫 매장의 default 를 쓴다 —
+        스키마 주석 "user → (any store) → org cascade" 의 결정적(deterministic) 구현.
+        """
+        from app.models.user_store import UserStore
+
+        if not user_ids:
+            return {}
+        rows = await db.execute(
+            select(UserStore.user_id, Store.default_hourly_rate)
+            .join(Store, Store.id == UserStore.store_id)
+            .where(
+                UserStore.user_id.in_(user_ids),
+                Store.default_hourly_rate.isnot(None),
+                Store.deleted_at.is_(None),
+            )
+            .order_by(UserStore.user_id, UserStore.created_at, Store.id)
+        )
+        out: dict[UUID, float] = {}
+        for uid, rate in rows:
+            if uid not in out:
+                out[uid] = float(rate)
+        return out
 
     # 사번 영구 burn 메시지 — previously-used(과거 사용/현재 활성 모두 포함) 차단.
     _EMP_NO_BURNED_MSG = (
@@ -176,7 +265,18 @@ class UserService:
             db, organization_id, filters
         )
         org_rate = await self._get_org_rate(db, organization_id)
-        return [self._to_list_response(u, org_rate) for u in users]
+        user_ids = [u.id for u in users]
+        member_rates = await self._get_member_rate_map(db, organization_id, user_ids)
+        store_rates = await self._get_store_rate_map(db, user_ids)
+        return [
+            self._to_list_response(
+                u,
+                org_rate,
+                raw_rate=self._raw_rate_from_map(u, member_rates),
+                store_rate=store_rates.get(u.id),
+            )
+            for u in users
+        ]
 
     async def get_user(
         self,
@@ -217,7 +317,12 @@ class UserService:
                 )
             )
         ).scalar_one_or_none()
-        return self._to_response(user, org_rate, crewid=crewid)
+        raw_rate = await self._member_raw_rate(db, organization_id, user)
+        store_rates = await self._get_store_rate_map(db, [user.id])
+        return self._to_response(
+            user, org_rate, crewid=crewid,
+            raw_rate=raw_rate, store_rate=store_rates.get(user.id),
+        )
 
     async def create_user(
         self,
@@ -369,7 +474,12 @@ class UserService:
                 raise NotFoundError("User not found after creation")
 
             org_rate = await self._get_org_rate(db, organization_id)
-            result = self._to_response(loaded, org_rate, crewid=_crewid)
+            store_rates = await self._get_store_rate_map(db, [loaded.id])
+            result = self._to_response(
+                loaded, org_rate, crewid=_crewid,
+                raw_rate=float(hourly_rate) if hourly_rate is not None else None,
+                store_rate=store_rates.get(loaded.id),
+            )
             await db.commit()
             return result
         except Exception:
@@ -405,6 +515,40 @@ class UserService:
                             (Attempting to assign a role at or above caller's priority)
         """
         update_data: dict = data.model_dump(exclude_unset=True)
+
+        # 이름 변경 — 단일 조합 규칙 (app/utils/names.compose_full_name).
+        # (a) 구조화 경로: first/middle/last 중 하나라도 오면 first+last 필수,
+        #     full_name 을 재합성해 항상 동기화 (middle 은 선택, 빈 값→NULL 해제).
+        # (b) 레거시 full_name-only 경로: 이름이 실제로 바뀌면 기존 구조화 파트를
+        #     비운다 — display_name 이 낡은 조합을 보여주는 desync 방지.
+        _name_parts = ("first_name", "middle_name", "last_name")
+        if any(f in update_data for f in _name_parts):
+            _first = (update_data.get("first_name") or "").strip()
+            _mid = (update_data.get("middle_name") or "").strip()
+            _last = (update_data.get("last_name") or "").strip()
+            if not _first or not _last:
+                raise BadRequestError("First name and last name are required")
+            update_data["first_name"] = _first
+            update_data["middle_name"] = _mid or None
+            update_data["last_name"] = _last
+            update_data["full_name"] = compose_full_name(_first, _mid, _last)
+        elif "full_name" in update_data:
+            _new_full = (update_data["full_name"] or "").strip()
+            if not _new_full:
+                raise BadRequestError("Name cannot be empty")
+            update_data["full_name"] = _new_full
+            _cur_for_name: User | None = await user_repository.get_by_id(
+                db, user_id, organization_id
+            )
+            if _cur_for_name is not None and _cur_for_name.full_name != _new_full:
+                update_data["first_name"] = None
+                update_data["middle_name"] = None
+                update_data["last_name"] = None
+
+        # 시급 변경 — 단일 mutation 경로(record_rate_change)로 우회 (Payroll R6).
+        # users 직접 쓰기 금지: 이력 + org_members(canonical) + users 미러 동시 처리.
+        rate_set: bool = "hourly_rate" in update_data
+        new_rate_value = update_data.pop("hourly_rate", None)
 
         # username 변경 시 조직 내 중복 검사 — Check username uniqueness within org
         if "username" in update_data and update_data["username"] is not None:
@@ -505,6 +649,13 @@ class UserService:
             if user is None:
                 raise NotFoundError("User not found")
 
+            # 시급 변경 — 단일 mutation 경로 (이력 + dual-write + 스케줄 표시 갱신)
+            if rate_set:
+                await self._apply_rate_update(
+                    db, user_id, organization_id, new_rate_value, caller,
+                    reason="Updated via console (user update)",
+                )
+
             # 역할 관계 로드를 위해 다시 조회 — Re-fetch with role loaded
             loaded: User | None = await user_repository.get_detail(
                 db, user_id, organization_id
@@ -513,12 +664,65 @@ class UserService:
                 raise NotFoundError("User not found")
 
             org_rate = await self._get_org_rate(db, organization_id)
-            result = self._to_response(loaded, org_rate)
+            raw_rate = await self._member_raw_rate(db, organization_id, loaded)
+            store_rates = await self._get_store_rate_map(db, [loaded.id])
+            result = self._to_response(
+                loaded, org_rate,
+                raw_rate=raw_rate, store_rate=store_rates.get(loaded.id),
+            )
             await db.commit()
             return result
         except Exception:
             await db.rollback()
             raise
+
+    async def _apply_rate_update(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        organization_id: UUID,
+        new_rate: float | None,
+        caller: User | None,
+        *,
+        reason: str,
+    ) -> None:
+        """개인 시급 쓰기 경로 통일 — record_rate_change 경유 (Payroll Phase 1).
+
+        - 값 지정: rate_service.record_rate_change (이력 + org_members/users
+          dual-write + operating_day ≥ 오늘 스케줄 표시 rate 갱신)
+        - None 명시 = '해제(상속)': 이력 없이 org_members + users 모두 NULL.
+          (이력 CHECK new_rate > 0 이라 해제는 이력화 불가 — known limitation:
+          과거 이력이 남아 있으면 rate_at ①단은 계속 마지막 이력 값을 반환)
+        - org_member 미생성 계정(레거시): users.hourly_rate 직접 쓰기 fallback
+        """
+        from sqlalchemy import update as sa_update
+
+        from app.services.rate_service import rate_service
+
+        member = await rate_service.get_member(
+            db, user_id=user_id, organization_id=organization_id
+        )
+        if new_rate is None:
+            await db.execute(
+                sa_update(User).where(User.id == user_id).values(hourly_rate=None)
+            )
+            if member is not None:
+                member.hourly_rate = None
+            await db.flush()
+        elif member is not None:
+            await rate_service.record_rate_change(
+                db,
+                org_member=member,
+                new_rate=new_rate,
+                reason=reason,
+                changed_by=caller.id if caller is not None else None,
+            )
+        else:
+            # 전환기 fallback — org_member 미생성 계정은 users 직접 쓰기
+            await db.execute(
+                sa_update(User).where(User.id == user_id).values(hourly_rate=new_rate)
+            )
+            await db.flush()
 
     # 일괄 변경 허용 컬럼 — role_id/store 는 가드/부수효과 때문에 제외 (후속 증분)
     BULK_ALLOWED_FIELDS = frozenset({"department", "is_active", "hourly_rate"})
@@ -529,13 +733,17 @@ class UserService:
         organization_id: UUID,
         user_ids: list[str],
         changes: dict,
+        caller: User | None = None,
     ) -> int:
         """여러 직원의 필드를 일괄 변경합니다 (조직 스코프).
 
         Bulk-update the given fields for the given users.
+        hourly_rate 는 단일 mutation 경로(record_rate_change)로 우회 —
+        이력 + org_members(canonical) + users 미러 + 스케줄 표시 rate 갱신.
 
         Args:
             changes: {필드: 값} — 보낸 필드만. 허용 필드만 적용.
+            caller: 요청자 (rate 변경 이력 changed_by 기록용)
 
         Returns:
             int: 실제 변경된 사용자 수 (rows updated)
@@ -555,15 +763,210 @@ class UserService:
         except (ValueError, AttributeError):
             raise BadRequestError("Invalid user id in user_ids")
 
+        # 시급은 직접 컬럼 쓰기에서 분리 — 단일 mutation 경로로 (Payroll R6)
+        rate_set = "hourly_rate" in changes
+        rate_value = changes.get("hourly_rate")
+        direct_changes = {k: v for k, v in changes.items() if k != "hourly_rate"}
+
         try:
-            count = await user_repository.bulk_update_fields(
-                db, organization_id, uuids, changes
-            )
+            count = 0
+            if direct_changes:
+                count = await user_repository.bulk_update_fields(
+                    db, organization_id, uuids, direct_changes
+                )
+            if rate_set:
+                affected = await self._bulk_apply_rate(
+                    db, organization_id, uuids, rate_value, caller
+                )
+                count = max(count, affected)
             await db.commit()
             return count
         except Exception:
             await db.rollback()
             raise
+
+    async def _bulk_apply_rate(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        uuids: list[UUID],
+        rate_value: float | None,
+        caller: User | None,
+    ) -> int:
+        """bulk hourly_rate 적용 — 멤버별 record_rate_change (이력+dual-write).
+
+        Returns:
+            int: rate 가 적용된 사용자 수
+        """
+        from sqlalchemy import update as sa_update
+
+        from app.models.org_member import OrgMember
+        from app.services.rate_service import rate_service
+
+        if rate_value is None:
+            # 해제(상속) — 이력 없이 org_members + users 모두 NULL (org 스코프)
+            res = await db.execute(
+                sa_update(User)
+                .where(User.id.in_(uuids), User.organization_id == organization_id)
+                .values(hourly_rate=None)
+            )
+            await db.execute(
+                sa_update(OrgMember)
+                .where(
+                    OrgMember.user_id.in_(uuids),
+                    OrgMember.organization_id == organization_id,
+                )
+                .values(hourly_rate=None)
+            )
+            await db.flush()
+            return res.rowcount or 0
+
+        members = (
+            await db.execute(
+                select(OrgMember).where(
+                    OrgMember.organization_id == organization_id,
+                    OrgMember.user_id.in_(uuids),
+                )
+            )
+        ).scalars().all()
+        affected = 0
+        for member in members:
+            await rate_service.record_rate_change(
+                db,
+                org_member=member,
+                new_rate=rate_value,
+                reason="Updated via console (bulk update)",
+                changed_by=caller.id if caller is not None else None,
+            )
+            affected += 1
+
+        # 전환기 fallback — org_member 미생성 계정은 users 직접 쓰기
+        member_uids = {m.user_id for m in members}
+        missing = [u for u in uuids if u not in member_uids]
+        if missing:
+            res = await db.execute(
+                sa_update(User)
+                .where(User.id.in_(missing), User.organization_id == organization_id)
+                .values(hourly_rate=rate_value)
+            )
+            affected += res.rowcount or 0
+        return affected
+
+    # ── Rate change (시급 변경 이력 콘솔 경로 — Payroll v1 Phase 1) ──────────
+
+    @staticmethod
+    def _rate_history_entry(row, changed_by_name: str | None) -> "RateChangeEntry":
+        """hourly_rate_history 행 → RateChangeEntry 스키마."""
+        from app.schemas.rate import RateChangeEntry
+        from app.services.rate_service import _utc_today
+
+        return RateChangeEntry(
+            id=str(row.id),
+            old_rate=float(row.old_rate) if row.old_rate is not None else None,
+            new_rate=float(row.new_rate),
+            effective_date=row.effective_date,
+            applied=row.effective_date <= _utc_today(),
+            reason=row.reason,
+            changed_by=str(row.changed_by) if row.changed_by is not None else None,
+            changed_by_name=changed_by_name,
+            created_at=row.created_at,
+        )
+
+    async def create_rate_change(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        organization_id: UUID,
+        *,
+        new_rate: float,
+        effective_date: date | None = None,
+        reason: str | None = None,
+        caller: User | None = None,
+    ) -> "RateChangeResult":
+        """개인 시급 변경 등록 (콘솔) — record_rate_change 단일 경로 + commit.
+
+        같은 값 재등록은 no-op (recorded=False). commit 은 여기서 소유.
+
+        Raises:
+            NotFoundError: 조직에 사용자가 없거나 org_member 소속이 없을 때
+            BadRequestError: new_rate ≤ 0 (record_rate_change 검증)
+        """
+        from app.schemas.rate import RateChangeResult
+        from app.services.rate_service import rate_service
+
+        user = await user_repository.get_by_id(db, user_id, organization_id)
+        if user is None:
+            raise NotFoundError("User not found")
+        member = await rate_service.get_member(
+            db, user_id=user_id, organization_id=organization_id
+        )
+        if member is None:
+            # 레거시(org_member 미생성) 계정 — 이력은 org_member 에 걸리므로 불가.
+            raise NotFoundError(
+                "Organization membership not found for this user — "
+                "rate history requires a member record"
+            )
+
+        try:
+            row = await rate_service.record_rate_change(
+                db,
+                org_member=member,
+                new_rate=new_rate,
+                effective_date=effective_date,
+                reason=reason,
+                changed_by=caller.id if caller is not None else None,
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+        if row is None:
+            return RateChangeResult(recorded=False, entry=None)
+        return RateChangeResult(
+            recorded=True,
+            entry=self._rate_history_entry(
+                row, caller.full_name if caller is not None else None
+            ),
+        )
+
+    async def list_rate_changes(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        organization_id: UUID,
+    ) -> list["RateChangeEntry"]:
+        """개인 시급 변경 이력 목록 (최신 우선 — effective_date DESC, created_at DESC).
+
+        org_member 미생성(레거시) 계정은 이력이 존재할 수 없으므로 빈 목록.
+
+        Raises:
+            NotFoundError: 조직에 사용자가 없을 때
+        """
+        from app.models.rate import HourlyRateHistory
+        from app.services.rate_service import rate_service
+
+        user = await user_repository.get_by_id(db, user_id, organization_id)
+        if user is None:
+            raise NotFoundError("User not found")
+        member = await rate_service.get_member(
+            db, user_id=user_id, organization_id=organization_id
+        )
+        if member is None:
+            return []
+
+        rows = await db.execute(
+            select(HourlyRateHistory, User.full_name)
+            .outerjoin(User, User.id == HourlyRateHistory.changed_by)
+            .where(HourlyRateHistory.org_member_id == member.id)
+            .order_by(
+                HourlyRateHistory.effective_date.desc(),
+                HourlyRateHistory.created_at.desc(),
+            )
+        )
+        return [
+            self._rate_history_entry(row, name) for row, name in rows.all()
+        ]
 
     async def get_super_owner_status(
         self,
@@ -745,7 +1148,12 @@ class UserService:
                 raise NotFoundError("User not found")
 
             org_rate = await self._get_org_rate(db, organization_id)
-            result = self._to_response(loaded, org_rate)
+            raw_rate = await self._member_raw_rate(db, organization_id, loaded)
+            store_rates = await self._get_store_rate_map(db, [loaded.id])
+            result = self._to_response(
+                loaded, org_rate,
+                raw_rate=raw_rate, store_rate=store_rates.get(loaded.id),
+            )
             await db.commit()
             return result
         except Exception:
