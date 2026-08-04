@@ -537,6 +537,47 @@ async def test_template_export_roundtrip(db: AsyncSession, ctx: Ctx) -> None:
     assert res2.total_rows == 0
 
 
+async def test_template_export_filters(db: AsyncSession, ctx: Ctx) -> None:
+    """export 필터 — 매장 부분집합 / 번호 유무 / 휴면 제외 / 이메일·번호 비우기."""
+    from openpyxl import load_workbook
+
+    store_a = await _make_store(db, ctx, "A")
+    store_b = await _make_store(db, ctx, "B")
+    u1 = await _make_user(db, ctx, "f1", f"f1.{ctx.sfx}@example.com")  # A, 번호 5
+    u2 = await _make_user(db, ctx, "f2", f"f2.{ctx.sfx}@example.com")  # A, 번호 없음
+    u3 = await _make_user(db, ctx, "f3", f"f3.{ctx.sfx}@example.com")  # A, 휴면 + 번호 9
+    u4 = await _make_user(db, ctx, "f4", f"f4.{ctx.sfx}@example.com")  # B, 번호 7
+    await _give_empid(db, ctx, u1, store_a, 5)
+    db.add(OrgMemberStore(org_member_id=await _member_id(db, ctx, u2), store_id=store_a))
+    db.add(OrgMemberStore(
+        org_member_id=await _member_id(db, ctx, u3), store_id=store_a,
+        empid=9, is_work_assignment=False,
+    ))
+    await _give_empid(db, ctx, u4, store_b, 7)
+    await db.commit()
+
+    def names(content: bytes) -> list[list]:
+        ws = load_workbook(io.BytesIO(content)).worksheets[0]
+        return [list(r) for r in ws.iter_rows(min_row=2, values_only=True)]
+
+    # 매장 A만 + 휴면 제외 → u1, u2 (u3 휴면 제외, u4 타매장)
+    rows = names(await svc.build_template_xlsx(
+        db, ctx.org_id, True, store_ids={store_a}, include_dormant=False))
+    assert {r[2] for r in rows} == {"Imp Test f1", "Imp Test f2"}
+
+    # 번호 없는 사람만 (A+B 전체) → u2 뿐
+    rows = names(await svc.build_template_xlsx(
+        db, ctx.org_id, True, store_ids={store_a, store_b}, people="unnumbered"))
+    assert {r[2] for r in rows} == {"Imp Test f2"}
+
+    # 번호 있는 사람만 + 이메일·번호 비우기 → u1/u3/u4, emp_id·Email 셀 공란
+    rows = names(await svc.build_template_xlsx(
+        db, ctx.org_id, True, store_ids={store_a, store_b}, people="numbered",
+        include_email=False, include_numbers=False))
+    assert {r[2] for r in rows} == {"Imp Test f1", "Imp Test f3", "Imp Test f4"}
+    assert all((r[3] in (None, "")) and (r[4] in (None, "")) for r in rows)
+
+
 async def test_roster_lists_store_members_sorted(db: AsyncSession, ctx: Ctx) -> None:
     store = await _make_store(db, ctx, "A")
     u1 = await _make_user(db, ctx, "r1", f"r1.{ctx.sfx}@example.com")

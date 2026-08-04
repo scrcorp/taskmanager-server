@@ -84,12 +84,35 @@ async def download_empid_template(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("users:read"))],
     mode: str = "blank",
+    stores: str | None = None,
+    people: str = "all",
+    include_dormant: bool = True,
+    include_email: bool = True,
+    include_numbers: bool = True,
 ):
-    """임포트용 xlsx 다운로드 — mode=blank(빈 템플릿) | current(현황 export, 왕복 편집용)."""
+    """임포트용 xlsx 다운로드 — mode=blank(빈 템플릿) | current(현황 export).
+
+    current 필터: stores(콤마구분 UUID, 생략=전체) / people(all|numbered|unnumbered) /
+    include_dormant / include_email(끄면 재업로드 매칭 불가) / include_numbers(끄면 작성용 양식).
+    """
     from fastapi.responses import Response
 
+    if people not in ("all", "numbered", "unnumbered"):
+        raise BadRequestError("people must be all|numbered|unnumbered")
+    store_ids: set[UUID] | None = None
+    if stores:
+        try:
+            store_ids = {UUID(s) for s in stores.split(",") if s.strip()}
+        except ValueError:
+            raise BadRequestError("stores must be comma-separated UUIDs")
+
     prefill = mode == "current"
-    content = await svc.build_template_xlsx(db, current_user.organization_id, prefill)
+    content = await svc.build_template_xlsx(
+        db, current_user.organization_id, prefill,
+        store_ids=store_ids, people=people,
+        include_dormant=include_dormant, include_email=include_email,
+        include_numbers=include_numbers,
+    )
     filename = "empid_export.xlsx" if prefill else "empid_import_template.xlsx"
     return Response(
         content=content,

@@ -496,25 +496,46 @@ def _roster_export_sheets(rows: list[list]) -> bytes:
 
 
 async def build_template_xlsx(
-    db: AsyncSession, organization_id: UUID, prefill: bool
+    db: AsyncSession,
+    organization_id: UUID,
+    prefill: bool,
+    *,
+    store_ids: set[UUID] | None = None,
+    people: str = "all",  # all | numbered | unnumbered
+    include_dormant: bool = True,
+    include_email: bool = True,
+    include_numbers: bool = True,
 ) -> bytes:
     """임포트용 템플릿/현황 export xlsx.
 
-    prefill=False: 헤더 + 안내 시트만 (빈 템플릿).
-    prefill=True: 현재 배정·번호를 전부 채워서 export — 수정 후 그대로 재업로드 가능(왕복).
+    prefill=False: 헤더 + 안내 시트만 (빈 템플릿, 필터 무관).
+    prefill=True: 현재 배정·번호 export — 필터로 범위를 좁힐 수 있다:
+      store_ids: 매장 부분집합 (None=전체) / people: 번호 유무 필터
+      include_dormant: 휴면(근무배정 제외) 포함 여부
+      include_email: Email 컬럼 값 포함 여부 — 빼면 재업로드 매칭 불가(공유용)
+      include_numbers: emp_id 값 포함 여부 — 빼면 번호 비운 작성용 양식
+    헤더 5컬럼은 항상 유지 (임포트 파서 형식 보존).
     """
     rows: list[list] = []
     if prefill:
         stores = await store_repository.get_by_org(db, organization_id, include_closed=False)
         code_by_id = {str(s.id): (s.code or "") for s in stores}
         for st in await roster(db, organization_id):
+            if store_ids is not None and UUID(st["store_id"]) not in store_ids:
+                continue
             for m in st["members"]:
+                if not include_dormant and not m["is_work_assignment"]:
+                    continue
+                if people == "numbered" and m["empid"] is None:
+                    continue
+                if people == "unnumbered" and m["empid"] is not None:
+                    continue
                 rows.append([
                     st["store_name"],
                     code_by_id.get(st["store_id"], ""),
                     m["full_name"],
-                    m["empid"] if m["empid"] is not None else "",
-                    m["email"] or "",
+                    (m["empid"] if m["empid"] is not None else "") if include_numbers else "",
+                    (m["email"] or "") if include_email else "",
                 ])
     return _roster_export_sheets(rows)
 
