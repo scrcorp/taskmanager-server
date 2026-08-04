@@ -13,7 +13,7 @@
 이 2컬럼 + 인덱스 2개만 남긴다 (08749687e891 과 동일 방침).
 
 Revision ID: 818ff86ac8ef
-Revises: 08749687e891
+Revises: fefe9c6e1492
 Create Date: 2026-08-03
 """
 from typing import Sequence, Union
@@ -23,7 +23,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '818ff86ac8ef'
-down_revision: Union[str, None] = '08749687e891'
+down_revision: Union[str, None] = 'fefe9c6e1492'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
