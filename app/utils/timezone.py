@@ -161,6 +161,31 @@ async def get_store_day_config(db: AsyncSession, store_id: UUID) -> tuple[str, d
     return tz, row.day_start_time
 
 
+def interpret_clock_time(value: datetime, tz_name: str) -> datetime:
+    """수동 입력 clock 시각을 timezone-aware UTC instant 로 정규화합니다.
+
+    Normalize a manually-entered clock time to an aware UTC instant.
+
+    - naive 값 → 매장 타임존(tz_name)의 벽시계로 해석 (디바이스/브라우저/서버
+      로컬 타임존을 절대 신뢰하지 않는다).
+    - offset 명시 값 → 그 offset 을 존중해 UTC 로 변환만 수행.
+
+    clock_in/clock_out 저장 계약(aware UTC instant)을 한 곳에서 강제 —
+    naive 시각이 UTC 나 서버 로컬 시간으로 오기록되어 instant 가 시간 단위로
+    밀리던 payroll 버그(AK-1) 방지.
+
+    Args:
+        value: 수동 입력 시각 (naive 또는 aware)
+        tz_name: 매장 유효 타임존 (IANA, get_store_timezone cascade 결과)
+
+    Returns:
+        datetime: timezone-aware UTC instant
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ZoneInfo(tz_name))
+    return value.astimezone(ZoneInfo("UTC"))
+
+
 def assemble_shift_datetimes(
     operating_day: date,
     start_time: time | None,

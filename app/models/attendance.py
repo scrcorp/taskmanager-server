@@ -126,6 +126,10 @@ class Attendance(Base):
     total_break_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 메모 — Optional note
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 자동퇴근 확인자 FK — Manager/SV who confirmed the auto clock-out (payroll close gate ①)
+    auto_clock_out_confirmed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # 자동퇴근 확인 일시 — When the auto clock-out was confirmed (UTC)
+    auto_clock_out_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)

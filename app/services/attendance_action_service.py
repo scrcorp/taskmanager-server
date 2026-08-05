@@ -40,12 +40,21 @@ class AttendanceActionService:
         attendance_id: UUID,
         organization_id: UUID,
     ) -> Attendance:
-        """org 격리 + 존재 검증된 attendance 반환."""
-        from app.services.attendance_service import attendance_service
+        """org 격리 + 존재 검증 + L3 lock 가드된 attendance 반환.
 
-        return await attendance_service.get_attendance(
+        이 서비스의 모든 액션은 mutation 이므로 여기서 일괄 가드한다 —
+        확정(confirmed)된 pay period 안의 근태는 상태 전이 불가 (409).
+        """
+        from app.services.attendance_service import attendance_service
+        from app.services.payroll_lock_service import ensure_not_locked
+
+        attendance = await attendance_service.get_attendance(
             db, attendance_id, organization_id
         )
+        await ensure_not_locked(
+            db, store_id=attendance.store_id, work_date=attendance.work_date
+        )
+        return attendance
 
     async def _get_open_break(
         self, db: AsyncSession, attendance_id: UUID
@@ -176,9 +185,11 @@ class AttendanceActionService:
                 "Clock-in already recorded. Edit the time instead."
             )
 
-        from app.utils.timezone import get_store_day_config
+        from app.utils.timezone import get_store_day_config, interpret_clock_time
 
         store_tz, _ = await get_store_day_config(db, attendance.store_id)
+        # (AK-1) naive 입력은 매장 타임존 벽시계로 해석 → UTC instant 저장
+        at = interpret_clock_time(at, store_tz)
         status_val, anomalies = await self._resolve_late_status(db, attendance, at)
 
         attendance.clock_in = at
@@ -222,12 +233,15 @@ class AttendanceActionService:
             raise BadRequestError("Cannot clock out without clock-in")
         if attendance.status == "clocked_out":
             raise BadRequestError("Already clocked out")
-        if at < attendance.clock_in:
-            raise BadRequestError("Clock-out cannot be earlier than clock-in")
 
-        from app.utils.timezone import get_store_day_config
+        from app.utils.timezone import get_store_day_config, interpret_clock_time
 
         store_tz, _ = await get_store_day_config(db, attendance.store_id)
+        # (AK-1) naive 입력은 매장 타임존 벽시계로 해석 → UTC instant 저장.
+        # 비교 전에 정규화해야 naive vs aware 비교 오류도 안 난다.
+        at = interpret_clock_time(at, store_tz)
+        if at < attendance.clock_in:
+            raise BadRequestError("Clock-out cannot be earlier than clock-in")
 
         # 진행중 break 가 있으면 같은 시각에 닫는다.
         open_break = await self._get_open_break(db, attendance.id)
@@ -246,6 +260,13 @@ class AttendanceActionService:
         attendance.status = "clocked_out"
         self._recalc_total_work(attendance)
         attendance.total_break_minutes = await self._sum_break_minutes(db, attendance.id)
+
+        # (L6) 자동퇴근 이력이 있는 record 에 사람이 clock-out 을 다시 기록하면
+        # (reopen → clock-out 흐름) 확인(confirm)으로 간주 — corrected == human-verified.
+        from app.services.attendance_service import attendance_service
+        attendance_service._mark_auto_clock_out_confirmed_if_applicable(
+            attendance, "clock_out", by_user_id
+        )
 
         self._add_correction(
             db,
@@ -282,6 +303,11 @@ class AttendanceActionService:
             raise BadRequestError(
                 "break_type required (paid_10min or unpaid_meal)"
             )
+
+        from app.utils.timezone import get_store_timezone, interpret_clock_time
+
+        # (AK-1) naive 입력은 매장 타임존 벽시계로 해석 → UTC instant 저장
+        at = interpret_clock_time(at, await get_store_timezone(db, attendance.store_id))
         if attendance.clock_in is not None and at < attendance.clock_in:
             raise BadRequestError("Break cannot start before clock-in")
         open_break = await self._get_open_break(db, attendance.id)
@@ -336,6 +362,11 @@ class AttendanceActionService:
             raise BadRequestError(
                 "No open break record found (status normalized to working)"
             )
+
+        from app.utils.timezone import get_store_timezone, interpret_clock_time
+
+        # (AK-1) naive 입력은 매장 타임존 벽시계로 해석 → UTC instant 저장
+        at = interpret_clock_time(at, await get_store_timezone(db, attendance.store_id))
         if at < open_break.started_at:
             raise BadRequestError("Break end cannot be earlier than break start")
 

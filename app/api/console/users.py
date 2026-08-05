@@ -15,7 +15,13 @@ from app.api.deps import hide_cost_for, require_permission, scrub_cost_fields
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse
+from app.schemas.rate import RateChangeCreate, RateChangeEntry, RateChangeResult
 from app.schemas.user import (
+    AbsorbPlanResponse,
+    AbsorbRequest,
+    ClaimCodeResponse,
+    ProvisionalUserBulkCreate,
+    ProvisionalUserCreate,
     SyncUserStoresRequest,
     UserBulkUpdate,
     UserBulkUpdateResult,
@@ -38,11 +44,15 @@ async def list_users(
     store_ids: Annotated[str | None, Query(description="매장 ID 필터 (복수, 콤마 구분)")] = None,
     role_id: Annotated[UUID | None, Query(description="역할 ID 필터")] = None,
     is_active: Annotated[bool | None, Query(description="활성 상태 필터")] = None,
+    include_provisional: Annotated[bool, Query(description="미가입(유령) 계정을 is_active 필터에서 면제")] = False,
+    provisional_only: Annotated[bool, Query(description="미가입(유령) 계정만 조회")] = False,
 ) -> list[UserListResponse]:
     """사용자 목록을 필터 조건으로 조회합니다.
 
     List users with optional filters (store_id/store_ids, role_id, is_active).
     store_ids는 콤마로 구분된 UUID 문자열 (예: "uuid1,uuid2").
+    미가입 계정은 is_active=False 라 is_active 필터가 걸리면 사라진다 —
+    include_provisional=true 로 면제하거나 provisional_only=true 로 유령만 조회.
     """
     org_id: UUID = current_user.organization_id
     # store_ids가 있으면 store_id보다 우선
@@ -55,6 +65,8 @@ async def list_users(
         "store_ids": parsed_store_ids,
         "role_id": role_id,
         "is_active": is_active,
+        "include_provisional": include_provisional,
+        "provisional_only": provisional_only,
     }
     users = await user_service.list_users(db, org_id, filters)
     if hide_cost_for(current_user):
@@ -78,6 +90,122 @@ async def get_user(
     if hide_cost_for(current_user):
         scrub_cost_fields(user)
     return user
+
+
+@router.post("/provisional", response_model=UserResponse, status_code=201)
+async def create_provisional_user(
+    data: ProvisionalUserCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:create"))],
+) -> UserResponse:
+    """미가입(유령) 직원을 생성합니다 — 아직 앱에 가입하지 않은 직원 자리.
+
+    이름·역할·매장만으로 생성되고 username/비밀번호는 자동. 로그인은 불가하며
+    (is_active=False) 스케줄 배정·empid 부여는 가능. 응답의 claim_code 를 직원에게
+    전달하면 본인이 가입할 때 이 계정을 그대로 인수한다.
+    """
+    from app.services import provisional_staff_service as prov_svc
+
+    org_id: UUID = current_user.organization_id
+    user = await prov_svc.create_provisional_user(
+        db,
+        org_id,
+        full_name=data.full_name,
+        role_id=UUID(data.role_id),
+        store_ids=[UUID(s) for s in data.store_ids],
+        department=data.department,
+        hourly_rate=data.hourly_rate,
+        caller=current_user,
+    )
+    detail = await user_service.get_user(db, user.id, org_id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(detail)
+    return detail
+
+
+@router.post("/provisional/bulk", response_model=list[UserResponse], status_code=201)
+async def create_provisional_users_bulk(
+    data: ProvisionalUserBulkCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:create"))],
+) -> list[UserResponse]:
+    """미가입 직원을 여러 명 한 번에 생성합니다 (단일 트랜잭션)."""
+    from app.services import provisional_staff_service as prov_svc
+
+    org_id: UUID = current_user.organization_id
+    users = await prov_svc.create_provisional_users_bulk(
+        db,
+        org_id,
+        [
+            {
+                "full_name": p.full_name,
+                "role_id": UUID(p.role_id),
+                "store_ids": [UUID(s) for s in p.store_ids],
+                "department": p.department,
+                "hourly_rate": p.hourly_rate,
+            }
+            for p in data.people
+        ],
+        caller=current_user,
+    )
+    out: list[UserResponse] = []
+    for u in users:
+        detail = await user_service.get_user(db, u.id, org_id)
+        if hide_cost_for(current_user):
+            scrub_cost_fields(detail)
+        out.append(detail)
+    return out
+
+
+@router.post("/{user_id}/absorb/preview", response_model=AbsorbPlanResponse)
+async def preview_absorb_provisional(
+    user_id: UUID,
+    data: AbsorbRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> AbsorbPlanResponse:
+    """미가입 계정을 실제 계정으로 흡수하기 전 계획을 확인합니다 (DB 변경 없음).
+
+    정상 경로는 인수 코드(claim)라 데이터 이동이 없다. 이 기능은 직원이 코드를 안 쓰고
+    따로 가입해 계정이 2개가 된 경우의 폴백이다.
+    """
+    from app.services import provisional_absorb_service as absorb_svc
+
+    plan = await absorb_svc.preview_absorb(
+        db, current_user.organization_id, user_id, UUID(data.target_user_id)
+    )
+    return AbsorbPlanResponse(**plan.__dict__)
+
+
+@router.post("/{user_id}/absorb", response_model=AbsorbPlanResponse)
+async def absorb_provisional(
+    user_id: UUID,
+    data: AbsorbRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> AbsorbPlanResponse:
+    """미가입 계정의 배정·번호·스케줄을 실제 계정으로 옮기고 미가입 행을 폐기합니다."""
+    from app.services import provisional_absorb_service as absorb_svc
+
+    plan = await absorb_svc.absorb(
+        db, current_user.organization_id, user_id, UUID(data.target_user_id)
+    )
+    return AbsorbPlanResponse(**plan.__dict__)
+
+
+@router.post("/{user_id}/claim-code", response_model=ClaimCodeResponse)
+async def regenerate_claim_code(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> ClaimCodeResponse:
+    """인수 코드를 재발급합니다 (코드 분실·유출 시). 미가입 계정만 가능."""
+    from app.services import provisional_staff_service as prov_svc
+
+    code = await prov_svc.regenerate_claim_code(
+        db, current_user.organization_id, user_id
+    )
+    return ClaimCodeResponse(user_id=str(user_id), claim_code=code)
 
 
 @router.post("", response_model=UserResponse, status_code=201)
@@ -112,7 +240,9 @@ async def bulk_update_users(
     org_id: UUID = current_user.organization_id
     # model_fields_set 으로 "보낸 필드"만 추출 (user_ids 제외)
     changes = data.model_dump(include=data.model_fields_set - {"user_ids"})
-    count = await user_service.bulk_update_users(db, org_id, data.user_ids, changes)
+    count = await user_service.bulk_update_users(
+        db, org_id, data.user_ids, changes, caller=current_user
+    )
     return UserBulkUpdateResult(updated_count=count)
 
 
@@ -250,6 +380,60 @@ async def admin_reset_password(
     }
 
 
+# ── Rate changes (시급 변경 이력 — Payroll v1 Phase 1) ───────────────────────
+# 쓰기 권한 = 기존 hourly_rate 편집 경로(PUT /users/{id})와 동일한 users:update.
+# 추가로 cost 가시성(GM+) 게이트 — SV/Staff 는 permission 이 있어도 시급 접근 불가
+# (scrub_cost_fields 와 같은 규칙. 목록/상세는 스크럽이지만 여긴 이력 전체가
+# cost 데이터라 403 으로 차단).
+
+
+def _require_cost_visibility(current_user: User) -> None:
+    """cost(시급) 가시성 게이트 — GM 미만이면 403 (원인+대상 역할 명시)."""
+    if hide_cost_for(current_user):
+        from app.utils.exceptions import ForbiddenError
+
+        raise ForbiddenError(
+            "Hourly rate information is only available to GM and above"
+        )
+
+
+@router.post("/{user_id}/rate-changes", response_model=RateChangeResult)
+async def create_user_rate_change(
+    user_id: UUID,
+    data: RateChangeCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> RateChangeResult:
+    """개인 시급 변경 등록 — 이력 + org_members/users dual-write + 스케줄 갱신.
+
+    effective_date 생략 시 즉시(오늘 UTC) 적용, 미래 날짜는 일일 잡이 반영.
+    같은 값 재등록은 no-op (recorded=False). 0 이하 시급은 400.
+    """
+    _require_cost_visibility(current_user)
+    return await user_service.create_rate_change(
+        db,
+        user_id,
+        current_user.organization_id,
+        new_rate=data.new_rate,
+        effective_date=data.effective_date,
+        reason=data.reason,
+        caller=current_user,
+    )
+
+
+@router.get("/{user_id}/rate-changes", response_model=list[RateChangeEntry])
+async def list_user_rate_changes(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:read"))],
+) -> list[RateChangeEntry]:
+    """개인 시급 변경 이력 목록 (최신 우선 — effective_date DESC, created_at DESC)."""
+    _require_cost_visibility(current_user)
+    return await user_service.list_rate_changes(
+        db, user_id, current_user.organization_id
+    )
+
+
 # ── Clockin PIN (attendance device 용) ───────────────────────────
 from sqlalchemy import select as _select  # noqa: E402
 
@@ -259,7 +443,8 @@ from app.schemas.attendance_device import (  # noqa: E402
 )
 from app.services.attendance_device_service import (  # noqa: E402
     commit_pin_or_409,
-    generate_clockin_pin,
+    assert_no_pin_prefix_conflict,
+    generate_unique_clockin_pin,
 )
 from app.utils.exceptions import NotFoundError  # noqa: E402
 
@@ -293,7 +478,9 @@ async def regenerate_user_clockin_pin(
 ) -> ClockinPinResponse:
     """Staff detail — attendance device PIN 재발급."""
     user = await _fetch_org_user(db, user_id, current_user.organization_id)
-    user.clockin_pin = generate_clockin_pin()
+    user.clockin_pin = await generate_unique_clockin_pin(
+        db, current_user.organization_id, exclude_user_id=user.id
+    )
     await commit_pin_or_409(db)
     return ClockinPinResponse(user_id=user.id, clockin_pin=user.clockin_pin)
 
@@ -307,6 +494,9 @@ async def update_user_clockin_pin(
 ) -> ClockinPinResponse:
     """Staff detail — attendance device PIN 직접 지정 (관리자)."""
     user = await _fetch_org_user(db, user_id, current_user.organization_id)
+    await assert_no_pin_prefix_conflict(
+        db, current_user.organization_id, body.clockin_pin, exclude_user_id=user.id
+    )
     user.clockin_pin = body.clockin_pin
     await commit_pin_or_409(db)
     return ClockinPinResponse(user_id=user.id, clockin_pin=user.clockin_pin)

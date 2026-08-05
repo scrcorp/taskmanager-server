@@ -134,9 +134,26 @@ class BulkUploadService:
                     user_id = UUID(resp.id)
 
                     if hourly_rate is not None:
-                        user_obj = await db.get(User, user_id)
-                        if user_obj:
-                            user_obj.hourly_rate = hourly_rate
+                        # 시급은 단일 mutation 경로 — 이력 + org_members(canonical)
+                        # + users 미러 dual-write (Payroll R6)
+                        from app.services.rate_service import rate_service
+
+                        member = await rate_service.get_member(
+                            db, user_id=user_id, organization_id=organization_id
+                        )
+                        if member is not None:
+                            await rate_service.record_rate_change(
+                                db,
+                                org_member=member,
+                                new_rate=hourly_rate,
+                                reason="Imported via bulk upload",
+                                changed_by=caller.id,
+                            )
+                        else:
+                            # 전환기 fallback — org_member 미생성 계정
+                            user_obj = await db.get(User, user_id)
+                            if user_obj:
+                                user_obj.hourly_rate = hourly_rate
 
                     users_list.append({"username": username, "full_name": full_name, "status": "created"})
                     created += 1

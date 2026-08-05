@@ -40,7 +40,11 @@ from app.models.hiring import (
 from app.models.organization import Store
 from app.models.user import Role, User
 from app.models.user_store import UserStore
-from app.services.attendance_device_service import generate_clockin_pin
+from app.services.attendance_device_service import (
+    assert_no_pin_prefix_conflict,
+    generate_clockin_pin,
+    generate_unique_clockin_pin,
+)
 from app.utils.password import hash_password
 
 router = APIRouter(prefix="/hiring", tags=["Admin Hiring"])
@@ -715,9 +719,9 @@ async def preview_clockin_pin(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("hiring:hire"))],
 ) -> dict:
-    """hire 모달에 미리 보여줄 clockin PIN을 발급한다 (단순 6자리 랜덤)."""
+    """hire 모달에 미리 보여줄 clockin PIN을 발급한다 (6자리 랜덤, org 내 충돌 회피)."""
     await check_store_access(db, current_user, store_id)
-    pin = generate_clockin_pin()
+    pin = await generate_unique_clockin_pin(db, current_user.organization_id)
     return {"clockin_pin": pin}
 
 
@@ -792,7 +796,14 @@ async def hire_application(
         if body.clockin_pin and body.clockin_pin.isdigit() and len(body.clockin_pin) == 6:
             clockin_pin = body.clockin_pin
         if clockin_pin is None:
-            clockin_pin = generate_clockin_pin()
+            clockin_pin = await generate_unique_clockin_pin(
+                db, current_user.organization_id
+            )
+        else:
+            # 클라가 preview 로 받아 들고 있던 값 — 그 사이 다른 직원이 선점했을 수 있다.
+            await assert_no_pin_prefix_conflict(
+                db, current_user.organization_id, clockin_pin
+            )
         # 클라가 미리 보여준 uuid를 받았으면 그대로 사용 (모달의 User ID = 실제 user.id 보장)
         user_kwargs: dict = {}
         if body.user_id:

@@ -99,6 +99,7 @@ ALLOWED_KEY_PREFIXES: tuple[str, ...] = (
     "temp/",          # presigned 업로드 수신 (finalize 전)
     "signatures/",    # tip 서명 PNG
     "forms/",         # 4070 PDF
+    "payroll/",       # pay stub PDF (payroll/stubs/{period_id}/{entry_id}.pdf)
 )
 
 

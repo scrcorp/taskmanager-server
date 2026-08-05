@@ -782,6 +782,10 @@ class AttendanceResponse(BaseModel):
     net_work_minutes: int | None = None  # 순 근무 시간(분) = total_work - unpaid_break - paid_overage (Net work minutes)
     breaks: list[dict] = []  # break 세션 타임라인 (Per-break timeline: started_at/ended_at/type/duration)
     note: str | None  # 메모 (Note, may be null)
+    # L6 — 자동퇴근 확인 상태. auto_clocked_out anomaly 인데 confirmed_at 이 None 이면
+    # 콘솔이 "unconfirmed" 배지를 표시한다. (Auto clock-out confirmation state)
+    auto_clock_out_confirmed_at: datetime | None = None
+    auto_clock_out_confirmed_by: str | None = None  # 확인자 UUID 문자열 (Confirmer UUID)
     # 수정 이력 — 상세 조회 시 함께 반환. 목록 응답에선 빈 리스트.
     # Correction history attached on detail responses; empty in list endpoints.
     corrections: list[dict] = []

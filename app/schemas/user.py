@@ -110,14 +110,17 @@ class UserCreate(BaseModel):
     @model_validator(mode="after")
     def _compose_full_name(self) -> "UserCreate":
         """이름 규칙: first/last 경로면 둘 다 필수(middle 선택), full_name 합성.
+        조합 규칙은 app/utils/names.compose_full_name 단일 규칙을 따른다.
         레거시로 full_name 만 직접 준 경우는 그대로 허용(호환)."""
+        from app.utils.names import compose_full_name
+
         first = (self.first_name or "").strip()
         mid = (self.middle_name or "").strip()
         last = (self.last_name or "").strip()
-        if first or last:
+        if first or mid or last:
             if not first or not last:
                 raise ValueError("First name and last name are required")
-            self.full_name = " ".join(p for p in (first, mid, last) if p)
+            self.full_name = compose_full_name(first, mid, last)
         if not (self.full_name and self.full_name.strip()):
             raise ValueError("Name is required")
         return self
@@ -138,7 +141,12 @@ class UserUpdate(BaseModel):
     """
 
     username: str | None = None  # 변경할 로그인 아이디 (New username, optional)
-    full_name: str | None = None  # 변경할 실명 (New name, optional)
+    full_name: str | None = None  # 변경할 실명 — 레거시 경로 (New name, optional)
+    # 구조화 이름 변경 — 하나라도 보내면 first+last 필수(middle 선택),
+    # full_name 은 서버가 compose_full_name 단일 규칙으로 재합성(동기화).
+    first_name: str | None = None
+    middle_name: str | None = None
+    last_name: str | None = None
     email: str | None = None  # 변경할 이메일 (New email, optional)
     role_id: str | None = None  # 변경할 역할 UUID (New role, optional)
     is_active: bool | None = None  # 활성 상태 변경 (Activate/deactivate, optional)
@@ -192,6 +200,10 @@ class UserResponse(BaseModel):
     id: str  # 사용자 UUID 문자열 (User UUID as string)
     username: str  # 로그인 아이디 (Login username)
     full_name: str  # 실명 (Full display name)
+    # 구조화 이름 — [Model B] 부분 백필 상태라 nullable (표시엔 display_name 규칙 사용)
+    first_name: str | None = None
+    middle_name: str | None = None
+    last_name: str | None = None
     email: str | None  # 이메일 (Email, may be null)
     email_verified: bool  # 이메일 인증 여부 (Email verification status)
     role_name: str  # 역할 이름 — 조인된 값 (Role name, resolved from Role table)
@@ -202,6 +214,9 @@ class UserResponse(BaseModel):
     employee_no: str | None = None  # 사번 (Company employee number, nullable) [레거시]
     crewid: int | None = None  # CREWID — org 안 1부터 순번 (org 번호)
     is_active: bool  # 계정 활성 상태 (Account active flag)
+    # 미가입(유령) 계정 — 관리자가 미리 만든 자리, 본인 가입 전. 항상 is_active=False.
+    is_provisional: bool = False
+    claim_code: str | None = None  # 인수 코드 (유령만, 인수 완료 시 NULL)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
 
@@ -232,7 +247,53 @@ class UserListResponse(BaseModel):
     employee_no: str | None = None  # 사번 (Company employee number, nullable) [레거시]
     crewid: int | None = None  # CREWID — org 안 1부터 순번 (org 번호)
     is_active: bool  # 계정 활성 상태 (Account active flag)
+    # 미가입(유령) 계정 — 관리자가 미리 만든 자리, 본인 가입 전. 항상 is_active=False.
+    is_provisional: bool = False
+    claim_code: str | None = None  # 인수 코드 (유령만, 인수 완료 시 NULL)
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
+
+
+# === 미가입(Provisional) 직원 스키마 ===
+
+
+class ProvisionalUserCreate(BaseModel):
+    """미가입 직원 생성 요청 — 이름·역할·매장만. username/비밀번호는 서버가 자동 생성."""
+
+    full_name: str
+    role_id: str
+    store_ids: list[str] = []
+    department: str | None = None
+    hourly_rate: float | None = None
+
+
+class ProvisionalUserBulkCreate(BaseModel):
+    """미가입 직원 다건 생성 (임포트·스케줄 화면에서 여러 명 한 번에)."""
+
+    people: list[ProvisionalUserCreate]
+
+
+class AbsorbRequest(BaseModel):
+    """흡수 요청 — 유령 계정을 이 대상 계정으로 합친다."""
+
+    target_user_id: str
+
+
+class AbsorbPlanResponse(BaseModel):
+    """흡수 계획/결과 — 무엇이 옮겨지고 무엇이 충돌하는지."""
+
+    provisional_name: str = ""
+    target_name: str = ""
+    moves: dict[str, int] = {}          # 테이블 → 옮길 행 수
+    store_transfers: list[dict] = []    # {store_name, empid, action: move|keep_target}
+    conflicts: list[str] = []           # 사람이 읽는 충돌 설명
+    crewid_action: str = ""
+
+
+class ClaimCodeResponse(BaseModel):
+    """인수 코드 응답 — 관리자가 직원에게 전달할 코드."""
+
+    user_id: str
+    claim_code: str
 
 
 # === 매장 배정 (Store Assignment) 스키마 ===

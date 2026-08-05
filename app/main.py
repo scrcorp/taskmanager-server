@@ -103,9 +103,10 @@ scheduler: AsyncIOScheduler = AsyncIOScheduler()
 
 @app.on_event("startup")
 async def start_scheduler() -> None:
-    """APScheduler 시작 — attendance state cron + 스케줄 일일 리포트."""
+    """APScheduler 시작 — attendance state cron + 스케줄 일일 리포트 + rate 일일 반영."""
     import logging
     from app.services.attendance_cron_service import run_attendance_state_tick
+    from app.services.rate_service import run_rate_change_daily_tick
     from app.services.schedule_report_service import run_daily_report_tick
 
     logger = logging.getLogger("uvicorn.error")
@@ -131,8 +132,17 @@ async def start_scheduler() -> None:
             max_instances=1,
             coalesce=True,
         )
+        # 시급 미래 적용일 반영 — 기준일이 UTC(rate_service._utc_today)라 UTC 자정 직후 1회.
+        scheduler.add_job(
+            run_rate_change_daily_tick,
+            trigger=CronTrigger(hour=0, minute=5, timezone="UTC"),
+            id="rate_change_daily_tick",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
         scheduler.start()
-        logger.info("[scheduler] APScheduler started (attendance_state_tick, schedule_daily_report tz=%s)", report_tz_name)
+        logger.info("[scheduler] APScheduler started (attendance_state_tick, schedule_daily_report tz=%s, rate_change_daily_tick)", report_tz_name)
 
 
 @app.on_event("shutdown")

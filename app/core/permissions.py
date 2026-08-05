@@ -251,6 +251,12 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     ("tips:period_confirm",  "tips", "period_confirm",  "Confirm bi-monthly cycle (locks entries)", False),
     ("tips:period_override", "tips", "period_override", "Force-close cycle with reason (audit-trail)", True),
     ("tips:form_view",       "tips", "form_view",       "View IRS Form 4070 documents", False),
+
+    # ── Payroll (급여 — Payroll v1. 기본 부여는 Owner 만: 급여 확정/열람은 최상위 책임) ──
+    # 스펙 'Phase 1 이행 작업' — is_owner 하드체크 금지, permission 코드로 게이트.
+    ("payroll:read",    "payroll", "read",    "View pay periods, payroll entries and rate history", False),
+    ("payroll:confirm", "payroll", "confirm", "Confirm pay periods (freeze payroll entries)", False),
+    ("payroll:export",  "payroll", "export",  "Export confirmed payroll data", False),
 ]
 
 # 편의용: code → description 조회
@@ -282,6 +288,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         # 일반 GM 은 본인 발행 건만 wet PDF 업로드(서비스 issuer 체크). '타인 발행 건'
         # 업로드는 오너 또는 이 권한을 개별 부여받은 사람만 → GM 기본에서 제외.
         "warnings:upload",
+        # Payroll 은 기본 Owner 전용 (급여 확정/열람/export) — 필요 시 개별 부여.
+        "payroll:read", "payroll:confirm", "payroll:export",
     },
     "sv": {
         "stores:read", "users:read",

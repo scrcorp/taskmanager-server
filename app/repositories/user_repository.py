@@ -45,8 +45,12 @@ class UserRepository(BaseRepository[User]):
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 ID (Organization UUID)
-            filters: 필터 딕셔너리 (store_id, role_id, is_active)
-                     (Filter dict with optional store_id, role_id, is_active)
+            filters: 필터 딕셔너리 (store_ids, role_id, is_active,
+                     include_provisional, provisional_only)
+                     - include_provisional: 미가입(유령) 계정을 is_active 필터에서 면제.
+                       유령은 is_active=False 라 is_active=True 필터에 걸려 사라지는데,
+                       스케줄 후보처럼 유령도 봐야 하는 곳에서 True 로 준다.
+                     - provisional_only: 유령만 조회 (콘솔 '미가입' 필터용).
 
         Returns:
             list[User]: 사용자 목록 (List of users)
@@ -61,6 +65,8 @@ class UserRepository(BaseRepository[User]):
             store_ids: list[UUID] | None = filters.get("store_ids")  # type: ignore[assignment]
             role_id: UUID | None = filters.get("role_id")  # type: ignore[assignment]
             is_active: bool | None = filters.get("is_active")  # type: ignore[assignment]
+            include_provisional: bool = bool(filters.get("include_provisional"))
+            provisional_only: bool = bool(filters.get("provisional_only"))
 
             if store_ids:
                 # 해당 매장(들)의 스케줄 대상 직원 조회:
@@ -85,8 +91,17 @@ class UserRepository(BaseRepository[User]):
                 )
             if role_id is not None:
                 query = query.where(User.role_id == role_id)
-            if is_active is not None:
-                query = query.where(User.is_active == is_active)
+            if provisional_only:
+                query = query.where(User.is_provisional.is_(True))
+            elif is_active is not None:
+                if include_provisional:
+                    # 유령은 항상 is_active=False 라 is_active 필터를 그대로 걸면 사라진다.
+                    # 명시 요청 시에만 면제해 스케줄 후보 등에 포함시킨다.
+                    query = query.where(
+                        or_(User.is_active == is_active, User.is_provisional.is_(True))
+                    )
+                else:
+                    query = query.where(User.is_active == is_active)
 
         query = query.order_by(User.created_at)
         result = await db.execute(query)

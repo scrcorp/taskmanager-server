@@ -32,6 +32,12 @@ STORE_STATUSES = (
     STORE_STATUS_CLOSED,
 )
 
+# 그룹 채번 모드 — Store group empid numbering mode.
+# group: 그룹 내 모든 매장이 empid 시퀀스를 공유 / store: 그룹에 속해도 매장별 독립 시퀀스
+NUMBERING_MODE_GROUP = "group"
+NUMBERING_MODE_STORE = "store"
+NUMBERING_MODES = (NUMBERING_MODE_GROUP, NUMBERING_MODE_STORE)
+
 
 def generate_company_code() -> str:
     """6자리 랜덤 회사 코드 생성 (대문자 + 숫자).
@@ -95,6 +101,50 @@ class Organization(Base):
     users = relationship("User", back_populates="organization", cascade="all, delete-orphan", foreign_keys="User.organization_id")
 
 
+class StoreGroup(Base):
+    """매장 그룹 모델 — 조직 하위에서 매장들을 묶는 단위 (브랜드/지역 등).
+
+    Store group model — Groups stores within an organization.
+    empid 채번 정책의 단위: numbering_mode="group" 이면 그룹 내 모든 매장이
+    empid 시퀀스를 공유하고, "store" 면 그룹에 속해도 매장별 독립 시퀀스.
+    number_range_start 는 그룹 기본 번호대 시작값(예: 1000) — 매장별 값이 우선.
+
+    Attributes:
+        id: 고유 식별자 UUID (Unique identifier)
+        organization_id: 소속 조직 FK (Parent organization)
+        name: 그룹 이름 (Group display name)
+        sort_order: 그룹 표시 순서 (Manual display order, drag-reorder)
+        numbering_mode: 채번 모드 group|store (empid sequence scope)
+        number_range_start: 그룹 기본 번호대 시작값 (Default empid range start)
+        created_at/updated_at: 타임스탬프 UTC (Timestamps)
+    """
+
+    __tablename__ = "store_groups"
+
+    # 그룹 고유 식별자 — Group unique identifier (UUID v4, auto-generated)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 소속 조직 FK — Parent organization (CASCADE: 조직 삭제 시 그룹도 삭제)
+    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    # 그룹 이름 — Group display name
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 정렬 순서 — Manual display order within org (lower first). Drag-reorder.
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # 채번 모드 — empid sequence scope: "group"(그룹 공유, 기본) | "store"(매장별 독립)
+    numbering_mode: Mapped[str] = mapped_column(
+        String(10), nullable=False, default=NUMBERING_MODE_GROUP, server_default=NUMBERING_MODE_GROUP
+    )
+    # 그룹 기본 번호대 시작값 — Default empid range start (e.g. 1000). 매장 값이 우선. NULL=1부터.
+    number_range_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 생성 일시 — Record creation timestamp (UTC)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # 수정 일시 — Last modification timestamp (UTC, auto-updated)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # 관계 — Relationships (SET NULL: 그룹 삭제 시 매장은 미그룹으로)
+    organization = relationship("Organization")
+    stores = relationship("Store", back_populates="group")
+
+
 class Store(Base):
     """매장 모델 — 조직 하위의 사업장 단위.
 
@@ -143,6 +193,12 @@ class Store(Base):
     )
     # 정렬 순서 — Manual display order within org (lower first, then created_at). Drag-reorder.
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # 소속 그룹 FK — Store group (SET NULL: 그룹 삭제 시 미그룹으로). NULL=미그룹.
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("store_groups.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # 매장 번호대 시작값 — empid range start override (그룹 값보다 우선). NULL=그룹/1 폴백.
+    number_range_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 소프트 삭제 일시 — Timestamp when store was soft-deleted/closed (NULL = live)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 승인 필요 여부 — Whether schedule approval is required (default True)
@@ -185,6 +241,7 @@ class Store(Base):
 
     # 관계 — Relationships
     organization = relationship("Organization", back_populates="stores")
+    group = relationship("StoreGroup", back_populates="stores")
     shifts = relationship("Shift", back_populates="store", cascade="all, delete-orphan")
     positions = relationship("Position", back_populates="store", cascade="all, delete-orphan")
     user_stores = relationship("UserStore", back_populates="store", cascade="all, delete-orphan")
