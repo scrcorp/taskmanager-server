@@ -54,9 +54,21 @@ class Settings(BaseSettings):
     AXIOM_API_TOKEN: str = ""  # Axiom API 토큰 (API token from Axiom dashboard)
     AXIOM_DATASET: str = ""  # Axiom 데이터셋 이름 (Dataset name for API logs)
 
-    # 앱 실행 환경 — 모바일 앱 릴리스 채널 결정에 사용
-    # local | staging | production
+    # 서버 배포 환경 — local | staging | production
+    # 이 서버 자체가 어느 환경으로 떠 있는지. 백오피스 쿠키 secure 플래그 등이 참조한다.
+    # 주의: HTMA(출퇴근 앱) 릴리스 채널은 여기가 아니라 HTMA_TYPE 이 결정한다.
     APP_ENV: str = "local"
+
+    # HTMA(출퇴근 앱) 릴리스 채널 — local | staging | production
+    # 채널명은 `attendance_{HTMA_TYPE}` 로 만들어지며, release-attendance.sh 가
+    # 등록하는 채널명과 반드시 일치해야 한다. 안 맞으면 앱이 최신 버전을 못 찾고
+    # "이미 최신"으로 표시된다(실제로 prod/staging 에서 그렇게 깨져 있었다).
+    #
+    # 서버 배포 환경(APP_ENV)과 값이 같은 게 보통이지만 별도 변수로 둔다 —
+    # 서버 환경과 앱 배포 채널은 다른 축이고, 한 이름으로 묶여 있으면
+    # "서버 변수인데 왜 앱 얘기냐"로 계속 헷갈린다.
+    # 비어 있으면 APP_ENV 로 폴백 (구버전 .env 하위호환).
+    HTMA_TYPE: str = ""
 
     # 검증맥락 사진 촬영시각 강제 — True이면 체크리스트 완료 사진에 capture_time 없으면 422 거부.
     # 과도기엔 False(받되 capture_source="unknown" 플래그). 앱 배포 완료 후 True로 전환.

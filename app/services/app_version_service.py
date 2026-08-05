@@ -62,8 +62,15 @@ def _extract_version_from_key(key: str) -> Optional[str]:
 
 class AppVersionService:
     def attendance_channel(self) -> str:
-        """현재 서버 환경에 대응하는 attendance 앱 채널명."""
-        return f"attendance_{settings.APP_ENV}"
+        """HTMA 릴리스 채널명 — `attendance_{HTMA_TYPE}`.
+
+        `release-attendance.sh` 가 등록할 때 쓰는 채널명과 반드시 같아야 한다.
+        다르면 앱이 등록된 최신 버전을 못 찾고 조용히 "이미 최신"으로 표시된다.
+
+        HTMA_TYPE 이 비어 있으면 APP_ENV 로 폴백한다 — 이 변수를 도입하기 전
+        .env 들과의 하위호환.
+        """
+        return f"attendance_{settings.HTMA_TYPE or settings.APP_ENV}"
 
     async def get_for_channel(
         self, db: AsyncSession, channel: str
