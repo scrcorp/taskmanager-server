@@ -52,6 +52,49 @@ def cycle_for_date(d: DateType) -> tuple[DateType, DateType]:
     return DateType(d.year, d.month, 16), DateType(d.year, d.month, last_day)
 
 
+def summarize_employee_tips(
+    entries: Iterable[TipEntry],
+    dists: Iterable[TipDistribution],
+) -> dict[UUID, dict]:
+    """직원별 사이클 팁 합계 — 4070 폼과 급여(payroll)가 공유하는 유일한 분배 공식.
+
+    반환: {employee_id: {cash, own_card, paid_out, received_card}}
+        - cash: cash_tips_kept 합 (본인 소지 — 분배 차감 X)
+        - own_card: 본인 입력 card_tips 합
+        - paid_out: 본인 entry 에서 나간 분배 전액 (status 무관 — 보낸 쪽은 즉시 차감)
+        - received_card: 받은 분배 중 accepted/auto_accepted 만
+          (pending 은 아직 수취 확정 아님. 확정 시 auto_accept 강제 정리로 비대칭 해소)
+
+    가이드 §8.6 Box 공식의 원천 — fork 금지, 여기만 수정한다.
+    """
+    emp_summary: dict[UUID, dict] = {}
+
+    def _row(emp_id: UUID) -> dict:
+        return emp_summary.setdefault(emp_id, {
+            "cash": Decimal("0"),
+            "own_card": Decimal("0"),
+            "paid_out": Decimal("0"),
+            "received_card": Decimal("0"),
+        })
+
+    ent_by_id = {e.id: e for e in entries}
+    for e in ent_by_id.values():
+        row = _row(e.employee_id)
+        row["cash"] += Decimal(str(e.cash_tips_kept))
+        row["own_card"] += Decimal(str(e.card_tips))
+
+    for d in dists:
+        sender_entry = ent_by_id.get(d.entry_id)
+        if sender_entry is None:
+            continue
+        _row(sender_entry.employee_id)["paid_out"] += Decimal(str(d.amount))
+        # 받은 사람은 accepted/auto_accepted 만 보고 대상 (가이드 §8.6 Box2).
+        if d.status in ("accepted", "auto_accepted") and d.receiver_id is not None:
+            _row(d.receiver_id)["received_card"] += Decimal(str(d.amount))
+
+    return emp_summary
+
+
 class TipService:
 
     # ── Period 헬퍼 ────────────────────────────────────────────
@@ -139,38 +182,8 @@ class TipService:
             select(TipDistribution).where(TipDistribution.entry_id.in_(entry_ids))
         )).all()
 
-        emp_summary: dict[UUID, dict] = {}
-        ent_by_id = {e.id: e for e in entries}
-        for e in entries:
-            row = emp_summary.setdefault(e.employee_id, {
-                "cash": Decimal("0"),
-                "own_card": Decimal("0"),
-                "paid_out": Decimal("0"),
-                "received_card": Decimal("0"),
-            })
-            row["cash"] += Decimal(str(e.cash_tips_kept))
-            row["own_card"] += Decimal(str(e.card_tips))
-
-        for d in dists:
-            sender_entry = ent_by_id.get(d.entry_id)
-            if sender_entry is None:
-                continue
-            row = emp_summary.setdefault(sender_entry.employee_id, {
-                "cash": Decimal("0"),
-                "own_card": Decimal("0"),
-                "paid_out": Decimal("0"),
-                "received_card": Decimal("0"),
-            })
-            row["paid_out"] += Decimal(str(d.amount))
-            # 받은 사람은 accepted/auto_accepted 만 보고 대상 (가이드 §8.6 Box2).
-            if d.status in ("accepted", "auto_accepted") and d.receiver_id is not None:
-                rec = emp_summary.setdefault(d.receiver_id, {
-                    "cash": Decimal("0"),
-                    "own_card": Decimal("0"),
-                    "paid_out": Decimal("0"),
-                    "received_card": Decimal("0"),
-                })
-                rec["received_card"] += Decimal(str(d.amount))
+        # 직원별 합계 — 단일 공식 (summarize_employee_tips, 급여와 공유)
+        emp_summary = summarize_employee_tips(entries, dists)
 
         created = 0
         new_forms: list[Form4070Document] = []

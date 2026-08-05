@@ -36,6 +36,8 @@ from app.api.console.auth import router as auth_router
 from app.api.console.organizations import router as organizations_router
 from app.api.console.super_owner import router as super_owner_router
 from app.api.console.stores import router as stores_router
+from app.api.console.store_groups import router as store_groups_router
+from app.api.console.empid_import import router as empid_import_router
 from app.api.console.roles import router as roles_router
 from app.api.console.users import router as users_router
 from app.api.console.availability import router as availability_router
@@ -128,6 +130,8 @@ console_router.include_router(auth_router, prefix="/auth", tags=["Console Auth"]
 console_router.include_router(organizations_router, prefix="/organizations", tags=["Organizations"])
 console_router.include_router(super_owner_router, prefix="/super-owner", tags=["Super Owner"])
 console_router.include_router(stores_router, prefix="/stores", tags=["Stores"])
+console_router.include_router(store_groups_router, prefix="/store-groups", tags=["Store Groups"])
+console_router.include_router(empid_import_router, prefix="/empid-import", tags=["EMPID Import"])
 console_router.include_router(roles_router, prefix="/roles", tags=["Roles"])
 console_router.include_router(users_router, prefix="/users", tags=["Users"])
 console_router.include_router(shifts_router, tags=["Shifts"])
@@ -267,3 +271,9 @@ console_router.include_router(app_versions_router, prefix="/app-versions", tags=
 # Schedule Daily Report 라우터 등록 — Owner 전용 수동 트리거
 # ---------------------------------------------------------------------------
 console_router.include_router(schedule_reports_router, prefix="/schedule-report", tags=["Schedule Report"])
+
+# ---------------------------------------------------------------------------
+# Payroll 라우터 등록 — pay periods/확정(payroll:*, 기본 Owner) + 이벤트 태깅
+# ---------------------------------------------------------------------------
+from app.api.console.payroll import router as payroll_router  # noqa: E402
+console_router.include_router(payroll_router, prefix="/payroll", tags=["Payroll"])

@@ -10,10 +10,11 @@ Tables:
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -84,6 +85,9 @@ class OrgMember(Base):
     # org 번호(CREWID) — org 안에서 1부터 순번, org 내 unique. DB 컬럼명 = 라벨 = crewid.
     # (기존 employee_no[레거시 String]와 별개 — 새 정수 순번.)
     crewid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 고용 시작/종료일 — Payroll v1 Phase 1. status 와 별개의 날짜 기록 (급여 기간 판정용).
+    hire_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    termination_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

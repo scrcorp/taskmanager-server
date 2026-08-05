@@ -30,6 +30,21 @@ class LoginRequest(BaseModel):
     company_code: str | None = None  # 회사 코드 — 조직 식별용 (Company code for org identification)
 
 
+class ClaimPreviewRequest(BaseModel):
+    """인수 코드 확인 요청 — 가입 전에 어떤 계정을 이어받는지 보여주기 위함."""
+
+    claim_code: str
+    company_code: str | None = None
+
+
+class ClaimPreviewResponse(BaseModel):
+    """인수 대상 미리보기 — 본인 확인용 최소 정보만 (민감정보 제외)."""
+
+    full_name: str
+    role_name: str
+    store_names: list[str] = []
+
+
 class RegisterRequest(BaseModel):
     """앱 사용자 회원가입 요청 스키마.
 
@@ -51,6 +66,11 @@ class RegisterRequest(BaseModel):
     company_code: str | None = None  # 회사 코드 — 미지정 시 단일 org 자동 매칭
     verification_token: str  # 이메일 인증 토큰 — 코드 검증 성공 시 발급 (Issued after code verification)
     store_ids: list[str] = []  # 배정할 매장 ID 목록 (Store UUIDs to assign user to)
+    # 인수 코드 — 관리자가 미리 만들어 둔 미가입(유령) 계정을 이어받을 때. 있으면 새 계정을
+    # 만들지 않고 그 행을 인수하므로 기존 empid·스케줄·매장 배정이 그대로 따라온다.
+    claim_code: str | None = None
+    # 소프트 가드 우회 — "아니오, 새 계정입니다"를 고른 경우 true 로 재요청.
+    skip_claim_check: bool = False
     preferred_language: PreferredLanguage = "en"  # 선호 언어 (정보 수집용, default en)
 
 

@@ -131,6 +131,19 @@ class ProfileService:
         if "email" in update_data and update_data["email"] != current_user.email:
             update_data["email_verified"] = False
 
+        # full_name 변경(레거시 경로) — 구조화 이름(first/middle/last)과의 desync 방지.
+        # 이름이 실제로 바뀌면 구조화 파트를 비운다 (display_name 은 full_name 폴백).
+        # 조합 규칙 단일화: app/utils/names.py 참조.
+        if "full_name" in update_data and update_data["full_name"] is not None:
+            new_full: str = update_data["full_name"].strip()
+            if not new_full:
+                raise BadRequestError("Name cannot be empty")
+            update_data["full_name"] = new_full
+            if new_full != current_user.full_name:
+                update_data["first_name"] = None
+                update_data["middle_name"] = None
+                update_data["last_name"] = None
+
         try:
             for field, value in update_data.items():
                 if hasattr(current_user, field):

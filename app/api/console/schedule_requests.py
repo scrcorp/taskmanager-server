@@ -111,11 +111,18 @@ async def admin_delete_request(
 ) -> dict:
     """관리자가 생성한 신청 삭제 (admin-created만)."""
     from app.repositories.schedule_repository import schedule_repository
+    from app.services.payroll_lock_service import ensure_not_locked
     from app.utils.exceptions import BadRequestError, NotFoundError
 
     schedule = await schedule_repository.get_by_id(db, request_id)
-    if schedule is None:
+    if schedule is None or schedule.organization_id != current_user.organization_id:
         raise NotFoundError("Request not found")
+
+    # (L3) 확정된 pay period 안의 신청 삭제 금지 (소급 차단).
+    await ensure_not_locked(
+        db, store_id=schedule.store_id, work_date=schedule.operating_day
+    )
+
     if schedule.created_by is None:
         raise BadRequestError("Staff-submitted requests cannot be deleted. Use reject instead.")
     try:

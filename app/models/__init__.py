@@ -20,7 +20,7 @@ Modules:
     daily_report: 일일 보고서 템플릿, 보고서, 섹션, 코멘트 (Daily report templates, reports, sections, comments)
 """
 
-from app.models.organization import Organization, Store, ShiftPreset, LaborLawSetting
+from app.models.organization import Organization, Store, StoreGroup, ShiftPreset, LaborLawSetting
 from app.models.user import Role, User
 from app.models.org_member import OrgMember, OrgMemberStore
 from app.models.platform_admin import PlatformAdmin
@@ -56,6 +56,9 @@ from app.models.schedule_report import ScheduleReportSnapshot
 from app.models.file import File, FileUsage
 from app.models.changelog import ChangelogPost
 from app.models.availability import StaffAvailability, StaffAvailabilityHistory, StaffAvailabilityPreset
+from app.models.clockin_pin_audit import ClockinPinAudit
+from app.models.rate import HourlyRateHistory
+from app.models.payroll import PayPeriod, PayrollEntry, PayrollEvent
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -88,9 +91,12 @@ __all__ = [
     "StoreHiringForm", "Candidate", "Application", "CandidateBlock",
     "InterviewSlot", "InterviewSlotPreference",
     "AppVersion",
+    "ClockinPinAudit",
     "TipEntry", "TipDistribution", "TipAuditLog", "TipPeriod", "Form4070Document",
     "ScheduleReportSnapshot",
     "File", "FileUsage",
     "ChangelogPost",
     "StaffAvailability", "StaffAvailabilityHistory", "StaffAvailabilityPreset",
+    "HourlyRateHistory",
+    "PayPeriod", "PayrollEntry", "PayrollEvent",
 ]

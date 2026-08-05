@@ -30,6 +30,19 @@ from app.models.user_store import UserStore
 pytestmark = pytest.mark.asyncio
 
 
+def _grid_now_window(hours: int = 4) -> tuple[str, str]:
+    """현재 시각(UTC=테스트 매장 tz)을 30분 grid 로 내림한 (start, end) HH:MM 쌍.
+
+    manage schedule create 는 30분 grid(:00/:30) 만 허용하므로 now() 를 그대로
+    보내면 시각에 따라 422 가 난다 (flaky). 직전 grid 로 내림 — 스케줄이 현재
+    시각을 포함하므로 clock-in 가능하고, end 전이라 state 판정도 동일.
+    """
+    now = datetime.now(timezone.utc)
+    start = now.replace(minute=0 if now.minute < 30 else 30, second=0, microsecond=0)
+    end = start + timedelta(hours=hours)
+    return start.strftime("%H:%M"), end.strftime("%H:%M")
+
+
 @pytest_asyncio.fixture
 async def gm_user(test_users: dict) -> dict:
     """testgm 정보 반환 (PIN 포함)."""
@@ -176,13 +189,14 @@ async def test_manage_cancel_clock_in_returns_ok(
     먼저 schedule 만들고 clock-in 한 다음 cancel.
     """
     # schedule + clock-in
+    start_hhmm, end_hhmm = _grid_now_window()
     create = await async_client.post(
         "/api/v1/attendance/manage/schedules",
         headers=manage_headers,
         json={
             "user_id": str(test_user["id"]),
-            "start_time": datetime.now(timezone.utc).strftime("%H:%M"),
-            "end_time": (datetime.now(timezone.utc) + timedelta(hours=4)).strftime("%H:%M"),
+            "start_time": start_hhmm,
+            "end_time": end_hhmm,
         },
     )
     assert create.status_code == 201, create.text
@@ -224,13 +238,14 @@ async def test_manage_cancel_clock_out_returns_ok(
 
     schedule → clock-in → clock-out 한 다음 cancel.
     """
+    start_hhmm, end_hhmm = _grid_now_window()
     create = await async_client.post(
         "/api/v1/attendance/manage/schedules",
         headers=manage_headers,
         json={
             "user_id": str(test_user["id"]),
-            "start_time": datetime.now(timezone.utc).strftime("%H:%M"),
-            "end_time": (datetime.now(timezone.utc) + timedelta(hours=4)).strftime("%H:%M"),
+            "start_time": start_hhmm,
+            "end_time": end_hhmm,
         },
     )
     assert create.status_code == 201, create.text
@@ -275,13 +290,14 @@ async def test_manage_list_includes_state_anomalies_breaks(
     staff_in_store: None,
 ) -> None:
     """미출근(clock-in 전) 스케줄은 state=upcoming, breaks 빈 배열, anomalies 는 list."""
+    start_hhmm, end_hhmm = _grid_now_window()
     create = await async_client.post(
         "/api/v1/attendance/manage/schedules",
         headers=manage_headers,
         json={
             "user_id": str(test_user["id"]),
-            "start_time": datetime.now(timezone.utc).strftime("%H:%M"),
-            "end_time": (datetime.now(timezone.utc) + timedelta(hours=4)).strftime("%H:%M"),
+            "start_time": start_hhmm,
+            "end_time": end_hhmm,
         },
     )
     assert create.status_code == 201, create.text
@@ -303,13 +319,14 @@ async def test_manage_list_breaking_state_with_breaks(
     staff_in_store: None,
 ) -> None:
     """clock-in → break_start 하면 state=breaking, breaks 에 진행 중(end=null) 1건."""
+    start_hhmm, end_hhmm = _grid_now_window()
     create = await async_client.post(
         "/api/v1/attendance/manage/schedules",
         headers=manage_headers,
         json={
             "user_id": str(test_user["id"]),
-            "start_time": datetime.now(timezone.utc).strftime("%H:%M"),
-            "end_time": (datetime.now(timezone.utc) + timedelta(hours=4)).strftime("%H:%M"),
+            "start_time": start_hhmm,
+            "end_time": end_hhmm,
         },
     )
     assert create.status_code == 201, create.text

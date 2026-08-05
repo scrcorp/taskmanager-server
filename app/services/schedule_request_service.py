@@ -92,19 +92,23 @@ class ScheduleRequestService:
         self, db: AsyncSession, user_id: UUID, store_id: UUID,
         override: float | None = None,
     ) -> float:
-        """시급 cascade 결정: override > user.hourly_rate > store.default_hourly_rate > org.default_hourly_rate."""
+        """시급 cascade 결정: override > 개인 rate(org_members, R6 canonical) > store.default_hourly_rate > org.default_hourly_rate."""
+        from app.services.rate_service import rate_service
+
         if override is not None:
             return override
-        user_row = await db.execute(select(User.hourly_rate).where(User.id == user_id))
-        user_hr = user_row.scalar()
-        if user_hr is not None:
-            return float(user_hr)
         store_row = await db.execute(select(Store.default_hourly_rate, Store.organization_id).where(Store.id == store_id))
         store_record = store_row.one_or_none()
+        org_id = store_record[1] if store_record else None
+        person = await rate_service.person_rate_at(
+            db, user_id=user_id, organization_id=org_id,
+        )
+        if person is not None:
+            return float(person)
         if store_record and store_record[0] is not None:
             return float(store_record[0])
-        if store_record and store_record[1] is not None:
-            org_row = await db.execute(select(Organization.default_hourly_rate).where(Organization.id == store_record[1]))
+        if org_id is not None:
+            org_row = await db.execute(select(Organization.default_hourly_rate).where(Organization.id == org_id))
             org_hr = org_row.scalar()
             if org_hr is not None:
                 return float(org_hr)
@@ -391,6 +395,10 @@ class ScheduleRequestService:
     ) -> ScheduleRequestResponse:
         store_id = UUID(data.store_id)
 
+        # (L3) 확정된 pay period 안의 과거 날짜로 신청 생성 금지 (소급 차단).
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(db, store_id=store_id, work_date=data.work_date)
+
         work_role_id = UUID(data.work_role_id) if data.work_role_id else None
 
         # schedules 테이블에서 중복 신청 체크 (requested/confirmed 상태, 같은 날짜+역할)
@@ -463,6 +471,14 @@ class ScheduleRequestService:
             raise BadRequestError("User organization not found")
 
         items = await request_template_repository.get_items(db, template_id)
+
+        # (L3) locked 날짜는 생성/교체하지 않고 skipped 로 명시 (무음 금지).
+        from app.services.payroll_lock_service import (
+            PAY_PERIOD_LOCKED_MESSAGE,
+            is_locked_cached,
+        )
+        lock_cache: dict = {}
+
         try:
             result = ScheduleRequestFromTemplateResult()
             current = date_from
@@ -470,6 +486,16 @@ class ScheduleRequestService:
                 weekday = (current.weekday() + 1) % 7  # 0=Sun, 6=Sat
                 for item in items:
                     if item.day_of_week != weekday:
+                        continue
+                    if await is_locked_cached(
+                        db, lock_cache, store_id=store_id, work_date=current,
+                    ):
+                        result.skipped.append(ScheduleRequestSkippedItem(
+                            work_date=current,
+                            work_role_id=str(item.work_role_id) if item.work_role_id else None,
+                            work_role_name=None,
+                            reason=PAY_PERIOD_LOCKED_MESSAGE,
+                        ))
                         continue
                     # 중복 체크: schedules 테이블에서 requested/confirmed 상태
                     dup_query = select(Schedule).where(
@@ -565,11 +591,28 @@ class ScheduleRequestService:
         # 날짜 오프셋 계산
         day_offset = (date_from - prev_date_from).days
 
+        # (L3) locked 날짜는 복사하지 않고 skipped 로 명시 (무음 금지).
+        from app.services.payroll_lock_service import (
+            PAY_PERIOD_LOCKED_MESSAGE,
+            is_locked_cached,
+        )
+        lock_cache: dict = {}
+
         try:
             result = ScheduleRequestFromTemplateResult()
             for prev_s in prev_schedules:
                 new_date = prev_s.work_date + timedelta(days=day_offset)
                 if new_date < date_from or new_date > date_to:
+                    continue
+                if await is_locked_cached(
+                    db, lock_cache, store_id=store_id, work_date=new_date,
+                ):
+                    result.skipped.append(ScheduleRequestSkippedItem(
+                        work_date=new_date,
+                        work_role_id=str(prev_s.work_role_id) if prev_s.work_role_id else None,
+                        work_role_name=None,
+                        reason=PAY_PERIOD_LOCKED_MESSAGE,
+                    ))
                     continue
                 # 중복 체크
                 dup_query = select(Schedule).where(
@@ -641,6 +684,17 @@ class ScheduleRequestService:
         if schedule.status != "requested":
             raise BadRequestError("Only pending requests can be updated")
 
+        # (L3) 확정된 pay period 안의 신청 수정 금지. 날짜/매장을 locked 조합으로
+        # 옮기는 것도 함께 차단 (매장만 바뀌어도 새 매장 기간을 판정).
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(
+            db, store_id=schedule.store_id, work_date=schedule.operating_day
+        )
+        target_store = UUID(data.store_id) if data.store_id else schedule.store_id
+        target_date = data.work_date if data.work_date is not None else schedule.operating_day
+        if target_store != schedule.store_id or target_date != schedule.operating_day:
+            await ensure_not_locked(db, store_id=target_store, work_date=target_date)
+
         update_data: dict = {}
         if data.store_id is not None:
             update_data["store_id"] = UUID(data.store_id)
@@ -694,6 +748,12 @@ class ScheduleRequestService:
             raise NotFoundError("Request not found")
         if schedule.status != "requested":
             raise BadRequestError("Only pending requests can be deleted")
+
+        # (L3) 확정된 pay period 안의 신청 삭제 금지 (소급 차단).
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(
+            db, store_id=schedule.store_id, work_date=schedule.operating_day
+        )
 
         try:
             await schedule_repository.delete(db, request_id)
@@ -796,6 +856,10 @@ class ScheduleRequestService:
         store_id = UUID(data.store_id)
         work_role_id = UUID(data.work_role_id) if data.work_role_id else None
 
+        # (L3) 확정된 pay period 안의 과거 날짜로 신청 생성 금지 (소급 차단).
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(db, store_id=store_id, work_date=data.work_date)
+
         # 중복 신청 체크: schedules 테이블에서 requested/confirmed 상태
         dup_query = select(Schedule).where(
             Schedule.user_id == user_id,
@@ -858,6 +922,16 @@ class ScheduleRequestService:
             raise NotFoundError("Request not found")
         if schedule.status == "rejected":
             raise BadRequestError("Rejected requests cannot be updated. Revert the request first.")
+
+        # (L3) 확정된 pay period 안의 신청 수정 금지 + locked 기간으로 날짜 이동 차단.
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(
+            db, store_id=schedule.store_id, work_date=schedule.operating_day
+        )
+        if data.work_date is not None and data.work_date != schedule.operating_day:
+            await ensure_not_locked(
+                db, store_id=schedule.store_id, work_date=data.work_date
+            )
 
         update_data: dict = {}
         has_value_change = False
@@ -989,6 +1063,12 @@ class ScheduleRequestService:
         if schedule.status not in ("requested", "rejected") and not schedule.is_modified:
             raise BadRequestError("Only modified or rejected requests can be reverted")
 
+        # (L3) 확정된 pay period 안의 신청 복원 금지 (소급 변경).
+        from app.services.payroll_lock_service import ensure_not_locked
+        await ensure_not_locked(
+            db, store_id=schedule.store_id, work_date=schedule.operating_day
+        )
+
         revert_data: dict = {
             "status": "requested",
             "rejection_reason": None,
@@ -1026,6 +1106,9 @@ class ScheduleRequestService:
         new_end = revert_times["end_time"] if "end_time" in revert_times else schedule.end_time
         _anchor_rd = revert_times.get("work_date")
         anchor = _anchor_rd if _anchor_rd is not None else (schedule.operating_day or schedule.work_date)
+        # (L3) 복원되는 원본 날짜가 locked 기간이면 차단 — 소급 이동 우회 방지.
+        if anchor != schedule.operating_day:
+            await ensure_not_locked(db, store_id=schedule.store_id, work_date=anchor)
         sf = self._shift_fields(anchor, new_start, new_end,
                                 schedule.break_start_time, schedule.break_end_time,
                                 start_offset_days=self._start_offset_of(schedule))
@@ -1132,9 +1215,25 @@ class ScheduleRequestService:
         requests_rejected = 0
         errors: list[str] = []
 
+        # (L3) locked 날짜의 신청은 confirm 하지 않고 에러로 명시 (무음 금지).
+        from app.services.payroll_lock_service import (
+            PAY_PERIOD_LOCKED_MESSAGE,
+            is_locked_cached,
+        )
+        lock_cache: dict = {}
+
         for s in schedules:
             if s.status == "rejected":
                 requests_rejected += 1
+                continue
+
+            if await is_locked_cached(
+                db, lock_cache, store_id=s.store_id, work_date=s.operating_day,
+            ):
+                errors.append(
+                    f"Schedule {s.id}: {PAY_PERIOD_LOCKED_MESSAGE}"
+                    f" ({s.operating_day.isoformat()})"
+                )
                 continue
 
             # Get time, fall back to work role defaults

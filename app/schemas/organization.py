@@ -7,9 +7,16 @@ Covers CRUD operations for organizations (tenants) and stores (locations).
 import re
 from datetime import datetime
 from typing import Any
-from pydantic import BaseModel, field_validator
+from uuid import UUID
 
-from app.models.organization import STORE_STATUSES, STORE_STATUS_OPEN
+from pydantic import BaseModel, Field, field_validator
+
+from app.models.organization import (
+    NUMBERING_MODE_GROUP,
+    NUMBERING_MODES,
+    STORE_STATUSES,
+    STORE_STATUS_OPEN,
+)
 
 # 스토어 코드 — 파일명/식별용 짧은 약어 (예: IFO, SWC). org 내 유일(partial unique).
 # 길이 2~10 영숫자. 현장에서 store 이름 약어(예: "swc - Seed Water Cafe")를 직접 붙이던
@@ -36,6 +43,16 @@ def _validate_store_status(v: str | None) -> str | None:
     v = v.strip().lower()
     if v not in STORE_STATUSES:
         raise ValueError(f"Store status must be one of {', '.join(STORE_STATUSES)}")
+    return v
+
+
+def _validate_numbering_mode(v: str | None) -> str | None:
+    """그룹 채번 모드가 허용된 enum(group/store)인지 검증."""
+    if v is None:
+        return None
+    v = v.strip().lower()
+    if v not in NUMBERING_MODES:
+        raise ValueError(f"Numbering mode must be one of {', '.join(NUMBERING_MODES)}")
     return v
 
 
@@ -96,6 +113,67 @@ class OrganizationResponse(BaseModel):
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 
+# === 매장 그룹 (StoreGroup) 스키마 ===
+
+class StoreGroupCreate(BaseModel):
+    """매장 그룹 생성 요청 스키마.
+
+    Store group creation request schema.
+
+    Attributes:
+        name: 그룹 이름 (Group name)
+        numbering_mode: 채번 모드 group|store (empid sequence scope, default group)
+        number_range_start: 그룹 기본 번호대 시작값 (Default empid range start, optional)
+    """
+
+    name: str  # 그룹 이름 (Group name)
+    numbering_mode: str = NUMBERING_MODE_GROUP  # 채번 모드 (group=공유 시퀀스, store=매장별)
+    number_range_start: int | None = Field(default=None, ge=1)  # 번호대 시작값 (예: 1000)
+
+    _norm_mode = field_validator("numbering_mode")(_validate_numbering_mode)
+
+
+class StoreGroupUpdate(BaseModel):
+    """매장 그룹 수정 요청 스키마 (부분 업데이트).
+
+    Store group update request schema (partial update).
+    """
+
+    name: str | None = None  # 변경할 그룹 이름 (New name, optional)
+    numbering_mode: str | None = None  # 채번 모드 변경 (group|store, optional)
+    number_range_start: int | None = Field(default=None, ge=1)  # 번호대 시작값 (optional)
+
+    _norm_mode = field_validator("numbering_mode")(_validate_numbering_mode)
+
+
+class StoreGroupResponse(BaseModel):
+    """매장 그룹 응답 스키마.
+
+    Store group response schema. duplicate_empids 는 그룹 편성/모드 변경 직후
+    채번 스코프 안에 이미 존재하는 중복 empid 목록 (경고용, 블록하지 않음).
+    """
+
+    id: str  # 그룹 UUID 문자열 (Group UUID as string)
+    organization_id: str  # 소속 조직 UUID 문자열 (Organization UUID as string)
+    name: str  # 그룹 이름 (Group name)
+    sort_order: int = 0  # 정렬 순서 (Manual display order)
+    numbering_mode: str = NUMBERING_MODE_GROUP  # 채번 모드 (group|store)
+    number_range_start: int | None = None  # 번호대 시작값 (Range start)
+    store_count: int = 0  # 소속 매장 수 (Number of stores in this group)
+    duplicate_empids: list[dict[str, int]] = []  # 스코프 내 중복 empid 경고 [{empid, count}]
+    created_at: datetime  # 생성 일시 UTC (Creation timestamp)
+
+
+class StoreGroupReorderRequest(BaseModel):
+    """매장 그룹 정렬 순서 일괄 변경 요청.
+
+    Bulk store-group reorder request — group IDs in the desired display order.
+    """
+
+    # Pydantic 이 UUID 파싱까지 검증 (잘못된 값은 422 — 라우터에서 UUID() 수동 변환 금지)
+    group_ids: list[UUID]  # 새 순서의 그룹 UUID 목록 (Group UUIDs in desired order)
+
+
 # === 매장 (Store) 스키마 ===
 
 class StoreCreate(BaseModel):
@@ -117,6 +195,8 @@ class StoreCreate(BaseModel):
     timezone: str | None = None  # IANA 타임존 (Store timezone override, optional)
     status: str = STORE_STATUS_OPEN  # 매장 상태 (preparing/open/paused/closed, default open)
     default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate, optional)
+    group_id: UUID | None = None  # 소속 그룹 UUID (Store group, optional — 잘못된 값은 422)
+    number_range_start: int | None = Field(default=None, ge=1)  # 매장 번호대 시작값 (optional)
 
     _norm_code = field_validator("code")(_normalize_store_code)
     _norm_status = field_validator("status")(_validate_store_status)
@@ -145,6 +225,8 @@ class StoreUpdate(BaseModel):
     state_code: str | None = None  # 주(State) 코드 (US state code, optional)
     timezone: str | None = None  # IANA 타임존 (Store timezone override, optional)
     default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate, optional)
+    group_id: UUID | None = None  # 소속 그룹 변경 (null=그룹 해제. 미포함=변경 없음. 잘못된 값은 422)
+    number_range_start: int | None = Field(default=None, ge=1)  # 매장 번호대 시작값 (optional)
 
     _norm_code = field_validator("code")(_normalize_store_code)
     _norm_status = field_validator("status")(_validate_store_status)
@@ -182,6 +264,9 @@ class StoreResponse(BaseModel):
     timezone: str | None = None  # IANA 타임존 (Store timezone override)
     default_hourly_rate: float | None = None  # 매장 기본 시급 (Store default hourly rate)
     accepting_signups: bool = True  # 가입/지원 접수 여부 (Hiring signups open flag)
+    group_id: str | None = None  # 소속 그룹 UUID (Store group, null=미그룹)
+    number_range_start: int | None = None  # 매장 번호대 시작값 (empid range start override)
+    duplicate_empids: list[dict[str, int]] = []  # 그룹 편성 직후 스코프 내 중복 경고 [{empid, count}]
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 

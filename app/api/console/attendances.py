@@ -107,6 +107,62 @@ async def list_attendances(
     }
 
 
+# NOTE: 고정 경로(/weekly-summary, /overtime-alerts)는 반드시 /{attendance_id}
+# 보다 먼저 등록해야 한다 — FastAPI 는 등록 순서로 매칭하므로 뒤에 두면
+# "weekly-summary" 가 UUID 파싱에 걸려 422 로 도달 불가(P0-1/P0-2 회귀 방지).
+
+
+@router.get("/weekly-summary")
+async def get_weekly_summary(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
+    user_id: Annotated[str | None, Query()] = None,
+    store_id: Annotated[str | None, Query()] = None,
+    week_date: Annotated[date | None, Query()] = None,
+) -> list[dict]:
+    """주간 근무시간 요약 — 사용자별 주간 실 근무시간 (C1 net).
+
+    Weekly work time summary — net work hours per user.
+    """
+    store_uuid = UUID(store_id) if store_id else None
+    accessible = await get_accessible_store_ids(db, current_user)
+    if store_uuid is not None:
+        await check_store_access(db, current_user, store_uuid)
+    return await attendance_service.get_weekly_summary(
+        db,
+        organization_id=current_user.organization_id,
+        user_id=UUID(user_id) if user_id else None,
+        store_id=store_uuid,
+        week_date=week_date,
+        store_ids=accessible,
+    )
+
+
+@router.get("/overtime-alerts")
+async def get_overtime_alerts(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
+    store_id: Annotated[str | None, Query()] = None,
+    week_date: Annotated[date | None, Query()] = None,
+) -> list[dict]:
+    """초과근무 경고 목록 조회 — 주간 순 근무시간 초과 직원 목록.
+
+    Get overtime alerts — List employees exceeding weekly work hour limits.
+    Returns users whose weekly net hours exceed the per-store threshold.
+    """
+    store_uuid = UUID(store_id) if store_id else None
+    accessible = await get_accessible_store_ids(db, current_user)
+    if store_uuid is not None:
+        await check_store_access(db, current_user, store_uuid)
+    return await attendance_service.get_overtime_alerts(
+        db,
+        organization_id=current_user.organization_id,
+        store_id=store_uuid,
+        week_date=week_date,
+        store_ids=accessible,
+    )
+
+
 @router.get("/{attendance_id}", response_model=AttendanceResponse)
 async def get_attendance(
     attendance_id: UUID,
@@ -177,6 +233,36 @@ async def correct_attendance(
     return await attendance_service.build_correction_response(db, correction)
 
 
+@router.post(
+    "/{attendance_id}/confirm-auto-clockout",
+    response_model=AttendanceResponse,
+)
+async def confirm_auto_clockout(
+    attendance_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> dict:
+    """자동퇴근(auto_clocked_out) 건을 매니저가 확인 처리합니다 (L6 일상 플로우).
+
+    Confirm an auto clocked-out attendance (daily/next-day manager check).
+    Sets auto_clock_out_confirmed_by/at — the basis for payroll close gate #1
+    (zero unconfirmed auto clock-outs).
+
+    동작:
+        - 'auto_clocked_out' anomaly 가 없는 record → 400
+        - 이미 확인된 record → **no-op 멱등 성공** (최초 확인자/시각 보존)
+        - clock_out 시각을 correction 으로 고치면 이 endpoint 없이도 자동 확인됨
+          (corrected == human-verified)
+    """
+    attendance = await attendance_service.confirm_auto_clock_out(
+        db,
+        attendance_id=attendance_id,
+        organization_id=current_user.organization_id,
+        confirmed_by=current_user.id,
+    )
+    return await attendance_service.build_response(db, attendance)
+
+
 @router.patch(
     "/{attendance_id}/corrections/{correction_id}",
     response_model=AttendanceCorrectionResponse,
@@ -201,57 +287,6 @@ async def update_correction_reason(
         reason=data.reason,
     )
     return await attendance_service.build_correction_response(db, correction)
-
-
-@router.get("/weekly-summary")
-async def get_weekly_summary(
-    db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
-    user_id: Annotated[str | None, Query()] = None,
-    store_id: Annotated[str | None, Query()] = None,
-    week_date: Annotated[date | None, Query()] = None,
-) -> list[dict]:
-    """주간 근무시간 요약 — 사용자별 주간 실 근무시간 (총시간 - 휴식).
-
-    Weekly work time summary — net work hours per user.
-    """
-    store_uuid = UUID(store_id) if store_id else None
-    accessible = await get_accessible_store_ids(db, current_user)
-    if store_uuid is not None:
-        await check_store_access(db, current_user, store_uuid)
-    return await attendance_service.get_weekly_summary(
-        db,
-        organization_id=current_user.organization_id,
-        user_id=UUID(user_id) if user_id else None,
-        store_id=store_uuid,
-        week_date=week_date,
-        store_ids=accessible,
-    )
-
-
-@router.get("/overtime-alerts")
-async def get_overtime_alerts(
-    db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
-    store_id: Annotated[str | None, Query()] = None,
-    week_date: Annotated[date | None, Query()] = None,
-) -> list[dict]:
-    """초과근무 경고 목록 조회 — 주간 근무시간 초과 직원 목록.
-
-    Get overtime alerts — List employees exceeding weekly work hour limits.
-    Returns users whose total weekly hours exceed the configured threshold.
-    """
-    store_uuid = UUID(store_id) if store_id else None
-    accessible = await get_accessible_store_ids(db, current_user)
-    if store_uuid is not None:
-        await check_store_access(db, current_user, store_uuid)
-    return await attendance_service.get_overtime_alerts(
-        db,
-        organization_id=current_user.organization_id,
-        store_id=store_uuid,
-        week_date=week_date,
-        store_ids=accessible,
-    )
 
 
 @router.post(

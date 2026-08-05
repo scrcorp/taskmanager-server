@@ -1,0 +1,713 @@
+"""Payroll Confirm Service — L5 마감 게이트 + 기간 확정/동결 (Payroll v1 Phase 3).
+
+pay period 'open' → 'confirmed' 전이의 유일한 경로. 스펙: docs/99_inbox/2026-08-03
+payroll-v1-스키마-스펙.md §4/§5 + 설계방향 L1~L6, 계산 규칙 1~5.
+
+마감 게이트 (L5 — 전부 평가해서 한 번에 보고, 하나라도 걸리면 409):
+    ① 미확인 자동퇴근 0건 — anomaly 'auto_clocked_out' 이면서
+       auto_clock_out_confirmed_at IS NULL 인 attendance (L6 확인 플로우가 해소)
+    ② 열린 근무 0건 — clock_in 有 + clock_out 無 (non-cancelled)
+    ③ rate 게이트 — preview validation 의 rate_missing / below_minimum_wage 0건
+       (판정은 rate_at 기준 — 계산 규칙 5, C8)
+    ④ 대응 tip_period(같은 store+범위) status == 'confirmed' (계산 규칙 4)
+    ⑤ 멀티스토어 주간 정합 (계산 규칙 2) — 아래 참조
+
+동결 (단일 트랜잭션 — 전부 성공 또는 전부 없던 일):
+    preview_period 재실행 → 행별 breakdown 합계 == 스칼라 검증(불일치 시 중단)
+    → payroll_entries INSERT (revision 0, 스냅샷: member_name=display_name 경유
+    preview 값, empid=이 store 의 org_member_stores, crewid=org_members)
+    → 범위 내 유효(non-voided) payroll_events 에 pay_period_id 스탬프(동결)
+    → period confirmed_at/by 기록. commit 은 이 서비스가 소유 (단독 API 액션).
+
+unconfirm 없음 (v1):
+    확정 해제 API 를 두지 않는다 — 확정 후 정정은 amendment(Q3, 외부 확인 대기)
+    경로로만. revision 컬럼이 그 탈출구다 (v1 은 항상 0).
+
+멀티스토어 커플링 (계산 규칙 2) — v1 단순화와 한계:
+    같은 org 사용자가 겹치는 주(Sun–Sat)에 다른 매장에서도 근무한 경우, 주 40h /
+    7일 연속 / 일 8h 판정은 org 합산이 법적 기준이지만 v1 계산 엔진은 매장 단위다.
+    confirm 시 org 합산 정합 체크를 돌려, 매장 단위 계산이 과소지급이 되는 조합
+    (합산 주 40h 초과 / org 관점 7일 연속 / 같은 날 두 매장 합산 8h 초과)이
+    감지되면 설명과 함께 거부한다 — v1 은 cross-store premium 자동 분배를 하지
+    않는다 (수동 처리 유도).
+    한계 (문서화):
+    - 타 매장 시간은 live attendance 로 읽는다. 선확정된 형제 기간은 L3 lock 이
+      attendance 수정을 막으므로 frozen entries 와 live 가 일치한다는 전제
+      (frozen breakdown 재파싱 대신 단순화). lock enforcement 이전 데이터는 예외.
+    - 타 매장의 열린 근무(clock_out 無)는 net 미계산이라 합산에서 빠진다 —
+      그 매장의 자체 confirm 게이트 ② 가 잡는다.
+    - 감지는 이 매장 preview 행에 있는 사용자만 대상 (타 매장 전용 근무자는
+      그 매장 confirm 몫).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from uuid import UUID
+
+from fastapi import HTTPException, status
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.payroll_rules import (
+    CA_DAILY_OT_HOURS,
+    MINIMUM_WAGE,
+    WEEKLY_OT_HOURS,
+)
+from app.models.attendance import Attendance
+from app.models.org_member import OrgMember
+from app.models.payroll import PayPeriod, PayrollEntry, PayrollEvent
+from app.models.user import User
+from app.schemas.payroll import (
+    CODE_ALREADY_CONFIRMED,
+    CODE_CLOSE_GATES_FAILED,
+    GATE_MULTI_STORE_WEEK,
+    VALIDATION_BELOW_MINIMUM_WAGE,
+    VALIDATION_OPEN_SHIFT,
+    VALIDATION_RATE_MISSING,
+    VALIDATION_TIP_PERIOD_NOT_CONFIRMED,
+    VALIDATION_UNCONFIRMED_AUTO_CLOCKOUT,
+    ConfirmGateFailure,
+    ConfirmGateItem,
+    PayrollPreviewRow,
+)
+from app.services.payroll_calc_service import payroll_calc_service
+from app.services.payroll_period_service import (
+    payroll_period_service,
+    week_start_for,
+    workweeks_touching,
+)
+from app.utils.exceptions import NotFoundError
+from app.utils.names import display_name
+
+# 자동퇴근 anomaly 코드 (attendance_cron_service 가 기록 — calc 서비스와 동일 값)
+_ANOMALY_AUTO_CLOCKED_OUT = "auto_clocked_out"
+
+_DAILY_OT_MIN = CA_DAILY_OT_HOURS * 60  # 480
+_WEEKLY_OT_MIN = WEEKLY_OT_HOURS * 60  # 2400
+
+# 멀티스토어 주간 정합 위반 종류 (evaluate_org_week_minutes 반환 kind)
+ORG_WEEK_OVER_40H = "weekly_over_40h"
+ORG_WEEK_SEVENTH_DAY_SPLIT = "seventh_day_split"
+ORG_WEEK_DAILY_OVER_8H = "daily_over_8h"
+
+
+def _fmt_hours(minutes: int) -> str:
+    """분 → 'H.T' 표기 (사람이 읽는 메시지용). 2700 → '45.0'."""
+    return f"{minutes / 60:.1f}"
+
+
+# ---------------------------------------------------------------------------
+# 순수 규칙 — DB 없음 (unit test 대상)
+# ---------------------------------------------------------------------------
+
+
+def verify_row_consistency(row: PayrollPreviewRow) -> list[str]:
+    """breakdown 합계 == 스칼라 필드 검증 (스펙 §5 confirm 시 일치 검증).
+
+    라운딩 규칙(구간별 센트 반올림 1회 후 정확한 합) 덕에 등식이 정확히
+    성립해야 한다 — 불일치는 계산 엔진 버그이며 동결하면 안 된다.
+
+    Returns:
+        발견된 불일치 설명 목록 (빈 목록 = 일관성 OK)
+    """
+    problems: list[str] = []
+    bd = row.breakdown
+
+    day_reg = sum(d.regular_minutes for d in bd.days)
+    day_ot = sum(d.ot_minutes for d in bd.days)
+    day_dt = sum(d.dt_minutes for d in bd.days)
+    if (day_reg, day_ot, day_dt) != (
+        row.regular_minutes, row.ot_minutes, row.dt_minutes
+    ):
+        problems.append(
+            f"day minutes ({day_reg}/{day_ot}/{day_dt}) != scalar minutes "
+            f"({row.regular_minutes}/{row.ot_minutes}/{row.dt_minutes})"
+        )
+
+    seg_reg = sum(s.regular_minutes for s in bd.segments)
+    seg_ot = sum(s.ot_minutes for s in bd.segments)
+    seg_dt = sum(s.dt_minutes for s in bd.segments)
+    if (seg_reg, seg_ot, seg_dt) != (
+        row.regular_minutes, row.ot_minutes, row.dt_minutes
+    ):
+        problems.append(
+            f"segment minutes ({seg_reg}/{seg_ot}/{seg_dt}) != scalar minutes "
+            f"({row.regular_minutes}/{row.ot_minutes}/{row.dt_minutes})"
+        )
+
+    seg_amount = sum((s.amount for s in bd.segments), start=Decimal("0"))
+    work_pay = row.regular_pay + row.ot_pay + row.dt_pay
+    if seg_amount != work_pay:
+        problems.append(
+            f"segment amount total {seg_amount} != regular+ot+dt pay {work_pay}"
+        )
+
+    penalty_total = sum((p.amount for p in bd.penalties), start=Decimal("0"))
+    if penalty_total != row.penalty_pay:
+        problems.append(
+            f"penalty line total {penalty_total} != penalty_pay {row.penalty_pay}"
+        )
+
+    gross = work_pay + row.penalty_pay + row.card_tips
+    if gross != row.gross_pay:
+        problems.append(
+            f"component sum {gross} != gross_pay {row.gross_pay}"
+        )
+    return problems
+
+
+def evaluate_org_week_minutes(
+    minutes_by_store: dict[UUID, dict[date, int]],
+) -> list[tuple[str, str]]:
+    """한 (user, Sun–Sat 주) 의 매장별 net 분 → org 합산 정합 위반 목록.
+
+    매장 1곳뿐이면 항상 빈 목록 — 매장 단위 엔진이 그대로 정확하다.
+    2곳 이상일 때만 매장 단위 계산이 놓치는 조합을 찾는다 (계산 규칙 2):
+        - weekly_over_40h: 합산 straight 근무가 40h 초과 (주간 OT 분배 불가)
+        - seventh_day_split: org 관점 7일 연속인데 어느 한 매장도 7일 전부는 아님
+        - daily_over_8h: 같은 날 두 매장 합산이 8h 초과 (일별 OT 분배 불가)
+
+    Args:
+        minutes_by_store: {store_id: {work_date: net_minutes}}
+
+    Returns:
+        [(kind, human_detail)] — kind 는 ORG_WEEK_* 상수, detail 은 영어 문구
+    """
+    store_totals = {
+        sid: sum(day_map.values()) for sid, day_map in minutes_by_store.items()
+    }
+    active = {sid: total for sid, total in store_totals.items() if total > 0}
+    if len(active) < 2:
+        return []
+
+    violations: list[tuple[str, str]] = []
+    total = sum(active.values())
+    if total > _WEEKLY_OT_MIN:
+        violations.append(
+            (
+                ORG_WEEK_OVER_40H,
+                f"combined {_fmt_hours(total)}h across {len(active)} stores "
+                f"exceeds {WEEKLY_OT_HOURS}h/week — weekly overtime cannot be "
+                "attributed to a single store",
+            )
+        )
+
+    worked_days = {
+        d
+        for day_map in minutes_by_store.values()
+        for d, minutes in day_map.items()
+        if minutes > 0
+    }
+    if len(worked_days) == 7 and not any(
+        len({d for d, m in day_map.items() if m > 0}) == 7
+        for day_map in minutes_by_store.values()
+    ):
+        violations.append(
+            (
+                ORG_WEEK_SEVENTH_DAY_SPLIT,
+                "worked all 7 days of the workweek across multiple stores — "
+                "the 7th-consecutive-day premium cannot be computed per store",
+            )
+        )
+
+    day_totals: dict[date, dict[UUID, int]] = {}
+    for sid, day_map in minutes_by_store.items():
+        for d, minutes in day_map.items():
+            if minutes > 0:
+                day_totals.setdefault(d, {})[sid] = minutes
+    for d in sorted(day_totals):
+        per_store = day_totals[d]
+        combined = sum(per_store.values())
+        if len(per_store) >= 2 and combined > _DAILY_OT_MIN:
+            violations.append(
+                (
+                    ORG_WEEK_DAILY_OVER_8H,
+                    f"worked at {len(per_store)} stores on {d} for a combined "
+                    f"{_fmt_hours(combined)}h — daily overtime over "
+                    f"{CA_DAILY_OT_HOURS}h cannot be attributed per store",
+                )
+            )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# 서비스
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ConfirmResult:
+    """confirm_period 성공 결과."""
+
+    period: PayPeriod
+    entries: list[PayrollEntry]
+    events_frozen: int  # pay_period_id 스탬프된 이벤트 수
+
+
+class PayrollConfirmService:
+    """마감 게이트 평가 + 동결 실행 — 'open' → 'confirmed' 단일 경로."""
+
+    async def confirm_period(
+        self,
+        db: AsyncSession,
+        *,
+        store_id: UUID,
+        period_id: UUID,
+        actor: User,
+    ) -> ConfirmResult:
+        """L5 게이트 전부 통과 시 기간을 확정하고 entries/events 를 동결한다.
+
+        모든 게이트를 평가해 실패를 한 번에 보고한다 (게이트 하나 고칠 때마다
+        다음 게이트를 새로 발견하는 waterfall 방지). 동결은 단일 트랜잭션 —
+        commit 은 이 함수가 소유한다 (단독 API 액션 관례, tag_event 동일).
+
+        Raises:
+            NotFoundError: 기간이 없거나 store 소속이 아닐 때 (404)
+            HTTPException 409: 이미 confirmed (detail.code =
+                pay_period_already_confirmed) / 게이트 실패 (detail.code =
+                payroll_close_gates_failed, detail.gates = 게이트별 상세)
+            HTTPException 500: breakdown 합계 != 스칼라 (엔진 버그 — 동결 중단)
+        """
+        period = await db.get(PayPeriod, period_id)
+        if period is None or period.store_id != store_id:
+            raise NotFoundError("Pay period not found")
+        if period.status == "confirmed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": CODE_ALREADY_CONFIRMED,
+                    "message": (
+                        "This pay period is already confirmed. Confirmed payroll "
+                        "cannot be re-confirmed or unconfirmed in v1 — "
+                        "corrections will be handled through amendments."
+                    ),
+                },
+            )
+
+        # 계산 (이벤트 upsert 는 flush 만 — 게이트 실패 시 rollback 으로 소거)
+        rows = await payroll_calc_service.preview_period(db, store_id, period)
+
+        gates = await self._evaluate_gates(db, period, rows)
+        if gates:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": CODE_CLOSE_GATES_FAILED,
+                    "message": (
+                        f"Cannot confirm this pay period — {len(gates)} close "
+                        "gate(s) failed. Resolve every issue below, then "
+                        "confirm again."
+                    ),
+                    "gates": [g.model_dump(mode="json") for g in gates],
+                },
+            )
+
+        entries = await self._freeze_entries(db, period, rows)
+        events_frozen = await self._stamp_events(db, period)
+        period.status = "confirmed"
+        period.confirmed_at = datetime.now(timezone.utc)
+        period.confirmed_by = actor.id
+        try:
+            await db.commit()
+        except IntegrityError:
+            # 동시 confirm 경합 — entry unique(uq_payroll_entry_period_user_rev)
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": CODE_ALREADY_CONFIRMED,
+                    "message": (
+                        "This pay period was confirmed by another request while "
+                        "this one was running. Reload the period to see the "
+                        "frozen entries."
+                    ),
+                },
+            )
+        return ConfirmResult(period=period, entries=entries, events_frozen=events_frozen)
+
+    # ── 게이트 평가 ──────────────────────────────────────────────
+
+    async def _evaluate_gates(
+        self,
+        db: AsyncSession,
+        period: PayPeriod,
+        rows: list[PayrollPreviewRow],
+    ) -> list[ConfirmGateFailure]:
+        """L5 게이트 ①~④ + 멀티스토어 정합(계산 규칙 2)을 전부 평가."""
+        failures: list[ConfirmGateFailure] = []
+        names: dict[UUID, str] = {r.user_id: r.member_name for r in rows}
+
+        # ① 미확인 자동퇴근 — anomaly + confirmed_at IS NULL (정밀 판정은 여기)
+        auto_map = await self._auto_clockout_dates(db, period)
+        # ② 열린 근무
+        open_map = await self._open_shift_dates(db, period)
+        missing = (set(auto_map) | set(open_map)) - set(names)
+        if missing:
+            names.update(await self._load_names(db, missing))
+
+        if auto_map:
+            failures.append(
+                ConfirmGateFailure(
+                    gate=VALIDATION_UNCONFIRMED_AUTO_CLOCKOUT,
+                    message=(
+                        "Auto clock-outs in this period have not been confirmed. "
+                        "Open Attendance, review each day and confirm (or "
+                        "correct) the auto clock-out time."
+                    ),
+                    items=[
+                        ConfirmGateItem(
+                            user_id=user_id,
+                            member_name=names.get(user_id),
+                            dates=dates,
+                            message=(
+                                "Unconfirmed auto clock-out on: "
+                                + ", ".join(str(d) for d in dates)
+                            ),
+                        )
+                        for user_id, dates in sorted(
+                            auto_map.items(), key=lambda kv: str(kv[0])
+                        )
+                    ],
+                )
+            )
+        if open_map:
+            failures.append(
+                ConfirmGateFailure(
+                    gate=VALIDATION_OPEN_SHIFT,
+                    message=(
+                        "Open shifts without a clock-out remain in this period. "
+                        "Close each shift with the real clock-out time (or "
+                        "cancel the record) in Attendance."
+                    ),
+                    items=[
+                        ConfirmGateItem(
+                            user_id=user_id,
+                            member_name=names.get(user_id),
+                            dates=dates,
+                            message=(
+                                "Open shift without clock-out on: "
+                                + ", ".join(str(d) for d in dates)
+                            ),
+                        )
+                        for user_id, dates in sorted(
+                            open_map.items(), key=lambda kv: str(kv[0])
+                        )
+                    ],
+                )
+            )
+
+        # ③ rate 게이트 — preview validation 재사용 (판정 fork 금지)
+        rate_items: list[ConfirmGateItem] = []
+        below_items: list[ConfirmGateItem] = []
+        for row in rows:
+            for validation in row.validations:
+                if validation.code == VALIDATION_RATE_MISSING:
+                    rate_items.append(
+                        ConfirmGateItem(
+                            user_id=row.user_id,
+                            member_name=row.member_name,
+                            dates=[
+                                d.work_date
+                                for d in row.breakdown.days
+                                if d.applied_rate is None or d.applied_rate <= 0
+                            ],
+                            message=validation.message,
+                        )
+                    )
+                elif validation.code == VALIDATION_BELOW_MINIMUM_WAGE:
+                    below_items.append(
+                        ConfirmGateItem(
+                            user_id=row.user_id,
+                            member_name=row.member_name,
+                            dates=[
+                                d.work_date
+                                for d in row.breakdown.days
+                                if d.applied_rate is not None
+                                and 0 < d.applied_rate < MINIMUM_WAGE
+                            ],
+                            message=validation.message,
+                        )
+                    )
+        if rate_items:
+            failures.append(
+                ConfirmGateFailure(
+                    gate=VALIDATION_RATE_MISSING,
+                    message=(
+                        "Some members have no hourly rate (or rate 0) on worked "
+                        "days. Set their rate with a rate change effective on or "
+                        "before those dates, then confirm again."
+                    ),
+                    items=rate_items,
+                )
+            )
+        if below_items:
+            failures.append(
+                ConfirmGateFailure(
+                    gate=VALIDATION_BELOW_MINIMUM_WAGE,
+                    message=(
+                        f"Some applied hourly rates are below the legal minimum "
+                        f"wage (${MINIMUM_WAGE}). Raise the member's rate to at "
+                        "least the minimum, then confirm again."
+                    ),
+                    items=below_items,
+                )
+            )
+
+        # ④ tip period confirmed (계산 규칙 4)
+        tip_status = await payroll_period_service.tip_period_status_for(
+            db, store_id=period.store_id, period=period
+        )
+        if tip_status != "confirmed":
+            state = tip_status if tip_status is not None else "not created yet"
+            failures.append(
+                ConfirmGateFailure(
+                    gate=VALIDATION_TIP_PERIOD_NOT_CONFIRMED,
+                    message=(
+                        f"The tip period for {period.start_date} – "
+                        f"{period.end_date} is {state}. Confirm the tip period "
+                        "in Tips first so card tips are final before they are "
+                        "frozen into paychecks."
+                    ),
+                    items=[],
+                )
+            )
+
+        # ⑤ 멀티스토어 주간 정합 (계산 규칙 2)
+        multi_items = await self._multi_store_items(db, period, rows, names)
+        if multi_items:
+            failures.append(
+                ConfirmGateFailure(
+                    gate=GATE_MULTI_STORE_WEEK,
+                    message=(
+                        "Some members also worked at another store in an "
+                        "overlapping workweek, and the combined hours change "
+                        "their overtime. v1 cannot split cross-store premiums "
+                        "automatically — adjust the records or handle these "
+                        "members' pay manually, then confirm again."
+                    ),
+                    items=multi_items,
+                )
+            )
+        return failures
+
+    async def _auto_clockout_dates(
+        self, db: AsyncSession, period: PayPeriod
+    ) -> dict[UUID, list[date]]:
+        """게이트 ① — 미확인 자동퇴근 (user → 날짜 목록, 정렬)."""
+        result = await db.execute(
+            select(Attendance.user_id, Attendance.work_date)
+            .where(
+                Attendance.store_id == period.store_id,
+                Attendance.work_date >= period.start_date,
+                Attendance.work_date <= period.end_date,
+                Attendance.status != "cancelled",
+                Attendance.user_id.is_not(None),
+                Attendance.anomalies.contains([_ANOMALY_AUTO_CLOCKED_OUT]),
+                Attendance.auto_clock_out_confirmed_at.is_(None),
+            )
+            .distinct()
+        )
+        return self._group_dates(result.all())
+
+    async def _open_shift_dates(
+        self, db: AsyncSession, period: PayPeriod
+    ) -> dict[UUID, list[date]]:
+        """게이트 ② — clock_out 없는 열린 근무 (user → 날짜 목록, 정렬)."""
+        result = await db.execute(
+            select(Attendance.user_id, Attendance.work_date)
+            .where(
+                Attendance.store_id == period.store_id,
+                Attendance.work_date >= period.start_date,
+                Attendance.work_date <= period.end_date,
+                Attendance.status != "cancelled",
+                Attendance.user_id.is_not(None),
+                Attendance.clock_in.is_not(None),
+                Attendance.clock_out.is_(None),
+            )
+            .distinct()
+        )
+        return self._group_dates(result.all())
+
+    @staticmethod
+    def _group_dates(pairs: list) -> dict[UUID, list[date]]:
+        grouped: dict[UUID, list[date]] = {}
+        for user_id, work_date in pairs:
+            grouped.setdefault(user_id, []).append(work_date)
+        for dates in grouped.values():
+            dates.sort()
+        return grouped
+
+    @staticmethod
+    async def _load_names(
+        db: AsyncSession, user_ids: set[UUID]
+    ) -> dict[UUID, str]:
+        """preview 행에 없는 사용자(예: 게이트 전용 검출)의 표시 이름 로드."""
+        users = (
+            (await db.execute(select(User).where(User.id.in_(user_ids))))
+            .scalars()
+            .all()
+        )
+        return {u.id: display_name(u) for u in users}
+
+    async def _multi_store_items(
+        self,
+        db: AsyncSession,
+        period: PayPeriod,
+        rows: list[PayrollPreviewRow],
+        names: dict[UUID, str],
+    ) -> list[ConfirmGateItem]:
+        """게이트 ⑤ — org 합산 주간 정합 체크 (모듈 docstring 의 한계 참조)."""
+        from app.services.attendance_service import (
+            attendance_service,
+            compute_net_work_minutes,
+        )
+
+        user_ids = [r.user_id for r in rows]
+        if not user_ids:
+            return []
+        weeks = workweeks_touching(period.start_date, period.end_date)
+        scan_start = weeks[0][0]  # 앞으로 걸친 주 포함 (C4 와 동일 경계)
+        scan_end = period.end_date  # 뒤로 걸친 주 초과분은 다음 기간 몫
+
+        attendances = (
+            (
+                await db.execute(
+                    select(Attendance).where(
+                        Attendance.organization_id == period.organization_id,
+                        Attendance.user_id.in_(user_ids),
+                        Attendance.work_date >= scan_start,
+                        Attendance.work_date <= scan_end,
+                        Attendance.status != "cancelled",
+                        Attendance.store_id.is_not(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # 전부 이 매장 근무면 합산 체크 자체가 불필요 (v1 표준 케이스 fast path)
+        if all(att.store_id == period.store_id for att in attendances):
+            return []
+
+        breaks_map = await attendance_service._load_breaks_map(
+            db, [a.id for a in attendances]
+        )
+        per_user_week: dict[tuple[UUID, date], dict[UUID, dict[date, int]]] = {}
+        for att in attendances:
+            net = compute_net_work_minutes(att, breaks_map.get(att.id, []))
+            if net is None:
+                continue  # 열린 근무 — 해당 매장 게이트 ② 몫 (한계 문서화)
+            wk = week_start_for(att.work_date)
+            day_map = per_user_week.setdefault((att.user_id, wk), {}).setdefault(
+                att.store_id, {}
+            )
+            day_map[att.work_date] = day_map.get(att.work_date, 0) + net
+
+        items: list[ConfirmGateItem] = []
+        for (user_id, wk), by_store in sorted(
+            per_user_week.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])
+        ):
+            for _kind, detail in evaluate_org_week_minutes(by_store):
+                items.append(
+                    ConfirmGateItem(
+                        user_id=user_id,
+                        member_name=names.get(user_id),
+                        dates=[wk],
+                        message=f"Week of {wk}: {detail}",
+                    )
+                )
+        return items
+
+    # ── 동결 ─────────────────────────────────────────────────────
+
+    async def _freeze_entries(
+        self,
+        db: AsyncSession,
+        period: PayPeriod,
+        rows: list[PayrollPreviewRow],
+    ) -> list[PayrollEntry]:
+        """preview 행 → payroll_entries INSERT (revision 0, flush 까지만).
+
+        스냅샷 원천: member_name/empid/crewid 는 preview 가 이미 display_name /
+        org_member_stores(이 store)/org_members 에서 조립한 값 그대로.
+        breakdown 합계 == 스칼라 검증에 실패하면 500 으로 중단 (아무것도 동결 안 됨).
+        """
+        member_ids: dict[UUID, UUID] = {}
+        if rows:
+            result = await db.execute(
+                select(OrgMember.user_id, OrgMember.id).where(
+                    OrgMember.organization_id == period.organization_id,
+                    OrgMember.user_id.in_([r.user_id for r in rows]),
+                )
+            )
+            member_ids = {user_id: member_id for user_id, member_id in result.all()}
+
+        entries: list[PayrollEntry] = []
+        for row in rows:
+            problems = verify_row_consistency(row)
+            if problems:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=(
+                        "Payroll totals failed the internal consistency check "
+                        f"for {row.member_name}: {'; '.join(problems)}. Nothing "
+                        "was confirmed. Please retry — if this keeps happening, "
+                        "report it as a bug."
+                    ),
+                )
+            entry = PayrollEntry(
+                pay_period_id=period.id,
+                organization_id=period.organization_id,
+                store_id=period.store_id,
+                user_id=row.user_id,
+                org_member_id=member_ids.get(row.user_id),
+                empid=row.empid,
+                crewid=row.crewid,
+                member_name=row.member_name,
+                revision=0,
+                regular_minutes=row.regular_minutes,
+                ot_minutes=row.ot_minutes,
+                dt_minutes=row.dt_minutes,
+                regular_pay=row.regular_pay,
+                ot_pay=row.ot_pay,
+                dt_pay=row.dt_pay,
+                penalty_pay=row.penalty_pay,
+                card_tips=row.card_tips,
+                gross_pay=row.gross_pay,
+                calc_version=row.breakdown.calc_version,
+                breakdown=row.breakdown.model_dump(mode="json"),
+            )
+            db.add(entry)
+            entries.append(entry)
+        await db.flush()
+        return entries
+
+    async def _stamp_events(self, db: AsyncSession, period: PayPeriod) -> int:
+        """범위 내 유효(non-voided)·미동결 이벤트에 pay_period_id 스탬프.
+
+        voided 이벤트는 스탬프하지 않는다 — 조건 소멸 기록은 open 라이프사이클에
+        남고, 이후 재감지 revive 도 frozen 이 아니므로 계속 가능하다.
+        """
+        result = await db.execute(
+            update(PayrollEvent)
+            .where(
+                PayrollEvent.store_id == period.store_id,
+                PayrollEvent.work_date >= period.start_date,
+                PayrollEvent.work_date <= period.end_date,
+                PayrollEvent.voided_at.is_(None),
+                PayrollEvent.pay_period_id.is_(None),
+            )
+            .values(pay_period_id=period.id)
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount or 0
+
+
+# 싱글턴 인스턴스 — Singleton instance
+payroll_confirm_service: PayrollConfirmService = PayrollConfirmService()

@@ -112,20 +112,24 @@ def test_get_latest_returns_none_when_empty(tmp_path: Path) -> None:
         app_settings.LOCAL_BUCKET_DIR = original
 
 
-def test_get_latest_excludes_test_apk(tmp_bucket: Path) -> None:
-    """파일명에 'test' 들어간 APK 는 무시."""
-    # tmp_bucket 에 v1.0.10 test 만 추가 (prod 는 v1.0.9 가 max 상태)
+def test_get_latest_includes_test_named_apk(tmp_bucket: Path) -> None:
+    """파일명에 'test' 가 들어가도 필터 없이 버전만 비교.
+
+    버킷이 prod/staging 환경별로 분리돼 있어 'test' 파일명 필터가 제거됨
+    (c0ac4cf) — 해당 버킷에서 버전 가장 높은 APK 를 그대로 반환한다.
+    """
     base = tmp_bucket / "app-releases" / "attendance" / "v1.0.10"
     base.mkdir(parents=True)
-    (base / "htma_test_1.0.10+30.apk").write_text("test")  # 제외돼야 함
+    (base / "htma_test_1.0.10+30.apk").write_text("test")
 
     from app.config import settings as app_settings
     original = app_settings.LOCAL_BUCKET_DIR
     app_settings.LOCAL_BUCKET_DIR = str(tmp_bucket)
     try:
         result = app_version_service.get_latest_attendance_from_storage()
-        # test 파일 무시 → 1.0.9+27 가 여전히 max
+        # 필터 없음 → 버전 최고인 test 파일이 그대로 latest
         assert result is not None
-        assert result["version"] == "1.0.9+27"
+        assert result["version"] == "1.0.10+30"
+        assert "htma_test_1.0.10+30.apk" in result["key"]
     finally:
         app_settings.LOCAL_BUCKET_DIR = original

@@ -1,7 +1,14 @@
 """org 번호(crewid) / 매장 번호(empid) 다음 순번 계산.
 
-crewid = org 안에서 1부터, empid = 매장(store) 안에서 1부터. 부여 규칙 없이 단순 MAX+1.
-동시성: MAX+1 은 경합 시 같은 번호가 날 수 있으나 partial unique 로 걸린다(트라이얼 단계 수용).
+crewid = org 안에서 1부터. empid = 채번 스코프 안에서 번호대 시작값(floor)부터 MAX+1.
+
+채번 스코프(scope): 매장이 그룹(store_groups)에 속하고 numbering_mode="group" 이면
+그룹 내 전체 매장(폐점 포함 — 휴면·폐점 번호도 점유), 그 외에는 해당 매장 하나.
+번호대(floor): store.number_range_start > group.number_range_start > 1 순 폴백.
+
+동시성: 단일 매장 스코프는 경합 시 (store_id, empid) partial unique 로 걸린다.
+그룹 공유 스코프는 매장이 달라 인덱스로 못 막으므로 pg_advisory_xact_lock(그룹 키)으로
+직렬화한다(트랜잭션 종료 시 자동 해제). 트라이얼 단계 수용.
 """
 
 from uuid import UUID
@@ -27,15 +34,114 @@ async def next_crewid(db: AsyncSession, organization_id: UUID) -> int:
     ).scalar() or 1
 
 
-async def next_empid(db: AsyncSession, store_id: UUID) -> int:
-    """매장 안에서 다음 empid — MAX+1 (1부터). 휴면 포함 사용 중 번호는 건너뜀."""
-    return (
+async def empid_scope_store_ids(db: AsyncSession, store_id: UUID) -> list[UUID]:
+    """empid 채번 스코프의 매장 id 목록.
+
+    그룹 소속 + numbering_mode="group" → 그룹 내 전체 매장(폐점 포함 — 번호 점유 유지).
+    그 외(미그룹 or mode="store") → [store_id].
+    """
+    from app.models.organization import NUMBERING_MODE_GROUP, Store, StoreGroup
+
+    row = (
         await db.execute(
-            select(func.coalesce(func.max(OrgMemberStore.empid), 0) + 1).where(
-                OrgMemberStore.store_id == store_id
+            select(Store.group_id, StoreGroup.numbering_mode)
+            .outerjoin(StoreGroup, StoreGroup.id == Store.group_id)
+            .where(Store.id == store_id)
+        )
+    ).first()
+    if row is None or row.group_id is None or row.numbering_mode != NUMBERING_MODE_GROUP:
+        return [store_id]
+    ids = (
+        await db.execute(select(Store.id).where(Store.group_id == row.group_id))
+    ).scalars().all()
+    return list(ids) or [store_id]
+
+
+async def _empid_floor(db: AsyncSession, store_id: UUID) -> int:
+    """empid 번호대 시작값.
+
+    - Shared(numbering_mode="group") 그룹: 그룹 번호대만 적용 — 매장 개별값은 무시한다.
+      (그룹 = 하나의 공유 대역. UI 도 Shared 모드에선 매장별 입력을 숨긴다. 과거 Per-store
+      시절 남은 매장값이 공유 시퀀스를 엉뚱한 대역으로 밀어올리는 것 방지 — QA 발견.)
+    - Per-store 그룹: 매장값 > 그룹 기본값(Default range) > 1.
+    - 미그룹: 매장값 > 1.
+    """
+    from app.models.organization import NUMBERING_MODE_GROUP, Store, StoreGroup
+
+    row = (
+        await db.execute(
+            select(
+                Store.number_range_start,
+                StoreGroup.number_range_start.label("group_start"),
+                StoreGroup.numbering_mode,
+            )
+            .outerjoin(StoreGroup, StoreGroup.id == Store.group_id)
+            .where(Store.id == store_id)
+        )
+    ).first()
+    if row is None:
+        return 1
+    if row.numbering_mode == NUMBERING_MODE_GROUP:
+        return row.group_start or 1
+    return row.number_range_start or row.group_start or 1
+
+
+async def lock_empid_scope(db: AsyncSession, store_id: UUID) -> None:
+    """그룹 공유 스코프면 그룹 키 advisory lock 선취 (트랜잭션 종료 시 자동 해제).
+
+    단일 매장 스코프는 no-op — (store_id, empid) partial unique 가 2차 방어.
+    같은 트랜잭션 내 재획득은 무해(재진입)라 next_empid 와 중복 호출해도 안전.
+    """
+    from app.models.organization import Store
+
+    scope_ids = await empid_scope_store_ids(db, store_id)
+    if len(scope_ids) > 1:
+        # 그룹 공유 — (store_id, empid) 인덱스는 매장이 다르면 못 막으므로 트랜잭션 락으로 직렬화.
+        group_id = (
+            await db.execute(select(Store.group_id).where(Store.id == store_id))
+        ).scalar_one()
+        await db.execute(
+            select(func.pg_advisory_xact_lock(func.hashtextextended(str(group_id), 0)))
+        )
+
+
+async def next_empid(db: AsyncSession, store_id: UUID) -> int:
+    """채번 스코프 안에서 다음 empid — max(MAX, floor-1)+1. 휴면·폐점 번호도 건너뜀.
+
+    그룹 공유 스코프면 advisory lock(그룹 키)으로 동시 채번을 직렬화한다.
+    """
+    scope_ids = await empid_scope_store_ids(db, store_id)
+    if len(scope_ids) > 1:
+        await lock_empid_scope(db, store_id)
+    floor = await _empid_floor(db, store_id)
+    current_max = (
+        await db.execute(
+            select(func.coalesce(func.max(OrgMemberStore.empid), 0)).where(
+                OrgMemberStore.store_id.in_(scope_ids)
             )
         )
-    ).scalar() or 1
+    ).scalar() or 0
+    return max(current_max, floor - 1) + 1
+
+
+async def duplicate_empids_in_scope(db: AsyncSession, store_ids: list[UUID]) -> list[dict[str, int]]:
+    """스코프(매장 집합) 안에서 중복 사용 중인 empid 목록 — [{empid, count}].
+
+    그룹 편성/모드 전환 경고용. 기존 매장들은 각자 1..N 백필 상태라 그룹 공유로 묶는
+    순간 중복이 생긴다 — 자동 재번호는 하지 않고(정책 A) 경고만, 해소는 EMPID 임포트에서.
+    """
+    if len(store_ids) < 2:
+        return []
+    rows = (
+        await db.execute(
+            select(OrgMemberStore.empid, func.count().label("cnt"))
+            .where(OrgMemberStore.store_id.in_(store_ids), OrgMemberStore.empid.isnot(None))
+            .group_by(OrgMemberStore.empid)
+            .having(func.count() > 1)
+            .order_by(OrgMemberStore.empid)
+        )
+    ).all()
+    return [{"empid": r.empid, "count": r.cnt} for r in rows]
 
 
 async def _org_member_id_for_store(db: AsyncSession, user_id: UUID, store_id: UUID) -> UUID | None:

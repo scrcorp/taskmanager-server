@@ -36,11 +36,36 @@ async def cleanup_created_users() -> AsyncIterator[list[str]]:
 
     시드 user(_purge_test_data)는 안 건드리는 정리 흐름이라, API 로 새로 만든
     user 는 별도로 직접 삭제해야 다음 테스트와 username 충돌이 안 난다.
+
+    Payroll Phase 1 이후: hourly_rate 변경은 hourly_rate_history 를 남기고
+    org_member FK 가 RESTRICT 라 user hard delete 전에 이력 먼저 삭제해야 한다.
     """
+    from sqlalchemy import select
+
+    from app.models.org_member import OrgMember
+    from app.models.rate import HourlyRateHistory
+
     usernames: list[str] = []
     yield usernames
     if usernames:
         async with async_session() as db:
+            user_ids = (
+                await db.execute(
+                    select(User.id).where(User.username.in_(usernames))
+                )
+            ).scalars().all()
+            if user_ids:
+                member_ids = (
+                    await db.execute(
+                        select(OrgMember.id).where(OrgMember.user_id.in_(user_ids))
+                    )
+                ).scalars().all()
+                if member_ids:
+                    await db.execute(
+                        delete(HourlyRateHistory).where(
+                            HourlyRateHistory.org_member_id.in_(member_ids)
+                        )
+                    )
             await db.execute(delete(User).where(User.username.in_(usernames)))
             await db.commit()
 
