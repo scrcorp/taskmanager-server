@@ -237,3 +237,42 @@ class ChangePasswordResponse(BaseModel):
 class AdminResetPasswordResponse(BaseModel):
     temporary_password: str
     message: str
+
+
+# ── Signup Availability (공개 가입 링크 선체크) ──
+
+class CheckAvailabilityRequest(BaseModel):
+    """가입 링크에서 아이디/이메일 사용 가능 여부 조회 요청.
+
+    공개 가입 폼이 "계속" 단계에서 미리 물어본다. 계정을 만들지 않으며,
+    최종 생성 시점의 중복 검사(409)를 대체하지 않는다 — 동시 가입 경합은
+    그대로 생성 시점에서 걸린다.
+
+    Attributes:
+        encoded: 가입 링크의 매장 식별자 (base64url store id)
+        username: 확인할 아이디
+        email: 확인할 이메일
+        mode: "join"(지원자 가입, /applications/start) 또는
+              "direct"(즉시 staff 등록, /auth/direct-signup)
+    """
+
+    encoded: str
+    username: str
+    email: str
+    mode: Literal["join", "direct"] = "join"
+
+
+class CheckAvailabilityResponse(BaseModel):
+    """아이디/이메일 사용 가능 여부.
+
+    Attributes:
+        username_available: 아이디 사용 가능 여부
+        email_available: 이메일 사용 가능 여부
+        resumable: join 모드에서 아이디+이메일이 기존 지원자와 정확히 일치해
+                   "이어서 진행"이 되는 경우 True. 이때 두 available 은 모두 True 다
+                   (중복이 아니라 재개이므로 막으면 안 된다).
+    """
+
+    username_available: bool
+    email_available: bool
+    resumable: bool = False
