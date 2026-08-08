@@ -6,7 +6,9 @@ Covers login, registration, token issuance/refresh, and current user info.
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from app.utils.email_address import normalize_email
 
 # 지원 선호 언어 — Supported preferred language codes (BCP-47 short).
 # 현재는 정보 수집용. UI 다국어화는 추후 별도 작업.
@@ -72,6 +74,9 @@ class RegisterRequest(BaseModel):
     # 소프트 가드 우회 — "아니오, 새 계정입니다"를 고른 경우 true 로 재요청.
     skip_claim_check: bool = False
     preferred_language: PreferredLanguage = "en"  # 선호 언어 (정보 수집용, default en)
+
+    # users.email 은 소문자 canonical 로만 저장한다 (app/utils/email_address 참조).
+    _norm_email = field_validator("email")(normalize_email)
 
 
 class TokenResponse(BaseModel):

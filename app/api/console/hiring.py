@@ -816,7 +816,9 @@ async def hire_application(
             role_id=staff_role.id,
             username=target_username,
             full_name=candidate.full_name,
-            email=candidate.email,
+            # candidate.email 은 지원서에 적힌 원본(표시용)이라 대소문자가 섞여 있다.
+            # users.email 은 소문자 canonical 이므로 정규화 컬럼을 쓴다.
+            email=candidate.email_normalized,
             password_hash=candidate.password_hash,
             email_verified=candidate.email_verified,
             clockin_pin=clockin_pin,
