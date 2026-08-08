@@ -310,6 +310,129 @@ async def test_update_pin_rejects_prefix_conflict(
     assert resp.status_code == 409, resp.text
 
 
+# ── 409 detail 계약 (pin_conflict) ─────────────────────────
+
+
+async def _set_pin(user_id: UUID, pin: str) -> None:
+    async with async_session() as db:
+        await db.execute(
+            text("UPDATE users SET clockin_pin=:pin WHERE id=:id"),
+            {"pin": pin, "id": str(user_id)},
+        )
+        await db.commit()
+
+
+async def test_update_pin_exact_conflict_same_store_detail(
+    async_client: AsyncClient,
+    gm_manage_headers: dict,
+    staff_in_store: dict,
+    test_users: dict,
+    test_store_id: UUID,
+    restore_pins: None,
+) -> None:
+    """같은 매장 직원과 정확히 같은 PIN → exact + other_store=False."""
+    sv = test_users["testsv"]
+    await _ensure_user_store(sv["id"], test_store_id, is_manager=False)
+    await _set_pin(sv["id"], "7717")
+
+    resp = await async_client.patch(
+        f"/api/v1/attendance/manage/staff-pins/{staff_in_store['id']}",
+        headers=gm_manage_headers,
+        json={"clockin_pin": "7717"},
+    )
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "pin_conflict"
+    assert detail["reason"] == "exact"
+    assert detail["other_store"] is False
+    assert detail["message"] == "This PIN is already in use by another employee."
+    # 충돌 상대의 정체(이름)는 응답 어디에도 없다
+    assert sv["full_name"] not in resp.text
+
+
+async def test_update_pin_exact_conflict_other_store_detail(
+    async_client: AsyncClient,
+    gm_manage_headers: dict,
+    staff_in_store: dict,
+    test_users: dict,
+    test_store_id: UUID,
+    restore_pins: None,
+) -> None:
+    """기기 매장 밖 직원과 충돌 → other_store=True + 다른 매장 안내 메시지."""
+    outsider = test_users["testadmin"]
+    # 기기 매장 배정 제거 — '다른 매장 소속' 상태를 만든다 (종료 시 복원)
+    async with async_session() as db:
+        had_row = (
+            await db.execute(
+                select(UserStore).where(
+                    UserStore.user_id == outsider["id"],
+                    UserStore.store_id == test_store_id,
+                )
+            )
+        ).scalar_one_or_none() is not None
+        await db.execute(
+            text(
+                "DELETE FROM user_stores WHERE user_id=:uid AND store_id=:sid"
+            ),
+            {"uid": str(outsider["id"]), "sid": str(test_store_id)},
+        )
+        await db.commit()
+    await _set_pin(outsider["id"], "8828")
+
+    try:
+        resp = await async_client.patch(
+            f"/api/v1/attendance/manage/staff-pins/{staff_in_store['id']}",
+            headers=gm_manage_headers,
+            json={"clockin_pin": "8828"},
+        )
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "pin_conflict"
+        assert detail["reason"] == "exact"
+        assert detail["other_store"] is True
+        assert detail["message"] == (
+            "This PIN is already in use by an employee at another store."
+        )
+        # 충돌 상대의 정체(이름)는 응답 어디에도 없다
+        assert outsider["full_name"] not in resp.text
+    finally:
+        if had_row:
+            await _ensure_user_store(
+                outsider["id"], test_store_id, is_manager=True
+            )
+
+
+async def test_update_pin_prefix_conflict_detail(
+    async_client: AsyncClient,
+    gm_manage_headers: dict,
+    staff_in_store: dict,
+    test_users: dict,
+    test_store_id: UUID,
+    restore_pins: None,
+) -> None:
+    """prefix 충돌 → reason=prefix + 겹침 안내 (충돌 PIN 값은 절대 비노출)."""
+    sv = test_users["testsv"]
+    await _ensure_user_store(sv["id"], test_store_id, is_manager=False)
+    await _set_pin(sv["id"], "6644")
+
+    resp = await async_client.patch(
+        f"/api/v1/attendance/manage/staff-pins/{staff_in_store['id']}",
+        headers=gm_manage_headers,
+        json={"clockin_pin": "664422"},
+    )
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "pin_conflict"
+    assert detail["reason"] == "prefix"
+    assert detail["other_store"] is False
+    assert detail["message"] == (
+        "This PIN overlaps with another employee's PIN "
+        "(numbers that start the same)."
+    )
+    # 충돌 상대 PIN(제출값의 앞자리)이 응답 본문에 없다 — echo 금지
+    assert "6644" not in resp.text
+
+
 async def test_regenerate_changes_pin(
     async_client: AsyncClient,
     gm_manage_headers: dict,

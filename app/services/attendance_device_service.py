@@ -30,6 +30,7 @@ from app.models.attendance_break import (
 from app.models.attendance_device import AttendanceDevice
 from app.models.organization import Store
 from app.models.user import User
+from app.models.user_store import UserStore
 from app.repositories.attendance_repository import attendance_repository
 from app.utils.exceptions import BadRequestError, NotFoundError, UnauthorizedError
 from app.utils.timezone import resolve_schedule_instants
@@ -118,8 +119,9 @@ async def assert_no_pin_prefix_conflict(
     organization_id: UUID,
     pin: str,
     exclude_user_id: UUID | None = None,
+    store_id: UUID | None = None,
 ) -> None:
-    """org 안에서 PIN prefix 충돌을 막는다. 충돌 시 409.
+    """org 안에서 PIN prefix 충돌을 막는다. 충돌 시 409 (구조화 detail).
 
     PIN 길이가 4~6 로 가변이라 `uq_user_org_clockin_pin`(정확 일치) 만으로는 부족하다.
     A=`1234`, B=`123456` 이 공존하면 B 가 앞 4자리만 누르고 확인을 눌렀을 때 A 로 식별돼
@@ -130,31 +132,82 @@ async def assert_no_pin_prefix_conflict(
 
     정확히 같은 값도 이 조건에 걸리므로 중복 검사까지 겸한다(선 검사 → 친절한 409,
     동시성으로 빠져나간 경우는 `commit_pin_or_409` 의 unique 위반이 최종 방어).
+
+    409 detail 계약 (모든 클라이언트 공통):
+        {"code": "pin_conflict", "reason": "exact"|"prefix",
+         "other_store": true|false|null, "message": "<영어 사유 문장>"}
+
+    - reason: 충돌 PIN 이 제출 PIN 과 정확히 같으면 exact,
+      길이가 다른 두 PIN 이 앞자리를 공유(양방향)하면 prefix.
+    - other_store: manage(키오스크) 경로에서만 채움 — `store_id` 가 주어지면
+      충돌 유저가 그 매장(user_stores)에 없을 때 True. 그 외 경로는 None.
+    - 타인의 PIN 값·이름은 어떤 필드에도 절대 싣지 않는다.
     """
     from fastapi import HTTPException, status
 
-    stmt = select(User.id).where(
-        User.organization_id == organization_id,
-        User.clockin_pin.isnot(None),
-        or_(
-            User.clockin_pin.startswith(pin),
-            literal(pin).startswith(User.clockin_pin),
-        ),
+    stmt = (
+        select(User.id, User.clockin_pin)
+        .where(
+            User.organization_id == organization_id,
+            User.clockin_pin.isnot(None),
+            or_(
+                User.clockin_pin.startswith(pin),
+                literal(pin).startswith(User.clockin_pin),
+            ),
+        )
+        # exact 충돌을 우선 선택 — exact/prefix 충돌이 공존해도 reason 이 결정적이게.
+        .order_by((User.clockin_pin == pin).desc())
     )
     if exclude_user_id is not None:
         stmt = stmt.where(User.id != exclude_user_id)
 
-    result = await db.execute(stmt.limit(1))
-    if result.scalar_one_or_none() is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Not available"
+    row = (await db.execute(stmt.limit(1))).first()
+    if row is None:
+        return
+
+    conflict_user_id, conflict_pin = row
+    reason = "exact" if conflict_pin == pin else "prefix"
+
+    other_store: bool | None = None
+    if store_id is not None:
+        in_store = (
+            await db.execute(
+                select(UserStore.user_id)
+                .where(
+                    UserStore.user_id == conflict_user_id,
+                    UserStore.store_id == store_id,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        other_store = in_store is None
+
+    if reason == "prefix":
+        message = (
+            "This PIN overlaps with another employee's PIN "
+            "(numbers that start the same)."
         )
+    elif other_store is True:
+        message = "This PIN is already in use by an employee at another store."
+    else:
+        message = "This PIN is already in use by another employee."
+
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "pin_conflict",
+            "reason": reason,
+            "other_store": other_store,
+            "message": message,
+        },
+    )
 
 
 async def commit_pin_or_409(db: AsyncSession) -> None:
-    """commit. `uq_user_org_clockin_pin` 위반 시 409 'Not available' 로 변환.
+    """commit. `uq_user_org_clockin_pin` 위반 시 409 pin_conflict 로 변환.
 
-    그 외 IntegrityError 는 그대로 raise.
+    unique 제약 fallback 이라 old-row 정보가 없다 — reason 은 exact 로 고정,
+    other_store 는 null. 그 외 IntegrityError 는 그대로 raise.
     """
     from fastapi import HTTPException, status
     from sqlalchemy.exc import IntegrityError
@@ -165,7 +218,13 @@ async def commit_pin_or_409(db: AsyncSession) -> None:
         await db.rollback()
         if "uq_user_org_clockin_pin" in str(exc.orig):
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail="Not available"
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "pin_conflict",
+                    "reason": "exact",
+                    "other_store": None,
+                    "message": "This PIN is already in use by another employee.",
+                },
             ) from exc
         raise
 

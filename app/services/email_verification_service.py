@@ -272,10 +272,7 @@ class EmailVerificationService:
         from app.config import settings as _settings
         magic = (_settings.EMAIL_VERIFICATION_TEST_CODE or "").strip()
         if magic and code == magic:
-            user.email = email
-            user.email_verified = True
-            await db.commit()
-            return {"message": "Email verified successfully"}
+            return await self._finalize_email_verified(db, user, email)
 
         # 코드 검증
         now = datetime.now(timezone.utc)
@@ -303,12 +300,49 @@ class EmailVerificationService:
             await db.commit()
             raise BadRequestError(f"Incorrect code. {remaining} attempts remaining")
 
-        # 성공
+        # 성공 — record 소모는 pending 상태로 두고 finalize 의 commit 에 함께 실린다.
         record.is_used = True
+        return await self._finalize_email_verified(db, user, email)
+
+    async def _finalize_email_verified(
+        self,
+        db: AsyncSession,
+        user: User,
+        email: str,
+    ) -> dict:
+        """이메일 인증 성공 마무리 — 공통 경로 (magic bypass / 정상 코드 둘 다).
+
+        email 반영 + email_verified=True + PIN 미보유 시 clockin_pin 자동 배정
+        (org_member 행이 있으면 미러). commit 은 `commit_pin_or_409` 로 —
+        동시성으로 PIN unique 위반이 나면 409 pin_conflict 로 변환된다.
+        """
+        from app.services.attendance_device_service import (
+            commit_pin_or_409,
+            generate_unique_clockin_pin,
+        )
+
         user.email = email
         user.email_verified = True
-        await db.commit()
 
+        if user.clockin_pin is None:
+            from app.models.org_member import OrgMember
+
+            pin = await generate_unique_clockin_pin(
+                db, user.organization_id, exclude_user_id=user.id
+            )
+            user.clockin_pin = pin
+            member = (
+                await db.execute(
+                    select(OrgMember).where(
+                        OrgMember.user_id == user.id,
+                        OrgMember.organization_id == user.organization_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if member is not None:
+                member.clockin_pin = pin
+
+        await commit_pin_or_409(db)
         return {"message": "Email verified successfully"}
 
 

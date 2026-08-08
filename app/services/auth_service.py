@@ -381,9 +381,15 @@ class AuthService:
             db, data.verification_token, data.email
         )
 
-        from app.services.attendance_device_service import generate_clockin_pin
+        from app.services.attendance_device_service import (
+            generate_unique_clockin_pin,
+        )
 
-        clockin_pin = generate_clockin_pin()
+        # prefix 충돌 회피 발급 — 단순 generate_clockin_pin() 은 기존 4자리 PIN 을
+        # prefix 로 갖는 값을 뽑을 수 있다 (오인식 사고 경로).
+        clockin_pin = await generate_unique_clockin_pin(
+            db, ghost.organization_id, exclude_user_id=ghost.id
+        )
         ghost.username = data.username
         ghost.password_hash = hash_password(data.password)
         ghost.email = data.email

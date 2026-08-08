@@ -8,6 +8,7 @@ and user-store association management.
 from datetime import date
 from uuid import UUID
 
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -516,6 +517,23 @@ class UserService:
         """
         update_data: dict = data.model_dump(exclude_unset=True)
 
+        # is_active 변경 — 유령 가드 + 전이(True→False/False→True) 판정용 이전 값 확보
+        deactivating: bool = False
+        reactivating: bool = False
+        if "is_active" in update_data:
+            _active_target: User | None = await user_repository.get_by_id(
+                db, user_id, organization_id
+            )
+            if _active_target is None:
+                raise NotFoundError("User not found")
+            _new_active = update_data["is_active"]
+            if _new_active is not None and _new_active != _active_target.is_active:
+                # 유령 활성화 가드 — 미가입 계정은 is_active 변경 불가 (delete 만 허용)
+                if _active_target.is_provisional:
+                    self._raise_provisional_active_guard()
+                deactivating = _new_active is False
+                reactivating = _new_active is True
+
         # 이름 변경 — 단일 조합 규칙 (app/utils/names.compose_full_name).
         # (a) 구조화 경로: first/middle/last 중 하나라도 오면 first+last 필수,
         #     full_name 을 재합성해 항상 동기화 (middle 은 선택, 빈 값→NULL 해제).
@@ -649,6 +667,16 @@ class UserService:
             if user is None:
                 raise NotFoundError("User not found")
 
+            # is_active 전이 부수효과 — 비활성화=자격증명 회수 / 재활성화=status 동기화
+            if deactivating:
+                await self._apply_deactivation_side_effects(
+                    db, [user_id], organization_id
+                )
+            elif reactivating:
+                await self._apply_reactivation_sync(
+                    db, [user_id], organization_id
+                )
+
             # 시급 변경 — 단일 mutation 경로 (이력 + dual-write + 스케줄 표시 갱신)
             if rate_set:
                 await self._apply_rate_update(
@@ -724,6 +752,101 @@ class UserService:
             )
             await db.flush()
 
+    # ── 비활성화/재활성화 부수효과 (자격증명 회수) ─────────────────────
+
+    @staticmethod
+    def _raise_provisional_active_guard() -> None:
+        """유령(미가입) 계정의 is_active 변경 시도 → 400 provisional_account.
+
+        유령은 is_active=False fail-closed 불변 — 활성화는 본인이 claim 으로만.
+        delete(플레이스홀더 제거)는 허용이므로 이 가드는 delete 경로엔 없다.
+        """
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "provisional_account",
+                "message": (
+                    "This account has not been claimed yet. "
+                    "Share the claim code so the employee can sign up."
+                ),
+            },
+        )
+
+    async def _apply_deactivation_side_effects(
+        self,
+        db: AsyncSession,
+        user_ids: list[UUID],
+        organization_id: UUID,
+    ) -> None:
+        """계정 비활성화 부수효과 — 자격증명 회수 (org 스코프).
+
+        비활성 계정이 키오스크 PIN 출근/이메일 인증 상태를 유지하면 안 되므로
+        clockin_pin 회수 + email_verified 해제 + users.status='deactivated' 동기화.
+        같은 user 의 org_members.clockin_pin 미러도 회수 (해당 org 행만).
+        유령(is_provisional=true)은 원래 자격증명이 없으므로 스킵(내부 가드) —
+        toggle/PUT/bulk 경로에서 유령은 여기 걸리지 않는다. delete 는 유령을
+        먼저 retire(is_provisional=False 전환)한 뒤 호출하므로 함께 적용된다.
+        commit 은 호출자 트랜잭션이 담당.
+        """
+        from sqlalchemy import update as sa_update
+
+        from app.models.org_member import OrgMember
+
+        if not user_ids:
+            return
+        await db.execute(
+            sa_update(User)
+            .where(
+                User.id.in_(user_ids),
+                User.organization_id == organization_id,
+                User.is_provisional.is_(False),
+            )
+            .values(clockin_pin=None, email_verified=False, status="deactivated")
+        )
+        await db.execute(
+            sa_update(OrgMember)
+            .where(
+                # org 스코프 필수 — 멀티-org(Model B) 유저의 다른 org 소속
+                # org_members.clockin_pin 미러까지 지우면 안 된다 (org 별 독립 자격증명).
+                OrgMember.organization_id == organization_id,
+                OrgMember.user_id.in_(
+                    select(User.id).where(
+                        User.id.in_(user_ids),
+                        User.organization_id == organization_id,
+                        User.is_provisional.is_(False),
+                    )
+                ),
+            )
+            .values(clockin_pin=None)
+        )
+        await db.flush()
+
+    async def _apply_reactivation_sync(
+        self,
+        db: AsyncSession,
+        user_ids: list[UUID],
+        organization_id: UUID,
+    ) -> None:
+        """재활성화(False→True) 동기화 — users.status='active' 만 되돌린다.
+
+        PIN/email_verified 는 복원하지 않는다 — 첫 로그인 인증 흐름이
+        재인증/재발급을 처리한다. commit 은 호출자 트랜잭션이 담당.
+        """
+        from sqlalchemy import update as sa_update
+
+        if not user_ids:
+            return
+        await db.execute(
+            sa_update(User)
+            .where(
+                User.id.in_(user_ids),
+                User.organization_id == organization_id,
+                User.is_provisional.is_(False),
+            )
+            .values(status="active")
+        )
+        await db.flush()
+
     # 일괄 변경 허용 컬럼 — role_id/store 는 가드/부수효과 때문에 제외 (후속 증분)
     BULK_ALLOWED_FIELDS = frozenset({"department", "is_active", "hourly_rate"})
 
@@ -766,7 +889,17 @@ class UserService:
         # 시급은 직접 컬럼 쓰기에서 분리 — 단일 mutation 경로로 (Payroll R6)
         rate_set = "hourly_rate" in changes
         rate_value = changes.get("hourly_rate")
-        direct_changes = {k: v for k, v in changes.items() if k != "hourly_rate"}
+        # is_active 도 분리 — 유령(is_provisional) 제외 적용 + 비활성화 부수효과
+        active_set = "is_active" in changes
+        active_value = changes.get("is_active")
+        if active_set and active_value is None:
+            # bool 컬럼이라 null "해제" 의미가 없다 — DB 에러 대신 명시 400
+            raise BadRequestError("is_active must be true or false, not null")
+        direct_changes = {
+            k: v
+            for k, v in changes.items()
+            if k not in ("hourly_rate", "is_active")
+        }
 
         try:
             count = 0
@@ -774,6 +907,22 @@ class UserService:
                 count = await user_repository.bulk_update_fields(
                     db, organization_id, uuids, direct_changes
                 )
+            if active_set:
+                # 유령의 is_active 는 bulk 로 바꾸지 않는다 (fail-closed 불변)
+                affected_active = (
+                    await user_repository.bulk_set_active_non_provisional(
+                        db, organization_id, uuids, active_value
+                    )
+                )
+                if active_value:
+                    await self._apply_reactivation_sync(
+                        db, uuids, organization_id
+                    )
+                else:
+                    await self._apply_deactivation_side_effects(
+                        db, uuids, organization_id
+                    )
+                count = max(count, affected_active)
             if rate_set:
                 affected = await self._bulk_apply_rate(
                     db, organization_id, uuids, rate_value, caller
@@ -1132,13 +1281,28 @@ class UserService:
         if user is None:
             raise NotFoundError("User not found")
 
+        # 유령 활성화 가드 — 미가입 계정은 is_active 변경 불가 (delete 만 허용)
+        if user.is_provisional:
+            self._raise_provisional_active_guard()
+
         try:
             # 현재 상태 반전 — Invert current status
+            new_active: bool = not user.is_active
             toggled: User | None = await user_repository.update(
-                db, user_id, {"is_active": not user.is_active}, organization_id
+                db, user_id, {"is_active": new_active}, organization_id
             )
             if toggled is None:
                 raise NotFoundError("User not found")
+
+            # 비활성화 → 자격증명 회수 / 재활성화 → status 동기화만
+            if new_active:
+                await self._apply_reactivation_sync(
+                    db, [user_id], organization_id
+                )
+            else:
+                await self._apply_deactivation_side_effects(
+                    db, [user_id], organization_id
+                )
 
             # 역할 관계 로드를 위해 다시 조회 — Re-fetch with role loaded
             loaded: User | None = await user_repository.get_detail(
@@ -1170,6 +1334,11 @@ class UserService:
 
         Delete a user (soft-delete: deactivate).
 
+        유령(is_provisional=true)은 delete 가 유일한 제거 경로이므로 소프트 삭제만으로는
+        부족하다 — claim_code 가 남으면 '삭제된' 유령을 여전히 인수(가입)해서 org 에
+        들어올 수 있다. absorb(provisional_absorb_service)와 동일한 retire 패턴으로
+        claim_code 회수 + is_provisional 해제 + username 비켜주기까지 수행한다.
+
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
             user_id: 사용자 ID (User UUID)
@@ -1178,6 +1347,8 @@ class UserService:
         Raises:
             NotFoundError: 사용자를 찾을 수 없을 때 (User not found)
         """
+        from datetime import datetime, timezone
+
         user: User | None = await user_repository.get_by_id(
             db, user_id, organization_id
         )
@@ -1185,9 +1356,24 @@ class UserService:
             raise NotFoundError("User not found")
 
         try:
-            # 소프트 삭제: 비활성화 — Soft-delete: deactivate user
-            await user_repository.update(
-                db, user_id, {"is_active": False}, organization_id
+            if user.is_provisional:
+                # 유령 retire — 플레이스홀더 폐기 + claim 경로 영구 차단.
+                # (absorb 의 폐기 처리와 같은 필드 전환: absorb_service 6단계 참조)
+                user.is_active = False
+                user.is_provisional = False
+                user.claim_code = None
+                user.deleted_at = datetime.now(timezone.utc)
+                user.username = f"deleted_{user.username}"[:100]
+                await db.flush()
+            else:
+                # 소프트 삭제: 비활성화 — Soft-delete: deactivate user
+                await user_repository.update(
+                    db, user_id, {"is_active": False}, organization_id
+                )
+            # 자격증명 회수 (PIN/email_verified/status + org_members 미러) —
+            # retire 된 유령은 이제 비유령이므로 함께 적용된다 (수동 배정 PIN 방어 포함)
+            await self._apply_deactivation_side_effects(
+                db, [user_id], organization_id
             )
             await db.commit()
         except Exception:

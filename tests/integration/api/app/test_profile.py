@@ -188,7 +188,7 @@ async def test_update_my_clockin_pin_duplicate_returns_409(
     test_users: dict,
     restore_pins,
 ) -> None:
-    """본인 PIN 을 다른 user 와 같은 값으로 update → 409 'Not available'."""
+    """본인 PIN 을 다른 user 와 같은 값으로 update → 409 pin_conflict (exact)."""
     conflicting_pin = test_users["testadmin"]["clockin_pin"]
 
     resp = await async_client.put(
@@ -197,7 +197,12 @@ async def test_update_my_clockin_pin_duplicate_returns_409(
         json={"clockin_pin": conflicting_pin},
     )
     assert resp.status_code == 409, resp.text
-    assert resp.json()["detail"] == "Not available"
+    detail = resp.json()["detail"]
+    assert detail["code"] == "pin_conflict"
+    assert detail["reason"] == "exact"
+    # 앱 프로필 경로는 매장 컨텍스트가 없다 — other_store 는 null
+    assert detail["other_store"] is None
+    assert detail["message"] == "This PIN is already in use by another employee."
 
 
 async def test_update_my_clockin_pin_invalid_format_returns_422(

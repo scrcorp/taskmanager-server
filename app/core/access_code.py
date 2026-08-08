@@ -6,16 +6,16 @@ Generic helpers for the `access_codes` table. 각 조직은 서비스별로 자�
 
 Bootstrap (조직별):
     - `ensure_code(db, service_key, organization_id)` → 없으면 랜덤 6자 생성(source='auto')
-    - env override 는 단일 org 하위호환용 (env_var_name 지정 시 해당 org 코드를 env 값으로)
+    - `set_code(db, service_key, organization_id, code)` → 운영자 지정 코드(source='manual')
 """
 
 from __future__ import annotations
 
-import os
 import secrets
 from datetime import datetime, timezone
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,42 +94,18 @@ async def ensure_code(
     db: AsyncSession,
     service_key: str,
     organization_id: UUID | None,
-    env_var_name: str | None = None,
 ) -> AccessCode:
     """조직별 코드 보장 — 없으면 생성.
 
-    1. env_var_name 이 지정되고 값이 있으면 → 해당 org 코드를 env 값으로 upsert(source='env')
-    2. 아니면 org 에 코드가 있으면 그대로 반환
-    3. 없으면 유니크 랜덤 생성 → INSERT(source='auto')
+    1. org 에 코드가 있으면 그대로 반환
+    2. 없으면 유니크 랜덤 생성 → INSERT(source='auto')
 
     Args:
         db: 비동기 세션 (commit 은 호출자가 책임)
         service_key: 예 "attendance"
         organization_id: 대상 조직
-        env_var_name: 예 "ATTENDANCE_ACCESS_CODE" (단일 org 하위호환용, 보통 미사용)
     """
-    env_value = os.getenv(env_var_name) if env_var_name else None
     existing = await get_code(db, service_key, organization_id)
-
-    if env_value:
-        env_value_clean = env_value.strip().upper()
-        if existing is None:
-            record = AccessCode(
-                service_key=service_key,
-                organization_id=organization_id,
-                code=env_value_clean,
-                source="env",
-            )
-            db.add(record)
-            await db.flush()
-            return record
-        if existing.code != env_value_clean or existing.source != "env":
-            existing.code = env_value_clean
-            existing.source = "env"
-            existing.rotated_at = datetime.now(timezone.utc)
-            await db.flush()
-        return existing
-
     if existing is not None:
         return existing
 
@@ -181,3 +157,59 @@ async def rotate_code(
         record.rotated_at = datetime.now(timezone.utc)
     await db.flush()
     return record
+
+
+async def set_code(
+    db: AsyncSession,
+    service_key: str,
+    organization_id: UUID | None,
+    code: str,
+) -> AccessCode:
+    """운영자 지정 코드 upsert — admin 엔드포인트에서 호출 (자기 org 코드만).
+
+    정규화(strip + upper)는 요청 스키마가 보장하지만 방어적으로 한 번 더 적용.
+    - 자기 org 의 기존 코드와 같으면 그대로 반환 (no-op)
+    - service_key 안에서 타 org 가 이미 쓰는 코드면 409 (전역 유니크 보장)
+    - 통과 시 upsert: row 없으면 생성. source='manual', rotated_at=now
+
+    동시 요청으로 여기 검사를 통과해도 uq_access_code_service_code 제약이
+    commit 시점에 최종 방어한다 (호출자가 IntegrityError → 409 변환).
+    """
+    normalized = (code or "").strip().upper()
+    existing = await get_code(db, service_key, organization_id)
+    if existing is not None and existing.code == normalized:
+        return existing  # no-op — rotated_at/source 도 건드리지 않음
+
+    # 타 org 점유 검사 — code 는 service_key 안에서 전역 유니크
+    holder = (
+        await db.execute(
+            select(AccessCode).where(
+                AccessCode.service_key == service_key,
+                AccessCode.code == normalized,
+            )
+        )
+    ).scalar_one_or_none()
+    if holder is not None and holder.organization_id != organization_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "access_code_taken",
+                "message": "This code is already used by another organization. Choose a different code.",
+            },
+        )
+
+    if existing is None:
+        existing = AccessCode(
+            service_key=service_key,
+            organization_id=organization_id,
+            code=normalized,
+            source="manual",
+            rotated_at=datetime.now(timezone.utc),
+        )
+        db.add(existing)
+    else:
+        existing.code = normalized
+        existing.source = "manual"
+        existing.rotated_at = datetime.now(timezone.utc)
+    await db.flush()
+    return existing
