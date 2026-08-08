@@ -364,6 +364,32 @@ class UserRepository(BaseRepository[User]):
         await db.flush()
         return result.rowcount or 0
 
+    async def bulk_set_active_non_provisional(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        user_ids: list[UUID],
+        is_active: bool,
+    ) -> int:
+        """is_active 일괄 변경 (조직 스코프) — 유령(is_provisional=true)은 제외.
+
+        유령의 is_active 는 fail-closed 불변(False)이라 bulk 로 바꾸지 않는다.
+        반환: 실제 변경된 행 수.
+        """
+        if not user_ids:
+            return 0
+        result = await db.execute(
+            update(User)
+            .where(
+                User.id.in_(user_ids),
+                User.organization_id == organization_id,
+                User.is_provisional.is_(False),
+            )
+            .values(is_active=is_active)
+        )
+        await db.flush()
+        return result.rowcount or 0
+
     async def bulk_assign_org_stores_to_user(
         self,
         db: AsyncSession,

@@ -6,7 +6,9 @@ Covers login, registration, token issuance/refresh, and current user info.
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from app.utils.email_address import normalize_email
 
 # 지원 선호 언어 — Supported preferred language codes (BCP-47 short).
 # 현재는 정보 수집용. UI 다국어화는 추후 별도 작업.
@@ -72,6 +74,9 @@ class RegisterRequest(BaseModel):
     # 소프트 가드 우회 — "아니오, 새 계정입니다"를 고른 경우 true 로 재요청.
     skip_claim_check: bool = False
     preferred_language: PreferredLanguage = "en"  # 선호 언어 (정보 수집용, default en)
+
+    # users.email 은 소문자 canonical 로만 저장한다 (app/utils/email_address 참조).
+    _norm_email = field_validator("email")(normalize_email)
 
 
 class TokenResponse(BaseModel):
@@ -237,3 +242,42 @@ class ChangePasswordResponse(BaseModel):
 class AdminResetPasswordResponse(BaseModel):
     temporary_password: str
     message: str
+
+
+# ── Signup Availability (공개 가입 링크 선체크) ──
+
+class CheckAvailabilityRequest(BaseModel):
+    """가입 링크에서 아이디/이메일 사용 가능 여부 조회 요청.
+
+    공개 가입 폼이 "계속" 단계에서 미리 물어본다. 계정을 만들지 않으며,
+    최종 생성 시점의 중복 검사(409)를 대체하지 않는다 — 동시 가입 경합은
+    그대로 생성 시점에서 걸린다.
+
+    Attributes:
+        encoded: 가입 링크의 매장 식별자 (base64url store id)
+        username: 확인할 아이디
+        email: 확인할 이메일
+        mode: "join"(지원자 가입, /applications/start) 또는
+              "direct"(즉시 staff 등록, /auth/direct-signup)
+    """
+
+    encoded: str
+    username: str
+    email: str
+    mode: Literal["join", "direct"] = "join"
+
+
+class CheckAvailabilityResponse(BaseModel):
+    """아이디/이메일 사용 가능 여부.
+
+    Attributes:
+        username_available: 아이디 사용 가능 여부
+        email_available: 이메일 사용 가능 여부
+        resumable: join 모드에서 아이디+이메일이 기존 지원자와 정확히 일치해
+                   "이어서 진행"이 되는 경우 True. 이때 두 available 은 모두 True 다
+                   (중복이 아니라 재개이므로 막으면 안 된다).
+    """
+
+    username_available: bool
+    email_available: bool
+    resumable: bool = False

@@ -1170,8 +1170,13 @@ async def manage_update_staff_pin(
     await _require_pin_permission(db, manager, "clockin_pin:update")
     target = await _load_store_staff(db, device, user_id)
 
+    # store_id 전달 — 충돌 유저가 이 기기 매장 밖이면 409 detail.other_store=true
     await assert_no_pin_prefix_conflict(
-        db, device.organization_id, data.clockin_pin, exclude_user_id=target.id
+        db,
+        device.organization_id,
+        data.clockin_pin,
+        exclude_user_id=target.id,
+        store_id=device.store_id,
     )
     target.clockin_pin = data.clockin_pin
     await clockin_pin_audit_repository.record(

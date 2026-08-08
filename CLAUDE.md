@@ -198,6 +198,18 @@ completion.photo_url = key  # "completions/2026/03/17/abc.jpg"
 response["photo_url"] = storage_service.resolve_url(completion.photo_url)
 ```
 
+## HTMA API Version Policy (MUST FOLLOW)
+
+HTMA(attendance 사이드로드 APK)는 업데이트가 늦은 구버전이 최신 API를 계속 호출한다.
+**HTMA가 소비하는 API를 변경할 때는 반드시 아래 3갈래 판단을 거친다.**
+URL 버저닝(/api/v2 병렬 유지)은 하지 않는다. web(console/staff web)은 배포 즉시 최신이므로 이 정책의 대상이 아니다 — 버전 헤더/426/버전 분기를 web에 만들지 말 것.
+
+1. **additive 변경** (필드 추가, 새 엔드포인트) → 분기 없이 배포. 기본값 — 대부분의 변경이 여기 속해야 정상.
+2. **크리티컬 breaking** (보안, 데이터 오염·오기록 가능성) → 버전 분기 금지. **반드시 min_version을 올려 구버전을 강제 업데이트시킨다** (426 하드 컷). 구버전에게 옛 동작을 유지해주는 것 자체가 위험한 경우다.
+3. **전환 창이 필요한 breaking** → `X-App-Version` 요청 헤더 기준으로 **라우터/스키마 가장자리에서만** 어댑터 분기. service/repository 내부에 버전 비교 금지. 분기 생성 시 삭제 조건(min_version ≥ X 도달 시 제거)을 주석으로 명시 — 분기는 만료일 있는 임시 다리이며 최종 상태는 항상 분기 0개.
+
+기반 인프라(HTMA의 `X-App-Version` 요청 헤더 + 서버 min_version 426 게이트)는 **구현 대기** 상태. 구현 전까지는 판단 1·2를 우선 적용하고(2는 기존 클라 게이트의 min_version 인상으로), 3이 필요한 변경은 기반 구현을 선행할 것.
+
 ## Environment Variables
 
 ```env

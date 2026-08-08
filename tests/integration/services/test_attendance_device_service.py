@@ -6,7 +6,7 @@
 [작성됨] — 이번 phase
 - commit_pin_or_409
     · 정상 commit (충돌 없음) → 변경된 PIN DB 에 반영
-    · uq_user_org_clockin_pin 위반 → HTTPException(409, "Not available")
+    · uq_user_org_clockin_pin 위반 → HTTPException(409, pin_conflict detail dict)
     · 다른 IntegrityError (uq_user_org_username 등) → 원래 IntegrityError 그대로 raise
 
 [작성 필요] — 추후
@@ -58,10 +58,10 @@ async def test_commit_pin_or_409_succeeds_when_no_conflict(
 async def test_commit_pin_or_409_raises_409_on_unique_violation(
     db: AsyncSession, test_users: dict, restore_pins,
 ) -> None:
-    """다른 user 와 같은 PIN 으로 commit 시도 → HTTPException(409, 'Not available').
+    """다른 user 와 같은 PIN 으로 commit 시도 → HTTPException(409, pin_conflict).
 
     ORM 세션의 pending change 는 commit 시점에 flush 됨 — commit_pin_or_409 안에서
-    IntegrityError 잡힘.
+    IntegrityError 잡힘. unique 제약 fallback 이라 reason=exact 고정, other_store=null.
     """
     from app.models.user import User
     from sqlalchemy import select
@@ -76,7 +76,11 @@ async def test_commit_pin_or_409_raises_409_on_unique_violation(
         await commit_pin_or_409(db)
 
     assert exc_info.value.status_code == 409
-    assert exc_info.value.detail == "Not available"
+    detail = exc_info.value.detail
+    assert detail["code"] == "pin_conflict"
+    assert detail["reason"] == "exact"
+    assert detail["other_store"] is None
+    assert detail["message"] == "This PIN is already in use by another employee."
 
 
 @pytest.mark.asyncio

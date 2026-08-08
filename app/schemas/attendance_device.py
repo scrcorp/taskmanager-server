@@ -156,6 +156,27 @@ class AdminAccessCodeResponse(BaseModel):
     created_at: datetime
 
 
+class AdminAccessCodeSetRequest(BaseModel):
+    """PUT /access-codes/{service_key} — 운영자가 코드를 직접 지정.
+
+    정규화/검증 순서: strip → 내부 공백 거부 → upper → 길이 4~32.
+    """
+    code: str
+
+    @field_validator("code")
+    @classmethod
+    def _normalize_and_validate(cls, v: str) -> str:
+        v = v.strip()
+        if any(ch.isspace() for ch in v):
+            raise ValueError("Code cannot contain spaces.")
+        v = v.upper()
+        if len(v) < 4:
+            raise ValueError("Code must be at least 4 characters.")
+        if len(v) > 32:
+            raise ValueError("Code must be at most 32 characters.")
+        return v
+
+
 # ── Clockin PIN ────────────────────────────────────────────
 
 class ClockinPinResponse(BaseModel):
