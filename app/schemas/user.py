@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.utils.email_address import normalize_email_optional
+
 # 사번(employee_no) — 회사 사번. 문자열 유지(선행0 보존), org 내 유일(partial unique).
 _EMPLOYEE_NO_RE = re.compile(r"^[A-Za-z0-9-]{1,50}$")
 
@@ -106,6 +108,7 @@ class UserCreate(BaseModel):
 
     _norm_emp = field_validator("employee_no")(_normalize_employee_no)
     _valid_username = field_validator("username")(_validate_username)
+    _norm_email = field_validator("email")(normalize_email_optional)
 
     @model_validator(mode="after")
     def _compose_full_name(self) -> "UserCreate":
@@ -155,6 +158,7 @@ class UserUpdate(BaseModel):
     employee_no: str | None = None  # 사번 변경 (New employee number, optional)
 
     _norm_emp = field_validator("employee_no")(_normalize_employee_no)
+    _norm_email = field_validator("email")(normalize_email_optional)
 
 
 class UserBulkUpdate(BaseModel):
@@ -368,6 +372,8 @@ class ProfileUpdate(BaseModel):
     full_name: str | None = None  # 변경할 실명 (New name, optional)
     email: str | None = None  # 변경할 이메일 (New email, optional)
     preferred_language: Literal["en", "es", "ko"] | None = None  # 선호 언어 (정보 수집용)
+
+    _norm_email = field_validator("email")(normalize_email_optional)
 
 
 class AlertCategoryChannel(BaseModel):

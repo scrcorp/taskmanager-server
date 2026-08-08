@@ -20,6 +20,8 @@ from app.models.organization import Organization, Store
 from app.models.user import User
 from app.repositories.role_repository import role_repository
 from app.schemas.auth import (
+    CheckAvailabilityRequest,
+    CheckAvailabilityResponse,
     ClaimPreviewRequest,
     ClaimPreviewResponse,
     LoginRequest,
@@ -270,6 +272,51 @@ async def app_login(
         db, data, organization_id,
         **get_session_info(request),
     )
+
+
+@router.post("/check-availability", response_model=CheckAvailabilityResponse)
+async def check_signup_availability(
+    data: CheckAvailabilityRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CheckAvailabilityResponse:
+    """가입 폼 선(先)체크 — 아이디/이메일이 이미 쓰이는지 조회 (No auth).
+
+    공개 가입 폼(`/join/{encoded}`, `/direct/{encoded}`)이 계정 정보 단계를
+    넘어가기 전에 호출한다. 계정을 만들지 않으며, 생성 시점의 중복 검사를
+    대체하지 않는다 — 동시 가입 경합은 생성 시점 409 가 계속 막는다.
+
+    이메일 존재 여부는 이미 send-verification-code 가 409 로 알려주므로
+    이 엔드포인트가 노출 범위를 넓히지는 않는다.
+
+    Errors:
+        404 invalid_link    — encoded payload is malformed
+        404 store_not_found — store deleted or doesn't exist
+    """
+    try:
+        store_id = decode_uuid(data.encoded)
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "invalid_link", "message": "Signup link is malformed."},
+        )
+
+    store = (
+        await db.execute(select(Store).where(Store.id == store_id))
+    ).scalars().first()
+    if store is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "store_not_found", "message": "Store does not exist."},
+        )
+
+    result = await auth_service.check_signup_availability(
+        db,
+        store=store,
+        username=data.username,
+        email=data.email,
+        mode=data.mode,
+    )
+    return CheckAvailabilityResponse(**result)
 
 
 @router.post("/send-verification-code")

@@ -9,10 +9,10 @@ Current consumers:
     - "attendance": Attendance Device 등록 시 입력하는 코드 (조직별)
 
 소스 동작:
-    - `source="env"`: 서버 기동 시 환경 변수에서 읽어 upsert (단일 org 하위호환)
-    - `source="auto"`: env 미설정 시 서버가 랜덤 6자 생성 (조직당 최초 1회 INSERT)
+    - `source="auto"`: 서버가 랜덤 6자 생성 (조직당 최초 1회 INSERT / rotate)
+    - `source="manual"`: 운영자가 admin 엔드포인트로 직접 지정한 코드
 
-관리자가 admin 엔드포인트로 수동 rotate 가능 (자기 조직 코드만).
+관리자가 admin 엔드포인트로 수동 rotate/지정 가능 (자기 조직 코드만).
 """
 
 import uuid
@@ -32,7 +32,7 @@ class AccessCode(Base):
         service_key: 서비스 키 (예: "attendance")
         organization_id: 소속 조직 FK — 조직별 코드. (nullable: org 무관 전역 서비스 대비)
         code: 현재 유효한 코드 (숫자/영숫자 6자). service_key 내 전역 유니크.
-        source: "env" | "auto"
+        source: "auto" | "manual"
         rotated_at: 최근 rotate 시각 (nullable)
         created_at: 최초 생성 시각
     """
@@ -55,7 +55,7 @@ class AccessCode(Base):
     )
     # 현재 유효 코드 — 6자 (plain text 저장. 짧고 회전 가능한 성격이라 hash 사용 안 함)
     code: Mapped[str] = mapped_column(String(32), nullable=False)
-    # 소스 — "env" (환경변수로 주입) 또는 "auto" (서버 자동 생성)
+    # 소스 — "auto" (서버 랜덤 생성) 또는 "manual" (운영자 지정)
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
     # 최근 rotate 시각 — Last rotation timestamp (null이면 최초 생성 이후 rotate 없음)
     rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

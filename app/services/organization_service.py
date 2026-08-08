@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.organization import Organization
 from app.repositories.organization_repository import organization_repository
 from app.schemas.organization import OrganizationResponse, OrganizationUpdate
+from app.utils.email_address import normalize_email_optional
 from app.utils.exceptions import NotFoundError
 
 
@@ -210,7 +211,8 @@ class OrganizationService:
                 role_id=super_owner_role.id,
                 username=admin_username,
                 full_name=admin_username,
-                email=admin_email,
+                # users.email 은 소문자 canonical (app/utils/email_address 참조).
+                email=normalize_email_optional(admin_email),
                 password_hash=hash_password(admin_password),
                 clockin_pin=clockin_pin,
             )

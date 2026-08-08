@@ -6,17 +6,24 @@ Mounted under /api/v1/console.
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_permission
-from app.core.access_code import ensure_code, get_code, rotate_code
+from app.core.access_code import ensure_code, get_code, rotate_code, set_code
 from app.database import get_db
+from app.models.access_code_audit import (
+    ACCESS_CODE_AUDIT_MANUAL_SET,
+    ACCESS_CODE_AUDIT_ROTATE,
+)
 from app.models.organization import Store
 from app.models.user import User
+from app.repositories.access_code_audit_repository import access_code_audit_repository
 from app.schemas.attendance_device import (
     AdminAccessCodeResponse,
+    AdminAccessCodeSetRequest,
     AdminDeviceRenameRequest,
     AdminDeviceResponse,
 )
@@ -113,7 +120,56 @@ async def rotate_access_code(
 ) -> AdminAccessCodeResponse:
     # 자기 조직 코드만 rotate — 다른 조직 코드에 영향 없음.
     record = await rotate_code(db, service_key, current_user.organization_id)
+    await access_code_audit_repository.record(
+        db,
+        organization_id=current_user.organization_id,
+        service_key=service_key,
+        action=ACCESS_CODE_AUDIT_ROTATE,
+        actor_user_id=current_user.id,
+        meta={"code_length": len(record.code)},
+    )
     await db.commit()
+    return AdminAccessCodeResponse(
+        service_key=record.service_key,
+        code=record.code,
+        source=record.source,
+        rotated_at=record.rotated_at,
+        created_at=record.created_at,
+    )
+
+
+@router.put("/access-codes/{service_key}", response_model=AdminAccessCodeResponse)
+async def set_access_code(
+    service_key: str,
+    data: AdminAccessCodeSetRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("attendance_devices:update"))],
+) -> AdminAccessCodeResponse:
+    # 운영자 지정 코드 — 자기 조직 코드만. 타 org 점유 코드는 set_code 가 409.
+    record = await set_code(db, service_key, current_user.organization_id, data.code)
+    await access_code_audit_repository.record(
+        db,
+        organization_id=current_user.organization_id,
+        service_key=service_key,
+        action=ACCESS_CODE_AUDIT_MANUAL_SET,
+        actor_user_id=current_user.id,
+        meta={"code_length": len(record.code)},
+    )
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # 동시 요청이 set_code 의 사전 검사를 함께 통과한 경우 —
+        # uq_access_code_service_code 제약이 최종 방어. 같은 409 로 변환.
+        await db.rollback()
+        if "uq_access_code_service_code" in str(exc.orig):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "access_code_taken",
+                    "message": "This code is already used by another organization. Choose a different code.",
+                },
+            ) from exc
+        raise
     return AdminAccessCodeResponse(
         service_key=record.service_key,
         code=record.code,

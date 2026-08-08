@@ -381,9 +381,15 @@ class AuthService:
             db, data.verification_token, data.email
         )
 
-        from app.services.attendance_device_service import generate_clockin_pin
+        from app.services.attendance_device_service import (
+            generate_unique_clockin_pin,
+        )
 
-        clockin_pin = generate_clockin_pin()
+        # prefix 충돌 회피 발급 — 단순 generate_clockin_pin() 은 기존 4자리 PIN 을
+        # prefix 로 갖는 값을 뽑을 수 있다 (오인식 사고 경로).
+        clockin_pin = await generate_unique_clockin_pin(
+            db, ghost.organization_id, exclude_user_id=ghost.id
+        )
         ghost.username = data.username
         ghost.password_hash = hash_password(data.password)
         ghost.email = data.email
@@ -838,6 +844,128 @@ class AuthService:
         except Exception:
             await db.rollback()
             raise
+
+    async def check_signup_availability(
+        self,
+        db: AsyncSession,
+        *,
+        store: Store,
+        username: str,
+        email: str,
+        mode: str,
+    ) -> dict:
+        """공개 가입 폼의 아이디/이메일 선(先)체크.
+
+        가입 폼이 계정 정보 단계를 넘어가기 전에 물어본다. 계정을 만들지 않고
+        조회만 하며, **생성 시점의 중복 검사를 대체하지 않는다** — 동시 가입
+        경합은 여전히 생성 시점 409 로 걸린다.
+
+        판정 규칙은 실제 생성 경로와 같아야 오탐/누락이 없다:
+          - mode="direct" → `/app/auth/direct-signup` (app_register 와 공통 경로).
+            username 은 users + candidates 전역 unique.
+          - mode="join"   → `/app/applications/start`. candidates 를
+            (username OR email) 로 조회한 뒤 매칭 수에 따라 갈린다.
+            아이디·이메일이 **둘 다** 같은 기존 지원자는 중복이 아니라
+            "이어서 진행"이므로 막지 않는다(resumable).
+        이메일은 두 모드 공통으로 send-verification-code 와 같은 기준
+        (users.email_verified=True) 을 쓴다.
+
+        Args:
+            db: DB session
+            store: 가입 링크가 가리키는 매장
+            username: 확인할 아이디
+            email: 확인할 이메일
+            mode: "join" | "direct"
+
+        Returns:
+            {"username_available": bool, "email_available": bool, "resumable": bool}
+        """
+        from sqlalchemy import or_ as _or
+        from app.models.hiring import Candidate as _Candidate
+
+        username = username.strip()
+        email_norm = email.strip().lower()
+
+        # 이메일 — 이미 인증까지 끝난 계정이 쓰고 있으면 불가.
+        email_taken_by_user = (
+            await db.execute(
+                select(User).where(
+                    User.email == email_norm,
+                    User.email_verified == True,  # noqa: E712
+                )
+            )
+        ).scalars().first() is not None
+
+        if mode == "direct":
+            user_clash = (
+                await db.execute(select(User).where(User.username == username))
+            ).scalars().first() is not None
+            cand_clash = (
+                await db.execute(
+                    select(_Candidate).where(_Candidate.username == username)
+                )
+            ).scalars().first() is not None
+            return {
+                "username_available": not (user_clash or cand_clash),
+                "email_available": not email_taken_by_user,
+                "resumable": False,
+            }
+
+        # ── join ──
+        matches = (
+            await db.execute(
+                select(_Candidate).where(
+                    _or(
+                        _Candidate.username == username,
+                        _Candidate.email_normalized == email_norm,
+                    )
+                )
+            )
+        ).scalars().all()
+
+        if len(matches) == 0:
+            org_clash = (
+                await db.execute(
+                    select(User).where(
+                        User.organization_id == store.organization_id,
+                        User.username == username,
+                    )
+                )
+            ).scalars().first() is not None
+            return {
+                "username_available": not org_clash,
+                "email_available": not email_taken_by_user,
+                "resumable": False,
+            }
+
+        if len(matches) == 1:
+            m = matches[0]
+            if m.username == username and m.email_normalized == email_norm:
+                # 기존 지원자가 이어서 진행하는 경로 — 중복이 아니다.
+                return {
+                    "username_available": True,
+                    "email_available": True,
+                    "resumable": True,
+                }
+            if m.username == username:
+                return {
+                    "username_available": False,
+                    "email_available": not email_taken_by_user,
+                    "resumable": False,
+                }
+            return {
+                "username_available": True,
+                "email_available": False,
+                "resumable": False,
+            }
+
+        # 2건 이상 — 아이디와 이메일이 서로 다른 기존 계정에 묶여 있다
+        # (생성 시점의 credentials_split 과 같은 상황).
+        return {
+            "username_available": False,
+            "email_available": False,
+            "resumable": False,
+        }
 
 
 # 싱글턴 인스턴스 — Singleton instance

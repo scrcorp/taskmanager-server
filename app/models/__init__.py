@@ -37,6 +37,7 @@ from app.models.attendance import QRCode, Attendance, AttendanceCorrection
 from app.models.attendance_break import AttendanceBreak
 from app.models.attendance_device import AttendanceDevice
 from app.models.access_code import AccessCode
+from app.models.access_code_audit import AccessCodeAudit
 from app.models.evaluation import EvalTemplate, Evaluation
 from app.models.warning import Warning
 from app.models.warning_category import WarningCategory
@@ -77,6 +78,7 @@ __all__ = [
     "AttendanceBreak",
     "AttendanceDevice",
     "AccessCode",
+    "AccessCodeAudit",
     "EvalTemplate", "Evaluation",
     "Warning",
     "WarningCategory",
