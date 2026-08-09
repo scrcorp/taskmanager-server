@@ -1031,3 +1031,55 @@ def build_schedule_daily_report_email(
 </body>
 </html>"""
     return subject, html
+
+
+def build_early_clock_in_email(
+    staff_name: str,
+    store_name: str,
+    minutes_early: int,
+    scheduled_start_label: str,
+    clock_in_label: str,
+    reason: str,
+) -> tuple[str, str]:
+    """조기 출근 강행 알림 메일.
+
+    매니저/SV 가 현장에 없을 때 벌어지는 일이라 in-app 만으로는 놓치기 쉽다.
+    "누가·어디서·얼마나 일찍·왜" 네 가지가 제목과 본문 첫 화면에 다 보이게 한다.
+
+    Args:
+        staff_name: 출근한 직원 이름
+        store_name: 매장 이름
+        minutes_early: 예정보다 몇 분 일찍인지
+        scheduled_start_label: 예정 시작 시각 라벨 (매장 현지시각, "9:00 AM")
+        clock_in_label: 실제 출근 시각 라벨 (매장 현지시각)
+        reason: 직원이 입력한 사유
+    """
+    subject = f"[Early clock-in] {staff_name} started {minutes_early} min early"
+    html = f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background-color:#F8FAFC;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F8FAFC;">
+    <tr><td align="center" style="padding:32px 16px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+        <tr><td style="background-color:#6C5CE7;padding:24px 28px;"><div style="font-size:22px;font-weight:700;color:#FFFFFF;">HTM</div></td></tr>
+        <tr>
+          <td style="padding:28px 24px 8px;">
+            <div style="font-size:20px;font-weight:700;color:#1E293B;margin-bottom:6px;">Early clock-in at {escape(store_name)}</div>
+            <div style="font-size:14px;color:#64748B;line-height:1.6;"><strong>{escape(staff_name)}</strong> clocked in <strong>{minutes_early} minutes</strong> before the scheduled start.</div>
+            <div style="margin-top:14px;font-size:14px;color:#334155;line-height:1.8;">
+              Scheduled start: <strong>{escape(scheduled_start_label)}</strong><br>
+              Clocked in: <strong>{escape(clock_in_label)}</strong>
+            </div>
+            <div style="margin-top:12px;padding:12px 16px;background-color:#F1F5F9;border-left:3px solid #6C5CE7;border-radius:4px;font-size:14px;color:#334155;line-height:1.6;">{escape(reason)}</div>
+            <div style="margin-top:14px;font-size:13px;color:#64748B;line-height:1.6;">The extra time counts toward this pay period. Review it in Attendance — payroll cannot be confirmed until every early clock-in is reviewed.</div>
+          </td>
+        </tr>
+        <tr><td style="padding:20px 24px;background-color:#F8FAFC;border-top:1px solid #E2E8F0;"><div style="font-size:13px;color:#94A3B8;text-align:center;">Automated alert from HTM</div></td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+    return subject, html

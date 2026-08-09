@@ -786,6 +786,10 @@ class AttendanceResponse(BaseModel):
     # 콘솔이 "unconfirmed" 배지를 표시한다. (Auto clock-out confirmation state)
     auto_clock_out_confirmed_at: datetime | None = None
     auto_clock_out_confirmed_by: str | None = None  # 확인자 UUID 문자열 (Confirmer UUID)
+    # 조기 출근 강행 확인 상태. early_clock_in_override anomaly 인데 confirmed_at 이
+    # None 이면 콘솔이 "needs confirmation" 배지를 표시하고 payroll 마감이 막힌다.
+    early_clock_in_confirmed_at: datetime | None = None
+    early_clock_in_confirmed_by: str | None = None  # 확인자 UUID 문자열 (Confirmer UUID)
     # 수정 이력 — 상세 조회 시 함께 반환. 목록 응답에선 빈 리스트.
     # Correction history attached on detail responses; empty in list endpoints.
     corrections: list[dict] = []

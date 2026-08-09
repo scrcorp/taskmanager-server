@@ -67,7 +67,10 @@ class ClockActionRequest(BaseModel):
     user_id: UUID
     pin: str = Field(..., pattern=r"^\d{4,6}$")
     break_type: str | None = None
-    # Early clock-out 사유. clock-out 시점이 schedule end - threshold 이전이면 필수.
+    # 사유. 필수인 경우:
+    #   - clock-out 이 schedule end - threshold 이전 (early clock-out)
+    #   - clock-in 이 schedule start - threshold 이전 (early clock-in override)
+    #   - break-end 가 허용 시간 초과
     # 그 외엔 무시.
     reason: str | None = None
     # (Issue 8) 다중 schedule 시 client 가 선택한 schedule 지정. 미지정이면

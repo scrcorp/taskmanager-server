@@ -97,9 +97,20 @@ def compute_effective_status(
     return "upcoming"
 
 
+# 조기 clock-in override — 예정보다 이른 출근을 사유와 함께 강제로 찍은 기록.
+ANOMALY_EARLY_CLOCK_IN_OVERRIDE = "early_clock_in_override"
+
 # manage UI 재설계(Issue 10) 가 쓰는 anomaly 표시 후보 — server 판정 예외만.
 # (soon 은 anomaly 아님 → 앱이 start_time 으로 자체 계산, 여기서 안 냄)
-DISPLAY_ANOMALIES = ("late", "no_show", "early_leave", "overtime", "no_break")
+DISPLAY_ANOMALIES = (
+    "late",
+    "no_show",
+    "early_leave",
+    "overtime",
+    "no_break",
+    "early_clock_out",
+    ANOMALY_EARLY_CLOCK_IN_OVERRIDE,
+)
 
 
 def compute_state_and_anomalies(
@@ -125,7 +136,9 @@ def compute_state_and_anomalies(
     anomaly 유효성 규칙 (출퇴근 사실과 모순되는 건 제거):
       - no_show: 미출근(clock_in 없음)에서만 + **단독** (출근 안 했으니 다른 anomaly 공존 불가)
       - overtime: clock_in 있어야 (출근해야 초과근무)
-      - no_break / early_leave: clock_out 있어야 (퇴근해야 휴식없음/조기퇴근 판정 가능)
+      - no_break / early_leave / early_clock_out: clock_out 있어야
+        (퇴근해야 휴식없음/조기퇴근 판정 가능)
+      - early_clock_in_override: clock_in 있어야 (출근해야 조기출근 강행 성립)
       - late: 미출근 지각 / 늦은 출근 모두 가능 (no_show 와만 배타)
 
     soon 은 여기서 내지 않는다 (앱이 자체 판단).
@@ -168,7 +181,9 @@ def compute_state_and_anomalies(
             continue  # 출근 기록 있는데 no_show 면 모순 → 제거 (no_show 는 위에서 단독 처리)
         if a == "overtime" and not has_clock_in:
             continue  # 출근 안 했으면 overtime 불가
-        if a in ("no_break", "early_leave") and not has_clock_out:
+        if a == ANOMALY_EARLY_CLOCK_IN_OVERRIDE and not has_clock_in:
+            continue  # 출근 안 했으면 조기출근 강행 불가
+        if a in ("no_break", "early_leave", "early_clock_out") and not has_clock_out:
             continue  # 퇴근 안 했으면 판정 불가
         if a not in anomalies:
             anomalies.append(a)
@@ -960,6 +975,52 @@ class AttendanceService:
         await db.refresh(attendance)
         return attendance
 
+    # ─── 조기 출근 강행 확인 (payroll 마감 게이트 ⑥의 일상 플로우) ─────────
+
+    async def confirm_early_clock_in(
+        self,
+        db: AsyncSession,
+        *,
+        attendance_id: UUID,
+        organization_id: UUID,
+        confirmed_by: UUID,
+    ) -> Attendance:
+        """조기 출근 강행(early_clock_in_override) 건을 매니저가 확인 처리.
+
+        스케줄보다 이른 출근은 예정 밖 임금으로 이어지므로, 실제 clock-in 시각을
+        그대로 인정하는 대신 급여 확정 전에 사람이 한 번 본다. 이 확인 상태가
+        payroll 마감 게이트의 판정 근거다 (자동퇴근 확인과 동일한 계약).
+
+        규칙:
+            - override anomaly 가 없는 record 는 400 (확인할 게 없음)
+            - 이미 확인된 record 재확인은 **no-op (멱등)** — 최초 확인자/시각 보존
+            - 매니저 대행으로 찍힌 건은 애초에 확인된 상태로 생성된다
+
+        Raises:
+            NotFoundError: attendance 없음/타 org
+            BadRequestError: override anomaly 가 아닌 record
+        """
+        attendance = await self.get_attendance(db, attendance_id, organization_id)
+
+        if ANOMALY_EARLY_CLOCK_IN_OVERRIDE not in (attendance.anomalies or []):
+            raise BadRequestError(
+                "This attendance was not an early clock-in — there is nothing to confirm."
+            )
+
+        if attendance.early_clock_in_confirmed_at is not None:
+            return attendance
+
+        attendance.early_clock_in_confirmed_by = confirmed_by
+        attendance.early_clock_in_confirmed_at = datetime.now(timezone.utc)
+        await db.flush()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+        await db.refresh(attendance)
+        return attendance
+
     async def get_corrections(
         self,
         db: AsyncSession,
@@ -1191,6 +1252,12 @@ class AttendanceService:
             "auto_clock_out_confirmed_by": (
                 str(attendance.auto_clock_out_confirmed_by)
                 if attendance.auto_clock_out_confirmed_by is not None else None
+            ),
+            # 조기 출근 강행 확인 상태 (콘솔 미확인 배지용). 미확인이면 둘 다 None.
+            "early_clock_in_confirmed_at": attendance.early_clock_in_confirmed_at,
+            "early_clock_in_confirmed_by": (
+                str(attendance.early_clock_in_confirmed_by)
+                if attendance.early_clock_in_confirmed_by is not None else None
             ),
             "created_at": attendance.created_at,
         }
