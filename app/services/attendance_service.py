@@ -28,7 +28,7 @@ from app.models.schedule import Schedule
 from app.models.user import User
 from app.repositories.attendance_repository import attendance_repository, qr_code_repository
 from app.utils.exceptions import BadRequestError, NotFoundError
-from app.utils.timezone import resolve_schedule_instants
+from app.utils.timezone import minutes_between, resolve_schedule_instants
 
 
 # 지각/조퇴/휴식 anomaly 임계치 (분 단위) — defaults
@@ -516,8 +516,9 @@ class AttendanceService:
 
             # 휴식 시간 계산 — Calculate break minutes
             if attendance.break_start is not None:
-                break_delta = now - attendance.break_start
-                attendance.total_break_minutes = int(break_delta.total_seconds() / 60)
+                attendance.total_break_minutes = minutes_between(
+                    attendance.break_start, now
+                )
 
             await db.flush()
             await db.refresh(attendance)
@@ -535,8 +536,9 @@ class AttendanceService:
             # 휴식 중이면 먼저 휴식 종료 — End break if currently on break
             if attendance.status == "on_break" and attendance.break_start is not None:
                 attendance.break_end = now
-                break_delta = now - attendance.break_start
-                attendance.total_break_minutes = int(break_delta.total_seconds() / 60)
+                attendance.total_break_minutes = minutes_between(
+                    attendance.break_start, now
+                )
 
             attendance.clock_out = now
             attendance.clock_out_timezone = client_timezone
@@ -544,8 +546,9 @@ class AttendanceService:
 
             # 총 근무 시간 계산 — Calculate total work minutes
             if attendance.clock_in is not None:
-                work_delta = now - attendance.clock_in
-                attendance.total_work_minutes = int(work_delta.total_seconds() / 60)
+                attendance.total_work_minutes = minutes_between(
+                    attendance.clock_in, now
+                )
 
             # ─── Anomaly 감지 ───
             schedule = None
@@ -782,12 +785,14 @@ class AttendanceService:
 
         # 시간 재계산 — Recalculate minutes if relevant
         if field_name in ("clock_in", "clock_out") and attendance.clock_in and attendance.clock_out:
-            work_delta = attendance.clock_out - attendance.clock_in
-            attendance.total_work_minutes = int(work_delta.total_seconds() / 60)
+            attendance.total_work_minutes = minutes_between(
+                attendance.clock_in, attendance.clock_out
+            )
 
         if field_name in ("break_start", "break_end") and attendance.break_start and attendance.break_end:
-            break_delta = attendance.break_end - attendance.break_start
-            attendance.total_break_minutes = int(break_delta.total_seconds() / 60)
+            attendance.total_break_minutes = minutes_between(
+                attendance.break_start, attendance.break_end
+            )
 
         # no_show 자동 해제 — clock_in 이 채워지면 매니저가 직접 출근 인정한 것으로 간주.
         # clock_out 도 있으면 clocked_out, 없으면 working 으로 전환. anomalies 에서 no_show 제거.
@@ -1464,7 +1469,7 @@ class AttendanceService:
 
         duration: int | None = None
         if ended_at is not None:
-            duration = max(0, int((ended_at - started_at).total_seconds() / 60))
+            duration = minutes_between(started_at, ended_at)
 
         new_break = AttendanceBreak(
             attendance_id=attendance_id,
@@ -1550,7 +1555,7 @@ class AttendanceService:
         target.break_type = new_type
         target.duration_minutes = (
             None if new_ended is None
-            else max(0, int((new_ended - new_started).total_seconds() / 60))
+            else minutes_between(new_started, new_ended)
         )
         await db.flush()
 

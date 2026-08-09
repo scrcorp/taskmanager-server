@@ -33,7 +33,7 @@ from app.models.user import User
 from app.models.user_store import UserStore
 from app.repositories.attendance_repository import attendance_repository
 from app.utils.exceptions import BadRequestError, NotFoundError, UnauthorizedError
-from app.utils.timezone import resolve_schedule_instants
+from app.utils.timezone import minutes_between, resolve_schedule_instants
 
 # clock action 타입
 ClockAction = Literal["clock_in", "break_start", "break_end", "clock_out"]
@@ -1007,7 +1007,7 @@ class AttendanceDeviceService:
 
             # Stage J: break time 정책 검증 (pure helper)
             from app.utils.break_end_policy import validate_break_end
-            elapsed_minutes = max(0, int((now - open_break.started_at).total_seconds() / 60))
+            elapsed_minutes = minutes_between(open_break.started_at, now)
             policy_error = validate_break_end(open_break.break_type, elapsed_minutes, reason)
             if policy_error is not None:
                 raise BadRequestError(policy_error)
@@ -1069,15 +1069,15 @@ class AttendanceDeviceService:
                 open_break = await self._get_open_break(db, attendance.id)
                 if open_break is not None:
                     open_break.ended_at = now
-                    delta = now - open_break.started_at
-                    open_break.duration_minutes = max(0, int(delta.total_seconds() / 60))
+                    open_break.duration_minutes = minutes_between(
+                        open_break.started_at, now
+                    )
                     attendance.break_end = now
             attendance.clock_out = now
             attendance.clock_out_timezone = store_tz
             attendance.status = "clocked_out"
             if attendance.clock_in is not None:
-                work_delta = now - attendance.clock_in
-                attendance.total_work_minutes = int(work_delta.total_seconds() / 60)
+                attendance.total_work_minutes = minutes_between(attendance.clock_in, now)
             attendance.total_break_minutes = await self._sum_break_minutes(db, attendance.id)
 
             if is_early:

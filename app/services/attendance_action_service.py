@@ -22,6 +22,7 @@ from app.models.attendance_break import (
     normalize_break_type,
 )
 from app.utils.exceptions import BadRequestError
+from app.utils.timezone import minutes_between
 
 
 class AttendanceActionService:
@@ -89,8 +90,9 @@ class AttendanceActionService:
     def _recalc_total_work(self, attendance: Attendance) -> None:
         """clock_in/out 둘 다 있으면 분 단위 재계산."""
         if attendance.clock_in is not None and attendance.clock_out is not None:
-            delta = attendance.clock_out - attendance.clock_in
-            attendance.total_work_minutes = max(0, int(delta.total_seconds() / 60))
+            attendance.total_work_minutes = minutes_between(
+                attendance.clock_in, attendance.clock_out
+            )
         else:
             attendance.total_work_minutes = None
 
@@ -251,8 +253,7 @@ class AttendanceActionService:
                     "Clock-out cannot be earlier than the current break start"
                 )
             open_break.ended_at = at
-            delta = at - open_break.started_at
-            open_break.duration_minutes = max(0, int(delta.total_seconds() / 60))
+            open_break.duration_minutes = minutes_between(open_break.started_at, at)
             attendance.break_end = at
 
         attendance.clock_out = at
@@ -371,8 +372,7 @@ class AttendanceActionService:
             raise BadRequestError("Break end cannot be earlier than break start")
 
         open_break.ended_at = at
-        delta = at - open_break.started_at
-        open_break.duration_minutes = max(0, int(delta.total_seconds() / 60))
+        open_break.duration_minutes = minutes_between(open_break.started_at, at)
         attendance.status = "working"
         attendance.break_end = at
         attendance.total_break_minutes = await self._sum_break_minutes(db, attendance.id)

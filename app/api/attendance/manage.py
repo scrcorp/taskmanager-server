@@ -53,6 +53,7 @@ from app.utils.settings_resolver import (
     SettingNotRegisteredError,
     resolve_setting,
 )
+from app.utils.timezone import minutes_between
 
 
 router: APIRouter = APIRouter()
@@ -809,8 +810,7 @@ async def manage_change_attendance_status(
 
     # 파생값 재계산
     if target.clock_in is not None and target.clock_out is not None:
-        delta = target.clock_out - target.clock_in
-        target.total_work_minutes = max(0, int(delta.total_seconds() / 60))
+        target.total_work_minutes = minutes_between(target.clock_in, target.clock_out)
     else:
         target.total_work_minutes = None
 
