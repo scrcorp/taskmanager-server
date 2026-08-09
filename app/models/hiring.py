@@ -71,6 +71,14 @@ class StoreHiringForm(Base):
 
     __table_args__ = (
         UniqueConstraint("store_id", "version", name="uq_store_hiring_form_version"),
+        # 매장당 draft 는 1개 — 업무 규칙을 강제하는 partial unique.
+        # 모델에 선언 안 하면 autogenerate 가 drop 을 뱉어 중복 draft 가 생긴다.
+        Index(
+            "uq_store_form_one_draft",
+            "store_id",
+            unique=True,
+            postgresql_where=text("status::text = 'draft'::text"),
+        ),
     )
 
     store = relationship("Store")

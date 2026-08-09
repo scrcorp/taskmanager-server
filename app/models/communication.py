@@ -17,7 +17,7 @@ Tables:
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import String, DateTime, Text, ForeignKey, TIMESTAMP, UniqueConstraint, Uuid
+from sqlalchemy import String, DateTime, Index, Text, ForeignKey, TIMESTAMP, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -61,6 +61,14 @@ class Notice(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # 인덱스는 반드시 모델에 선언한다 (마이그레이션에만 있으면 autogenerate 가 drop 을 뱉는다).
+    __table_args__ = (
+        # 조직 공지 목록 (최신순)
+        Index("ix_notices_org_created", "organization_id", text("created_at DESC")),
+        # 매장 공지 조회 — org-wide(NULL) 행은 인덱스에서 제외 (partial)
+        Index("ix_notices_store", "store_id", postgresql_where=text("store_id IS NOT NULL")),
+    )
 
 
 # AdditionalTask / AdditionalTaskAssignee / TaskEvidence (legacy) 제거됨.

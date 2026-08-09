@@ -255,6 +255,24 @@ pytest tests/ -v
    - 인덱스명만 변경
 4. **`alembic upgrade head` 실행하여 검증** 후 커밋
 5. 기존 데이터와 충돌 가능한 migration은 alembic 코드 내에서 해결 (배포서버에서도 동일하게 동작해야 함)
+6. **생성된 파일에 `drop_table` / `drop_index` / `drop_column` 이 있으면 멈추고 확인할 것.**
+   내가 의도한 삭제가 아니라면 그건 드리프트 신호다. 배포는 `alembic upgrade head` 가
+   자동으로 돌기 때문에, 그대로 커밋하면 운영 테이블/인덱스가 사라진다.
+   (2026-08-09 정리 시점 기준 드리프트는 0 — 빈 마이그레이션이 나오는 게 정상이다.)
+
+### 인덱스는 반드시 모델에 선언한다
+
+`__table_args__` 에 없고 마이그레이션에만 있는 인덱스는 autogenerate 가 "모델에 없는
+인덱스" 로 보고 **drop_index 를 뱉는다.** 성능 인덱스면 조용히 느려지고, partial UNIQUE
+면 중복 데이터가 쌓인다 (실제로 reports/store_hiring_forms 에서 그럴 뻔했다).
+마이그레이션에서만 만들 수밖에 없는 표현식/partial 인덱스도 `text()` +
+`postgresql_where` 로 모델에 똑같이 선언해 둘 것.
+
+### 의도적으로 DB 에만 남기는 객체
+
+하위호환 컬럼처럼 모델에 없지만 남겨야 하는 것은 `alembic/env.py` 의 `LEGACY_TABLES` /
+`LEGACY_COLUMNS` 에 등록한다 (autogenerate 제외). 등록할 땐 **왜 남기는지 + 언제 지울지**를
+함께 적는다. 그 목록 밖의 diff 는 전부 진짜 드리프트이므로 모델/마이그레이션으로 해소한다.
 
 ## Git Workflow
 
