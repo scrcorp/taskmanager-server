@@ -8,21 +8,41 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field, field_validator
 
-# 스케줄 시간은 30분 grid(:00/:30)만 허용. 어긋나면 reject (반올림하지 않음).
+# 스케줄 시간은 grid 단위로만 허용. 어긋나면 reject (반올림하지 않음).
+# 기본(console/벌크)은 30분, 키오스크(HTMA)는 5분 — 매장에서 즉석 보정을 하는 컨텍스트라
+# 30분 단위로는 실제 운영 시각을 표현하지 못해 별도 step 을 쓴다.
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 SCHEDULE_STEP_MINUTES = 30
+KIOSK_STEP_MINUTES = 5
 
 
-def validate_30min_grid(value: str | None) -> str | None:
-    """"HH:MM" 가 30분 단위(:00/:30)인지 검증. None/"" 은 통과 (optional 필드)."""
+def grid_error_message(step_minutes: int) -> str:
+    """step 위반 시 사용자에게 보여줄 문구 — 서버가 단일 출처."""
+    if step_minutes == 30:
+        return "Time must be on the hour or half-hour (:00 or :30)."
+    return f"Time must be in {step_minutes}-minute increments."
+
+
+def validate_grid(value: str | None, step_minutes: int) -> str | None:
+    """"HH:MM" 가 step_minutes 단위인지 검증. None/"" 은 통과 (optional 필드)."""
     if value is None or value == "":
         return value
     m = _HHMM_RE.match(value)
     if not m:
         raise ValueError("Time must be in HH:MM format.")
-    if int(m.group(2)) % SCHEDULE_STEP_MINUTES != 0:
-        raise ValueError("Time must be on the hour or half-hour (:00 or :30).")
+    if int(m.group(2)) % step_minutes != 0:
+        raise ValueError(grid_error_message(step_minutes))
     return value
+
+
+def validate_30min_grid(value: str | None) -> str | None:
+    """console/벌크 경로용 30분 grid validator."""
+    return validate_grid(value, SCHEDULE_STEP_MINUTES)
+
+
+def validate_kiosk_grid(value: str | None) -> str | None:
+    """키오스크(HTMA) 경로용 5분 grid validator."""
+    return validate_grid(value, KIOSK_STEP_MINUTES)
 
 
 # ─── Work Role ───────────────────────────────────────
@@ -358,9 +378,8 @@ class ScheduleCreate(BaseModel):
     status: str = "confirmed"  # "requested" for app submissions, "confirmed" for direct admin creation
     force: bool = False  # Override warnings
 
-    _validate_times = field_validator(
-        "start_time", "end_time", "break_start_time", "break_end_time"
-    )(validate_30min_grid)
+    # 시각 grid 검증은 여기서 하지 않는다 — step 이 경로마다 다르므로(console 30 / kiosk 5)
+    # schedule_service._normalize_shift_input 이 step 을 받아 단일 관문에서 판정한다.
 
 
 class ScheduleUpdate(BaseModel):
@@ -386,9 +405,7 @@ class ScheduleUpdate(BaseModel):
     # True  = 체크리스트 초기화
     # False = 진행 상태 그대로 유지
 
-    _validate_times = field_validator(
-        "start_time", "end_time", "break_start_time", "break_end_time"
-    )(validate_30min_grid)
+    # 시각 grid 검증은 _normalize_shift_input 단일 관문에서 (ScheduleCreate 주석 참조).
 
 
 class ScheduleResponse(BaseModel):

@@ -43,6 +43,7 @@ from app.schemas.attendance_device import (
     AdminStatusChangeRequest,
     ManageWorkRoleOption,
 )
+from app.schemas.schedule import KIOSK_STEP_MINUTES
 from app.services.attendance_device_service import attendance_device_service
 from app.services.attendance_service import attendance_service, compute_state_and_anomalies
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
@@ -425,7 +426,8 @@ async def manage_create_schedule(
         force=True,
     )
     response = await schedule_service.create_entry(
-        db, device.organization_id, payload, created_by=manager.id
+        db, device.organization_id, payload, created_by=manager.id,
+        step_minutes=KIOSK_STEP_MINUTES,
     )
     # SV 매니저 권한이면 requested 로 떨어졌을 수 있음 → 강제 confirmed
     await _ensure_confirmed_today(db, uuid.UUID(response.id), device.organization_id, manager.id)
@@ -475,7 +477,8 @@ async def manage_update_schedule(
         reset_checklist=True,
     )
     await schedule_service.update_entry(
-        db, schedule_id, device.organization_id, payload, actor=manager
+        db, schedule_id, device.organization_id, payload, actor=manager,
+        step_minutes=KIOSK_STEP_MINUTES,
     )
     return await _manage_schedule_row(db, schedule_id)
 

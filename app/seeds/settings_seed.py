@@ -85,9 +85,13 @@ SETTINGS_SEED: list[SettingDefinition] = [
     SettingDefinition(
         key="schedule.approval_required",
         label="Require GM approval",
-        description="All requested schedules need GM confirmation before becoming active.",
+        description=(
+            "When on, schedules created by SV are submitted as requests and need GM confirmation, "
+            "and only GM+ can edit or delete confirmed schedules. "
+            "Off by default — SV runs the store day to day and creates confirmed schedules directly."
+        ),
         value_type="boolean",
-        default_value=True,
+        default_value=False,
         category="Approval Workflow",
     ),
     SettingDefinition(
