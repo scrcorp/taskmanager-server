@@ -32,6 +32,8 @@ VALIDATION_OPEN_SHIFT = "open_shift"  # clock_out 없는 열린 근무 (L5-②)
 # 자동퇴근 미확인 — Phase 3 에서 auto_clock_out_confirmed_* 컬럼으로 정교화 예정 (L5-①)
 VALIDATION_UNCONFIRMED_AUTO_CLOCKOUT = "unconfirmed_auto_clockout"
 VALIDATION_TIP_PERIOD_NOT_CONFIRMED = "tip_period_not_confirmed"  # 계산 규칙 4
+# 조기 출근 강행 미확인 — 예정 밖 근무시간이 급여에 그대로 들어가므로 사람이 한 번 본다
+VALIDATION_UNCONFIRMED_EARLY_CLOCK_IN = "unconfirmed_early_clock_in"
 
 
 class RateSegment(BaseModel):

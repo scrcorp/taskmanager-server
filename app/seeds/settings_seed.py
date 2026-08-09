@@ -155,6 +155,14 @@ SETTINGS_SEED: list[SettingDefinition] = [
         category="Attendance",
     ),
     SettingDefinition(
+        key="attendance.tip_entry_enabled",
+        label="Tip entry on clock-out",
+        description="Show the tip entry screen when staff clock out. When disabled, clock-out completes without asking for tips. Applies to every device in the store.",
+        value_type="boolean",
+        default_value=False,
+        category="Attendance",
+    ),
+    SettingDefinition(
         key="attendance.auto_clock_out_enabled",
         label="Auto clock-out",
         description="Automatically clock out staff who forgot to clock out. When disabled, this store is skipped by the auto clock-out loop (manager alerts still apply).",

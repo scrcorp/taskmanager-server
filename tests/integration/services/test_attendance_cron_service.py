@@ -123,12 +123,20 @@ async def test_open_overdue_shift_auto_closed_as_before(
     assert "auto_clocked_out" in (att.anomalies or [])
     assert att.total_work_minutes == 175  # 09:05 → 12:00
 
+    # 한 액션 = 한 그룹, 그 안에 전이 항목마다 한 행 (status + clock_out).
+    # before 는 어느 행에서도 비지 않는다.
     corrections = await _get_corrections(att_id)
-    assert len(corrections) == 1
-    corr = corrections[0]
-    assert corr.field_name == "auto_clock_out"
-    assert corr.corrected_by is None
-    assert corr.corrected_value == expected_out.isoformat()
+    assert len(corrections) == 2
+    assert {c.action for c in corrections} == {"auto_clock_out"}
+    assert len({c.group_id for c in corrections}) == 1
+    assert all(c.corrected_by is None for c in corrections)
+    assert all(c.original_value for c in corrections)
+
+    by_field = {c.field_name: c for c in corrections}
+    assert by_field["status"].original_value == "working"
+    assert by_field["status"].corrected_value == "clocked_out"
+    assert by_field["clock_out"].original_value == "(none)"
+    assert by_field["clock_out"].corrected_value == expected_out.isoformat()
 
 
 async def test_open_overdue_on_break_closes_break_at_cutoff(

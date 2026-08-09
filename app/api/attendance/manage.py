@@ -40,13 +40,20 @@ from app.schemas.attendance_device import (
     ManageStaffPinRevealResponse,
     ManageStaffPinRow,
     ManageStaffPinUpdateRequest,
+    ManageStoreSettings,
     AdminStatusChangeRequest,
     ManageWorkRoleOption,
 )
 from app.schemas.schedule import KIOSK_STEP_MINUTES
 from app.services.attendance_device_service import attendance_device_service
 from app.services.attendance_service import attendance_service, compute_state_and_anomalies
-from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
+from app.services.store_setting_service import upsert_store_setting
+from app.utils.settings_resolver import (
+    TIP_ENTRY_ENABLED_KEY,
+    SettingNotRegisteredError,
+    resolve_setting,
+)
+from app.utils.timezone import minutes_between
 
 
 router: APIRouter = APIRouter()
@@ -100,6 +107,8 @@ async def manage_open_session(
 
     can_read_pins = await user_has_permissions(db, manager, "clockin_pin:read")
     can_update_pins = await user_has_permissions(db, manager, "clockin_pin:update")
+    # Store Settings 도 같은 방식 — manage 진입(SV+)과 별개로 console 과 동일한 문턱.
+    can_manage_store_settings = await user_has_permissions(db, manager, "stores:update")
 
     return ManageSessionResponse(
         manage_token=session.token,
@@ -108,6 +117,7 @@ async def manage_open_session(
         expires_at=session.expires_at,
         can_read_pins=can_read_pins,
         can_update_pins=can_update_pins,
+        can_manage_store_settings=can_manage_store_settings,
     )
 
 
@@ -764,44 +774,40 @@ async def manage_change_attendance_status(
         if new_clock_out is None:
             new_clock_out = _dt.now(_tz.utc)
 
-    # diff & corrections — 실제 변경된 필드만 기록
-    if (target.clock_in or None) != new_clock_in:
+    # diff & corrections — 실제 변경된 필드만 기록.
+    # 한 번의 편집이므로 세 전이(clock_in / clock_out / status)를 같은 그룹으로 묶는다.
+    # field_name 은 "modify" 가 아니라 실제 대상 — 무엇이 바뀐지 행만 봐도 알 수 있게.
+    from app.services import attendance_timeline as tl
+    group = tl.new_group()
+
+    def _queue(field_name: str, before: str, after: str) -> None:
         corrections_to_add.append(AttendanceCorrection(
             attendance_id=target.id,
-            field_name="modify",
-            original_value=(target.clock_in.isoformat() if target.clock_in else None) or "(none)",
-            corrected_value=(new_clock_in.isoformat() if new_clock_in else "(cleared)"),
-            reason=f"Clock-in time: {reason}",
+            group_id=group,
+            action=tl.ACTION_MODIFY,
+            field_name=field_name,
+            target_type=tl.TARGET_ATTENDANCE,
+            original_value=before,
+            corrected_value=after,
+            reason=reason,
             corrected_by=manager.id,
         ))
+
+    if (target.clock_in or None) != new_clock_in:
+        _queue(tl.FIELD_CLOCK_IN, tl.dt_value(target.clock_in), tl.dt_value(new_clock_in))
         target.clock_in = new_clock_in
         target.clock_in_timezone = store_tz_name if new_clock_in else None
     if (target.clock_out or None) != new_clock_out:
-        corrections_to_add.append(AttendanceCorrection(
-            attendance_id=target.id,
-            field_name="modify",
-            original_value=(target.clock_out.isoformat() if target.clock_out else None) or "(none)",
-            corrected_value=(new_clock_out.isoformat() if new_clock_out else "(cleared)"),
-            reason=f"Clock-out time: {reason}",
-            corrected_by=manager.id,
-        ))
+        _queue(tl.FIELD_CLOCK_OUT, tl.dt_value(target.clock_out), tl.dt_value(new_clock_out))
         target.clock_out = new_clock_out
         target.clock_out_timezone = store_tz_name if new_clock_out else None
     if target.status != new_status:
-        corrections_to_add.append(AttendanceCorrection(
-            attendance_id=target.id,
-            field_name="modify",
-            original_value=target.status,
-            corrected_value=new_status,
-            reason=f"Status: {reason}",
-            corrected_by=manager.id,
-        ))
+        _queue(tl.FIELD_STATUS, tl.plain_value(target.status), tl.plain_value(new_status))
         target.status = new_status
 
     # 파생값 재계산
     if target.clock_in is not None and target.clock_out is not None:
-        delta = target.clock_out - target.clock_in
-        target.total_work_minutes = max(0, int(delta.total_seconds() / 60))
+        target.total_work_minutes = minutes_between(target.clock_in, target.clock_out)
     else:
         target.total_work_minutes = None
 
@@ -885,7 +891,8 @@ async def _manage_cancel_clock_in(
     if target is None:
         raise HTTPException(status_code=400, detail="No active clock-in to cancel")
 
-    original_clock_in = target.clock_in.isoformat() if target.clock_in else None
+    original_clock_in_dt = target.clock_in
+    original_status = target.status
 
     # 진행 중 break 종료(삭제) — clock_in 시점으로 ended_at 채워서 정리
     br_rows = (await db.execute(
@@ -902,22 +909,33 @@ async def _manage_cancel_clock_in(
     target.total_break_minutes = None
     target.status = "upcoming"
 
-    # 매니저 override → "modify" 태그. 단일 row 로 기록.
-    # status 가 main 변경, clock_in 시각 정보는 reason 에 부속.
+    # Undo clock-in — 상태 전이 + 지워진 clock_in 값 전이를 각각 남긴다.
+    # 예전엔 단일 row 에 status 만 담고 시각은 reason 문자열에 욱여넣어서
+    # "무엇이 지워졌는지"가 이력 데이터가 아니라 문장으로만 남았다.
+    from app.services import attendance_timeline as tl
     user_reason = reason if reason and reason != "(no reason provided)" else None
-    composed_reason = (
-        f"Undo clock-in (clock-in was {original_clock_in})"
-        if not user_reason
-        else f"{user_reason} · clock-in was {original_clock_in}"
-    )
-    db.add(AttendanceCorrection(
+    group = tl.new_group()
+    tl.record_status(
+        db,
         attendance_id=target.id,
-        field_name="modify",
-        original_value="working",
-        corrected_value="upcoming",
-        reason=composed_reason,
-        corrected_by=manager.id,
-    ))
+        group_id=group,
+        action=tl.ACTION_REOPEN,
+        before=original_status,
+        after=target.status,
+        reason=user_reason,
+        by_user_id=manager.id,
+    )
+    tl.record(
+        db,
+        attendance_id=target.id,
+        group_id=group,
+        action=tl.ACTION_REOPEN,
+        field_name=tl.FIELD_CLOCK_IN,
+        before=tl.dt_value(original_clock_in_dt),
+        after=tl.NONE,
+        reason=user_reason,
+        by_user_id=manager.id,
+    )
     await db.flush()
     response = await attendance_service.build_response(db, target)
     await db.commit()
@@ -969,7 +987,8 @@ async def _manage_cancel_clock_out(
             ),
         )
 
-    original_clock_out = target.clock_out.isoformat() if target.clock_out else None
+    original_clock_out_dt = target.clock_out
+    original_status = target.status
 
     target.clock_out = None
     target.clock_out_timezone = None
@@ -979,22 +998,31 @@ async def _manage_cancel_clock_out(
     anoms = [a for a in (target.anomalies or []) if a != "early_clock_out"]
     target.anomalies = anoms or None
 
-    # 매니저 override (Undo Clock-out) → "modify" 태그. 단일 row 로 기록.
-    # status 가 main 변경, clock_out 시각 정보는 reason 에 부속.
+    # Undo clock-out — 상태 전이 + 지워진 clock_out 값 전이.
+    from app.services import attendance_timeline as tl
     user_reason = reason if reason and reason != "(no reason provided)" else None
-    composed_reason = (
-        f"Undo clock-out (clock-out was {original_clock_out})"
-        if not user_reason
-        else f"{user_reason} · clock-out was {original_clock_out}"
-    )
-    db.add(AttendanceCorrection(
+    group = tl.new_group()
+    tl.record_status(
+        db,
         attendance_id=target.id,
-        field_name="modify",
-        original_value="clocked_out",
-        corrected_value="working",
-        reason=composed_reason,
-        corrected_by=manager.id,
-    ))
+        group_id=group,
+        action=tl.ACTION_REOPEN,
+        before=original_status,
+        after=target.status,
+        reason=user_reason,
+        by_user_id=manager.id,
+    )
+    tl.record(
+        db,
+        attendance_id=target.id,
+        group_id=group,
+        action=tl.ACTION_REOPEN,
+        field_name=tl.FIELD_CLOCK_OUT,
+        before=tl.dt_value(original_clock_out_dt),
+        after=tl.NONE,
+        reason=user_reason,
+        by_user_id=manager.id,
+    )
     await db.flush()
     response = await attendance_service.build_response(db, target)
     await db.commit()
@@ -1011,10 +1039,14 @@ async def _manage_cancel_clock_out(
 # org 전체 PIN 이 키오스크에서 열린다.
 
 
-async def _require_pin_permission(
+async def _require_manager_permission(
     db: AsyncSession, manager: User, *codes: str
 ) -> None:
-    """manage 세션 매니저가 PIN permission 을 가졌는지 검사."""
+    """manage 세션 매니저가 해당 permission 을 가졌는지 검사.
+
+    manage 세션 자체는 SV+ 문턱이라, 그보다 높은 기능(PIN, 매장 설정)은 여기서
+    console 과 같은 permission 을 다시 요구한다.
+    """
     from app.api.deps import user_has_permissions
 
     if not await user_has_permissions(db, manager, *codes):
@@ -1022,6 +1054,13 @@ async def _require_pin_permission(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Permission required: {codes[0]}",
         )
+
+
+async def _require_pin_permission(
+    db: AsyncSession, manager: User, *codes: str
+) -> None:
+    """manage 세션 매니저가 PIN permission 을 가졌는지 검사."""
+    await _require_manager_permission(db, manager, *codes)
 
 
 async def _load_store_staff(
@@ -1238,3 +1277,50 @@ async def manage_regenerate_staff_pin(
     return ManageStaffPinRevealResponse(
         user_id=target.id, clockin_pin=target.clockin_pin
     )
+
+
+# ── Kiosk 관리자 모드 — 매장 설정 ────────────────────────────
+
+@router.get("/manage/store-settings", response_model=ManageStoreSettings)
+async def manage_get_store_settings(
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ManageStoreSettings:
+    """이 기기가 속한 매장의 설정 (resolve 값). 읽기는 manage 세션이면 허용."""
+    device, _session, _manager = auth
+    try:
+        raw = await resolve_setting(
+            db,
+            key=TIP_ENTRY_ENABLED_KEY,
+            organization_id=device.organization_id,
+            store_id=device.store_id,
+        )
+        tip_entry_enabled = bool(raw)
+    except SettingNotRegisteredError:
+        tip_entry_enabled = False
+    return ManageStoreSettings(tip_entry_enabled=tip_entry_enabled)
+
+
+@router.put("/manage/store-settings", response_model=ManageStoreSettings)
+async def manage_update_store_settings(
+    data: ManageStoreSettings,
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ManageStoreSettings:
+    """매장 설정 변경 — console 과 같은 StoreSetting row 를 쓴다.
+
+    manage 진입 문턱(SV+)보다 높은 stores:update 를 요구한다 (console 과 동일).
+    같은 매장의 다른 기기는 다음 device 폴링에서 새 값을 받는다.
+    """
+    device, _session, manager = auth
+    await _require_manager_permission(db, manager, "stores:update")
+    await upsert_store_setting(
+        db,
+        store_id=device.store_id,
+        organization_id=device.organization_id,
+        key=TIP_ENTRY_ENABLED_KEY,
+        value=data.tip_entry_enabled,
+        updated_by=manager.id,
+    )
+    await db.commit()
+    return ManageStoreSettings(tip_entry_enabled=data.tip_entry_enabled)

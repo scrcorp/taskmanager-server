@@ -10,7 +10,7 @@ Tables:
 
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Uuid
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Index, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -66,3 +66,12 @@ class Alert(Base):
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     # 생성 일시 — Alert creation timestamp (UTC, immutable)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    # 인덱스는 반드시 여기 선언한다 — 마이그레이션에만 있고 모델에 없으면
+    # autogenerate 가 "모델에 없는 인덱스" 로 보고 drop_index 를 뱉는다.
+    __table_args__ = (
+        # 알림 목록 (최신순) — user_id + created_at DESC
+        Index("ix_alerts_user_created", "user_id", text("created_at DESC")),
+        # 미읽음 뱃지 카운트 — user_id + is_read
+        Index("ix_alerts_user_unread", "user_id", "is_read"),
+    )

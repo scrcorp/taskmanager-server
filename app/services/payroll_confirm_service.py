@@ -11,6 +11,10 @@ payroll-v1-스키마-스펙.md §4/§5 + 설계방향 L1~L6, 계산 규칙 1~5.
        (판정은 rate_at 기준 — 계산 규칙 5, C8)
     ④ 대응 tip_period(같은 store+범위) status == 'confirmed' (계산 규칙 4)
     ⑤ 멀티스토어 주간 정합 (계산 규칙 2) — 아래 참조
+    ⑥ 미확인 조기 출근 강행 0건 — anomaly 'early_clock_in_override' 이면서
+       early_clock_in_confirmed_at IS NULL 인 attendance. 실제 clock-in 시각을
+       그대로 인정하므로 예정 밖 시간이 급여에 들어간다 — 확정 전 사람이 본다.
+       (매니저 대행 건은 생성 시점에 확인 처리되어 걸리지 않음)
 
 동결 (단일 트랜잭션 — 전부 성공 또는 전부 없던 일):
     preview_period 재실행 → 행별 breakdown 합계 == 스칼라 검증(불일치 시 중단)
@@ -70,10 +74,12 @@ from app.schemas.payroll import (
     VALIDATION_RATE_MISSING,
     VALIDATION_TIP_PERIOD_NOT_CONFIRMED,
     VALIDATION_UNCONFIRMED_AUTO_CLOCKOUT,
+    VALIDATION_UNCONFIRMED_EARLY_CLOCK_IN,
     ConfirmGateFailure,
     ConfirmGateItem,
     PayrollPreviewRow,
 )
+from app.services.attendance_service import ANOMALY_EARLY_CLOCK_IN_OVERRIDE
 from app.services.payroll_calc_service import payroll_calc_service
 from app.services.payroll_period_service import (
     payroll_period_service,
@@ -85,6 +91,8 @@ from app.utils.names import display_name
 
 # 자동퇴근 anomaly 코드 (attendance_cron_service 가 기록 — calc 서비스와 동일 값)
 _ANOMALY_AUTO_CLOCKED_OUT = "auto_clocked_out"
+# 조기 출근 강행 anomaly 코드 (attendance_device_service 가 기록)
+_ANOMALY_EARLY_CLOCK_IN_OVERRIDE = ANOMALY_EARLY_CLOCK_IN_OVERRIDE
 
 _DAILY_OT_MIN = CA_DAILY_OT_HOURS * 60  # 480
 _WEEKLY_OT_MIN = WEEKLY_OT_HOURS * 60  # 2400
@@ -346,7 +354,9 @@ class PayrollConfirmService:
         auto_map = await self._auto_clockout_dates(db, period)
         # ② 열린 근무
         open_map = await self._open_shift_dates(db, period)
-        missing = (set(auto_map) | set(open_map)) - set(names)
+        # ⑥ 미확인 조기 출근 강행
+        early_map = await self._early_clock_in_dates(db, period)
+        missing = (set(auto_map) | set(open_map) | set(early_map)) - set(names)
         if missing:
             names.update(await self._load_names(db, missing))
 
@@ -396,6 +406,33 @@ class PayrollConfirmService:
                         )
                         for user_id, dates in sorted(
                             open_map.items(), key=lambda kv: str(kv[0])
+                        )
+                    ],
+                )
+            )
+
+        if early_map:
+            failures.append(
+                ConfirmGateFailure(
+                    gate=VALIDATION_UNCONFIRMED_EARLY_CLOCK_IN,
+                    message=(
+                        "Early clock-ins in this period have not been reviewed. "
+                        "Staff clocked in before their shift started, so the extra "
+                        "time is included in this payroll. Open Attendance, check "
+                        "each one and confirm (or correct) the clock-in time."
+                    ),
+                    items=[
+                        ConfirmGateItem(
+                            user_id=user_id,
+                            member_name=names.get(user_id),
+                            dates=dates,
+                            message=(
+                                "Unreviewed early clock-in on: "
+                                + ", ".join(str(d) for d in dates)
+                            ),
+                        )
+                        for user_id, dates in sorted(
+                            early_map.items(), key=lambda kv: str(kv[0])
                         )
                     ],
                 )
@@ -509,6 +546,30 @@ class PayrollConfirmService:
                 Attendance.user_id.is_not(None),
                 Attendance.anomalies.contains([_ANOMALY_AUTO_CLOCKED_OUT]),
                 Attendance.auto_clock_out_confirmed_at.is_(None),
+            )
+            .distinct()
+        )
+        return self._group_dates(result.all())
+
+    async def _early_clock_in_dates(
+        self, db: AsyncSession, period: PayPeriod
+    ) -> dict[UUID, list[date]]:
+        """게이트 ⑥ — 미확인 조기 출근 강행 (user → 날짜 목록, 정렬).
+
+        실제 clock-in 시각을 그대로 인정하므로 예정 밖 시간이 급여에 들어간다.
+        확정 전에 매니저가 한 번 확인하게 만드는 게 이 게이트의 목적.
+        매니저 대행 건은 생성 시점에 확인된 상태라 여기 걸리지 않는다.
+        """
+        result = await db.execute(
+            select(Attendance.user_id, Attendance.work_date)
+            .where(
+                Attendance.store_id == period.store_id,
+                Attendance.work_date >= period.start_date,
+                Attendance.work_date <= period.end_date,
+                Attendance.status != "cancelled",
+                Attendance.user_id.is_not(None),
+                Attendance.anomalies.contains([_ANOMALY_EARLY_CLOCK_IN_OVERRIDE]),
+                Attendance.early_clock_in_confirmed_at.is_(None),
             )
             .distinct()
         )

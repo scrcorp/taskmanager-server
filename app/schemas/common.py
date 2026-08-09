@@ -786,6 +786,10 @@ class AttendanceResponse(BaseModel):
     # 콘솔이 "unconfirmed" 배지를 표시한다. (Auto clock-out confirmation state)
     auto_clock_out_confirmed_at: datetime | None = None
     auto_clock_out_confirmed_by: str | None = None  # 확인자 UUID 문자열 (Confirmer UUID)
+    # 조기 출근 강행 확인 상태. early_clock_in_override anomaly 인데 confirmed_at 이
+    # None 이면 콘솔이 "needs confirmation" 배지를 표시하고 payroll 마감이 막힌다.
+    early_clock_in_confirmed_at: datetime | None = None
+    early_clock_in_confirmed_by: str | None = None  # 확인자 UUID 문자열 (Confirmer UUID)
     # 수정 이력 — 상세 조회 시 함께 반환. 목록 응답에선 빈 리스트.
     # Correction history attached on detail responses; empty in list endpoints.
     corrections: list[dict] = []
@@ -854,8 +858,14 @@ class AttendanceCorrectionResponse(BaseModel):
     """
 
     id: str  # 수정 이력 UUID 문자열 (Correction UUID as string)
-    field_name: str  # 수정된 필드 (Corrected field name)
-    original_value: str | None  # 수정 전 값 (Original value, may be null)
+    # 액션 그룹 — 한 사용자 액션이 만든 행들을 콘솔이 한 카드로 묶는 키.
+    # null = 이 필드 도입 이전 레거시 행 (콘솔이 시간 근접 휴리스틱으로 fallback).
+    group_id: str | None = None
+    action: str | None = None  # 카드 태그 — 무엇을 했나 (clock_in / modify / break_added …)
+    field_name: str  # 전이 대상 항목 — 무엇이 바뀌었나 (status / clock_in / break_type …)
+    target_type: str | None = None  # "attendance" | "break". null = 레거시(= attendance)
+    target_id: str | None = None  # 하위 엔터티 식별자 (break 세션 id). 본체 전이면 null
+    original_value: str | None  # 전이 전 값. 신규 행은 항상 채워짐 (레거시만 null)
     corrected_value: str  # 수정 후 값 (Corrected value)
     reason: str | None  # 수정 사유, optional (Reason for correction, may be null)
     corrected_by: str | None = None  # 수정자 UUID 문자열 (system actor 면 NULL)
@@ -875,6 +885,9 @@ class BreakSessionCreateRequest(BaseModel):
     started_at: datetime
     ended_at: datetime | None = None
     break_type: str  # paid_10min | unpaid_meal (구: paid_short | unpaid_long)
+    # 사유는 선택 — 콘솔이 preset 으로 한 번에 넣을 수 있게 하되 강제하진 않는다.
+    # 비면 이력에 "(no reason)" 으로 남는다.
+    reason: str | None = None
 
 
 class BreakSessionUpdateRequest(BaseModel):
@@ -888,6 +901,7 @@ class BreakSessionUpdateRequest(BaseModel):
     ended_at: datetime | None = None
     break_type: str | None = None
     clear_ended_at: bool = False
+    reason: str | None = None  # 선택 사유 (BreakSessionCreateRequest 와 동일 규칙)
 
 
 class BreakSessionResponse(BaseModel):
