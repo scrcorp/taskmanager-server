@@ -130,6 +130,10 @@ class Attendance(Base):
     auto_clock_out_confirmed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # 자동퇴근 확인 일시 — When the auto clock-out was confirmed (UTC)
     auto_clock_out_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 조기 출근 강행 확인자 FK — Manager/SV who reviewed the early clock-in override
+    early_clock_in_confirmed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # 조기 출근 강행 확인 일시 — payroll 마감 게이트의 판정 근거 (UTC)
+    early_clock_in_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)

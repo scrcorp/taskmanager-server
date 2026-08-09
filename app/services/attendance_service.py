@@ -975,6 +975,52 @@ class AttendanceService:
         await db.refresh(attendance)
         return attendance
 
+    # ─── 조기 출근 강행 확인 (payroll 마감 게이트 ⑥의 일상 플로우) ─────────
+
+    async def confirm_early_clock_in(
+        self,
+        db: AsyncSession,
+        *,
+        attendance_id: UUID,
+        organization_id: UUID,
+        confirmed_by: UUID,
+    ) -> Attendance:
+        """조기 출근 강행(early_clock_in_override) 건을 매니저가 확인 처리.
+
+        스케줄보다 이른 출근은 예정 밖 임금으로 이어지므로, 실제 clock-in 시각을
+        그대로 인정하는 대신 급여 확정 전에 사람이 한 번 본다. 이 확인 상태가
+        payroll 마감 게이트의 판정 근거다 (자동퇴근 확인과 동일한 계약).
+
+        규칙:
+            - override anomaly 가 없는 record 는 400 (확인할 게 없음)
+            - 이미 확인된 record 재확인은 **no-op (멱등)** — 최초 확인자/시각 보존
+            - 매니저 대행으로 찍힌 건은 애초에 확인된 상태로 생성된다
+
+        Raises:
+            NotFoundError: attendance 없음/타 org
+            BadRequestError: override anomaly 가 아닌 record
+        """
+        attendance = await self.get_attendance(db, attendance_id, organization_id)
+
+        if ANOMALY_EARLY_CLOCK_IN_OVERRIDE not in (attendance.anomalies or []):
+            raise BadRequestError(
+                "This attendance was not an early clock-in — there is nothing to confirm."
+            )
+
+        if attendance.early_clock_in_confirmed_at is not None:
+            return attendance
+
+        attendance.early_clock_in_confirmed_by = confirmed_by
+        attendance.early_clock_in_confirmed_at = datetime.now(timezone.utc)
+        await db.flush()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+        await db.refresh(attendance)
+        return attendance
+
     async def get_corrections(
         self,
         db: AsyncSession,
@@ -1206,6 +1252,12 @@ class AttendanceService:
             "auto_clock_out_confirmed_by": (
                 str(attendance.auto_clock_out_confirmed_by)
                 if attendance.auto_clock_out_confirmed_by is not None else None
+            ),
+            # 조기 출근 강행 확인 상태 (콘솔 미확인 배지용). 미확인이면 둘 다 None.
+            "early_clock_in_confirmed_at": attendance.early_clock_in_confirmed_at,
+            "early_clock_in_confirmed_by": (
+                str(attendance.early_clock_in_confirmed_by)
+                if attendance.early_clock_in_confirmed_by is not None else None
             ),
             "created_at": attendance.created_at,
         }

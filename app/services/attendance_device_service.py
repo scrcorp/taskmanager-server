@@ -991,6 +991,10 @@ class AttendanceDeviceService:
                         if a not in existing_anoms:
                             existing_anoms.append(a)
                 target.anomalies = existing_anoms or None
+                if early_clock_in_override and early_override_preapproved:
+                    # 매니저가 그 자리에서 승인한 조기 출근 — 라벨은 남기되 확인은 끝난 것.
+                    target.early_clock_in_confirmed_by = manager_user_id
+                    target.early_clock_in_confirmed_at = now
                 await db.flush()
                 await db.refresh(target)
                 attendance = target
@@ -1008,6 +1012,16 @@ class AttendanceDeviceService:
                         "clock_in_timezone": store_tz,
                         "status": status_val,
                         "anomalies": anomalies,
+                        "early_clock_in_confirmed_by": (
+                            manager_user_id
+                            if early_clock_in_override and early_override_preapproved
+                            else None
+                        ),
+                        "early_clock_in_confirmed_at": (
+                            now
+                            if early_clock_in_override and early_override_preapproved
+                            else None
+                        ),
                     },
                 )
         elif action == "break_start":
@@ -1206,12 +1220,125 @@ class AttendanceDeviceService:
             )
 
         await self.touch_last_seen(db, device)
+
+        # 조기 출근 강행 알림 — 직원이 스스로 찍은 건만. 매니저 대행은 그 매니저가
+        # 이미 알고 있으므로 알리지 않는다. 실패해도 출근 자체는 성립해야 한다.
+        notify_early = (
+            action == "clock_in"
+            and early_clock_in_override
+            and not early_override_preapproved
+        )
+
         try:
             await db.commit()
-            return attendance
         except Exception:
             await db.rollback()
             raise
+
+        if notify_early:
+            await self._notify_early_clock_in(
+                db,
+                attendance=attendance,
+                device=device,
+                user=user,
+                store_tz=store_tz,
+                scheduled_start=scheduled_start,
+                reason=reason or "",
+            )
+        return attendance
+
+    async def _notify_early_clock_in(
+        self,
+        db: AsyncSession,
+        *,
+        attendance: Attendance,
+        device: AttendanceDevice,
+        user: User,
+        store_tz: str,
+        scheduled_start: datetime | None,
+        reason: str,
+    ) -> None:
+        """조기 출근 강행 in-app 알림 + email (best-effort).
+
+        알림 실패가 출근 기록을 되돌리면 안 된다 — 전체를 삼킨다.
+        """
+        try:
+            from zoneinfo import ZoneInfo as _Zone
+
+            from app.services.alert_service import alert_service
+            from app.utils.names import display_name
+
+            if scheduled_start is None or attendance.clock_in is None:
+                return
+            minutes_early = max(
+                0,
+                int(
+                    (
+                        scheduled_start
+                        - attendance.clock_in.replace(second=0, microsecond=0)
+                    ).total_seconds()
+                    / 60
+                ),
+            )
+            staff_name = display_name(user)
+
+            await alert_service.create_for_early_clock_in(
+                db,
+                attendance_id=attendance.id,
+                organization_id=device.organization_id,
+                store_id=attendance.store_id,
+                staff_user_id=user.id,
+                staff_name=staff_name,
+                minutes_early=minutes_early,
+            )
+            await db.commit()
+
+            # email — 사용자 선호 가드는 should_send_email 이 담당 (checklist 와 동일).
+            import asyncio
+
+            from app.models.organization import Store as _Store
+            from app.models.permission import Permission, RolePermission
+            from app.models.user import Role
+            from app.utils.email import send_email
+            from app.utils.email_templates import build_early_clock_in_email
+
+            store_name = await db.scalar(
+                select(_Store.name).where(_Store.id == attendance.store_id)
+            )
+            recipients = await db.execute(
+                select(User.id, User.email)
+                .join(Role, User.role_id == Role.id)
+                .join(RolePermission, Role.id == RolePermission.role_id)
+                .join(Permission, RolePermission.permission_id == Permission.id)
+                .where(User.organization_id == device.organization_id)
+                .where(User.is_active.is_(True))
+                .where(Permission.code == "schedules:update")
+                .where(User.id != user.id)
+                .where(User.email.is_not(None))
+                .distinct()
+            )
+            tz = _Zone(store_tz)
+            subject, html = build_early_clock_in_email(
+                staff_name=staff_name,
+                store_name=store_name or "your store",
+                minutes_early=minutes_early,
+                scheduled_start_label=scheduled_start.astimezone(tz).strftime(
+                    "%-I:%M %p"
+                ),
+                clock_in_label=attendance.clock_in.astimezone(tz).strftime("%-I:%M %p"),
+                reason=reason or "(no reason provided)",
+            )
+            for uid, email in recipients.all():
+                if not email:
+                    continue
+                if not await alert_service.should_send_email(
+                    db, uid, "early_clock_in_override"
+                ):
+                    continue
+                asyncio.create_task(send_email(to=email, subject=subject, html=html))
+        except Exception:
+            # 알림 실패는 출근 성립에 영향 없음
+            pass
 
     async def _sum_break_minutes(
         self, db: AsyncSession, attendance_id: UUID

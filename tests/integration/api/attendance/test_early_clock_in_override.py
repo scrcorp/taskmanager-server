@@ -180,6 +180,8 @@ async def test_early_clock_in_with_reason_succeeds_and_is_labeled(
     att = await _latest_attendance(test_user["id"])
     assert att.clock_in is not None
     assert ANOMALY_EARLY_CLOCK_IN_OVERRIDE in (att.anomalies or [])
+    # 직원이 스스로 강행한 건이므로 아직 미확인 — payroll 확정 전에 매니저가 봐야 한다.
+    assert att.early_clock_in_confirmed_at is None
 
     # 사유는 Activity History(attendance_corrections) 에 남아야 매니저가 볼 수 있다.
     async with async_session() as db:
@@ -237,6 +239,10 @@ async def test_manager_override_is_labeled_but_needs_no_reason(
 
     assert res.status_code == 200, res.text
     assert ANOMALY_EARLY_CLOCK_IN_OVERRIDE in (res.json().get("anomalies") or [])
+    # 확인은 이미 끝난 상태 — 매니저가 그 자리에서 승인했으므로 payroll 게이트에
+    # 다시 걸리지 않는다.
+    att = await _latest_attendance(test_user["id"])
+    assert att.early_clock_in_confirmed_at is not None
 
 
 async def test_blank_reason_is_not_accepted(

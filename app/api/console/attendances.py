@@ -263,6 +263,34 @@ async def confirm_auto_clockout(
     return await attendance_service.build_response(db, attendance)
 
 
+@router.post(
+    "/{attendance_id}/confirm-early-clockin",
+    response_model=AttendanceResponse,
+)
+async def confirm_early_clockin(
+    attendance_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> dict:
+    """조기 출근 강행(early_clock_in_override) 건을 매니저가 확인 처리합니다.
+
+    Confirm an early clock-in override. Sets early_clock_in_confirmed_by/at —
+    the basis for the payroll close gate (zero unconfirmed early clock-ins).
+
+    동작:
+        - override anomaly 가 없는 record → 400
+        - 이미 확인된 record → **no-op 멱등 성공** (최초 확인자/시각 보존)
+        - 매니저 대행으로 찍힌 건은 생성 시점에 이미 확인 상태다
+    """
+    attendance = await attendance_service.confirm_early_clock_in(
+        db,
+        attendance_id=attendance_id,
+        organization_id=current_user.organization_id,
+        confirmed_by=current_user.id,
+    )
+    return await attendance_service.build_response(db, attendance)
+
+
 @router.patch(
     "/{attendance_id}/corrections/{correction_id}",
     response_model=AttendanceCorrectionResponse,
