@@ -86,4 +86,7 @@ async def break_end(
     device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    return await _perform_action(db, device, data.pin, data.user_id, "break_end")
+    # reason 은 break 초과 사유 — unpaid_meal 35분 이상이면 필수 (break_end_policy).
+    return await _perform_action(
+        db, device, data.pin, data.user_id, "break_end", reason=data.reason,
+    )

@@ -21,6 +21,10 @@ from app.schemas.settings import (
     StaffSettingResponse, StaffSettingUpsert,
     StoreSettingResponse, StoreSettingUpsert,
 )
+# 라우터 함수와 이름이 겹치므로 alias — 안 하면 라우터가 자기 자신을 호출한다.
+from app.services.store_setting_service import (
+    upsert_store_setting as upsert_store_setting_row,
+)
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 
@@ -229,38 +233,15 @@ async def upsert_store_setting(
 ) -> StoreSettingResponse:
     """매장 설정 upsert. registry + force_locked 체크."""
     await _guard_store(db, current_user, store_id)
-    registry = await db.scalar(select(SettingsRegistry).where(SettingsRegistry.key == data.key))
-    if registry is None:
-        raise BadRequestError(f"Setting key '{data.key}' is not registered")
-    if "store" not in (registry.levels or []):
-        raise BadRequestError(f"Setting '{data.key}' does not allow store-level override")
-
-    # Org level force_locked 체크
-    org_setting = await db.scalar(
-        select(OrgSetting).where(
-            OrgSetting.organization_id == current_user.organization_id,
-            OrgSetting.key == data.key,
-        )
+    # 검증 + upsert 는 공통 관문 — 키오스크 manage 모드도 같은 함수를 쓴다.
+    existing = await upsert_store_setting_row(
+        db,
+        store_id=store_id,
+        organization_id=current_user.organization_id,
+        key=data.key,
+        value=data.value,
+        updated_by=current_user.id,
     )
-    if org_setting and org_setting.force_locked:
-        raise ForbiddenError(f"Setting '{data.key}' is locked at organization level")
-
-    existing = await db.scalar(
-        select(StoreSetting).where(
-            StoreSetting.store_id == store_id,
-            StoreSetting.key == data.key,
-        )
-    )
-    if existing is None:
-        existing = StoreSetting(
-            store_id=store_id, key=data.key, value=data.value,
-            updated_by=current_user.id,
-        )
-        db.add(existing)
-    else:
-        existing.value = data.value
-        existing.updated_by = current_user.id
-        existing.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(existing)
     return StoreSettingResponse(

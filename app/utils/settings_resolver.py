@@ -23,6 +23,11 @@ class SettingNotRegisteredError(Exception):
     """settings_registry에 정의되지 않은 키를 조회할 때 발생."""
 
 
+# 여러 모듈(device/manage 라우터, console)이 공유하는 키 — 오타 방지용 상수.
+# clock-out 시 tip 입력 화면 노출 여부 (store 설정, 기본 off).
+TIP_ENTRY_ENABLED_KEY = "attendance.tip_entry_enabled"
+
+
 async def resolve_setting(
     db: AsyncSession,
     key: str,

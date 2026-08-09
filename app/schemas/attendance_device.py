@@ -41,6 +41,9 @@ class DeviceMeResponse(BaseModel):
     # 워크인 허용 여부 (store 설정 resolve, store 없으면 false). 키오스크가
     # 스케줄 없이도 clock-in 버튼을 띄울지 판단하는 데 사용.
     walk_in_allowed: bool = False
+    # clock-out 시 tip 입력 화면 노출 여부 (store 설정 resolve, store 없으면 false).
+    # 같은 매장의 모든 기기가 같은 값을 본다 — 한 기기에서 끄면 폴링으로 전파.
+    tip_entry_enabled: bool = False
     registered_at: datetime
     last_seen_at: datetime | None
 
@@ -286,6 +289,17 @@ class ManageSessionResponse(BaseModel):
     expires_at: datetime
     can_read_pins: bool = False
     can_update_pins: bool = False
+    # Store Settings 메뉴 노출 여부 — console 과 동일한 stores:update 요구.
+    can_manage_store_settings: bool = False
+
+
+class ManageStoreSettings(BaseModel):
+    """GET/PUT /attendance/manage/store-settings — 기기가 아니라 매장에 걸리는 설정.
+
+    같은 store 의 모든 기기가 같은 값을 본다. console 의 store 설정과 동일한
+    StoreSetting row 를 읽고 쓰므로 두 화면의 값이 항상 일치한다.
+    """
+    tip_entry_enabled: bool
 
 
 # ── Kiosk 관리자 모드 — 직원 PIN 관리 ──────────────────────

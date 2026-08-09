@@ -40,13 +40,19 @@ from app.schemas.attendance_device import (
     ManageStaffPinRevealResponse,
     ManageStaffPinRow,
     ManageStaffPinUpdateRequest,
+    ManageStoreSettings,
     AdminStatusChangeRequest,
     ManageWorkRoleOption,
 )
 from app.schemas.schedule import KIOSK_STEP_MINUTES
 from app.services.attendance_device_service import attendance_device_service
 from app.services.attendance_service import attendance_service, compute_state_and_anomalies
-from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
+from app.services.store_setting_service import upsert_store_setting
+from app.utils.settings_resolver import (
+    TIP_ENTRY_ENABLED_KEY,
+    SettingNotRegisteredError,
+    resolve_setting,
+)
 
 
 router: APIRouter = APIRouter()
@@ -100,6 +106,8 @@ async def manage_open_session(
 
     can_read_pins = await user_has_permissions(db, manager, "clockin_pin:read")
     can_update_pins = await user_has_permissions(db, manager, "clockin_pin:update")
+    # Store Settings 도 같은 방식 — manage 진입(SV+)과 별개로 console 과 동일한 문턱.
+    can_manage_store_settings = await user_has_permissions(db, manager, "stores:update")
 
     return ManageSessionResponse(
         manage_token=session.token,
@@ -108,6 +116,7 @@ async def manage_open_session(
         expires_at=session.expires_at,
         can_read_pins=can_read_pins,
         can_update_pins=can_update_pins,
+        can_manage_store_settings=can_manage_store_settings,
     )
 
 
@@ -1011,10 +1020,14 @@ async def _manage_cancel_clock_out(
 # org 전체 PIN 이 키오스크에서 열린다.
 
 
-async def _require_pin_permission(
+async def _require_manager_permission(
     db: AsyncSession, manager: User, *codes: str
 ) -> None:
-    """manage 세션 매니저가 PIN permission 을 가졌는지 검사."""
+    """manage 세션 매니저가 해당 permission 을 가졌는지 검사.
+
+    manage 세션 자체는 SV+ 문턱이라, 그보다 높은 기능(PIN, 매장 설정)은 여기서
+    console 과 같은 permission 을 다시 요구한다.
+    """
     from app.api.deps import user_has_permissions
 
     if not await user_has_permissions(db, manager, *codes):
@@ -1022,6 +1035,13 @@ async def _require_pin_permission(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Permission required: {codes[0]}",
         )
+
+
+async def _require_pin_permission(
+    db: AsyncSession, manager: User, *codes: str
+) -> None:
+    """manage 세션 매니저가 PIN permission 을 가졌는지 검사."""
+    await _require_manager_permission(db, manager, *codes)
 
 
 async def _load_store_staff(
@@ -1238,3 +1258,50 @@ async def manage_regenerate_staff_pin(
     return ManageStaffPinRevealResponse(
         user_id=target.id, clockin_pin=target.clockin_pin
     )
+
+
+# ── Kiosk 관리자 모드 — 매장 설정 ────────────────────────────
+
+@router.get("/manage/store-settings", response_model=ManageStoreSettings)
+async def manage_get_store_settings(
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ManageStoreSettings:
+    """이 기기가 속한 매장의 설정 (resolve 값). 읽기는 manage 세션이면 허용."""
+    device, _session, _manager = auth
+    try:
+        raw = await resolve_setting(
+            db,
+            key=TIP_ENTRY_ENABLED_KEY,
+            organization_id=device.organization_id,
+            store_id=device.store_id,
+        )
+        tip_entry_enabled = bool(raw)
+    except SettingNotRegisteredError:
+        tip_entry_enabled = False
+    return ManageStoreSettings(tip_entry_enabled=tip_entry_enabled)
+
+
+@router.put("/manage/store-settings", response_model=ManageStoreSettings)
+async def manage_update_store_settings(
+    data: ManageStoreSettings,
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ManageStoreSettings:
+    """매장 설정 변경 — console 과 같은 StoreSetting row 를 쓴다.
+
+    manage 진입 문턱(SV+)보다 높은 stores:update 를 요구한다 (console 과 동일).
+    같은 매장의 다른 기기는 다음 device 폴링에서 새 값을 받는다.
+    """
+    device, _session, manager = auth
+    await _require_manager_permission(db, manager, "stores:update")
+    await upsert_store_setting(
+        db,
+        store_id=device.store_id,
+        organization_id=device.organization_id,
+        key=TIP_ENTRY_ENABLED_KEY,
+        value=data.tip_entry_enabled,
+        updated_by=manager.id,
+    )
+    await db.commit()
+    return ManageStoreSettings(tip_entry_enabled=data.tip_entry_enabled)
