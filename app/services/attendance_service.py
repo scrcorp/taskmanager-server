@@ -11,7 +11,7 @@ from typing import Sequence
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attendance import Attendance, AttendanceCorrection, QRCode
@@ -28,7 +28,7 @@ from app.models.schedule import Schedule
 from app.models.user import User
 from app.repositories.attendance_repository import attendance_repository, qr_code_repository
 from app.utils.exceptions import BadRequestError, NotFoundError
-from app.utils.timezone import resolve_schedule_instants
+from app.utils.timezone import minutes_between, resolve_schedule_instants
 
 
 # 지각/조퇴/휴식 anomaly 임계치 (분 단위) — defaults
@@ -97,9 +97,20 @@ def compute_effective_status(
     return "upcoming"
 
 
+# 조기 clock-in override — 예정보다 이른 출근을 사유와 함께 강제로 찍은 기록.
+ANOMALY_EARLY_CLOCK_IN_OVERRIDE = "early_clock_in_override"
+
 # manage UI 재설계(Issue 10) 가 쓰는 anomaly 표시 후보 — server 판정 예외만.
 # (soon 은 anomaly 아님 → 앱이 start_time 으로 자체 계산, 여기서 안 냄)
-DISPLAY_ANOMALIES = ("late", "no_show", "early_leave", "overtime", "no_break")
+DISPLAY_ANOMALIES = (
+    "late",
+    "no_show",
+    "early_leave",
+    "overtime",
+    "no_break",
+    "early_clock_out",
+    ANOMALY_EARLY_CLOCK_IN_OVERRIDE,
+)
 
 
 def compute_state_and_anomalies(
@@ -125,7 +136,9 @@ def compute_state_and_anomalies(
     anomaly 유효성 규칙 (출퇴근 사실과 모순되는 건 제거):
       - no_show: 미출근(clock_in 없음)에서만 + **단독** (출근 안 했으니 다른 anomaly 공존 불가)
       - overtime: clock_in 있어야 (출근해야 초과근무)
-      - no_break / early_leave: clock_out 있어야 (퇴근해야 휴식없음/조기퇴근 판정 가능)
+      - no_break / early_leave / early_clock_out: clock_out 있어야
+        (퇴근해야 휴식없음/조기퇴근 판정 가능)
+      - early_clock_in_override: clock_in 있어야 (출근해야 조기출근 강행 성립)
       - late: 미출근 지각 / 늦은 출근 모두 가능 (no_show 와만 배타)
 
     soon 은 여기서 내지 않는다 (앱이 자체 판단).
@@ -168,7 +181,9 @@ def compute_state_and_anomalies(
             continue  # 출근 기록 있는데 no_show 면 모순 → 제거 (no_show 는 위에서 단독 처리)
         if a == "overtime" and not has_clock_in:
             continue  # 출근 안 했으면 overtime 불가
-        if a in ("no_break", "early_leave") and not has_clock_out:
+        if a == ANOMALY_EARLY_CLOCK_IN_OVERRIDE and not has_clock_in:
+            continue  # 출근 안 했으면 조기출근 강행 불가
+        if a in ("no_break", "early_leave", "early_clock_out") and not has_clock_out:
             continue  # 퇴근 안 했으면 판정 불가
         if a not in anomalies:
             anomalies.append(a)
@@ -516,8 +531,9 @@ class AttendanceService:
 
             # 휴식 시간 계산 — Calculate break minutes
             if attendance.break_start is not None:
-                break_delta = now - attendance.break_start
-                attendance.total_break_minutes = int(break_delta.total_seconds() / 60)
+                attendance.total_break_minutes = minutes_between(
+                    attendance.break_start, now
+                )
 
             await db.flush()
             await db.refresh(attendance)
@@ -535,8 +551,9 @@ class AttendanceService:
             # 휴식 중이면 먼저 휴식 종료 — End break if currently on break
             if attendance.status == "on_break" and attendance.break_start is not None:
                 attendance.break_end = now
-                break_delta = now - attendance.break_start
-                attendance.total_break_minutes = int(break_delta.total_seconds() / 60)
+                attendance.total_break_minutes = minutes_between(
+                    attendance.break_start, now
+                )
 
             attendance.clock_out = now
             attendance.clock_out_timezone = client_timezone
@@ -544,8 +561,9 @@ class AttendanceService:
 
             # 총 근무 시간 계산 — Calculate total work minutes
             if attendance.clock_in is not None:
-                work_delta = now - attendance.clock_in
-                attendance.total_work_minutes = int(work_delta.total_seconds() / 60)
+                attendance.total_work_minutes = minutes_between(
+                    attendance.clock_in, now
+                )
 
             # ─── Anomaly 감지 ───
             schedule = None
@@ -748,21 +766,30 @@ class AttendanceService:
                 "Correct clock-in first, then clock-out."
             )
 
-        # 기존 값 가져오기 — Get original value
-        original_value: str | None = None
+        # 기존 값 가져오기 — Get original value.
+        # 비어 있었으면 NULL 이 아니라 센티널을 남긴다: "값이 없었다"도 엄연한 이전 상태다.
+        from app.services import attendance_timeline as tl
+
         original_raw = getattr(attendance, field_name, None)
-        if original_raw is not None:
-            if field_name in time_fields:
-                original_value = original_raw.isoformat()
-            else:
-                original_value = str(original_raw)
+        if original_raw is None:
+            original_value = tl.EMPTY if field_name == "note" else tl.NONE
+        elif field_name in time_fields:
+            original_value = original_raw.isoformat()
+        else:
+            original_value = tl.text_value(str(original_raw))
+
+        before_status = attendance.status
+        group = tl.new_group()
 
         # 수정 이력 생성 — Create correction record
         correction: AttendanceCorrection = await attendance_repository.create_correction(
             db,
             {
                 "attendance_id": attendance_id,
+                "group_id": group,
+                "action": tl.ACTION_MODIFY,
                 "field_name": field_name,
+                "target_type": tl.TARGET_ATTENDANCE,
                 "original_value": original_value,
                 "corrected_value": corrected_value,
                 "reason": reason,
@@ -782,12 +809,14 @@ class AttendanceService:
 
         # 시간 재계산 — Recalculate minutes if relevant
         if field_name in ("clock_in", "clock_out") and attendance.clock_in and attendance.clock_out:
-            work_delta = attendance.clock_out - attendance.clock_in
-            attendance.total_work_minutes = int(work_delta.total_seconds() / 60)
+            attendance.total_work_minutes = minutes_between(
+                attendance.clock_in, attendance.clock_out
+            )
 
         if field_name in ("break_start", "break_end") and attendance.break_start and attendance.break_end:
-            break_delta = attendance.break_end - attendance.break_start
-            attendance.total_break_minutes = int(break_delta.total_seconds() / 60)
+            attendance.total_break_minutes = minutes_between(
+                attendance.break_start, attendance.break_end
+            )
 
         # no_show 자동 해제 — clock_in 이 채워지면 매니저가 직접 출근 인정한 것으로 간주.
         # clock_out 도 있으면 clocked_out, 없으면 working 으로 전환. anomalies 에서 no_show 제거.
@@ -813,6 +842,19 @@ class AttendanceService:
         # anomaly 'auto_clocked_out' 는 이력(자동퇴근이 있었다는 사실)이므로 지우지 않는다.
         self._mark_auto_clock_out_confirmed_if_applicable(
             attendance, field_name, corrected_by
+        )
+
+        # 정정의 부수효과로 status 가 바뀌었으면 그 전이도 같은 그룹에 남긴다 —
+        # 값만 고쳤는데 상태가 조용히 따라 바뀌는 게 이력에 안 보이면 안 된다.
+        tl.record_status(
+            db,
+            attendance_id=attendance_id,
+            group_id=group,
+            action=tl.ACTION_MODIFY,
+            before=before_status,
+            after=attendance.status,
+            reason=reason,
+            by_user_id=corrected_by,
         )
 
         await db.flush()
@@ -852,6 +894,14 @@ class AttendanceService:
             raise NotFoundError("Correction record not found")
 
         correction.reason = reason
+        # 한 액션이 여러 행으로 쪼개져도 콘솔은 카드 하나에 사유 하나를 보여준다.
+        # 한 행만 고치면 카드 안에서 사유가 갈리므로 같은 그룹 전체를 함께 갱신한다.
+        if correction.group_id is not None:
+            await db.execute(
+                update(AttendanceCorrection)
+                .where(AttendanceCorrection.group_id == correction.group_id)
+                .values(reason=reason)
+            )
         await db.flush()
         await db.commit()
         await db.refresh(correction)
@@ -916,6 +966,52 @@ class AttendanceService:
 
         attendance.auto_clock_out_confirmed_by = confirmed_by
         attendance.auto_clock_out_confirmed_at = datetime.now(timezone.utc)
+        await db.flush()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+        await db.refresh(attendance)
+        return attendance
+
+    # ─── 조기 출근 강행 확인 (payroll 마감 게이트 ⑥의 일상 플로우) ─────────
+
+    async def confirm_early_clock_in(
+        self,
+        db: AsyncSession,
+        *,
+        attendance_id: UUID,
+        organization_id: UUID,
+        confirmed_by: UUID,
+    ) -> Attendance:
+        """조기 출근 강행(early_clock_in_override) 건을 매니저가 확인 처리.
+
+        스케줄보다 이른 출근은 예정 밖 임금으로 이어지므로, 실제 clock-in 시각을
+        그대로 인정하는 대신 급여 확정 전에 사람이 한 번 본다. 이 확인 상태가
+        payroll 마감 게이트의 판정 근거다 (자동퇴근 확인과 동일한 계약).
+
+        규칙:
+            - override anomaly 가 없는 record 는 400 (확인할 게 없음)
+            - 이미 확인된 record 재확인은 **no-op (멱등)** — 최초 확인자/시각 보존
+            - 매니저 대행으로 찍힌 건은 애초에 확인된 상태로 생성된다
+
+        Raises:
+            NotFoundError: attendance 없음/타 org
+            BadRequestError: override anomaly 가 아닌 record
+        """
+        attendance = await self.get_attendance(db, attendance_id, organization_id)
+
+        if ANOMALY_EARLY_CLOCK_IN_OVERRIDE not in (attendance.anomalies or []):
+            raise BadRequestError(
+                "This attendance was not an early clock-in — there is nothing to confirm."
+            )
+
+        if attendance.early_clock_in_confirmed_at is not None:
+            return attendance
+
+        attendance.early_clock_in_confirmed_by = confirmed_by
+        attendance.early_clock_in_confirmed_at = datetime.now(timezone.utc)
         await db.flush()
         try:
             await db.commit()
@@ -1157,6 +1253,12 @@ class AttendanceService:
                 str(attendance.auto_clock_out_confirmed_by)
                 if attendance.auto_clock_out_confirmed_by is not None else None
             ),
+            # 조기 출근 강행 확인 상태 (콘솔 미확인 배지용). 미확인이면 둘 다 None.
+            "early_clock_in_confirmed_at": attendance.early_clock_in_confirmed_at,
+            "early_clock_in_confirmed_by": (
+                str(attendance.early_clock_in_confirmed_by)
+                if attendance.early_clock_in_confirmed_by is not None else None
+            ),
             "created_at": attendance.created_at,
         }
 
@@ -1189,7 +1291,11 @@ class AttendanceService:
 
         return {
             "id": str(correction.id),
+            "group_id": str(correction.group_id) if correction.group_id else None,
+            "action": correction.action,
             "field_name": correction.field_name,
+            "target_type": correction.target_type,
+            "target_id": str(correction.target_id) if correction.target_id else None,
             "original_value": correction.original_value,
             "corrected_value": correction.corrected_value,
             "reason": correction.reason,
@@ -1433,6 +1539,8 @@ class AttendanceService:
         started_at: datetime,
         ended_at: datetime | None,
         break_type: str,
+        reason: str | None = None,
+        by_user_id: UUID | None = None,
     ) -> AttendanceBreak:
         """admin 이 새 break 세션을 attendance 에 추가."""
         attendance = await self.get_attendance(db, attendance_id, organization_id)
@@ -1464,7 +1572,7 @@ class AttendanceService:
 
         duration: int | None = None
         if ended_at is not None:
-            duration = max(0, int((ended_at - started_at).total_seconds() / 60))
+            duration = minutes_between(started_at, ended_at)
 
         new_break = AttendanceBreak(
             attendance_id=attendance_id,
@@ -1477,6 +1585,21 @@ class AttendanceService:
         await db.flush()
 
         await self._recalculate_break_aggregates(db, attendance)
+
+        # 휴식 세션 추가 이력 — 이전엔 이 경로가 이력을 아무것도 남기지 않아
+        # 콘솔에서 휴식을 고쳐도 Activity History 에 흔적이 없었다.
+        from app.services import attendance_timeline as tl
+        tl.record_break_snapshot(
+            db,
+            attendance_id=attendance.id,
+            group_id=tl.new_group(),
+            action=tl.ACTION_BREAK_ADDED,
+            break_id=new_break.id,
+            before=(None, None, None),
+            after=(new_break.started_at, new_break.ended_at, new_break.break_type),
+            reason=reason,
+            by_user_id=by_user_id,
+        )
         await db.flush()
 
         try:
@@ -1497,6 +1620,8 @@ class AttendanceService:
         ended_at: datetime | None,
         break_type: str | None,
         clear_ended_at: bool,
+        reason: str | None = None,
+        by_user_id: UUID | None = None,
     ) -> AttendanceBreak:
         """admin 이 기존 break 세션을 수정.
 
@@ -1545,16 +1670,32 @@ class AttendanceService:
         sessions = list(existing.scalars().all())
         self._check_overlap(sessions, new_started, new_ended, exclude_id=break_id)
 
+        # 변경 전 스냅샷 — 이력의 before 로 쓴다.
+        before_snapshot = (target.started_at, target.ended_at, target.break_type)
+
         target.started_at = new_started
         target.ended_at = new_ended
         target.break_type = new_type
         target.duration_minutes = (
             None if new_ended is None
-            else max(0, int((new_ended - new_started).total_seconds() / 60))
+            else minutes_between(new_started, new_ended)
         )
         await db.flush()
 
         await self._recalculate_break_aggregates(db, attendance)
+
+        from app.services import attendance_timeline as tl
+        tl.record_break_snapshot(
+            db,
+            attendance_id=attendance.id,
+            group_id=tl.new_group(),
+            action=tl.ACTION_BREAK_UPDATED,
+            break_id=target.id,
+            before=before_snapshot,
+            after=(target.started_at, target.ended_at, target.break_type),
+            reason=reason,
+            by_user_id=by_user_id,
+        )
         await db.flush()
 
         try:
@@ -1571,6 +1712,8 @@ class AttendanceService:
         attendance_id: UUID,
         break_id: UUID,
         organization_id: UUID,
+        reason: str | None = None,
+        by_user_id: UUID | None = None,
     ) -> None:
         """admin 이 break 세션을 삭제. attendance 의 누적 분 재계산."""
         attendance = await self.get_attendance(db, attendance_id, organization_id)
@@ -1588,10 +1731,28 @@ class AttendanceService:
         if target is None:
             raise NotFoundError("Break session not found")
 
+        # 삭제 전 스냅샷 — 세션 행은 사라져도 "무엇을 지웠는지"는 남아야 한다.
+        # target_id 에 FK 를 걸지 않은 이유가 이것이다.
+        before_snapshot = (target.started_at, target.ended_at, target.break_type)
+        deleted_break_id = target.id
+
         await db.delete(target)
         await db.flush()
 
         await self._recalculate_break_aggregates(db, attendance)
+
+        from app.services import attendance_timeline as tl
+        tl.record_break_snapshot(
+            db,
+            attendance_id=attendance.id,
+            group_id=tl.new_group(),
+            action=tl.ACTION_BREAK_REMOVED,
+            break_id=deleted_break_id,
+            before=before_snapshot,
+            after=(None, None, None),
+            reason=reason,
+            by_user_id=by_user_id,
+        )
         await db.flush()
 
         try:

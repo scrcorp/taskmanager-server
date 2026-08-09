@@ -20,6 +20,38 @@ DEFAULT_DAY_START_TIME = "06:00"
 _WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
+def floor_to_minute(value: datetime | None) -> datetime | None:
+    """초·마이크로초를 버려 분 경계로 절삭합니다.
+
+    Truncate a datetime to the minute (drop seconds/microseconds).
+
+    기록(DB)은 초까지 보존하되 표시·계산은 분 단위로만 한다는 규칙(R1/R2)의 기반.
+    표시가 `HH:MM` (초 버림) 이므로 계산도 같은 절삭을 거쳐야 화면 시각끼리의
+    뺄셈과 지표가 항상 일치한다.
+    """
+    if value is None:
+        return None
+    return value.replace(second=0, microsecond=0)
+
+
+def minutes_between(start: datetime | None, end: datetime | None) -> int:
+    """두 시각 사이의 분 — 각각 분 절삭한 뒤 차이 (R2).
+
+    Minutes between two datetimes, each truncated to the minute first.
+
+    `int((end - start).total_seconds() / 60)` (차이를 내림) 과 다르다:
+      22:26:50 → 22:57:20 은 차이 내림이면 30분이지만,
+      화면에는 `22:26 – 22:57` 로 보이므로 31분이어야 맞다.
+
+    start/end 중 하나라도 None 이면 0. 음수는 0 으로 하한.
+    """
+    s = floor_to_minute(start)
+    e = floor_to_minute(end)
+    if s is None or e is None:
+        return 0
+    return max(0, int((e - s).total_seconds() // 60))
+
+
 async def get_store_timezone(db: AsyncSession, store_id: UUID) -> str:
     """매장의 유효 타임존을 반환합니다 (매장 → 조직 → 기본값 순).
 
@@ -305,9 +337,9 @@ def net_minutes_from_datetimes(
     """
     if start_at is None or end_at is None:
         return 0
-    total = int((end_at - start_at).total_seconds() // 60)
+    total = minutes_between(start_at, end_at)
     if break_start_at is not None and break_end_at is not None:
-        total -= int((break_end_at - break_start_at).total_seconds() // 60)
+        total -= minutes_between(break_start_at, break_end_at)
     return max(total, 0)
 
 

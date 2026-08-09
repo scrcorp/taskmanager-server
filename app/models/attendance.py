@@ -130,6 +130,10 @@ class Attendance(Base):
     auto_clock_out_confirmed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # 자동퇴근 확인 일시 — When the auto clock-out was confirmed (UTC)
     auto_clock_out_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 조기 출근 강행 확인자 FK — Manager/SV who reviewed the early clock-in override
+    early_clock_in_confirmed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # 조기 출근 강행 확인 일시 — payroll 마감 게이트의 판정 근거 (UTC)
+    early_clock_in_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
@@ -156,20 +160,30 @@ class Attendance(Base):
 
 
 class AttendanceCorrection(Base):
-    """근태 수정 이력 모델 — 관리자가 근태 기록을 수정한 이력.
+    """근태 타임라인 이력 모델 — 근태 기록에 일어난 모든 전이를 남긴다.
 
-    Attendance correction audit trail model — Records when an admin
-    corrects an attendance field (clock_in, clock_out, etc.).
+    Attendance timeline / audit trail model. 직원의 실제 행동(출근·휴식)과
+    관리자의 정정을 같은 테이블에 쌓되, **모든 행이 before → after 전이를
+    빠짐없이 표현**한다. "이전 값이 없다"는 상태는 존재하지 않는다 —
+    비어 있었다면 그 사실을 `(none)` / `(empty)` 센티널로 명시한다.
+
+    한 사용자 액션이 여러 축을 바꾸면(예: 출근 = status 전이 + clock_in 값 전이)
+    행을 나눠 쓰고 `group_id` 로 묶는다. 카드 제목은 `action`, 각 줄의 항목명은
+    `field_name` 이다.
 
     Attributes:
         id: 고유 식별자 UUID (Unique identifier)
         attendance_id: 근태 기록 FK (Target attendance record)
-        field_name: 수정된 필드 이름 (Which field was corrected)
-        original_value: 수정 전 값 (Original value before correction)
-        corrected_value: 수정 후 값 (New corrected value)
-        reason: 수정 사유 (Reason for correction)
-        corrected_by: 수정자 FK (Admin who made the correction)
-        created_at: 수정 일시 UTC (Correction timestamp)
+        group_id: 액션 그룹 — 한 사용자 액션이 만든 행들을 묶는다
+        action: 카드 태그 — clock_in / break_start / modify 등 (무엇을 했나)
+        field_name: 전이 대상 항목 — status / clock_in / break_time 등 (무엇이 바뀌었나)
+        target_type: 전이 대상 엔터티 종류 — "attendance" | "break"
+        target_id: 하위 엔터티 식별자 (break 세션 id 등). attendance 자신이면 NULL
+        original_value: 전이 전 값 (Value before). 신규 행은 항상 채워진다
+        corrected_value: 전이 후 값 (Value after)
+        reason: 사유 (Reason)
+        corrected_by: 행위자 FK (Actor). NULL = system (cron)
+        created_at: 발생 일시 UTC (Timestamp)
     """
 
     __tablename__ = "attendance_corrections"
@@ -178,9 +192,22 @@ class AttendanceCorrection(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     # 근태 기록 FK — Target attendance record being corrected
     attendance_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("attendances.id", ondelete="CASCADE"), nullable=False)
-    # 수정된 필드 이름 — Field that was corrected (e.g. "clock_in", "clock_out")
+    # 액션 그룹 — 한 사용자 액션이 만든 행들을 묶는 식별자.
+    # NULL = 이 컬럼 도입 이전 레거시 행 (콘솔이 시간 근접 휴리스틱으로 fallback).
+    group_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    # 카드 태그 — 무엇을 했나 (clock_in / clock_out / break_start / break_end /
+    # modify / no_show / cancel / reopen / auto_clock_out / break_added 등).
+    # NULL = 레거시 행 → 콘솔은 field_name 으로 fallback.
+    action: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # 전이 대상 항목 이름 — 무엇이 바뀌었나 ("status", "clock_in", "break_time" 등)
     field_name: Mapped[str] = mapped_column(String(50), nullable=False)
-    # 수정 전 값 — Original value before correction (ISO datetime string or null)
+    # 전이 대상 엔터티 종류 — "attendance" | "break". NULL = 레거시 행(= attendance)
+    target_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 하위 엔터티 식별자 — break 세션 id 등. attendance 본체 전이면 NULL.
+    # FK 를 걸지 않는다: 세션이 삭제돼도 "삭제했다"는 이력은 남아야 한다.
+    target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    # 전이 전 값 — Value before. 신규 행은 항상 채운다 (비어 있었으면 "(none)").
+    # nullable 유지 = 이 정책 도입 이전 레거시 행 때문 (백필하지 않음).
     original_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 수정 후 값 — New corrected value (ISO datetime string)
     corrected_value: Mapped[str] = mapped_column(Text, nullable=False)

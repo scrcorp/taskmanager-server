@@ -122,9 +122,24 @@ class Report(Base):
         order_by="ReportAcknowledgement.acknowledged_at",
     )
 
-    # daily 리포트는 per-person 유일성 (결정-8): store + date + payload->>'period' + author_id.
-    # payload 필드 참조 partial unique index 라 마이그레이션에서 처리(컬럼 unique 미사용).
-    # 인덱스명: uq_reports_daily_store_date_period_author (WHERE type='daily' AND deleted_at IS NULL)
+    # 인덱스는 반드시 모델에 선언한다 — 마이그레이션에만 있으면 autogenerate 가
+    # drop_index 를 뱉는다. 특히 아래 unique 는 중복 일일보고서를 막는 업무 규칙이라
+    # 조용히 사라지면 데이터가 오염된다.
+    __table_args__ = (
+        # 리포트 목록 (조직 + 타입 + 날짜 최신순)
+        Index("ix_reports_org_type_date", "organization_id", "type", text("report_date DESC")),
+        # daily 리포트 per-person 유일성 (결정-8): store + date + payload->>'period' + author_id.
+        # payload 필드 참조 partial unique index (컬럼 unique 미사용).
+        Index(
+            "uq_reports_daily_store_date_period_author",
+            "store_id",
+            "report_date",
+            text("(payload ->> 'period'::text)"),
+            "author_id",
+            unique=True,
+            postgresql_where=text("type::text = 'daily'::text AND deleted_at IS NULL"),
+        ),
+    )
 
 
 class ReportComment(Base):

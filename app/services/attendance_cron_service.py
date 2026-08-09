@@ -22,7 +22,11 @@ from app.models.attendance import Attendance
 from app.models.organization import Store
 from app.models.schedule import Schedule
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
-from app.utils.timezone import get_store_day_config, resolve_schedule_instants
+from app.utils.timezone import (
+    get_store_day_config,
+    minutes_between,
+    resolve_schedule_instants,
+)
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -265,7 +269,7 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
             for br in br_rows.scalars().all():
                 end_at = max(cutoff, br.started_at)
                 br.ended_at = end_at
-                br.duration_minutes = max(0, int((end_at - br.started_at).total_seconds() / 60))
+                br.duration_minutes = minutes_between(br.started_at, end_at)
             att.break_end = cutoff
 
         # ORM 객체도 동기화 (synchronize_session 전략과 무관하게 일관 보장)
@@ -273,8 +277,7 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
         att.clock_out_timezone = tz_name
         att.status = "clocked_out"
         if att.clock_in is not None:
-            work_delta = cutoff - att.clock_in
-            att.total_work_minutes = max(0, int(work_delta.total_seconds() / 60))
+            att.total_work_minutes = minutes_between(att.clock_in, cutoff)
 
         # break 누적 재계산
         br_sum = await db.execute(
@@ -290,15 +293,32 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
         att.anomalies = anoms or None
 
         # timeline 에 기록 — system actor (corrected_by=NULL).
-        from app.models.attendance import AttendanceCorrection
-        db.add(AttendanceCorrection(
+        # 상태 전이 + clock_out 값 전이를 한 그룹으로. 이전 상태는 on_break 였을 수도
+        # 있으므로 "working" 하드코딩하지 않고 실제 값을 쓴다.
+        from app.services import attendance_timeline as tl
+        group = tl.new_group()
+        auto_reason = f"Shift ended {after_minutes} min ago"
+        tl.record_status(
+            db,
             attendance_id=att.id,
-            field_name="auto_clock_out",
-            original_value="working",
-            corrected_value=cutoff.isoformat(),
-            reason=f"Shift ended {after_minutes} min ago",
-            corrected_by=None,
-        ))
+            group_id=group,
+            action=tl.ACTION_AUTO_CLOCK_OUT,
+            before="on_break" if was_on_break else "working",
+            after=att.status,
+            reason=auto_reason,
+            by_user_id=None,
+        )
+        tl.record(
+            db,
+            attendance_id=att.id,
+            group_id=group,
+            action=tl.ACTION_AUTO_CLOCK_OUT,
+            field_name=tl.FIELD_CLOCK_OUT,
+            before=tl.NONE,
+            after=tl.dt_value(cutoff),
+            reason=auto_reason,
+            by_user_id=None,
+        )
 
         auto_count += 1
 
@@ -425,7 +445,7 @@ async def _alert_overdue_clock_outs(db: AsyncSession) -> int:
         )
         user_name = (user_name_row or "A staff member")
         sched_end_local = sched_end.astimezone(tz).strftime("%H:%M")
-        overdue_minutes = int((now_utc - sched_end).total_seconds() / 60)
+        overdue_minutes = minutes_between(sched_end, now_utc)
         message = (
             f"{user_name} hasn't clocked out (scheduled end {sched_end_local}, "
             f"{overdue_minutes} min overdue)"

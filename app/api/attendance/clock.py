@@ -51,8 +51,10 @@ async def clock_in(
     device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
+    # reason 은 조기 출근 사유 — 예정 시작보다 이르면 필수 (early clock-in override).
     return await _perform_action(
         db, device, data.pin, data.user_id, "clock_in",
+        reason=data.reason,
         schedule_id=data.schedule_id,
         walk_in=data.walk_in,
     )
@@ -86,4 +88,7 @@ async def break_end(
     device: Annotated[AttendanceDevice, Depends(get_current_attendance_device)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    return await _perform_action(db, device, data.pin, data.user_id, "break_end")
+    # reason 은 break 초과 사유 — unpaid_meal 35분 이상이면 필수 (break_end_policy).
+    return await _perform_action(
+        db, device, data.pin, data.user_id, "break_end", reason=data.reason,
+    )

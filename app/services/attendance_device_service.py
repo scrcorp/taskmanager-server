@@ -33,7 +33,7 @@ from app.models.user import User
 from app.models.user_store import UserStore
 from app.repositories.attendance_repository import attendance_repository
 from app.utils.exceptions import BadRequestError, NotFoundError, UnauthorizedError
-from app.utils.timezone import resolve_schedule_instants
+from app.utils.timezone import minutes_between, resolve_schedule_instants
 
 # clock action 타입
 ClockAction = Literal["clock_in", "break_start", "break_end", "clock_out"]
@@ -767,6 +767,15 @@ class AttendanceDeviceService:
 
         attendance = _active_row() if action != "clock_in" else (day_rows[0] if day_rows else None)
 
+        # ── 타임라인용 before 캡처 ──
+        # 각 분기가 실제로 건드리는 row 를 기준으로 변경 직전 값을 잡아둔다.
+        # 여기서 안 잡으면 "이전 상태"를 영영 복원할 수 없다 (기존 버그의 원인).
+        before_status: str | None = None
+        before_clock_in: datetime | None = None
+        before_clock_out: datetime | None = None
+        touched_break: AttendanceBreak | None = None
+        break_before: tuple[datetime | None, datetime | None, str | None] = (None, None, None)
+
         if action == "clock_in":
             # 1) 실제로 출근중인 shift(clock_in 있고 clock_out 없는 working/on_break) 만 차단.
             #    late는 "스케줄 지났는데 미출근" 상태일 수 있어 clock_in 여부로 판단해야 한다 —
@@ -903,11 +912,18 @@ class AttendanceDeviceService:
                 resolve_setting,
             )
 
+            from app.services.attendance_service import (
+                ANOMALY_EARLY_CLOCK_IN_OVERRIDE,
+            )
+
             status_val = "working"
             anomalies: list[str] | None = None
+            # 조기 출근 강행 여부 + "이미 승인된 건인가"(매니저 대행) — 확인 게이트용.
+            early_clock_in_override = False
+            early_override_preapproved = False
             scheduled_start = _start_dt(schedule)
             if scheduled_start is not None:
-                # Early clock-in threshold — 너무 일찍 clock-in 시도 차단.
+                # Early clock-in threshold — 이보다 이르면 사유 없이는 못 찍는다.
                 try:
                     raw = await resolve_setting(
                         db,
@@ -922,16 +938,39 @@ class AttendanceDeviceService:
                 # "정시 출근(같은 분)"이 초 차이로 late 로 찍히지 않게 한다. 워크인은 start=
                 # clock-in(분 내림)이라 이 규칙으로 자연히 early/late 가 아니게 된다(특수예외 불필요).
                 now_min = now.replace(second=0, microsecond=0)
-                if (
-                    not skip_early_guards
-                    and now_min < scheduled_start - _td(minutes=early_threshold)
-                ):
-                    minutes_until = int(
-                        (scheduled_start - now_min).total_seconds() / 60
-                    )
-                    raise BadRequestError(
-                        f"Too early to clock in. Shift starts in {minutes_until} minutes."
-                    )
+                # 조기 clock-in override — 예정보다 이르면 차단이 아니라 "사유 요구".
+                # 매니저/SV 가 현장에 없어도 직원이 직접 찍을 수 있어야 하기 때문
+                # (일찍 와달라고 부른 경우). 사유가 오면 통과시키고 anomaly 로 표시한다.
+                # 상한(몇 시간 전까지) 은 두지 않는다 — 얼마나 일찍 부를지 예측 불가.
+                #
+                # 매니저 대행(skip_early_guards) 도 **라벨은 똑같이 붙인다** — 예정 밖
+                # 근무는 특이사항으로 보여야 하기 때문. 다만 사유는 요구하지 않고,
+                # 확인이 이미 끝난 것으로 처리한다(매니저가 그 자리에서 승인한 행위라
+                # 다시 확인시키면 이중 확인). 자동 확인은 Phase 2 의 확인 컬럼이 담당.
+                if now_min < scheduled_start - _td(minutes=early_threshold):
+                    early_clock_in_override = True
+                    early_override_preapproved = skip_early_guards
+                    if not skip_early_guards and not (reason and reason.strip()):
+                        from fastapi import HTTPException, status
+
+                        minutes_early = int(
+                            (scheduled_start - now_min).total_seconds() / 60
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={
+                                "code": "early_clock_in_reason_required",
+                                "minutes_early": minutes_early,
+                                "schedule_id": str(schedule.id),
+                                "scheduled_start": scheduled_start.isoformat(),
+                                "message": (
+                                    "This shift starts in "
+                                    f"{minutes_early} minutes. To clock in now, "
+                                    "enter a reason — your manager will see it."
+                                ),
+                            },
+                        )
+                    anomalies = [ANOMALY_EARLY_CLOCK_IN_OVERRIDE]
                 if now_min > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
                     status_val = "late"
                     anomalies = ["late"]
@@ -940,6 +979,8 @@ class AttendanceDeviceService:
             # upcoming/late/no_show 상태에서 clock-in 시 update.
             target = await attendance_repository.get_by_schedule_id(db, schedule.id)
             if target is not None:
+                before_status = target.status
+                before_clock_in = target.clock_in
                 target.store_id = store_id
                 target.clock_in = now
                 target.clock_in_timezone = store_tz
@@ -950,6 +991,10 @@ class AttendanceDeviceService:
                         if a not in existing_anoms:
                             existing_anoms.append(a)
                 target.anomalies = existing_anoms or None
+                if early_clock_in_override and early_override_preapproved:
+                    # 매니저가 그 자리에서 승인한 조기 출근 — 라벨은 남기되 확인은 끝난 것.
+                    target.early_clock_in_confirmed_by = manager_user_id
+                    target.early_clock_in_confirmed_at = now
                 await db.flush()
                 await db.refresh(target)
                 attendance = target
@@ -967,6 +1012,16 @@ class AttendanceDeviceService:
                         "clock_in_timezone": store_tz,
                         "status": status_val,
                         "anomalies": anomalies,
+                        "early_clock_in_confirmed_by": (
+                            manager_user_id
+                            if early_clock_in_override and early_override_preapproved
+                            else None
+                        ),
+                        "early_clock_in_confirmed_at": (
+                            now
+                            if early_clock_in_override and early_override_preapproved
+                            else None
+                        ),
                     },
                 )
         elif action == "break_start":
@@ -987,6 +1042,9 @@ class AttendanceDeviceService:
                 break_type=normalize_break_type(break_type),
             )
             db.add(new_break)
+            before_status = attendance.status
+            touched_break = new_break
+            break_before = (None, None, None)
             attendance.status = "on_break"
             # 하위호환: 기존 컬럼도 최근 break 기준으로 갱신
             attendance.break_start = now
@@ -1007,11 +1065,14 @@ class AttendanceDeviceService:
 
             # Stage J: break time 정책 검증 (pure helper)
             from app.utils.break_end_policy import validate_break_end
-            elapsed_minutes = max(0, int((now - open_break.started_at).total_seconds() / 60))
+            elapsed_minutes = minutes_between(open_break.started_at, now)
             policy_error = validate_break_end(open_break.break_type, elapsed_minutes, reason)
             if policy_error is not None:
                 raise BadRequestError(policy_error)
 
+            before_status = attendance.status
+            touched_break = open_break
+            break_before = (open_break.started_at, open_break.ended_at, open_break.break_type)
             open_break.ended_at = now
             open_break.duration_minutes = elapsed_minutes
             attendance.status = "working"
@@ -1064,20 +1125,26 @@ class AttendanceDeviceService:
                     "Early clock-out requires a reason. Please provide one."
                 )
 
+            before_status = attendance.status
+            before_clock_out = attendance.clock_out
             # 진행중 break 가 있으면 먼저 종료 처리
             if attendance.status == "on_break":
                 open_break = await self._get_open_break(db, attendance.id)
                 if open_break is not None:
+                    touched_break = open_break
+                    break_before = (
+                        open_break.started_at, open_break.ended_at, open_break.break_type,
+                    )
                     open_break.ended_at = now
-                    delta = now - open_break.started_at
-                    open_break.duration_minutes = max(0, int(delta.total_seconds() / 60))
+                    open_break.duration_minutes = minutes_between(
+                        open_break.started_at, now
+                    )
                     attendance.break_end = now
             attendance.clock_out = now
             attendance.clock_out_timezone = store_tz
             attendance.status = "clocked_out"
             if attendance.clock_in is not None:
-                work_delta = now - attendance.clock_in
-                attendance.total_work_minutes = int(work_delta.total_seconds() / 60)
+                attendance.total_work_minutes = minutes_between(attendance.clock_in, now)
             attendance.total_break_minutes = await self._sum_break_minutes(db, attendance.id)
 
             if is_early:
@@ -1094,48 +1161,184 @@ class AttendanceDeviceService:
             raise BadRequestError(f"Invalid action: {action}")
 
         # ── 모든 attendance 액션을 timeline 에 기록 ──
-        # field_name 의미:
-        #   - staff PIN 정상 액션  → action verb 그대로 (clock_in / clock_out / break_start / break_end)
-        #   - admin override      → "modify" (매니저가 임의 사용자에 대해 직접 처리)
-        # corrected_value 는 새 시각/status 등 핵심 값.
-        from app.models.attendance import AttendanceCorrection
+        # action(카드 태그) 은 매니저 대행이어도 실제 행위(clock_in 등) 를 그대로 쓴다.
+        # 예전엔 대행이면 "modify" 로 뭉개서 무엇이 바뀐지 알 수 없었고 before 도 비었다.
+        # 대행 여부는 actor(corrected_by) 로 이미 드러난다.
+        from app.services import attendance_timeline as tl
+
         actor_id = manager_user_id if skip_pin_check else user.id
-        field_label = "modify" if skip_pin_check else action
-        # corrected_value: clock_in/out/break_start/break_end 는 해당 시각 ISO,
-        # modify 는 결과 status (이 액션의 효과).
-        cv: str
-        if skip_pin_check:
-            cv = attendance.status
-        elif action in ("clock_in", "clock_out"):
-            t = getattr(attendance, action, None)
-            cv = t.isoformat() if t else "(set)"
-        elif action == "break_start":
-            cv = (break_type or "break")
-        elif action == "break_end":
-            cv = "ended"
-        else:
-            cv = attendance.status
-        user_reason = (reason or "").strip()
-        if user_reason:
-            correction_reason = user_reason
-        else:
-            correction_reason = None
-        db.add(AttendanceCorrection(
+        group = tl.new_group()
+        tl.record_status(
+            db,
             attendance_id=attendance.id,
-            field_name=field_label,
-            original_value=None,
-            corrected_value=cv,
-            reason=correction_reason or "(no reason)",
-            corrected_by=actor_id,
-        ))
+            group_id=group,
+            action=action,
+            before=before_status,
+            after=attendance.status,
+            reason=reason,
+            by_user_id=actor_id,
+        )
+        if action == "clock_in":
+            tl.record(
+                db,
+                attendance_id=attendance.id,
+                group_id=group,
+                action=action,
+                field_name=tl.FIELD_CLOCK_IN,
+                before=tl.dt_value(before_clock_in),
+                after=tl.dt_value(attendance.clock_in),
+                reason=reason,
+                by_user_id=actor_id,
+            )
+        elif action == "clock_out":
+            tl.record(
+                db,
+                attendance_id=attendance.id,
+                group_id=group,
+                action=action,
+                field_name=tl.FIELD_CLOCK_OUT,
+                before=tl.dt_value(before_clock_out),
+                after=tl.dt_value(attendance.clock_out),
+                reason=reason,
+                by_user_id=actor_id,
+            )
+        if touched_break is not None:
+            tl.record_break_snapshot(
+                db,
+                attendance_id=attendance.id,
+                group_id=group,
+                action=action,
+                break_id=touched_break.id,
+                before=break_before,
+                after=(
+                    touched_break.started_at,
+                    touched_break.ended_at,
+                    touched_break.break_type,
+                ),
+                reason=reason,
+                by_user_id=actor_id,
+            )
 
         await self.touch_last_seen(db, device)
+
+        # 조기 출근 강행 알림 — 직원이 스스로 찍은 건만. 매니저 대행은 그 매니저가
+        # 이미 알고 있으므로 알리지 않는다. 실패해도 출근 자체는 성립해야 한다.
+        notify_early = (
+            action == "clock_in"
+            and early_clock_in_override
+            and not early_override_preapproved
+        )
+
         try:
             await db.commit()
-            return attendance
         except Exception:
             await db.rollback()
             raise
+
+        if notify_early:
+            await self._notify_early_clock_in(
+                db,
+                attendance=attendance,
+                device=device,
+                user=user,
+                store_tz=store_tz,
+                scheduled_start=scheduled_start,
+                reason=reason or "",
+            )
+        return attendance
+
+    async def _notify_early_clock_in(
+        self,
+        db: AsyncSession,
+        *,
+        attendance: Attendance,
+        device: AttendanceDevice,
+        user: User,
+        store_tz: str,
+        scheduled_start: datetime | None,
+        reason: str,
+    ) -> None:
+        """조기 출근 강행 in-app 알림 + email (best-effort).
+
+        알림 실패가 출근 기록을 되돌리면 안 된다 — 전체를 삼킨다.
+        """
+        try:
+            from zoneinfo import ZoneInfo as _Zone
+
+            from app.services.alert_service import alert_service
+            from app.utils.names import display_name
+
+            if scheduled_start is None or attendance.clock_in is None:
+                return
+            minutes_early = max(
+                0,
+                int(
+                    (
+                        scheduled_start
+                        - attendance.clock_in.replace(second=0, microsecond=0)
+                    ).total_seconds()
+                    / 60
+                ),
+            )
+            staff_name = display_name(user)
+
+            await alert_service.create_for_early_clock_in(
+                db,
+                attendance_id=attendance.id,
+                organization_id=device.organization_id,
+                store_id=attendance.store_id,
+                staff_user_id=user.id,
+                staff_name=staff_name,
+                minutes_early=minutes_early,
+            )
+            await db.commit()
+
+            # email — 사용자 선호 가드는 should_send_email 이 담당 (checklist 와 동일).
+            import asyncio
+
+            from app.models.organization import Store as _Store
+            from app.models.permission import Permission, RolePermission
+            from app.models.user import Role
+            from app.utils.email import send_email
+            from app.utils.email_templates import build_early_clock_in_email
+
+            store_name = await db.scalar(
+                select(_Store.name).where(_Store.id == attendance.store_id)
+            )
+            recipients = await db.execute(
+                select(User.id, User.email)
+                .join(Role, User.role_id == Role.id)
+                .join(RolePermission, Role.id == RolePermission.role_id)
+                .join(Permission, RolePermission.permission_id == Permission.id)
+                .where(User.organization_id == device.organization_id)
+                .where(User.is_active.is_(True))
+                .where(Permission.code == "schedules:update")
+                .where(User.id != user.id)
+                .where(User.email.is_not(None))
+                .distinct()
+            )
+            tz = _Zone(store_tz)
+            subject, html = build_early_clock_in_email(
+                staff_name=staff_name,
+                store_name=store_name or "your store",
+                minutes_early=minutes_early,
+                scheduled_start_label=scheduled_start.astimezone(tz).strftime(
+                    "%-I:%M %p"
+                ),
+                clock_in_label=attendance.clock_in.astimezone(tz).strftime("%-I:%M %p"),
+                reason=reason or "(no reason provided)",
+            )
+            for uid, email in recipients.all():
+                if not email:
+                    continue
+                if not await alert_service.should_send_email(
+                    db, uid, "early_clock_in_override"
+                ):
+                    continue
+                asyncio.create_task(send_email(to=email, subject=subject, html=html))
+        except Exception:
+            # 알림 실패는 출근 성립에 영향 없음
+            pass
 
     async def _sum_break_minutes(
         self, db: AsyncSession, attendance_id: UUID

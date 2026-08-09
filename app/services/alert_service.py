@@ -515,6 +515,57 @@ class AlertService:
             alerts.append(alert)
         return alerts
 
+    async def create_for_early_clock_in(
+        self,
+        db: AsyncSession,
+        attendance_id: UUID,
+        organization_id: UUID,
+        store_id: UUID,
+        staff_user_id: UUID,
+        staff_name: str,
+        minutes_early: int,
+    ) -> list[Alert]:
+        """조기 출근 강행 시 매니저/SV 에게 알림을 생성합니다.
+
+        Auto-create alerts when staff force an early clock-in with a reason.
+        매니저가 현장에 없어서 벌어지는 일이라, 늦게라도 반드시 눈에 들어와야 한다.
+        email 은 호출자가 should_send_email 가드와 함께 별도로 보낸다
+        (checklist/report 알림과 동일한 분업).
+        """
+        message = (
+            f"{staff_name} clocked in {minutes_early} minutes before their shift"
+        )
+
+        gm_result = await db.execute(
+            select(User.id)
+            .join(Role, User.role_id == Role.id)
+            .join(RolePermission, Role.id == RolePermission.role_id)
+            .join(Permission, RolePermission.permission_id == Permission.id)
+            .where(User.organization_id == organization_id)
+            .where(User.is_active.is_(True))
+            .where(Permission.code == "schedules:update")
+            .where(User.id != staff_user_id)
+        )
+        gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
+        filtered = await self._filter_in_app_recipients(
+            db, gm_ids, "early_clock_in_override"
+        )
+
+        alerts: list[Alert] = []
+        for uid in filtered:
+            alerts.append(
+                await alert_repository.create_alert(
+                    db,
+                    organization_id=organization_id,
+                    user_id=uid,
+                    alert_type="early_clock_in_override",
+                    message=message,
+                    reference_type="attendance",
+                    reference_id=attendance_id,
+                )
+            )
+        return alerts
+
     async def create_for_warning(
         self,
         db: AsyncSession,

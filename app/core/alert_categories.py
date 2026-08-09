@@ -58,9 +58,11 @@ CATEGORIES: list[dict[str, Any]] = [
     {
         "code": "attendance",
         "label": "Attendance",
-        "description": "Clock-in/out corrections",
-        "types": ["attendance_corrected"],
-        "email_available": False,
+        "description": "Clock-in/out corrections and early clock-ins",
+        # early_clock_in_override: 스케줄보다 일찍 강행 출근한 건 — 매니저가 현장에
+        # 없을 때 벌어지므로 in-app 만으로는 놓치기 쉽다. 그래서 email 도 연다.
+        "types": ["attendance_corrected", "early_clock_in_override"],
+        "email_available": True,
     },
     {
         "code": "warning",
