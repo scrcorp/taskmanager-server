@@ -9,7 +9,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.schemas.schedule import validate_30min_grid
+from app.schemas.schedule import validate_kiosk_grid
 
 
 # ── 앱/기기 측 요청 ────────────────────────────────────────
@@ -391,8 +391,9 @@ class ManageScheduleCreateRequest(BaseModel):
     start_at: str | None = None
     end_at: str | None = None
 
-    # 스케줄 시간은 30분 grid만 허용 (console 과 동일 규칙).
-    _validate_times = field_validator("start_time", "end_time")(validate_30min_grid)
+    # 키오스크는 5분 grid. console(30분)보다 촘촘한 이유는 매장에서 즉석으로
+    # 실제 운영 시각을 맞추는 컨텍스트라 30분 단위로는 표현이 안 되기 때문.
+    _validate_times = field_validator("start_time", "end_time")(validate_kiosk_grid)
 
 
 class ManageScheduleUpdateRequest(BaseModel):
@@ -405,7 +406,7 @@ class ManageScheduleUpdateRequest(BaseModel):
     start_at: str | None = None
     end_at: str | None = None
 
-    _validate_times = field_validator("start_time", "end_time")(validate_30min_grid)
+    _validate_times = field_validator("start_time", "end_time")(validate_kiosk_grid)
 
 
 class AdminClockActionRequest(BaseModel):
