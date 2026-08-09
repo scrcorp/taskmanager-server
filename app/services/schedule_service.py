@@ -18,6 +18,7 @@ from app.repositories.schedule_repository import schedule_repository
 from app.repositories.work_role_repository import work_role_repository
 from app.schemas.schedule import (
     SCHEDULE_STEP_MINUTES,
+    grid_error_message,
     ScheduleAuditLogResponse, ScheduleCancel,
     ScheduleCreate, ScheduleResponse, ScheduleSwitch, ScheduleUpdate,
     ScheduleValidation, FinalizeResult,
@@ -86,6 +87,8 @@ class ScheduleService:
         break_end_at: str | None,
         legacy_start_offset_days: int = 0,
         client_at_fields: set[str] | None = None,
+        client_time_fields: set[str] | None = None,
+        step_minutes: int = SCHEDULE_STEP_MINUTES,
     ) -> dict:
         """구/신 입력을 정규화 — 신 인코딩 필드 dict 반환 (Wave 3: 구 컬럼 제거로 구 입력만 받아 조립).
 
@@ -123,7 +126,12 @@ class ScheduleService:
         if sdate is None and s_at is not None:
             sdate = s_at.date()
 
-        # 30분 그리드 강제 — 클라이언트가 이번 요청에 보낸 ISO 필드에만 적용.
+        # 그리드 강제(기본 30분, 키오스크 경로는 step_minutes=5).
+        # **여기가 스케줄 시각 grid 의 단일 관문**이다 — 구(HH:MM)/신(ISO) 인코딩 양쪽 모두
+        # 이 지점에서만 판정한다. 스키마 validator 로 중복 검증하지 않는 이유는, step 이
+        # 경로마다 다르면(console 30 / kiosk 5) 상수 기반 스키마 검증이 그 차이를 표현하지
+        # 못하고 서로 어긋나기 때문.
+        # 검사 대상은 **클라이언트가 이번 요청에 실제로 보낸 필드만**.
         # (entry에서 캐리된 값·워크인의 실제 clock-in 분 등 기존 비그리드 시각은 허용 —
         #  전체 조립값에 걸면 워크인 스케줄의 레거시 수정이 거부되는 회귀 발생)
         if client_at_fields is None:
@@ -132,11 +140,25 @@ class ScheduleService:
                                ("break_start_at", break_start_at), ("break_end_at", break_end_at))
                 if v is not None
             }
+        _check_fields = set(client_at_fields)
+        # 구 인코딩(HH:MM)으로 온 필드는 조립된 datetime 을 같은 기준으로 검사한다.
+        _legacy_to_at = {
+            "start_time": "start_at", "end_time": "end_at",
+            "break_start_time": "break_start_at", "break_end_time": "break_end_at",
+        }
+        if client_time_fields is None:
+            client_time_fields = {
+                f for f, v in (("start_time", start_time), ("end_time", end_time),
+                               ("break_start_time", break_start_time), ("break_end_time", break_end_time))
+                if v is not None
+            }
+        _check_fields |= {_legacy_to_at[f] for f in client_time_fields if f in _legacy_to_at}
+
         _grid_map = {"start_at": s_at, "end_at": e_at, "break_start_at": bs_at, "break_end_at": be_at}
-        for _f in client_at_fields:
+        for _f in _check_fields:
             _v = _grid_map.get(_f)
-            if _v is not None and (_v.minute % SCHEDULE_STEP_MINUTES != 0 or _v.second != 0):
-                raise BadRequestError("Time must be on the hour or half-hour (:00 or :30).")
+            if _v is not None and (_v.minute % step_minutes != 0 or _v.second != 0):
+                raise BadRequestError(grid_error_message(step_minutes))
 
         # 브레이크 구간 검증 — 짝/순서/포함(적대 검증에서 확인된 구멍).
         # 역전(be≤bs)은 net 과지급(음수 브레이크), 근무창 밖 브레이크는 0-클램프로
@@ -437,6 +459,34 @@ class ScheduleService:
         priority = actor.role.priority if actor.role else 999
         if priority > GM_PRIORITY:
             raise ForbiddenError(f"GM or above required for action: {action}")
+
+    async def _approval_required(
+        self, db: AsyncSession, organization_id: UUID, store_id: UUID | None,
+    ) -> bool:
+        """승인 워크플로가 켜져 있는가 (schedule.approval_required).
+
+        꺼져 있으면(기본) SV 도 confirmed 스케줄을 직접 만들고 고칠 수 있다 —
+        매장 운영은 SV 가 실무로 돌리는데 GM 승인을 매번 태우면 현장이 멈춘다.
+        승인 절차가 필요한 조직만 이 설정을 켜서 SV 작업을 requested 로 돌린다.
+        """
+        try:
+            return bool(await resolve_setting(
+                db,
+                key="schedule.approval_required",
+                organization_id=organization_id,
+                store_id=store_id,
+            ))
+        except SettingNotRegisteredError:
+            return False
+
+    async def _require_gm_when_approval_required(
+        self, db: AsyncSession, actor: User | None, entry: Schedule, action: str,
+    ) -> None:
+        """confirmed 스케줄 변경 권한 — 승인 워크플로가 켜진 조직에서만 GM+ 로 제한."""
+        if actor is None:
+            return
+        if await self._approval_required(db, entry.organization_id, entry.store_id):
+            self._require_gm_or_above(actor, action)
 
     async def _resolve_work_role_snapshot(
         self, db: AsyncSession, work_role_id: UUID | None,
@@ -888,7 +938,9 @@ class ScheduleService:
         organization_id: UUID,
         data: ScheduleCreate,
         created_by: UUID,
+        step_minutes: int = SCHEDULE_STEP_MINUTES,
     ) -> ScheduleResponse:
+        """step_minutes: 시각 grid 단위. console/벌크는 기본 30분, 키오스크는 5분."""
         store_id = UUID(data.store_id)
         # 폐점(closed) 매장엔 새 스케줄 생성 차단 (조회/수정/삭제는 허용)
         from app.services.store_service import store_service
@@ -901,6 +953,7 @@ class ScheduleService:
             break_start_time=data.break_start_time, break_end_time=data.break_end_time,
             start_at=data.start_at, end_at=data.end_at,
             break_start_at=data.break_start_at, break_end_at=data.break_end_at,
+            step_minutes=step_minutes,
         )
         start_time = norm["start_at"].time() if norm["start_at"] else None
         end_time = norm["end_at"].time() if norm["end_at"] else None
@@ -927,16 +980,7 @@ class ScheduleService:
                 select(Role.priority).join(User, User.role_id == Role.id).where(User.id == created_by)
             )
             if actor_priority is not None and actor_priority > GM_PRIORITY:
-                try:
-                    approval_required = await resolve_setting(
-                        db,
-                        key="schedule.approval_required",
-                        organization_id=organization_id,
-                        store_id=store_id,
-                    )
-                except SettingNotRegisteredError:
-                    approval_required = True
-                if approval_required:
+                if await self._approval_required(db, organization_id, store_id):
                     # SV/Staff → "confirmed" 요청은 "requested"로 다운그레이드
                     entry_status = "requested"
 
@@ -1526,15 +1570,19 @@ class ScheduleService:
         organization_id: UUID,
         data: ScheduleUpdate,
         actor: User | None = None,
+        step_minutes: int = SCHEDULE_STEP_MINUTES,
     ) -> ScheduleResponse:
+        """step_minutes: 시각 grid 단위. console/벌크는 기본 30분, 키오스크는 5분."""
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
             raise NotFoundError("Schedule not found")
         if entry.status in ("cancelled", "rejected"):
             raise BadRequestError("Cancelled or rejected schedules cannot be updated")
-        # confirmed 스케줄 수정은 GM+ 권한 필요
-        if entry.status == "confirmed" and actor is not None:
-            self._require_gm_or_above(actor, "modify confirmed schedule")
+        # confirmed 스케줄 수정 — 승인 워크플로가 켜진 조직에서만 GM+ 제한
+        if entry.status == "confirmed":
+            await self._require_gm_when_approval_required(
+                db, actor, entry, "modify confirmed schedule",
+            )
 
         # (L3) 확정된 pay period 안의 스케줄은 수정 불가. 새 영업일이 locked 기간으로
         # 이동하는 것도 아래(norm 계산 후)에서 추가로 막는다.
@@ -1696,6 +1744,7 @@ class ScheduleService:
                                   else format_naive_iso(entry.break_end_at)),
                     # 그리드 체크는 클라가 이번 PATCH에 실제로 보낸 필드만 (캐리값은 워크인 등 비그리드 허용)
                     client_at_fields=_client_at,
+                    step_minutes=step_minutes,
                 )
             else:
                 # 구 인코딩(또는 work_date/시간 변경): 병합된 시각 locals에서 재조립.
@@ -1714,6 +1763,13 @@ class ScheduleService:
                     start_at=None, end_at=None,
                     break_start_at=None, break_end_at=None,
                     legacy_start_offset_days=_off,
+                    # 그리드 체크는 이번 PATCH에 실제로 온 HH:MM 필드만 — 나머지는 entry 캐리값이라
+                    # 워크인 등 기존 비그리드 시각이 수정 자체를 막지 않게 한다.
+                    client_time_fields={
+                        _f for _f in ("start_time", "end_time", "break_start_time", "break_end_time")
+                        if _f in data.model_fields_set and getattr(data, _f) is not None
+                    },
+                    step_minutes=step_minutes,
                 )
 
         # Validate with new values — norm이 있으면 실제 instant로 검증(새벽근무 정확)
@@ -1901,9 +1957,11 @@ class ScheduleService:
             raise NotFoundError("Schedule not found")
         if entry.status == "deleted":
             return  # 이미 삭제됨 — no-op
-        # confirmed 스케줄 삭제는 GM+ 권한 필요
-        if entry.status == "confirmed" and actor is not None:
-            self._require_gm_or_above(actor, "delete confirmed schedule")
+        # confirmed 스케줄 삭제 — 승인 워크플로가 켜진 조직에서만 GM+ 제한
+        if entry.status == "confirmed":
+            await self._require_gm_when_approval_required(
+                db, actor, entry, "delete confirmed schedule",
+            )
 
         # (L3) 확정된 pay period 안의 스케줄은 삭제 불가 (소급 차단).
         from app.services.payroll_lock_service import ensure_not_locked
