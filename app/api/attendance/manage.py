@@ -774,38 +774,35 @@ async def manage_change_attendance_status(
         if new_clock_out is None:
             new_clock_out = _dt.now(_tz.utc)
 
-    # diff & corrections — 실제 변경된 필드만 기록
-    if (target.clock_in or None) != new_clock_in:
+    # diff & corrections — 실제 변경된 필드만 기록.
+    # 한 번의 편집이므로 세 전이(clock_in / clock_out / status)를 같은 그룹으로 묶는다.
+    # field_name 은 "modify" 가 아니라 실제 대상 — 무엇이 바뀐지 행만 봐도 알 수 있게.
+    from app.services import attendance_timeline as tl
+    group = tl.new_group()
+
+    def _queue(field_name: str, before: str, after: str) -> None:
         corrections_to_add.append(AttendanceCorrection(
             attendance_id=target.id,
-            field_name="modify",
-            original_value=(target.clock_in.isoformat() if target.clock_in else None) or "(none)",
-            corrected_value=(new_clock_in.isoformat() if new_clock_in else "(cleared)"),
-            reason=f"Clock-in time: {reason}",
+            group_id=group,
+            action=tl.ACTION_MODIFY,
+            field_name=field_name,
+            target_type=tl.TARGET_ATTENDANCE,
+            original_value=before,
+            corrected_value=after,
+            reason=reason,
             corrected_by=manager.id,
         ))
+
+    if (target.clock_in or None) != new_clock_in:
+        _queue(tl.FIELD_CLOCK_IN, tl.dt_value(target.clock_in), tl.dt_value(new_clock_in))
         target.clock_in = new_clock_in
         target.clock_in_timezone = store_tz_name if new_clock_in else None
     if (target.clock_out or None) != new_clock_out:
-        corrections_to_add.append(AttendanceCorrection(
-            attendance_id=target.id,
-            field_name="modify",
-            original_value=(target.clock_out.isoformat() if target.clock_out else None) or "(none)",
-            corrected_value=(new_clock_out.isoformat() if new_clock_out else "(cleared)"),
-            reason=f"Clock-out time: {reason}",
-            corrected_by=manager.id,
-        ))
+        _queue(tl.FIELD_CLOCK_OUT, tl.dt_value(target.clock_out), tl.dt_value(new_clock_out))
         target.clock_out = new_clock_out
         target.clock_out_timezone = store_tz_name if new_clock_out else None
     if target.status != new_status:
-        corrections_to_add.append(AttendanceCorrection(
-            attendance_id=target.id,
-            field_name="modify",
-            original_value=target.status,
-            corrected_value=new_status,
-            reason=f"Status: {reason}",
-            corrected_by=manager.id,
-        ))
+        _queue(tl.FIELD_STATUS, tl.plain_value(target.status), tl.plain_value(new_status))
         target.status = new_status
 
     # 파생값 재계산
@@ -894,7 +891,8 @@ async def _manage_cancel_clock_in(
     if target is None:
         raise HTTPException(status_code=400, detail="No active clock-in to cancel")
 
-    original_clock_in = target.clock_in.isoformat() if target.clock_in else None
+    original_clock_in_dt = target.clock_in
+    original_status = target.status
 
     # 진행 중 break 종료(삭제) — clock_in 시점으로 ended_at 채워서 정리
     br_rows = (await db.execute(
@@ -911,22 +909,33 @@ async def _manage_cancel_clock_in(
     target.total_break_minutes = None
     target.status = "upcoming"
 
-    # 매니저 override → "modify" 태그. 단일 row 로 기록.
-    # status 가 main 변경, clock_in 시각 정보는 reason 에 부속.
+    # Undo clock-in — 상태 전이 + 지워진 clock_in 값 전이를 각각 남긴다.
+    # 예전엔 단일 row 에 status 만 담고 시각은 reason 문자열에 욱여넣어서
+    # "무엇이 지워졌는지"가 이력 데이터가 아니라 문장으로만 남았다.
+    from app.services import attendance_timeline as tl
     user_reason = reason if reason and reason != "(no reason provided)" else None
-    composed_reason = (
-        f"Undo clock-in (clock-in was {original_clock_in})"
-        if not user_reason
-        else f"{user_reason} · clock-in was {original_clock_in}"
-    )
-    db.add(AttendanceCorrection(
+    group = tl.new_group()
+    tl.record_status(
+        db,
         attendance_id=target.id,
-        field_name="modify",
-        original_value="working",
-        corrected_value="upcoming",
-        reason=composed_reason,
-        corrected_by=manager.id,
-    ))
+        group_id=group,
+        action=tl.ACTION_REOPEN,
+        before=original_status,
+        after=target.status,
+        reason=user_reason,
+        by_user_id=manager.id,
+    )
+    tl.record(
+        db,
+        attendance_id=target.id,
+        group_id=group,
+        action=tl.ACTION_REOPEN,
+        field_name=tl.FIELD_CLOCK_IN,
+        before=tl.dt_value(original_clock_in_dt),
+        after=tl.NONE,
+        reason=user_reason,
+        by_user_id=manager.id,
+    )
     await db.flush()
     response = await attendance_service.build_response(db, target)
     await db.commit()
@@ -978,7 +987,8 @@ async def _manage_cancel_clock_out(
             ),
         )
 
-    original_clock_out = target.clock_out.isoformat() if target.clock_out else None
+    original_clock_out_dt = target.clock_out
+    original_status = target.status
 
     target.clock_out = None
     target.clock_out_timezone = None
@@ -988,22 +998,31 @@ async def _manage_cancel_clock_out(
     anoms = [a for a in (target.anomalies or []) if a != "early_clock_out"]
     target.anomalies = anoms or None
 
-    # 매니저 override (Undo Clock-out) → "modify" 태그. 단일 row 로 기록.
-    # status 가 main 변경, clock_out 시각 정보는 reason 에 부속.
+    # Undo clock-out — 상태 전이 + 지워진 clock_out 값 전이.
+    from app.services import attendance_timeline as tl
     user_reason = reason if reason and reason != "(no reason provided)" else None
-    composed_reason = (
-        f"Undo clock-out (clock-out was {original_clock_out})"
-        if not user_reason
-        else f"{user_reason} · clock-out was {original_clock_out}"
-    )
-    db.add(AttendanceCorrection(
+    group = tl.new_group()
+    tl.record_status(
+        db,
         attendance_id=target.id,
-        field_name="modify",
-        original_value="clocked_out",
-        corrected_value="working",
-        reason=composed_reason,
-        corrected_by=manager.id,
-    ))
+        group_id=group,
+        action=tl.ACTION_REOPEN,
+        before=original_status,
+        after=target.status,
+        reason=user_reason,
+        by_user_id=manager.id,
+    )
+    tl.record(
+        db,
+        attendance_id=target.id,
+        group_id=group,
+        action=tl.ACTION_REOPEN,
+        field_name=tl.FIELD_CLOCK_OUT,
+        before=tl.dt_value(original_clock_out_dt),
+        after=tl.NONE,
+        reason=user_reason,
+        by_user_id=manager.id,
+    )
     await db.flush()
     response = await attendance_service.build_response(db, target)
     await db.commit()

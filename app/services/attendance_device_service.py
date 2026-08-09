@@ -767,6 +767,15 @@ class AttendanceDeviceService:
 
         attendance = _active_row() if action != "clock_in" else (day_rows[0] if day_rows else None)
 
+        # ── 타임라인용 before 캡처 ──
+        # 각 분기가 실제로 건드리는 row 를 기준으로 변경 직전 값을 잡아둔다.
+        # 여기서 안 잡으면 "이전 상태"를 영영 복원할 수 없다 (기존 버그의 원인).
+        before_status: str | None = None
+        before_clock_in: datetime | None = None
+        before_clock_out: datetime | None = None
+        touched_break: AttendanceBreak | None = None
+        break_before: tuple[datetime | None, datetime | None, str | None] = (None, None, None)
+
         if action == "clock_in":
             # 1) 실제로 출근중인 shift(clock_in 있고 clock_out 없는 working/on_break) 만 차단.
             #    late는 "스케줄 지났는데 미출근" 상태일 수 있어 clock_in 여부로 판단해야 한다 —
@@ -940,6 +949,8 @@ class AttendanceDeviceService:
             # upcoming/late/no_show 상태에서 clock-in 시 update.
             target = await attendance_repository.get_by_schedule_id(db, schedule.id)
             if target is not None:
+                before_status = target.status
+                before_clock_in = target.clock_in
                 target.store_id = store_id
                 target.clock_in = now
                 target.clock_in_timezone = store_tz
@@ -987,6 +998,9 @@ class AttendanceDeviceService:
                 break_type=normalize_break_type(break_type),
             )
             db.add(new_break)
+            before_status = attendance.status
+            touched_break = new_break
+            break_before = (None, None, None)
             attendance.status = "on_break"
             # 하위호환: 기존 컬럼도 최근 break 기준으로 갱신
             attendance.break_start = now
@@ -1012,6 +1026,9 @@ class AttendanceDeviceService:
             if policy_error is not None:
                 raise BadRequestError(policy_error)
 
+            before_status = attendance.status
+            touched_break = open_break
+            break_before = (open_break.started_at, open_break.ended_at, open_break.break_type)
             open_break.ended_at = now
             open_break.duration_minutes = elapsed_minutes
             attendance.status = "working"
@@ -1064,10 +1081,16 @@ class AttendanceDeviceService:
                     "Early clock-out requires a reason. Please provide one."
                 )
 
+            before_status = attendance.status
+            before_clock_out = attendance.clock_out
             # 진행중 break 가 있으면 먼저 종료 처리
             if attendance.status == "on_break":
                 open_break = await self._get_open_break(db, attendance.id)
                 if open_break is not None:
+                    touched_break = open_break
+                    break_before = (
+                        open_break.started_at, open_break.ended_at, open_break.break_type,
+                    )
                     open_break.ended_at = now
                     open_break.duration_minutes = minutes_between(
                         open_break.started_at, now
@@ -1094,40 +1117,63 @@ class AttendanceDeviceService:
             raise BadRequestError(f"Invalid action: {action}")
 
         # ── 모든 attendance 액션을 timeline 에 기록 ──
-        # field_name 의미:
-        #   - staff PIN 정상 액션  → action verb 그대로 (clock_in / clock_out / break_start / break_end)
-        #   - admin override      → "modify" (매니저가 임의 사용자에 대해 직접 처리)
-        # corrected_value 는 새 시각/status 등 핵심 값.
-        from app.models.attendance import AttendanceCorrection
+        # action(카드 태그) 은 매니저 대행이어도 실제 행위(clock_in 등) 를 그대로 쓴다.
+        # 예전엔 대행이면 "modify" 로 뭉개서 무엇이 바뀐지 알 수 없었고 before 도 비었다.
+        # 대행 여부는 actor(corrected_by) 로 이미 드러난다.
+        from app.services import attendance_timeline as tl
+
         actor_id = manager_user_id if skip_pin_check else user.id
-        field_label = "modify" if skip_pin_check else action
-        # corrected_value: clock_in/out/break_start/break_end 는 해당 시각 ISO,
-        # modify 는 결과 status (이 액션의 효과).
-        cv: str
-        if skip_pin_check:
-            cv = attendance.status
-        elif action in ("clock_in", "clock_out"):
-            t = getattr(attendance, action, None)
-            cv = t.isoformat() if t else "(set)"
-        elif action == "break_start":
-            cv = (break_type or "break")
-        elif action == "break_end":
-            cv = "ended"
-        else:
-            cv = attendance.status
-        user_reason = (reason or "").strip()
-        if user_reason:
-            correction_reason = user_reason
-        else:
-            correction_reason = None
-        db.add(AttendanceCorrection(
+        group = tl.new_group()
+        tl.record_status(
+            db,
             attendance_id=attendance.id,
-            field_name=field_label,
-            original_value=None,
-            corrected_value=cv,
-            reason=correction_reason or "(no reason)",
-            corrected_by=actor_id,
-        ))
+            group_id=group,
+            action=action,
+            before=before_status,
+            after=attendance.status,
+            reason=reason,
+            by_user_id=actor_id,
+        )
+        if action == "clock_in":
+            tl.record(
+                db,
+                attendance_id=attendance.id,
+                group_id=group,
+                action=action,
+                field_name=tl.FIELD_CLOCK_IN,
+                before=tl.dt_value(before_clock_in),
+                after=tl.dt_value(attendance.clock_in),
+                reason=reason,
+                by_user_id=actor_id,
+            )
+        elif action == "clock_out":
+            tl.record(
+                db,
+                attendance_id=attendance.id,
+                group_id=group,
+                action=action,
+                field_name=tl.FIELD_CLOCK_OUT,
+                before=tl.dt_value(before_clock_out),
+                after=tl.dt_value(attendance.clock_out),
+                reason=reason,
+                by_user_id=actor_id,
+            )
+        if touched_break is not None:
+            tl.record_break_snapshot(
+                db,
+                attendance_id=attendance.id,
+                group_id=group,
+                action=action,
+                break_id=touched_break.id,
+                before=break_before,
+                after=(
+                    touched_break.started_at,
+                    touched_break.ended_at,
+                    touched_break.break_type,
+                ),
+                reason=reason,
+                by_user_id=actor_id,
+            )
 
         await self.touch_last_seen(db, device)
         try:

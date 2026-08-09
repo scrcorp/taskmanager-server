@@ -11,7 +11,7 @@ from typing import Sequence
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attendance import Attendance, AttendanceCorrection, QRCode
@@ -751,21 +751,30 @@ class AttendanceService:
                 "Correct clock-in first, then clock-out."
             )
 
-        # 기존 값 가져오기 — Get original value
-        original_value: str | None = None
+        # 기존 값 가져오기 — Get original value.
+        # 비어 있었으면 NULL 이 아니라 센티널을 남긴다: "값이 없었다"도 엄연한 이전 상태다.
+        from app.services import attendance_timeline as tl
+
         original_raw = getattr(attendance, field_name, None)
-        if original_raw is not None:
-            if field_name in time_fields:
-                original_value = original_raw.isoformat()
-            else:
-                original_value = str(original_raw)
+        if original_raw is None:
+            original_value = tl.EMPTY if field_name == "note" else tl.NONE
+        elif field_name in time_fields:
+            original_value = original_raw.isoformat()
+        else:
+            original_value = tl.text_value(str(original_raw))
+
+        before_status = attendance.status
+        group = tl.new_group()
 
         # 수정 이력 생성 — Create correction record
         correction: AttendanceCorrection = await attendance_repository.create_correction(
             db,
             {
                 "attendance_id": attendance_id,
+                "group_id": group,
+                "action": tl.ACTION_MODIFY,
                 "field_name": field_name,
+                "target_type": tl.TARGET_ATTENDANCE,
                 "original_value": original_value,
                 "corrected_value": corrected_value,
                 "reason": reason,
@@ -820,6 +829,19 @@ class AttendanceService:
             attendance, field_name, corrected_by
         )
 
+        # 정정의 부수효과로 status 가 바뀌었으면 그 전이도 같은 그룹에 남긴다 —
+        # 값만 고쳤는데 상태가 조용히 따라 바뀌는 게 이력에 안 보이면 안 된다.
+        tl.record_status(
+            db,
+            attendance_id=attendance_id,
+            group_id=group,
+            action=tl.ACTION_MODIFY,
+            before=before_status,
+            after=attendance.status,
+            reason=reason,
+            by_user_id=corrected_by,
+        )
+
         await db.flush()
 
         # 근태 수정 알림 — Notify GM+ about attendance correction
@@ -857,6 +879,14 @@ class AttendanceService:
             raise NotFoundError("Correction record not found")
 
         correction.reason = reason
+        # 한 액션이 여러 행으로 쪼개져도 콘솔은 카드 하나에 사유 하나를 보여준다.
+        # 한 행만 고치면 카드 안에서 사유가 갈리므로 같은 그룹 전체를 함께 갱신한다.
+        if correction.group_id is not None:
+            await db.execute(
+                update(AttendanceCorrection)
+                .where(AttendanceCorrection.group_id == correction.group_id)
+                .values(reason=reason)
+            )
         await db.flush()
         await db.commit()
         await db.refresh(correction)
@@ -1194,7 +1224,11 @@ class AttendanceService:
 
         return {
             "id": str(correction.id),
+            "group_id": str(correction.group_id) if correction.group_id else None,
+            "action": correction.action,
             "field_name": correction.field_name,
+            "target_type": correction.target_type,
+            "target_id": str(correction.target_id) if correction.target_id else None,
             "original_value": correction.original_value,
             "corrected_value": correction.corrected_value,
             "reason": correction.reason,
@@ -1438,6 +1472,8 @@ class AttendanceService:
         started_at: datetime,
         ended_at: datetime | None,
         break_type: str,
+        reason: str | None = None,
+        by_user_id: UUID | None = None,
     ) -> AttendanceBreak:
         """admin 이 새 break 세션을 attendance 에 추가."""
         attendance = await self.get_attendance(db, attendance_id, organization_id)
@@ -1482,6 +1518,21 @@ class AttendanceService:
         await db.flush()
 
         await self._recalculate_break_aggregates(db, attendance)
+
+        # 휴식 세션 추가 이력 — 이전엔 이 경로가 이력을 아무것도 남기지 않아
+        # 콘솔에서 휴식을 고쳐도 Activity History 에 흔적이 없었다.
+        from app.services import attendance_timeline as tl
+        tl.record_break_snapshot(
+            db,
+            attendance_id=attendance.id,
+            group_id=tl.new_group(),
+            action=tl.ACTION_BREAK_ADDED,
+            break_id=new_break.id,
+            before=(None, None, None),
+            after=(new_break.started_at, new_break.ended_at, new_break.break_type),
+            reason=reason,
+            by_user_id=by_user_id,
+        )
         await db.flush()
 
         try:
@@ -1502,6 +1553,8 @@ class AttendanceService:
         ended_at: datetime | None,
         break_type: str | None,
         clear_ended_at: bool,
+        reason: str | None = None,
+        by_user_id: UUID | None = None,
     ) -> AttendanceBreak:
         """admin 이 기존 break 세션을 수정.
 
@@ -1550,6 +1603,9 @@ class AttendanceService:
         sessions = list(existing.scalars().all())
         self._check_overlap(sessions, new_started, new_ended, exclude_id=break_id)
 
+        # 변경 전 스냅샷 — 이력의 before 로 쓴다.
+        before_snapshot = (target.started_at, target.ended_at, target.break_type)
+
         target.started_at = new_started
         target.ended_at = new_ended
         target.break_type = new_type
@@ -1560,6 +1616,19 @@ class AttendanceService:
         await db.flush()
 
         await self._recalculate_break_aggregates(db, attendance)
+
+        from app.services import attendance_timeline as tl
+        tl.record_break_snapshot(
+            db,
+            attendance_id=attendance.id,
+            group_id=tl.new_group(),
+            action=tl.ACTION_BREAK_UPDATED,
+            break_id=target.id,
+            before=before_snapshot,
+            after=(target.started_at, target.ended_at, target.break_type),
+            reason=reason,
+            by_user_id=by_user_id,
+        )
         await db.flush()
 
         try:
@@ -1576,6 +1645,8 @@ class AttendanceService:
         attendance_id: UUID,
         break_id: UUID,
         organization_id: UUID,
+        reason: str | None = None,
+        by_user_id: UUID | None = None,
     ) -> None:
         """admin 이 break 세션을 삭제. attendance 의 누적 분 재계산."""
         attendance = await self.get_attendance(db, attendance_id, organization_id)
@@ -1593,10 +1664,28 @@ class AttendanceService:
         if target is None:
             raise NotFoundError("Break session not found")
 
+        # 삭제 전 스냅샷 — 세션 행은 사라져도 "무엇을 지웠는지"는 남아야 한다.
+        # target_id 에 FK 를 걸지 않은 이유가 이것이다.
+        before_snapshot = (target.started_at, target.ended_at, target.break_type)
+        deleted_break_id = target.id
+
         await db.delete(target)
         await db.flush()
 
         await self._recalculate_break_aggregates(db, attendance)
+
+        from app.services import attendance_timeline as tl
+        tl.record_break_snapshot(
+            db,
+            attendance_id=attendance.id,
+            group_id=tl.new_group(),
+            action=tl.ACTION_BREAK_REMOVED,
+            break_id=deleted_break_id,
+            before=before_snapshot,
+            after=(None, None, None),
+            reason=reason,
+            by_user_id=by_user_id,
+        )
         await db.flush()
 
         try:

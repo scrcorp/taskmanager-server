@@ -308,6 +308,8 @@ async def add_break_session(
         started_at=data.started_at,
         ended_at=data.ended_at,
         break_type=data.break_type,
+        reason=data.reason,
+        by_user_id=current_user.id,
     )
     return {
         "id": str(new_break.id),
@@ -339,6 +341,8 @@ async def update_break_session(
         ended_at=data.ended_at,
         break_type=data.break_type,
         clear_ended_at=data.clear_ended_at,
+        reason=data.reason,
+        by_user_id=current_user.id,
     )
     return {
         "id": str(target.id),
@@ -358,11 +362,17 @@ async def delete_break_session(
     break_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+    reason: str | None = None,
 ) -> None:
-    """admin 이 break 세션을 삭제 (GM+ 전용)."""
+    """admin 이 break 세션을 삭제 (GM+ 전용).
+
+    사유는 선택 — DELETE 라 body 대신 query 로 받는다 (`?reason=...`).
+    """
     await attendance_service.delete_break(
         db,
         attendance_id=attendance_id,
         break_id=break_id,
         organization_id=current_user.organization_id,
+        reason=reason,
+        by_user_id=current_user.id,
     )

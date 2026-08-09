@@ -189,14 +189,19 @@ async def test_long_meal_break_end_succeeds_with_reason(
             )
         )
         assert closed is not None
-        # 사유는 버려지지 않고 correction 으로 남아 콘솔에서 보여야 한다.
-        reason = await db.scalar(
-            select(AttendanceCorrection.reason).where(
-                AttendanceCorrection.attendance_id == att_id,
-                AttendanceCorrection.field_name == "break_end",
+        # 사유는 버려지지 않고 타임라인에 남아 콘솔에서 보여야 한다.
+        # 무슨 액션이었나는 action, 무엇이 바뀌었나는 field_name 이 담는다
+        # (break_end 액션은 status 전이 + break_end_at 전이 두 행을 남긴다).
+        rows = (
+            await db.execute(
+                select(AttendanceCorrection).where(
+                    AttendanceCorrection.attendance_id == att_id,
+                    AttendanceCorrection.action == "break_end",
+                )
             )
-        )
-        assert reason == "Waiting for coverage"
+        ).scalars().all()
+        assert rows, "break-end 액션이 타임라인에 남지 않았다"
+        assert {r.reason for r in rows} == {"Waiting for coverage"}
 
 
 async def test_meal_break_within_allowance_needs_no_reason(

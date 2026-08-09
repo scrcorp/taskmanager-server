@@ -15,12 +15,13 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.attendance import Attendance, AttendanceCorrection
+from app.models.attendance import Attendance
 from app.models.attendance_break import (
     VALID_BREAK_TYPES,
     AttendanceBreak,
     normalize_break_type,
 )
+from app.services import attendance_timeline as tl
 from app.utils.exceptions import BadRequestError
 from app.utils.timezone import minutes_between
 
@@ -130,28 +131,47 @@ class AttendanceActionService:
             return "late", ["late"]
         return "working", None
 
-    def _add_correction(
+    def _record_action(
         self,
         db: AsyncSession,
         *,
-        attendance_id: UUID,
-        field_name: str,
-        original_value: str | None,
-        corrected_value: str,
+        attendance: Attendance,
+        action: str,
+        before_status: str | None,
+        field_name: str | None = None,
+        before: str | None = None,
+        after: str | None = None,
         reason: str,
         by_user_id: UUID,
     ) -> None:
-        """timeline 행 추가. reason 은 항상 비지 않은 값으로 들어옴 (라우터 단 보장)."""
-        db.add(
-            AttendanceCorrection(
-                attendance_id=attendance_id,
-                field_name=field_name,
-                original_value=original_value,
-                corrected_value=corrected_value,
-                reason=reason,
-                corrected_by=by_user_id,
-            )
+        """한 액션의 타임라인 행들을 남긴다 — status 전이 + (있으면) 값 전이.
+
+        status 는 모든 액션에서 기록한다. "clock-in 이전 상태는 upcoming" 처럼
+        이전 상태가 늘 존재하기 때문이다 (attendance_timeline 모듈 계약 참조).
+        """
+        group = tl.new_group()
+        tl.record_status(
+            db,
+            attendance_id=attendance.id,
+            group_id=group,
+            action=action,
+            before=before_status,
+            after=attendance.status,
+            reason=reason,
+            by_user_id=by_user_id,
         )
+        if field_name is not None:
+            tl.record(
+                db,
+                attendance_id=attendance.id,
+                group_id=group,
+                action=action,
+                field_name=field_name,
+                before=before if before is not None else tl.NONE,
+                after=after if after is not None else tl.NONE,
+                reason=reason,
+                by_user_id=by_user_id,
+            )
 
     async def _commit_or_rollback(self, db: AsyncSession) -> None:
         try:
@@ -189,6 +209,8 @@ class AttendanceActionService:
 
         from app.utils.timezone import get_store_day_config, interpret_clock_time
 
+        before_status = attendance.status
+        before_clock_in = attendance.clock_in
         store_tz, _ = await get_store_day_config(db, attendance.store_id)
         # (AK-1) naive 입력은 매장 타임존 벽시계로 해석 → UTC instant 저장
         at = interpret_clock_time(at, store_tz)
@@ -205,12 +227,14 @@ class AttendanceActionService:
         attendance.anomalies = existing_anoms or None
         self._recalc_total_work(attendance)
 
-        self._add_correction(
+        self._record_action(
             db,
-            attendance_id=attendance.id,
-            field_name="clock_in",
-            original_value=None,
-            corrected_value=at.isoformat(),
+            attendance=attendance,
+            action=tl.ACTION_CLOCK_IN,
+            before_status=before_status,
+            field_name=tl.FIELD_CLOCK_IN,
+            before=tl.dt_value(before_clock_in),
+            after=tl.dt_value(at),
             reason=reason,
             by_user_id=by_user_id,
         )
@@ -238,6 +262,8 @@ class AttendanceActionService:
 
         from app.utils.timezone import get_store_day_config, interpret_clock_time
 
+        before_status = attendance.status
+        before_clock_out = attendance.clock_out
         store_tz, _ = await get_store_day_config(db, attendance.store_id)
         # (AK-1) naive 입력은 매장 타임존 벽시계로 해석 → UTC instant 저장.
         # 비교 전에 정규화해야 naive vs aware 비교 오류도 안 난다.
@@ -269,12 +295,14 @@ class AttendanceActionService:
             attendance, "clock_out", by_user_id
         )
 
-        self._add_correction(
+        self._record_action(
             db,
-            attendance_id=attendance.id,
-            field_name="clock_out",
-            original_value=None,
-            corrected_value=at.isoformat(),
+            attendance=attendance,
+            action=tl.ACTION_CLOCK_OUT,
+            before_status=before_status,
+            field_name=tl.FIELD_CLOCK_OUT,
+            before=tl.dt_value(before_clock_out),
+            after=tl.dt_value(at),
             reason=reason,
             by_user_id=by_user_id,
         )
@@ -315,24 +343,40 @@ class AttendanceActionService:
         if open_break is not None:
             raise BadRequestError("A break is already in progress")
 
+        before_status = attendance.status
         normalized = normalize_break_type(break_type)
-        db.add(
-            AttendanceBreak(
-                attendance_id=attendance.id,
-                started_at=at,
-                break_type=normalized,
-            )
+        new_break = AttendanceBreak(
+            attendance_id=attendance.id,
+            started_at=at,
+            break_type=normalized,
         )
+        db.add(new_break)
+        # id 는 컬럼 default(uuid4) 라 INSERT 전에는 None — 이력이 세션을 지목하려면
+        # 먼저 flush 해서 PK 를 확정해야 한다.
+        await db.flush()
         attendance.status = "on_break"
         attendance.break_start = at
         attendance.break_end = None
 
-        self._add_correction(
+        group = tl.new_group()
+        tl.record_status(
             db,
             attendance_id=attendance.id,
-            field_name="break_start",
-            original_value=None,
-            corrected_value=normalized,
+            group_id=group,
+            action=tl.ACTION_BREAK_START,
+            before=before_status,
+            after=attendance.status,
+            reason=reason,
+            by_user_id=by_user_id,
+        )
+        tl.record_break_snapshot(
+            db,
+            attendance_id=attendance.id,
+            group_id=group,
+            action=tl.ACTION_BREAK_START,
+            break_id=new_break.id,
+            before=(None, None, None),
+            after=(at, None, normalized),
             reason=reason,
             by_user_id=by_user_id,
         )
@@ -371,20 +415,36 @@ class AttendanceActionService:
         if at < open_break.started_at:
             raise BadRequestError("Break end cannot be earlier than break start")
 
+        before_status = attendance.status
         open_break.ended_at = at
         open_break.duration_minutes = minutes_between(open_break.started_at, at)
         attendance.status = "working"
         attendance.break_end = at
         attendance.total_break_minutes = await self._sum_break_minutes(db, attendance.id)
 
-        self._add_correction(
+        group = tl.new_group()
+        tl.record_status(
             db,
             attendance_id=attendance.id,
-            field_name="break_end",
-            original_value=None,
-            corrected_value=at.isoformat(),
+            group_id=group,
+            action=tl.ACTION_BREAK_END,
+            before=before_status,
+            after=attendance.status,
             reason=reason,
             by_user_id=by_user_id,
+        )
+        tl.record(
+            db,
+            attendance_id=attendance.id,
+            group_id=group,
+            action=tl.ACTION_BREAK_END,
+            field_name=tl.FIELD_BREAK_END_AT,
+            before=tl.NONE,
+            after=tl.dt_value(at),
+            reason=reason,
+            by_user_id=by_user_id,
+            target_type=tl.TARGET_BREAK,
+            target_id=open_break.id,
         )
         await db.flush()
         await self._commit_or_rollback(db)
@@ -420,12 +480,11 @@ class AttendanceActionService:
             anoms.append("no_show")
         attendance.anomalies = anoms or None
 
-        self._add_correction(
+        self._record_action(
             db,
-            attendance_id=attendance.id,
-            field_name="no_show",
-            original_value=original_status,
-            corrected_value="no_show",
+            attendance=attendance,
+            action=tl.ACTION_NO_SHOW,
+            before_status=original_status,
             reason=reason,
             by_user_id=by_user_id,
         )
@@ -455,12 +514,11 @@ class AttendanceActionService:
         original_status = attendance.status
         attendance.status = "cancelled"
 
-        self._add_correction(
+        self._record_action(
             db,
-            attendance_id=attendance.id,
-            field_name="cancel",
-            original_value=original_status,
-            corrected_value="cancelled",
+            attendance=attendance,
+            action=tl.ACTION_CANCEL,
+            before_status=original_status,
             reason=reason,
             by_user_id=by_user_id,
         )
@@ -486,6 +544,7 @@ class AttendanceActionService:
         """
         attendance = await self._get_attendance(db, attendance_id, organization_id)
         original_status = attendance.status
+        original_clock_out = attendance.clock_out
 
         if attendance.status == "clocked_out":
             attendance.clock_out = None
@@ -505,12 +564,15 @@ class AttendanceActionService:
                 f"Cannot reopen from '{attendance.status}' state"
             )
 
-        self._add_correction(
+        # clock_out 을 지우는 reopen 이면 그 전이도 함께 남긴다 (지워진 값이 뭐였는지).
+        self._record_action(
             db,
-            attendance_id=attendance.id,
-            field_name="reopen",
-            original_value=original_status,
-            corrected_value=attendance.status,
+            attendance=attendance,
+            action=tl.ACTION_REOPEN,
+            before_status=original_status,
+            field_name=tl.FIELD_CLOCK_OUT,
+            before=tl.dt_value(original_clock_out),
+            after=tl.dt_value(attendance.clock_out),
             reason=reason,
             by_user_id=by_user_id,
         )

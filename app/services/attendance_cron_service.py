@@ -293,15 +293,32 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
         att.anomalies = anoms or None
 
         # timeline 에 기록 — system actor (corrected_by=NULL).
-        from app.models.attendance import AttendanceCorrection
-        db.add(AttendanceCorrection(
+        # 상태 전이 + clock_out 값 전이를 한 그룹으로. 이전 상태는 on_break 였을 수도
+        # 있으므로 "working" 하드코딩하지 않고 실제 값을 쓴다.
+        from app.services import attendance_timeline as tl
+        group = tl.new_group()
+        auto_reason = f"Shift ended {after_minutes} min ago"
+        tl.record_status(
+            db,
             attendance_id=att.id,
-            field_name="auto_clock_out",
-            original_value="working",
-            corrected_value=cutoff.isoformat(),
-            reason=f"Shift ended {after_minutes} min ago",
-            corrected_by=None,
-        ))
+            group_id=group,
+            action=tl.ACTION_AUTO_CLOCK_OUT,
+            before="on_break" if was_on_break else "working",
+            after=att.status,
+            reason=auto_reason,
+            by_user_id=None,
+        )
+        tl.record(
+            db,
+            attendance_id=att.id,
+            group_id=group,
+            action=tl.ACTION_AUTO_CLOCK_OUT,
+            field_name=tl.FIELD_CLOCK_OUT,
+            before=tl.NONE,
+            after=tl.dt_value(cutoff),
+            reason=auto_reason,
+            by_user_id=None,
+        )
 
         auto_count += 1
 
