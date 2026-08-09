@@ -13,6 +13,7 @@ from typing import Optional
 from sqlalchemy import (
     DateTime,
     ForeignKey,
+    Index,
     String,
     TIMESTAMP,
     Text,
@@ -106,6 +107,12 @@ class Task(Base):
         order_by="TaskComment.created_at",
     )
 
+    # 인덱스는 반드시 모델에 선언 (마이그레이션에만 있으면 autogenerate 가 drop 을 뱉는다).
+    __table_args__ = (
+        # Task 목록 — 조직 + 상태 필터
+        Index("ix_tasks_org_status", "organization_id", "status"),
+    )
+
 
 class TaskComment(Base):
     """Task 댓글 — 보고/검토 진행 중 메시지 + 첨부 + audit trail.
@@ -135,6 +142,11 @@ class TaskComment(Base):
     )
 
     task = relationship("Task", back_populates="comments")
+
+    __table_args__ = (
+        # 댓글 타임라인 — task 별 시간순
+        Index("ix_task_comments_task_created", "task_id", "created_at"),
+    )
 
 
 class TaskAssignee(Base):
