@@ -17,6 +17,7 @@ from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 from app.services.attendance_service import (
+    ANOMALY_EARLY_CLOCK_IN_OVERRIDE,
     compute_effective_status,
     compute_state_and_anomalies,
 )
@@ -414,3 +415,46 @@ def test_done_keeps_no_break_and_early_leave() -> None:
         att_status="clocked_out", clock_in=_now(8, 0), clock_out=_now(14, 0), anomalies=["no_break", "early_leave"]
     )
     assert set(anomalies) == {"no_break", "early_leave"}
+
+
+# ── 조기 clock-in override / early_clock_out 표시 (화이트리스트 등록분) ──
+
+
+def test_early_clock_in_override_kept_when_clocked_in() -> None:
+    """출근 기록이 있으면 override 라벨 유지 — HTMA Manage 에 보여야 한다."""
+    _, anomalies = _state(
+        att_status="working",
+        clock_in=_now(7, 0),
+        anomalies=[ANOMALY_EARLY_CLOCK_IN_OVERRIDE],
+    )
+    assert ANOMALY_EARLY_CLOCK_IN_OVERRIDE in anomalies
+
+
+def test_early_clock_in_override_dropped_when_not_clocked_in() -> None:
+    """미출근인데 override 라벨 → 제거 (출근해야 조기출근 강행 성립)."""
+    _, anomalies = _state(
+        att_status="upcoming",
+        anomalies=[ANOMALY_EARLY_CLOCK_IN_OVERRIDE],
+        start=time(9, 0),
+        now=_now(9, 30),
+    )
+    assert ANOMALY_EARLY_CLOCK_IN_OVERRIDE not in anomalies
+
+
+def test_early_clock_out_kept_when_clocked_out() -> None:
+    """early_clock_out 은 화이트리스트에 없어서 앱에서 안 보이던 누락 — 이제 유지."""
+    _, anomalies = _state(
+        att_status="clocked_out",
+        clock_in=_now(8, 0),
+        clock_out=_now(12, 0),
+        anomalies=["early_clock_out"],
+    )
+    assert "early_clock_out" in anomalies
+
+
+def test_early_clock_out_dropped_when_still_working() -> None:
+    """퇴근 안 했으면 early_clock_out 은 모순 → 제거."""
+    _, anomalies = _state(
+        att_status="working", clock_in=_now(8, 0), anomalies=["early_clock_out"]
+    )
+    assert "early_clock_out" not in anomalies

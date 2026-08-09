@@ -912,11 +912,18 @@ class AttendanceDeviceService:
                 resolve_setting,
             )
 
+            from app.services.attendance_service import (
+                ANOMALY_EARLY_CLOCK_IN_OVERRIDE,
+            )
+
             status_val = "working"
             anomalies: list[str] | None = None
+            # 조기 출근 강행 여부 + "이미 승인된 건인가"(매니저 대행) — 확인 게이트용.
+            early_clock_in_override = False
+            early_override_preapproved = False
             scheduled_start = _start_dt(schedule)
             if scheduled_start is not None:
-                # Early clock-in threshold — 너무 일찍 clock-in 시도 차단.
+                # Early clock-in threshold — 이보다 이르면 사유 없이는 못 찍는다.
                 try:
                     raw = await resolve_setting(
                         db,
@@ -931,16 +938,39 @@ class AttendanceDeviceService:
                 # "정시 출근(같은 분)"이 초 차이로 late 로 찍히지 않게 한다. 워크인은 start=
                 # clock-in(분 내림)이라 이 규칙으로 자연히 early/late 가 아니게 된다(특수예외 불필요).
                 now_min = now.replace(second=0, microsecond=0)
-                if (
-                    not skip_early_guards
-                    and now_min < scheduled_start - _td(minutes=early_threshold)
-                ):
-                    minutes_until = int(
-                        (scheduled_start - now_min).total_seconds() / 60
-                    )
-                    raise BadRequestError(
-                        f"Too early to clock in. Shift starts in {minutes_until} minutes."
-                    )
+                # 조기 clock-in override — 예정보다 이르면 차단이 아니라 "사유 요구".
+                # 매니저/SV 가 현장에 없어도 직원이 직접 찍을 수 있어야 하기 때문
+                # (일찍 와달라고 부른 경우). 사유가 오면 통과시키고 anomaly 로 표시한다.
+                # 상한(몇 시간 전까지) 은 두지 않는다 — 얼마나 일찍 부를지 예측 불가.
+                #
+                # 매니저 대행(skip_early_guards) 도 **라벨은 똑같이 붙인다** — 예정 밖
+                # 근무는 특이사항으로 보여야 하기 때문. 다만 사유는 요구하지 않고,
+                # 확인이 이미 끝난 것으로 처리한다(매니저가 그 자리에서 승인한 행위라
+                # 다시 확인시키면 이중 확인). 자동 확인은 Phase 2 의 확인 컬럼이 담당.
+                if now_min < scheduled_start - _td(minutes=early_threshold):
+                    early_clock_in_override = True
+                    early_override_preapproved = skip_early_guards
+                    if not skip_early_guards and not (reason and reason.strip()):
+                        from fastapi import HTTPException, status
+
+                        minutes_early = int(
+                            (scheduled_start - now_min).total_seconds() / 60
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={
+                                "code": "early_clock_in_reason_required",
+                                "minutes_early": minutes_early,
+                                "schedule_id": str(schedule.id),
+                                "scheduled_start": scheduled_start.isoformat(),
+                                "message": (
+                                    "This shift starts in "
+                                    f"{minutes_early} minutes. To clock in now, "
+                                    "enter a reason — your manager will see it."
+                                ),
+                            },
+                        )
+                    anomalies = [ANOMALY_EARLY_CLOCK_IN_OVERRIDE]
                 if now_min > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
                     status_val = "late"
                     anomalies = ["late"]

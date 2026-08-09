@@ -97,9 +97,20 @@ def compute_effective_status(
     return "upcoming"
 
 
+# 조기 clock-in override — 예정보다 이른 출근을 사유와 함께 강제로 찍은 기록.
+ANOMALY_EARLY_CLOCK_IN_OVERRIDE = "early_clock_in_override"
+
 # manage UI 재설계(Issue 10) 가 쓰는 anomaly 표시 후보 — server 판정 예외만.
 # (soon 은 anomaly 아님 → 앱이 start_time 으로 자체 계산, 여기서 안 냄)
-DISPLAY_ANOMALIES = ("late", "no_show", "early_leave", "overtime", "no_break")
+DISPLAY_ANOMALIES = (
+    "late",
+    "no_show",
+    "early_leave",
+    "overtime",
+    "no_break",
+    "early_clock_out",
+    ANOMALY_EARLY_CLOCK_IN_OVERRIDE,
+)
 
 
 def compute_state_and_anomalies(
@@ -125,7 +136,9 @@ def compute_state_and_anomalies(
     anomaly 유효성 규칙 (출퇴근 사실과 모순되는 건 제거):
       - no_show: 미출근(clock_in 없음)에서만 + **단독** (출근 안 했으니 다른 anomaly 공존 불가)
       - overtime: clock_in 있어야 (출근해야 초과근무)
-      - no_break / early_leave: clock_out 있어야 (퇴근해야 휴식없음/조기퇴근 판정 가능)
+      - no_break / early_leave / early_clock_out: clock_out 있어야
+        (퇴근해야 휴식없음/조기퇴근 판정 가능)
+      - early_clock_in_override: clock_in 있어야 (출근해야 조기출근 강행 성립)
       - late: 미출근 지각 / 늦은 출근 모두 가능 (no_show 와만 배타)
 
     soon 은 여기서 내지 않는다 (앱이 자체 판단).
@@ -168,7 +181,9 @@ def compute_state_and_anomalies(
             continue  # 출근 기록 있는데 no_show 면 모순 → 제거 (no_show 는 위에서 단독 처리)
         if a == "overtime" and not has_clock_in:
             continue  # 출근 안 했으면 overtime 불가
-        if a in ("no_break", "early_leave") and not has_clock_out:
+        if a == ANOMALY_EARLY_CLOCK_IN_OVERRIDE and not has_clock_in:
+            continue  # 출근 안 했으면 조기출근 강행 불가
+        if a in ("no_break", "early_leave", "early_clock_out") and not has_clock_out:
             continue  # 퇴근 안 했으면 판정 불가
         if a not in anomalies:
             anomalies.append(a)
