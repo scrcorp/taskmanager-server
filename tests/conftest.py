@@ -75,6 +75,24 @@ async def seed_organization() -> dict:
         return {"id": org.id, "name": org.name}
 
 
+@pytest.fixture(scope="session", autouse=True)
+def block_outgoing_email() -> None:
+    """테스트는 절대 메일을 보내지 않는다.
+
+    테스트 DB 는 dev 복사본이라 **실제 사람들의 주소**가 들어있고 .env 의 SMTP
+    자격증명은 진짜다. 조기 출근 알림처럼 권한 보유자 전원에게 fan-out 하는 코드가
+    테스트 중에 돌면 그대로 나간다. EMAIL_REDIRECT_TO 를 비워 가드의 기본 차단
+    (blocked_no_redirect) 에 걸리게 한다 — 개발자 .env 설정과 무관하게 항상.
+
+    발송 동작 자체를 검증하는 테스트는 이 값을 각자 monkeypatch 로 덮어쓴다.
+    """
+    from app.config import settings
+
+    settings.EMAIL_REDIRECT_TO = ""
+    settings.EMAIL_SEND_REAL = False
+    settings.APP_ENV = "local"
+
+
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def seed_warning_categories(seed_organization: dict) -> None:
     """테스트 org 에 기본 경고 카테고리 12종 시드 (idempotent).

@@ -399,6 +399,10 @@ class ScheduleUpdate(BaseModel):
     note: str | None = None
     hourly_rate: float | None = Field(default=None, ge=0)  # 시급 override (optional, non-negative)
     force: bool = False
+    # 수정 사유 — schedule_audit_logs.reason 에 그대로 기록된다 (History 노출).
+    # attendance correction 은 reason 이 필수인데 schedule 수정만 사유 없이 diff 만 남아서,
+    # "왜 바꿨나" 를 History 에서 알 수 없었다. 선택 입력 (기존 호출자 호환).
+    change_reason: str | None = Field(default=None, max_length=500)
     reset_checklist: bool | None = None
     # user_id 변경 시 기존 체크리스트 처리:
     # None  = 충돌(in_progress/completed) 시 에러 반환 (프론트가 선택 후 재요청)

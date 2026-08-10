@@ -20,7 +20,11 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.models.attendance import Attendance, AttendanceCorrection
-from app.models.attendance_break import BREAK_TYPE_PAID_10MIN, BREAK_TYPE_UNPAID_MEAL
+from app.models.attendance_break import (
+    BREAK_TYPE_PAID_10MIN,
+    BREAK_TYPE_UNPAID_MEAL,
+    AttendanceBreak,
+)
 from app.models.schedule import Schedule
 from app.services import attendance_timeline as tl
 from app.services.attendance_action_service import attendance_action_service
@@ -335,3 +339,141 @@ async def test_reason_update_applies_to_whole_group(
 
     after = await _rows(att_id)
     assert {r.reason for r in after} == {"Forgot to punch in"}
+
+
+# ── 6. clear_times — 잘못 찍힌 기록 정리 ─────────────────────────────────
+#
+# 이 액션이 없으면 잘못 찍힌 clock_in 을 지울 방법이 아예 없다:
+#   mark_no_show 는 시간 기록이 있으면 거부하고 "Reopen and clear first" 라고 하는데,
+#   reopen 은 clock_out 만 지우고, correct 는 값을 비울 수 없다. 아래 테스트가
+#   그 막다른 길이 실제로 뚫렸는지 지킨다.
+
+
+async def test_clear_times_wipes_records_and_keeps_before_values(
+    test_user: dict, test_store_id: UUID, _clean_state: None,
+) -> None:
+    """시간 기록을 지우되, 지워진 값은 전부 History 에 before 로 남는다."""
+    clock_in = datetime.combine(_today(), time(9, 0), tzinfo=timezone.utc)
+    att_id = await _make_attendance(
+        test_user, test_store_id, status="working", clock_in=clock_in
+    )
+    async with async_session() as db:
+        await attendance_action_service.start_break(
+            db,
+            attendance_id=att_id,
+            organization_id=test_user["organization_id"],
+            at=clock_in + timedelta(hours=3),
+            break_type=BREAK_TYPE_UNPAID_MEAL,
+            reason="Lunch",
+            by_user_id=test_user["id"],
+        )
+        await attendance_action_service.end_break(
+            db,
+            attendance_id=att_id,
+            organization_id=test_user["organization_id"],
+            at=clock_in + timedelta(hours=3, minutes=30),
+            reason="Back",
+            by_user_id=test_user["id"],
+        )
+        await attendance_action_service.clock_out(
+            db,
+            attendance_id=att_id,
+            organization_id=test_user["organization_id"],
+            at=clock_in + timedelta(hours=8),
+            reason="Done",
+            by_user_id=test_user["id"],
+        )
+
+    async with async_session() as db:
+        cleared = await attendance_action_service.clear_times(
+            db,
+            attendance_id=att_id,
+            organization_id=test_user["organization_id"],
+            reason="Recorded on the wrong person",
+            by_user_id=test_user["id"],
+        )
+
+    # 기록은 사라지고 상태는 출근 전으로 되돌아간다
+    assert cleared.clock_in is None
+    assert cleared.clock_out is None
+    assert cleared.total_work_minutes is None
+    assert cleared.status in ("upcoming", "late", "no_show")
+
+    async with async_session() as db:
+        remaining = await db.execute(
+            select(AttendanceBreak).where(AttendanceBreak.attendance_id == att_id)
+        )
+        assert list(remaining.scalars().all()) == []
+
+    rows = await _rows(att_id)
+    cleared_rows = [r for r in rows if r.action == tl.ACTION_CLEAR_TIMES]
+    # 한 액션 = 한 그룹
+    assert len({r.group_id for r in cleared_rows}) == 1
+    # 지워진 값이 before 로 살아 있어야 한다 — 조용한 증발 금지
+    fields = _by_field(cleared_rows)
+    assert fields["clock_in"].original_value.startswith(str(_today()))
+    assert fields["clock_in"].corrected_value == tl.NONE
+    assert fields["clock_out"].corrected_value == tl.NONE
+    assert fields["break_start_at"].corrected_value == tl.NONE
+    assert fields["break_start_at"].target_type == tl.TARGET_BREAK
+    assert all(r.reason == "Recorded on the wrong person" for r in cleared_rows)
+
+
+async def test_clear_times_then_mark_no_show_succeeds(
+    test_user: dict, test_store_id: UUID, _clean_state: None,
+) -> None:
+    """정리 전에는 no-show 가 거부되고, 정리 후에는 통과한다 (막다른 길 해소)."""
+    clock_in = datetime.combine(_today(), time(9, 0), tzinfo=timezone.utc)
+    att_id = await _make_attendance(
+        test_user, test_store_id, status="working", clock_in=clock_in
+    )
+
+    from app.utils.exceptions import BadRequestError
+
+    async with async_session() as db:
+        with pytest.raises(BadRequestError):
+            await attendance_action_service.mark_no_show(
+                db,
+                attendance_id=att_id,
+                organization_id=test_user["organization_id"],
+                reason="Did not show up",
+                by_user_id=test_user["id"],
+            )
+
+    async with async_session() as db:
+        await attendance_action_service.clear_times(
+            db,
+            attendance_id=att_id,
+            organization_id=test_user["organization_id"],
+            reason="Punched by mistake",
+            by_user_id=test_user["id"],
+        )
+
+    async with async_session() as db:
+        marked = await attendance_action_service.mark_no_show(
+            db,
+            attendance_id=att_id,
+            organization_id=test_user["organization_id"],
+            reason="Did not show up",
+            by_user_id=test_user["id"],
+        )
+    assert marked.status == "no_show"
+
+
+async def test_clear_times_rejects_when_nothing_to_clear(
+    test_user: dict, test_store_id: UUID, _clean_state: None,
+) -> None:
+    """지울 기록이 없으면 조용히 통과시키지 않고 거절한다."""
+    att_id = await _make_attendance(test_user, test_store_id)
+
+    from app.utils.exceptions import BadRequestError
+
+    async with async_session() as db:
+        with pytest.raises(BadRequestError):
+            await attendance_action_service.clear_times(
+                db,
+                attendance_id=att_id,
+                organization_id=test_user["organization_id"],
+                reason="Nothing here",
+                by_user_id=test_user["id"],
+            )

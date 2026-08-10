@@ -149,6 +149,32 @@ async def mark_no_show_action(
 
 
 @router.post(
+    "/{attendance_id}/actions/clear-times",
+    response_model=AttendanceResponse,
+)
+async def clear_times_action(
+    attendance_id: UUID,
+    data: AttendanceReasonOnlyRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> dict:
+    """clock_in / clock_out / break 기록을 모두 지우고 출근 전 상태로 되돌린다.
+
+    잘못 찍힌 출근 기록을 정리하는 유일한 경로 (reopen 은 clock_out 만 지우고,
+    correct 는 값을 비울 수 없다). 지워진 값은 History 에 before 로 남는다.
+    정리 후 mark-no-show 로 결번 처리 가능.
+    """
+    attendance = await attendance_action_service.clear_times(
+        db,
+        attendance_id=attendance_id,
+        organization_id=current_user.organization_id,
+        reason=data.reason,
+        by_user_id=current_user.id,
+    )
+    return await _build(db, attendance)
+
+
+@router.post(
     "/{attendance_id}/actions/cancel",
     response_model=AttendanceResponse,
 )

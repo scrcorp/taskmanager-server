@@ -44,6 +44,7 @@ ACTION_MODIFY = "modify"
 ACTION_BREAK_ADDED = "break_added"
 ACTION_BREAK_UPDATED = "break_updated"
 ACTION_BREAK_REMOVED = "break_removed"
+ACTION_CLEAR_TIMES = "clear_times"
 
 # ── field_name (줄 항목) ──────────────────────────────────────────────────
 FIELD_STATUS = "status"
