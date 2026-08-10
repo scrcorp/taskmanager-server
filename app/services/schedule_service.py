@@ -1935,6 +1935,7 @@ class ScheduleService:
             await self._log_audit(
                 db, entry_id, "modified", actor,
                 description=desc,
+                reason=(data.change_reason or "").strip() or None,
                 diff=audit_diff or None,
             )
             result = await self._to_response(db, updated)

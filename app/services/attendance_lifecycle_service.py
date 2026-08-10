@@ -140,6 +140,40 @@ async def ensure_attendance_for_schedule(
     return existing
 
 
+async def status_after_time_clear(
+    db: AsyncSession,
+    attendance: Attendance,
+) -> tuple[str, list[str] | None]:
+    """시간 기록을 모두 지운 attendance 가 가져야 할 status/anomalies 를 계산.
+
+    `clear_times` 전용. 기록이 사라진 row 는 "출근 전" 상태로 돌아가야 하는데,
+    그게 upcoming 인지 late 인지 no_show 인지는 스케줄 시각과 현재 시각이 정한다 —
+    새 row 를 만들 때와 같은 판정이므로 `_compute_initial_status` 를 그대로 쓴다.
+
+    스케줄이 없는 row(워크인)는 호출 측에서 미리 거른다. 방어적으로 upcoming 반환.
+    """
+    if attendance.schedule_id is None:
+        return "upcoming", None
+    schedule = await db.scalar(
+        select(Schedule).where(Schedule.id == attendance.schedule_id)
+    )
+    if schedule is None:
+        return "upcoming", None
+    tz = await _resolve_store_tz(db, schedule.store_id)
+    buffer = await _resolve_late_buffer(db, schedule.organization_id, schedule.store_id)
+    return _compute_initial_status(
+        schedule.status,
+        schedule.work_date,
+        schedule.start_time,
+        schedule.end_time,
+        tz,
+        buffer,
+        datetime.now(timezone.utc),
+        schedule.start_at,
+        schedule.end_at,
+    )
+
+
 async def recompute_attendance_for_schedule_change(
     db: AsyncSession,
     schedule: Schedule,
