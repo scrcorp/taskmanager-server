@@ -31,6 +31,7 @@ from app.models.user_store import UserStore
 from app.schemas.attendance_device import (
     ManageAssignableUser,
     AdminClockActionRequest,
+    AdminEditTimesRequest,
     ManageBreakEntry,
     ManageScheduleCreateRequest,
     ManageScheduleRow,
@@ -210,9 +211,32 @@ def _break_entries(breaks, tz_info) -> list[ManageBreakEntry]:
         if start is None:
             continue
         out.append(
-            ManageBreakEntry(type=normalize_break_type(b.break_type), start=start, end=_hhmm(b.ended_at))
+            ManageBreakEntry(
+                break_id=b.id,
+                type=normalize_break_type(b.break_type),
+                start=start,
+                end=_hhmm(b.ended_at),
+            )
         )
     return out
+
+
+def _combine_business_day(hhmm: str, today, day_start, tz_info) -> datetime:
+    """영업일(today) 기준 "HH:mm" → 실제 달력일 instant.
+
+    영업일 D의 창은 [D의 경계, D+1의 경계). 경계(day_start, 기본 06:00) 이전 새벽
+    시각은 달력상 D+1에 속한다 — 마감조 clock_out 02:00, 새벽 워크인 clock_in 01:30 등을
+    영업일 달력일(D)로 합성하면 하루 어긋난다.
+    """
+    from datetime import time as _t, timedelta as _td
+    from app.utils.timezone import resolve_day_start_time
+
+    hh, mm = hhmm.split(":")
+    t = _t(int(hh), int(mm))
+    next_day = today + _td(days=1)
+    boundary_next = resolve_day_start_time(day_start, next_day.weekday())
+    d = next_day if t < boundary_next else today
+    return datetime.combine(d, t, tzinfo=tz_info)
 
 
 @router.get("/manage/schedules", response_model=list[ManageScheduleRow])
@@ -691,7 +715,7 @@ async def manage_change_attendance_status(
       (관리자가 명시적으로 시각을 지정한 것을 신뢰).
     - reason: attendance_corrections.reason 으로 기록 (필수).
     """
-    from datetime import datetime as _dt, time as _t, timezone as _tz
+    from datetime import datetime as _dt, timezone as _tz
     from zoneinfo import ZoneInfo
     from app.models.attendance import Attendance, AttendanceCorrection
     from app.repositories.attendance_repository import attendance_repository
@@ -721,20 +745,8 @@ async def manage_change_attendance_status(
         raise HTTPException(status_code=404, detail="No attendance row for today")
 
     def _combine(hhmm: str):
-        """영업일(today) 기준 시각 → 실제 달력일 instant.
-
-        영업일 D의 창은 [D의 경계, D+1의 경계). 경계(day_start, 기본 06:00) 이전 새벽
-        시각은 달력상 D+1에 속한다 — 마감조 clock_out 02:00, 새벽 워크인 clock_in 01:30 등을
-        영업일 달력일(D)로 합성하면 하루 어긋나던 버그 수정.
-        """
-        from datetime import timedelta as _td
-        from app.utils.timezone import resolve_day_start_time
-        hh, mm = hhmm.split(":")
-        t = _t(int(hh), int(mm))
-        next_day = today + _td(days=1)
-        boundary_next = resolve_day_start_time(day_start, next_day.weekday())
-        d = next_day if t < boundary_next else today
-        return _dt.combine(d, t, tzinfo=tz_info)
+        # 영업일 경계 처리는 Edit Times 와 같은 규칙이어야 한다 → 공용 헬퍼 사용.
+        return _combine_business_day(hhmm, today, day_start, tz_info)
 
     # ── 시간 보정 (요청 본문 기반) ──
     corrections_to_add: list[AttendanceCorrection] = []
@@ -821,6 +833,229 @@ async def manage_change_attendance_status(
 
     for c in corrections_to_add:
         db.add(c)
+
+    await db.flush()
+    response = await attendance_service.build_response(db, target)
+    await db.commit()
+    return response
+
+
+@router.post("/manage/attendance/times")
+async def manage_edit_attendance_times(
+    data: AdminEditTimesRequest,
+    auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """관리자가 **상태는 그대로 두고 시각만** 보정 (clock in/out + break 세션).
+
+    기존에는 clock-in 시각 하나를 고치려 해도 Undo Clock-in → 다시 Clock In 으로
+    상태를 되돌렸다 주입해야 했다. 그 과정에서 break 기록이 정리되고 anomaly 가
+    지워지는 등 의도치 않은 부수효과가 났다. 이 엔드포인트는 status/anomalies 를
+    일절 건드리지 않고 시각만 바꾼다.
+
+    - 시각은 store tz "HH:mm". 영업일 경계 처리는 status 엔드포인트와 같은 규칙.
+    - None = "변경 안 함". 지우기는 지원하지 않는다 (그건 상태 전이라 Undo 쪽 몫).
+    - 이력은 한 group_id 로 묶여 콘솔 Activity History 에 카드 하나로 뜬다.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    from zoneinfo import ZoneInfo
+    from app.models.attendance import Attendance
+    from app.models.attendance_break import AttendanceBreak
+    from app.repositories.attendance_repository import attendance_repository
+    from app.services import attendance_timeline as tl
+    from app.services.payroll_lock_service import ensure_not_locked
+    from app.utils.timezone import get_store_day_config, get_work_date
+
+    device, _session, manager = auth
+
+    if (
+        data.clock_in_hhmm is None
+        and data.clock_out_hhmm is None
+        and not data.breaks
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing to change. Set at least one time before saving.",
+        )
+
+    reason = (data.reason or "").strip() or "(no reason provided)"
+
+    store_tz_name, day_start = await get_store_day_config(db, device.store_id)
+    tz_info = ZoneInfo(store_tz_name)
+    today = get_work_date(store_tz_name, day_start, _dt.now(_tz.utc))
+
+    # 죽은 schedule 을 뒷문으로 되살리지 못하게 — 다른 admin override 와 같은 가드.
+    await _ensure_active_schedule_for_user(db, device, data.user_id)
+
+    day_rows = await attendance_repository.list_user_day(db, data.user_id, today)
+    target: Attendance | None = next(
+        (r for r in day_rows if r.store_id == device.store_id), None
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="No attendance row for today")
+
+    # 확정된 pay period 안이면 보정 불가 (409) — 콘솔 break 편집과 같은 규칙.
+    await ensure_not_locked(db, store_id=target.store_id, work_date=target.work_date)
+
+    def _combine(hhmm: str) -> datetime:
+        return _combine_business_day(hhmm, today, day_start, tz_info)
+
+    # ── clock in/out 목표값 ──
+    new_clock_in = target.clock_in
+    new_clock_out = target.clock_out
+    if data.clock_in_hhmm is not None:
+        if target.clock_in is None:
+            raise HTTPException(
+                status_code=400,
+                detail="This staff has not clocked in yet. Use the Clock In action instead.",
+            )
+        new_clock_in = _combine(data.clock_in_hhmm)
+    if data.clock_out_hhmm is not None:
+        if target.clock_out is None:
+            raise HTTPException(
+                status_code=400,
+                detail="This staff has not clocked out yet. Use the Clock Out action instead.",
+            )
+        new_clock_out = _combine(data.clock_out_hhmm)
+
+    if new_clock_in is not None and new_clock_out is not None and new_clock_out <= new_clock_in:
+        raise HTTPException(
+            status_code=400,
+            detail="Clock-out must be after clock-in. Check the two times.",
+        )
+
+    # ── break 목표값 ──
+    sessions = list((await db.execute(
+        select(AttendanceBreak).where(AttendanceBreak.attendance_id == target.id)
+    )).scalars().all())
+    by_id = {s.id: s for s in sessions}
+
+    # break_id → (before, after). after 는 편집 대상만 갱신되고 나머지는 현재값 그대로.
+    planned: dict[uuid.UUID, tuple[datetime, datetime | None]] = {
+        s.id: (s.started_at, s.ended_at) for s in sessions
+    }
+    edited_ids: list[uuid.UUID] = []
+    for edit in data.breaks:
+        if edit.start_hhmm is None and edit.end_hhmm is None:
+            continue
+        session = by_id.get(edit.break_id)
+        if session is None:
+            raise HTTPException(
+                status_code=404,
+                detail="That break was not found on today's record. Reload and try again.",
+            )
+        start, end = planned[session.id]
+        if edit.start_hhmm is not None:
+            start = _combine(edit.start_hhmm)
+        if edit.end_hhmm is not None:
+            if session.ended_at is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "This break is still in progress, so it has no end time to edit. "
+                        "End the break first."
+                    ),
+                )
+            end = _combine(edit.end_hhmm)
+        if end is not None and end <= start:
+            raise HTTPException(
+                status_code=400,
+                detail="Break end must be after break start. Check the two times.",
+            )
+        if new_clock_in is not None and start < new_clock_in:
+            raise HTTPException(
+                status_code=400,
+                detail="A break cannot start before clock-in. Adjust the times.",
+            )
+        if new_clock_out is not None and end is not None and end > new_clock_out:
+            raise HTTPException(
+                status_code=400,
+                detail="A break cannot end after clock-out. Adjust the times.",
+            )
+        planned[session.id] = (start, end)
+        edited_ids.append(session.id)
+
+    if not edited_ids and data.clock_in_hhmm is None and data.clock_out_hhmm is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing to change. Set at least one time before saving.",
+        )
+
+    # 최종 구간끼리 겹치는지 — 한 번에 두 건을 옮기는 경우까지 잡으려면 결과 집합으로 검사.
+    # break 를 안 건드리는 편집(clock 시각만)에서는 검사하지 않는다: 이미 겹쳐 있는
+    # 기존 데이터 때문에 무관한 보정이 막히면 안 된다.
+    if edited_ids:
+        ordered = sorted(planned.items(), key=lambda kv: kv[1][0])
+        for (_id_a, (_a_start, a_end)), (_id_b, (b_start, _b_end)) in zip(ordered, ordered[1:]):
+            if a_end is None or a_end > b_start:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Breaks would overlap each other. Adjust the times.",
+                )
+
+    # ── 적용 + 이력 (한 편집 = 한 그룹) ──
+    group = tl.new_group()
+
+    if target.clock_in != new_clock_in:
+        tl.record(
+            db,
+            attendance_id=target.id,
+            group_id=group,
+            action=tl.ACTION_MODIFY,
+            field_name=tl.FIELD_CLOCK_IN,
+            before=tl.dt_value(target.clock_in),
+            after=tl.dt_value(new_clock_in),
+            reason=reason,
+            by_user_id=manager.id,
+        )
+        target.clock_in = new_clock_in
+        target.clock_in_timezone = store_tz_name
+    if target.clock_out != new_clock_out:
+        tl.record(
+            db,
+            attendance_id=target.id,
+            group_id=group,
+            action=tl.ACTION_MODIFY,
+            field_name=tl.FIELD_CLOCK_OUT,
+            before=tl.dt_value(target.clock_out),
+            after=tl.dt_value(new_clock_out),
+            reason=reason,
+            by_user_id=manager.id,
+        )
+        target.clock_out = new_clock_out
+        target.clock_out_timezone = store_tz_name
+
+    for break_id in edited_ids:
+        session = by_id[break_id]
+        start, end = planned[break_id]
+        before_snapshot = (session.started_at, session.ended_at, session.break_type)
+        session.started_at = start
+        session.ended_at = end
+        session.duration_minutes = None if end is None else minutes_between(start, end)
+        tl.record_break_snapshot(
+            db,
+            attendance_id=target.id,
+            group_id=group,
+            action=tl.ACTION_BREAK_UPDATED,
+            break_id=session.id,
+            before=before_snapshot,
+            after=(session.started_at, session.ended_at, session.break_type),
+            reason=reason,
+            by_user_id=manager.id,
+        )
+
+    # 하위호환 컬럼 + 파생값 재계산
+    if sessions:
+        latest = max(sessions, key=lambda s: s.started_at)
+        target.break_start = latest.started_at
+        target.break_end = latest.ended_at
+    target.total_break_minutes = sum(
+        (s.duration_minutes or 0) for s in sessions if s.ended_at is not None
+    )
+    if target.clock_in is not None and target.clock_out is not None:
+        target.total_work_minutes = minutes_between(target.clock_in, target.clock_out)
+    else:
+        target.total_work_minutes = None
 
     await db.flush()
     response = await attendance_service.build_response(db, target)

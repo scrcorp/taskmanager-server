@@ -493,6 +493,142 @@ class AttendanceActionService:
         await db.refresh(attendance)
         return attendance
 
+    async def clear_times(
+        self,
+        db: AsyncSession,
+        *,
+        attendance_id: UUID,
+        organization_id: UUID,
+        reason: str,
+        by_user_id: UUID,
+    ) -> Attendance:
+        """clock_in / clock_out / break 세션을 모두 지우고 "출근 전" 으로 되돌린다.
+
+        존재 이유 — 이게 없으면 잘못 찍힌 clock_in 을 지울 방법이 아예 없다:
+          - `mark_no_show` 는 시간 기록이 있으면 거부하며 "Reopen and clear first" 라고 안내
+          - 그런데 `reopen` 은 clock_out 만 지운다 (clock_in 은 못 지움)
+          - `correct` 는 corrected_value 가 필수 문자열이라 null 을 넣을 수 없다
+        즉 서버가 자기 에러 문구에서 지시하는 동작을 수행할 경로가 없었다.
+
+        지워진 값은 전부 타임라인에 before 로 남는다 — 기록이 조용히 증발하면 안 된다.
+        정리 후 status 는 스케줄 기준으로 재판정되어 upcoming/late/no_show 중 하나가 되고,
+        그 다음 `mark_no_show` 로 결번 처리할 수 있다.
+
+        워크인(schedule 없는 row)은 대상이 아니다 — 시간을 지우면 남는 의미가 없다.
+        """
+        from sqlalchemy import select
+
+        from app.services.attendance_lifecycle_service import status_after_time_clear
+
+        attendance = await self._get_attendance(db, attendance_id, organization_id)
+
+        if attendance.schedule_id is None:
+            raise BadRequestError(
+                "This record has no linked shift, so clearing its times would leave "
+                "nothing behind. Cancel the record instead."
+            )
+        if attendance.clock_in is None and attendance.clock_out is None:
+            breaks_exist = await db.scalar(
+                select(AttendanceBreak.id)
+                .where(AttendanceBreak.attendance_id == attendance.id)
+                .limit(1)
+            )
+            if breaks_exist is None:
+                raise BadRequestError("There are no time records to clear.")
+
+        original_status = attendance.status
+        original_in = attendance.clock_in
+        original_out = attendance.clock_out
+
+        breaks_result = await db.execute(
+            select(AttendanceBreak)
+            .where(AttendanceBreak.attendance_id == attendance.id)
+            .order_by(AttendanceBreak.started_at)
+        )
+        breaks = list(breaks_result.scalars().all())
+
+        attendance.clock_in = None
+        attendance.clock_in_timezone = None
+        attendance.clock_out = None
+        attendance.clock_out_timezone = None
+        attendance.break_start = None
+        attendance.break_end = None
+        attendance.total_work_minutes = None
+        attendance.total_break_minutes = None
+        # 확인 도장도 함께 지운다 — 지워진 시각에 대한 확인은 의미가 없고,
+        # 남겨두면 payroll 게이트가 "확인됨" 으로 통과시켜 버린다.
+        attendance.auto_clock_out_confirmed_at = None
+        attendance.auto_clock_out_confirmed_by = None
+        attendance.early_clock_in_confirmed_at = None
+        attendance.early_clock_in_confirmed_by = None
+
+        for b in breaks:
+            await db.delete(b)
+
+        status, anomalies = await status_after_time_clear(db, attendance)
+        attendance.status = status
+        attendance.anomalies = anomalies
+
+        # 한 액션이므로 모든 전이를 같은 group 으로 묶는다.
+        group = tl.new_group()
+        tl.record_status(
+            db,
+            attendance_id=attendance.id,
+            group_id=group,
+            action=tl.ACTION_CLEAR_TIMES,
+            before=original_status,
+            after=attendance.status,
+            reason=reason,
+            by_user_id=by_user_id,
+        )
+        for field, before_dt in (
+            (tl.FIELD_CLOCK_IN, original_in),
+            (tl.FIELD_CLOCK_OUT, original_out),
+        ):
+            tl.record(
+                db,
+                attendance_id=attendance.id,
+                group_id=group,
+                action=tl.ACTION_CLEAR_TIMES,
+                field_name=field,
+                before=tl.dt_value(before_dt),
+                after=tl.NONE,
+                reason=reason,
+                by_user_id=by_user_id,
+            )
+        for b in breaks:
+            tl.record(
+                db,
+                attendance_id=attendance.id,
+                group_id=group,
+                action=tl.ACTION_CLEAR_TIMES,
+                field_name=tl.FIELD_BREAK_START_AT,
+                before=tl.dt_value(b.started_at),
+                after=tl.NONE,
+                reason=reason,
+                by_user_id=by_user_id,
+                target_type=tl.TARGET_BREAK,
+                target_id=b.id,
+            )
+            tl.record(
+                db,
+                attendance_id=attendance.id,
+                group_id=group,
+                action=tl.ACTION_CLEAR_TIMES,
+                field_name=tl.FIELD_BREAK_END_AT,
+                before=tl.dt_value(b.ended_at),
+                after=tl.NONE,
+                reason=reason,
+                by_user_id=by_user_id,
+                target_type=tl.TARGET_BREAK,
+                target_id=b.id,
+            )
+
+        await db.flush()
+        await self._commit_or_rollback(db)
+        await db.refresh(attendance)
+        return attendance
+
     async def cancel(
         self,
         db: AsyncSession,

@@ -83,6 +83,9 @@ class ClockActionRequest(BaseModel):
 
 class ManageBreakEntry(BaseModel):
     """한 attendance 의 break 한 건 (manage/schedule UI Breaks 존 공용)."""
+    # Edit Times 가 "이 break 세션의 시각을 고쳐라" 로 지목하는 키.
+    # 구버전 HTMA 는 모르는 필드를 무시하므로 additive 변경(정책 1갈래).
+    break_id: UUID
     type: str  # paid_10min | unpaid_meal (normalize 됨)
     start: str  # "HH:mm" (store tz)
     end: str | None  # null = 진행 중
@@ -374,6 +377,34 @@ class AdminStatusChangeRequest(BaseModel):
     # 선택적 시간 보정 ("HH:mm" store tz). 현재 work_date 의 store tz datetime 으로 합성.
     clock_in_hhmm: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
     clock_out_hhmm: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+
+
+class AdminBreakTimeEdit(BaseModel):
+    """Edit Times 에서 break 세션 한 건의 시각 보정.
+
+    None 은 "그대로 둔다" 이지 "지운다"가 아니다 — 진행 중 break 의 종료 시각을
+    비우는 건 Edit Times 의 일이 아니다(그건 상태 전이라 End Break/Undo 쪽 몫).
+    """
+    break_id: UUID
+    start_hhmm: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    end_hhmm: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+
+
+class AdminEditTimesRequest(BaseModel):
+    """관리자가 **상태는 그대로 두고 시각만** 보정할 때.
+
+    AdminStatusChangeRequest 와의 차이: 이쪽은 status 를 절대 건드리지 않는다.
+    "clock-in 시각만 3분 당기고 싶은데 Undo 했다가 다시 넣어야 하는" 문제
+    (2026-08-09 제보) 를 없애는 게 목적이라, 상태 전이는 아예 할 수 없게 막는다.
+
+    모든 시각 필드가 비어 있으면 400 — 아무것도 안 바꾸는 호출은 사고 신호다.
+    """
+    user_id: UUID
+    reason: str | None = None
+    # "HH:mm" store tz. None = 변경 안 함 (지우기 아님).
+    clock_in_hhmm: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    clock_out_hhmm: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    breaks: list[AdminBreakTimeEdit] = Field(default_factory=list)
 
 
 class ManageAssignableUser(BaseModel):
