@@ -114,6 +114,20 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: str = ""  # 발신 이메일 주소
     SMTP_FROM_NAME: str = "HTM"  # 발신자 표시 이름
 
+    # ── 비-prod 이메일 안전장치 ────────────────────────────────────────
+    # 왜 필요한가: 이메일 수신자는 대부분 DB(User.email)에서 나온다. worktree/로컬
+    # DB 는 dev 복사본이라 **실제 사람들의 주소**가 들어있고, .env 의 SMTP 자격증명은
+    # 진짜라서, 로컬 테스트 한 번이 실제 매니저들 받은편지함으로 나간다.
+    # (2026-03 첫 이메일 기능은 수신자가 env 값 하나뿐이라 자연히 안전했는데,
+    #  2026-05 부터 수신자를 DB 에서 읽기 시작하면서 그 성질이 사라졌다.)
+    #
+    # 계약: APP_ENV != production 이면 모든 발송이 EMAIL_REDIRECT_TO 한 곳으로 간다.
+    #       비어 있으면 **발송하지 않는다** (설정을 깜빡해도 사고가 안 나도록 기본 차단).
+    #       staging 등에서 진짜 수신자에게 보내야 하면 EMAIL_SEND_REAL=true 로 명시 해제.
+    # production 에서는 이 값들을 모두 비워둔다 — 아래 두 값이 무시된다.
+    EMAIL_REDIRECT_TO: str = ""
+    EMAIL_SEND_REAL: bool = False
+
     # 보고서 제출 알림 수신 이메일 — Daily Report submit 시 알림 발송
     REPORT_NOTIFICATION_EMAIL: str = ""
 

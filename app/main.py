@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.middleware.app_version_broadcast import AppVersionBroadcastMiddleware
 from app.middleware.axiom_logging import AxiomLoggingMiddleware
+from app.utils.email_guard import PRODUCTION_ENVS
 
 app: FastAPI = FastAPI(
     title=settings.APP_NAME,
@@ -99,6 +100,40 @@ from apscheduler.triggers.cron import CronTrigger  # noqa: E402
 from apscheduler.triggers.interval import IntervalTrigger  # noqa: E402
 
 scheduler: AsyncIOScheduler = AsyncIOScheduler()
+
+
+@app.on_event("startup")
+async def log_email_routing_mode() -> None:
+    """이메일이 어디로 나가는지 부팅 로그에 한 줄 남긴다.
+
+    가드는 APP_ENV 로 운영 여부를 판단하는데, 그 값이 빠진 채 배포되면 **모든 메일이
+    조용히 차단된다.** 첫 발송 때까지 모르면 늦으므로 부팅 시점에 드러낸다.
+    """
+    import logging
+
+    logger = logging.getLogger("uvicorn.error")
+    env = (settings.APP_ENV or "").strip().lower()
+    if env in PRODUCTION_ENVS:
+        logger.info("[email] APP_ENV=%s — 실제 수신자에게 발송", settings.APP_ENV)
+    elif settings.EMAIL_SEND_REAL:
+        logger.warning(
+            "[email] APP_ENV=%s + EMAIL_SEND_REAL=true — 실제 수신자에게 발송한다. "
+            "운영이 아닌데 이 설정이 켜져 있다면 DB 의 실제 주소로 메일이 나간다.",
+            settings.APP_ENV,
+        )
+    elif settings.EMAIL_REDIRECT_TO:
+        logger.info(
+            "[email] APP_ENV=%s — 모든 메일이 %s 로 리다이렉트된다",
+            settings.APP_ENV,
+            settings.EMAIL_REDIRECT_TO,
+        )
+    else:
+        logger.warning(
+            "[email] APP_ENV=%s 이고 EMAIL_REDIRECT_TO 가 비어 있다 — 이메일이 "
+            "전혀 발송되지 않는다. 운영 서버라면 .env 에 APP_ENV=production 을 "
+            "넣어야 한다.",
+            settings.APP_ENV,
+        )
 
 
 @app.on_event("startup")
