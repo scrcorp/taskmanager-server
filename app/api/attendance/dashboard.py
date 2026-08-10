@@ -135,6 +135,7 @@ async def today_staff(
             start_disp = display_store_tz(br.started_at)
             if start_disp is not None:
                 break_entries.append(ManageBreakEntry(
+                    break_id=br.id,
                     type=normalize_break_type(br.break_type),
                     start=start_disp,
                     end=display_store_tz(br.ended_at),
