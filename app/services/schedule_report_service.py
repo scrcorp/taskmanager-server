@@ -26,9 +26,11 @@ from app.models.schedule import Schedule, StoreWorkRole
 from app.models.schedule_report import ScheduleReportSnapshot
 from app.models.user import Role, User
 from app.models.work import Shift
+from app.seeds.settings_seed import SCHEDULE_RANGE_KEY, STORE_OPERATING_HOURS_KEY
 from app.utils.email import send_email
 from app.utils.email_templates import build_schedule_daily_report_email
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
+from app.utils.timezone import is_closed_weekday, resolve_day_range
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -43,18 +45,6 @@ CATEGORY_LABELS = {
     "over_6h": "Over 6h work",
     "no_break_8h": "No break with 8h+",
 }
-
-# operating_hours JSONB 요일 키. date.weekday(): Mon=0..Sun=6
-_DOW_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-
-
-def _parse_time_str(s: str | None) -> time | None:
-    if not s:
-        return None
-    try:
-        return time.fromisoformat(s)
-    except Exception:
-        return None
 
 
 def _time_to_minutes(t: time) -> int:
@@ -95,102 +85,21 @@ def _subtract_intervals(base_s: int, base_e: int, cuts: list[tuple[int, int]]) -
     return out
 
 
-def _operating_window_minutes(
-    operating_hours: dict | None,
-    target_date: date,
-) -> tuple[int, int] | None:
-    """[deprecated for SV gap] Store.operating_hours JSONB 기반 — _shift_within_operating_hours 만 사용.
+async def _resolve_setting_value(
+    db: AsyncSession,
+    key: str,
+    organization_id: UUID,
+    store_id: UUID,
+) -> dict | None:
+    """매장 → org → registry default cascade 로 시간 범위 설정을 읽는다.
 
-    SV gap 검사는 _extract_schedule_range() + settings.schedule.range 를 사용한다.
+    키가 registry 에 없으면(구 DB, 마이그레이션 전) None — 호출부가 "미설정"으로 다룬다.
     """
-    if not operating_hours or not isinstance(operating_hours, dict):
-        return None
-    day_key = _DOW_KEYS[target_date.weekday()]
-    hours = operating_hours.get(day_key)
-    if not hours or not isinstance(hours, dict):
-        return None
-    open_t = _parse_time_str(hours.get("open") or hours.get("start"))
-    close_t = _parse_time_str(hours.get("close") or hours.get("end"))
-    if open_t is None or close_t is None:
-        return None
-    open_m = _time_to_minutes(open_t)
-    close_m = _time_to_minutes(close_t)
-    if close_m <= open_m:
-        close_m += 1440
-    return (open_m, close_m)
-
-
-def _parse_minutes_str(s: str | None) -> int | None:
-    """'HH:MM' → 분. 24:00 같은 자정 끝 표기 지원 (time.fromisoformat 가 막는 케이스)."""
-    if not s or not isinstance(s, str):
-        return None
     try:
-        hh, mm = s.split(":", 1)
-        h, m = int(hh), int(mm)
-    except (ValueError, AttributeError):
+        raw = await resolve_setting(db, key, organization_id, store_id)
+    except SettingNotRegisteredError:
         return None
-    if not (0 <= h <= 48 and 0 <= m < 60):
-        return None
-    return h * 60 + m
-
-
-def _parse_range_pair(start_str: str | None, end_str: str | None) -> tuple[int, int] | None:
-    s_m = _parse_minutes_str(start_str)
-    e_m = _parse_minutes_str(end_str)
-    if s_m is None or e_m is None:
-        return None
-    if e_m <= s_m:
-        e_m += 1440
-    return (s_m, e_m)
-
-
-def _extract_schedule_range(value: dict | None, target_date: date) -> tuple[int, int] | None:
-    """settings.schedule.range 값에서 (open_min, close_min) 추출 — console 의 extractRange 와 동일 로직.
-
-    형식:
-      - {"all": {"start": "HH:MM", "end": "HH:MM"}}
-      - {"mode": "per_day", "per_day": {"mon": {...}, ...}}
-      - 레거시: {"mon": {...}, "all": {...}}
-    """
-    if not value or not isinstance(value, dict):
-        return None
-    dow_key = _DOW_KEYS[target_date.weekday()]
-    mode = value.get("mode")
-
-    # per_day 모드
-    if mode == "per_day":
-        per_day = value.get("per_day")
-        if isinstance(per_day, dict):
-            entry = per_day.get(dow_key)
-            if isinstance(entry, dict):
-                got = _parse_range_pair(entry.get("start"), entry.get("end"))
-                if got:
-                    return got
-            # 콘솔과 동일 — 그 요일 미설정 시 전체 min/max fallback
-            starts, ends = [], []
-            for v in per_day.values():
-                if isinstance(v, dict):
-                    pair = _parse_range_pair(v.get("start"), v.get("end"))
-                    if pair:
-                        starts.append(pair[0])
-                        ends.append(pair[1])
-            if starts and ends:
-                return (min(starts), max(ends))
-
-    # "all" 모드 (또는 단순 형식)
-    all_entry = value.get("all")
-    if isinstance(all_entry, dict):
-        got = _parse_range_pair(all_entry.get("start"), all_entry.get("end"))
-        if got:
-            return got
-
-    # 레거시 top-level 요일 키
-    entry = value.get(dow_key)
-    if isinstance(entry, dict):
-        got = _parse_range_pair(entry.get("start"), entry.get("end"))
-        if got:
-            return got
-    return None
+    return raw if isinstance(raw, dict) else None
 
 
 async def _resolve_schedule_window(
@@ -199,39 +108,44 @@ async def _resolve_schedule_window(
     store_id: UUID,
     target_date: date,
 ) -> tuple[int, int] | None:
-    """매장 → org → registry default cascade 로 schedule.range 해석."""
-    try:
-        raw = await resolve_setting(db, "schedule.range", organization_id, store_id)
-    except SettingNotRegisteredError:
-        return None
-    return _extract_schedule_range(raw, target_date)
+    """SV 공백 판정용 창 = **스케줄 시간대**(`schedule.range`) — 영업시간이 아니다 (D2-5).
+
+    직원이 일하는 모든 시간에 SV가 있어야 한다는 규칙이므로 기준은 근무 가능 시간대다.
+    영업시간(store.operating_hours)으로 바꾸면 프렙·마감 시간대가 검사에서 빠진다.
+    """
+    raw = await _resolve_setting_value(db, SCHEDULE_RANGE_KEY, organization_id, store_id)
+    return resolve_day_range(raw, target_date.weekday())
 
 
 def _shift_within_operating_hours(
-    store_operating_hours: dict | None,
+    operating_hours: dict | None,
     target_date: date,
     shift_start: time | None,
     shift_end: time | None,
 ) -> bool:
-    """매장 운영시간 + 시프트 시간 교차 판단.
+    """시프트가 매장 영업시간과 겹치는지 — 인원 부족 검사 대상 판정.
 
-    Returns True 이면 검사 대상. False 이면 운영시간 외 — 스킵.
-    operating_hours 미설정/시프트 시간 미설정 시 보수적으로 True (검사).
+    Returns True 이면 검사 대상. False 이면 영업시간 밖(또는 휴무) — 스킵.
+    영업시간 미설정/시프트 시간 미설정 시 보수적으로 True (검사) —
+    설정을 안 한 매장의 리포트가 조용히 비는 일은 없어야 한다.
+
+    출처는 `store.operating_hours` **설정 키**다. 예전엔 `stores.operating_hours`
+    컬럼을 봤는데 전 매장이 NULL 이라 사실상 죽은 검사였고, 컬럼은 미설정이 NULL 이라
+    호출부마다 폴백을 각자 짜게 된다. registry 는 매장 → 조직 → 기본값 cascade 를 준다 (D2-3).
     """
-    if not store_operating_hours or not isinstance(store_operating_hours, dict):
-        return True
-    day_key = _DOW_KEYS[target_date.weekday()]
-    hours = store_operating_hours.get(day_key)
-    if not hours or not isinstance(hours, dict):
-        return False  # 그 요일 휴무
-    open_t = _parse_time_str(hours.get("open") or hours.get("start"))
-    close_t = _parse_time_str(hours.get("close") or hours.get("end"))
-    if open_t is None or close_t is None:
-        return True
+    window = resolve_day_range(operating_hours, target_date.weekday())
+    if window is None:
+        # 휴무일이면 그 요일에 검사할 시프트가 없다. 미설정과 구분해야 한다 —
+        # 미설정은 "전부 검사", 휴무는 "검사 없음"으로 정반대다.
+        return not is_closed_weekday(operating_hours, target_date.weekday())
     if shift_start is None or shift_end is None:
         return True
-    # 시프트가 운영시간 안에 있어야 함 (자정 넘김은 단순화: 그대로 비교)
-    return shift_start >= open_t and shift_end <= close_t
+    open_m, close_m = window
+    start_m = _time_to_minutes(shift_start)
+    end_m = _time_to_minutes(shift_end)
+    if end_m <= start_m:
+        end_m += 1440  # 시프트 프리셋은 아직 time 쌍이라 자정 넘김을 여기서 편다
+    return start_m >= open_m and end_m <= close_m
 
 
 @dataclass(frozen=True)
@@ -350,6 +264,12 @@ async def collect_cells_and_issues(
     for wr in work_roles:
         _expand((wr.store_id, wr.shift_id), wr.default_start_time, wr.default_end_time)
 
+    # 영업시간은 설정 cascade 라 매장당 한 번만 해석한다 (요일별 값은 한 dict 안에 있음).
+    operating_hours_by_store: dict[UUID, dict | None] = {
+        sid: await _resolve_setting_value(db, STORE_OPERATING_HOURS_KEY, organization_id, sid)
+        for sid in store_ids
+    }
+
     # 매장이 정의한 모든 shifts 가 후보. work_role/schedule 유무와 무관.
     # → 같은 매장이라면 시프트 정의가 동일하게 표시되도록 일관성 보장.
     pending_cells: list[tuple[UUID, UUID, date, Store, Shift]] = []
@@ -358,8 +278,9 @@ async def collect_cells_and_issues(
         if not store:
             continue
         s_start, s_end = shift_window.get((shift.store_id, shift.id), (None, None))
+        operating_hours = operating_hours_by_store.get(shift.store_id)
         for d in target_dates:
-            if not _shift_within_operating_hours(store.operating_hours, d, s_start, s_end):
+            if not _shift_within_operating_hours(operating_hours, d, s_start, s_end):
                 continue
             pending_cells.append((shift.store_id, shift.id, d, store, shift))
 

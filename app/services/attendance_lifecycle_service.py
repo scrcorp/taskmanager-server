@@ -214,18 +214,41 @@ async def recompute_attendance_for_schedule_change(
 async def cancel_attendance_for_schedule(
     db: AsyncSession,
     schedule_id: UUID,
+    by_user_id: UUID | None = None,
+    reason: str | None = None,
 ) -> None:
     """Schedule 이 cancel/reject/delete 되었을 때 attendance.status 를 cancelled 로 마킹.
 
     row 가 없으면 아무것도 하지 않는다 (이미 정리되었거나 애초에 생성 안됨).
+
+    D10-2 — 취소와 삭제는 다른 개념이지만 **둘 다 기록에 남아야 한다.** 근태는 급여의
+    근거 자료라 "있었는데 사라졌다"가 데이터로 남지 않으면 나중에 복원도 반박도 못 한다.
+    예전 키오스크 삭제 경로는 attendance 를 hard delete 해서 breaks/corrections 까지
+    CASCADE 로 함께 소멸했다 — 그 비대칭을 없애고 여기 한 곳으로 모았다.
+
+    이미 cancelled 인 row 는 `tl.record` 가 before==after 로 걸러 소음을 남기지 않는다.
     """
     existing = await db.scalar(
         select(Attendance).where(Attendance.schedule_id == schedule_id)
     )
     if existing is None:
         return
+    from app.services import attendance_timeline as tl
+
+    before = existing.status
     existing.status = "cancelled"
     # 이전 anomalies 는 유지 (late 후 cancelled 같은 이력)
+    tl.record(
+        db,
+        attendance_id=existing.id,
+        group_id=tl.new_group(),
+        action=tl.ACTION_CANCEL,
+        field_name=tl.FIELD_STATUS,
+        before=tl.plain_value(before),
+        after=tl.plain_value(existing.status),
+        reason=reason,
+        by_user_id=by_user_id,
+    )
     await db.flush()
 
 

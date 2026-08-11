@@ -61,77 +61,12 @@ class StoreBreakRule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
-class ScheduleRequestTemplate(Base):
-    """스케줄 신청 템플릿 — 직원의 주간 근무 선호도 저장."""
-
-    __tablename__ = "schedule_request_templates"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    store_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=True)
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
-    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-    __table_args__ = (
-        Index("ix_request_templates_user_store", "user_id", "store_id"),
-    )
-
-
-class ScheduleRequestTemplateItem(Base):
-    """스케줄 신청 템플릿 항목 — 요일별 선호 근무."""
-
-    __tablename__ = "schedule_request_template_items"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    template_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("schedule_request_templates.id", ondelete="CASCADE"), nullable=False)
-    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False)  # 0=Sun, 6=Sat
-    work_role_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="CASCADE"), nullable=False)
-    preferred_start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    preferred_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint("template_id", "day_of_week", "work_role_id", name="uq_template_day_role"),
-    )
-
-
-class ScheduleRequest(Base):
-    """스케줄 신청 — 직원의 근무 신청."""
-
-    __tablename__ = "schedule_requests"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
-    work_role_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="SET NULL"), nullable=True)
-    work_date: Mapped[date] = mapped_column(Date, nullable=False)
-    preferred_start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    preferred_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    break_start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    break_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="submitted")  # submitted/accepted/modified/rejected
-    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    # ─── Original values (stored when SV/GM modifies, for revert) ───
-    original_preferred_start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    original_preferred_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
-    original_work_role_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="SET NULL"), nullable=True)
-    original_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    original_work_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    # 확정 시급 — Effective hourly rate at request creation (auto-filled from user > store > org)
-    hourly_rate: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
-    # ─── Admin metadata ───
-    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    __table_args__ = (
-        Index("ix_schedule_requests_user_date", "user_id", "work_date"),
-        Index("ix_schedule_requests_store", "store_id"),
-    )
-
+# ── 폐기된 신청(request) 모델 ────────────────────────────────
+# ScheduleRequestTemplate / ScheduleRequestTemplateItem / ScheduleRequest 는
+# 스케줄 신청 기능 폐기(2026-08-09)와 함께 제거했다.
+# 신청 행 자체는 schedules(status='requested') 에 있었고, 위 테이블들은 그보다
+# 앞선 세대의 잔존물이다. 테이블은 이력 보존을 위해 DB 에 남기고
+# alembic/env.py LEGACY_TABLES 에 등록해 autogenerate 에서 제외한다.
 
 class Schedule(Base):
     """통합 스케줄 — 신청/확정/거절 모든 상태를 포함.
@@ -148,8 +83,13 @@ class Schedule(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    # Legacy FK — will be removed after full migration from schedule_requests
-    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("schedule_requests.id", ondelete="SET NULL"), nullable=True)
+    # Legacy FK — 구세대 schedule_requests 테이블을 가리킨다.
+    # 그 테이블은 신청 기능 폐기(2026-08-09)로 모델에서 제거했지만 이력 보존을 위해
+    # DB 에는 남아 있고 alembic/env.py LEGACY_TABLES 에 등록돼 있다.
+    # 모델이 없으므로 ForeignKey 선언을 뗀다 — 선언을 남기면 SQLAlchemy 가
+    # 참조 테이블을 못 찾아 매핑 자체가 실패한다. DB 제약은 그대로 유지된다.
+    # 삭제 조건: LEGACY_TABLES 에서 두 테이블을 드롭할 때 이 컬럼도 함께 제거.
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     store_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True)
     work_role_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("store_work_roles.id", ondelete="SET NULL"), nullable=True)
@@ -242,6 +182,10 @@ class ScheduleAuditLog(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # diff: {field: {old, new}} — modifications 용
     diff: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # D9-5 — 확인하고 넘어간 경고. [{"code": ..., "params": {...}}, ...]
+    # "누가 어떤 경고를 알고도 진행했나" 를 조회할 수 있어야 하므로 diff 에 섞지 않고
+    # 별도 컬럼으로 둔다(기록 위치가 곧 조회 가능성).
+    acknowledged_warnings: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         Index("ix_schedule_audit_logs_schedule_ts", "schedule_id", "timestamp"),

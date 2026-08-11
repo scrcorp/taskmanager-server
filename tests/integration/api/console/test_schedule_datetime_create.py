@@ -104,7 +104,12 @@ async def test_create_new_fields_early_morning(async_client, admin_headers, staf
 
 
 async def test_cross_day_overlap_detected(async_client, admin_headers, staff_assigned):
-    """전날 마감조(익일 새벽 종료)와 다음날 새벽조의 물리 겹침을 검출해야 함."""
+    """전날 마감조(익일 새벽 종료)와 다음날 새벽조의 물리 겹침을 검출해야 함.
+
+    D9 — 겹침은 **경고**다(에러 아님). 확인 없이 저장하려 하면 409,
+    force:true 로 재요청하면 저장된다. 한 사람이 두 역할을 겹쳐 맡는 상황이
+    실제로 있을 수 있어 에러로 두면 표현할 방법이 없었다.
+    """
     # 12/4 22:00 → 12/5 02:00 (overnight)
     r1 = await async_client.post(CREATE_URL, json={
         "user_id": str(staff_assigned["id"]), "store_id": str(staff_assigned["store_id"]),
@@ -112,14 +117,22 @@ async def test_cross_day_overlap_detected(async_client, admin_headers, staff_ass
         "status": "confirmed", "force": True,
     }, headers=admin_headers)
     assert r1.status_code == 201, r1.text
-    # 12/5 01:00~09:00 — 12/5 01:00~02:00 구간이 물리적으로 겹침 → 거부
-    r2 = await async_client.post(CREATE_URL, json={
+    # 12/5 01:00~09:00 — 12/5 01:00~02:00 구간이 물리적으로 겹침
+    body = {
         "user_id": str(staff_assigned["id"]), "store_id": str(staff_assigned["store_id"]),
         "work_date": "2026-12-05", "start_time": "01:00", "end_time": "09:00",
-        "status": "confirmed", "force": True,
-    }, headers=admin_headers)
-    assert r2.status_code == 400, r2.text
-    assert "overlap" in r2.text.lower()
+        "status": "confirmed", "force": False,
+    }
+    r2 = await async_client.post(CREATE_URL, json=body, headers=admin_headers)
+    assert r2.status_code == 409, r2.text
+    detail = r2.json()["detail"]
+    assert detail["code"] == "SCHEDULE_WARNINGS_UNCONFIRMED", detail
+    assert any(w["code"] == "OVERLAPPING_SCHEDULE" for w in detail["warnings"]), detail
+    assert detail["retry"] == {"force": True}, detail
+
+    # 확인 후 진행 — force 로 재요청하면 저장된다
+    r3 = await async_client.post(CREATE_URL, json={**body, "force": True}, headers=admin_headers)
+    assert r3.status_code == 201, r3.text
 
 
 async def test_early_morning_explicit_no_false_overlap(async_client, admin_headers, staff_assigned):
@@ -163,7 +176,8 @@ async def test_boundary_warning_on_validate(async_client, admin_headers, staff_a
     }, headers=admin_headers)
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert any("day boundary" in w for w in body["warnings"]), body
+    # D9-4 — 경고는 코드+파라미터. 문구 매칭 금지.
+    assert any(w["code"] == "START_AFTER_DAY_BOUNDARY" for w in body["warnings"]), body
 
 
 async def test_legacy_time_edit_preserves_next_day_offset(async_client, admin_headers, staff_assigned):

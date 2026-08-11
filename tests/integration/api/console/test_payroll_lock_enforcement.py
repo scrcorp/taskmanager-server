@@ -12,7 +12,6 @@ confirmed pay period 안의 날짜를 대상으로 하는 모든 콘솔 mutation
     - PATCH/DELETE /console/schedules/{id} + cancel/revert/confirm
     - PATCH 로 미잠금 스케줄을 locked 기간으로 이동시키는 우회 차단
     - DELETE /console/schedules/bulk (bulk 경로 — 실패 집계 + 에러 메시지)
-    - POST /console/schedule-requests (admin request 생성)
 """
 
 from __future__ import annotations
@@ -38,7 +37,6 @@ pytestmark = pytest.mark.asyncio
 
 ATT_URL = "/api/v1/console/attendances"
 SCHED_URL = "/api/v1/console/schedules"
-REQ_URL = "/api/v1/console/schedule-requests"
 
 
 # ---------------------------------------------------------------------------
@@ -403,56 +401,6 @@ async def test_schedule_bulk_delete_locked_collected_as_failed(
 
 
 # ---------------------------------------------------------------------------
-# Schedule request 플로우 (admin)
+# 신청(request) 플로우 테스트는 기능 폐기(2026-08-09)와 함께 제거.
+# 급여 잠금 자체는 위의 스케줄 create/update/delete/bulk 경로에서 계속 검증된다.
 # ---------------------------------------------------------------------------
-
-
-async def test_admin_request_create_locked_409(async_client, admin_headers, locked_env):
-    resp = await async_client.post(REQ_URL, json={
-        "user_id": str(locked_env["staff"]["id"]),
-        "store_id": str(locked_env["store_id"]),
-        "work_date": locked_env["locked_date"].isoformat(),
-        "preferred_start_time": "09:00",
-        "preferred_end_time": "17:00",
-    }, headers=admin_headers)
-    _assert_locked_409(resp)
-
-
-async def test_admin_request_update_locked_409(async_client, admin_headers, locked_env):
-    sched_id = await _make_schedule(
-        locked_env, locked_env["locked_date"], status="requested",
-    )
-    resp = await async_client.patch(
-        f"{REQ_URL}/{sched_id}",
-        json={"preferred_start_time": "10:00"},
-        headers=admin_headers,
-    )
-    _assert_locked_409(resp)
-
-
-async def test_admin_request_delete_locked_409(async_client, admin_headers, locked_env):
-    sched_id = await _make_schedule(
-        locked_env, locked_env["locked_date"], status="requested",
-    )
-    resp = await async_client.delete(f"{REQ_URL}/{sched_id}", headers=admin_headers)
-    _assert_locked_409(resp)
-
-
-async def test_request_confirm_locked_collected_in_errors(
-    async_client, admin_headers, locked_env,
-):
-    """confirm 벌크 — locked 날짜 신청은 confirm 되지 않고 에러 목록에 명시."""
-    await _make_schedule(locked_env, locked_env["locked_date"], status="requested")
-    resp = await async_client.post(
-        f"{REQ_URL}/confirm",
-        json={
-            "store_id": str(locked_env["store_id"]),
-            "date_from": locked_env["locked_date"].isoformat(),
-            "date_to": locked_env["locked_end"].isoformat(),
-        },
-        headers=admin_headers,
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["requests_confirmed"] == 0
-    assert any(PAY_PERIOD_LOCKED_MESSAGE in e for e in body["errors"])

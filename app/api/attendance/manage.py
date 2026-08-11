@@ -7,10 +7,10 @@
 """
 
 import uuid
-from datetime import datetime
+from datetime import date as _date, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,7 @@ from app.core.attendance_manage_session import (
     create_session as create_manage_session,
     revoke_session as revoke_manage_session,
 )
+from app.core.app_version_compat import effective_force
 from app.core.permissions import is_owner, is_sv_plus
 from app.database import get_db
 from app.models.attendance_device import AttendanceDevice
@@ -45,7 +46,6 @@ from app.schemas.attendance_device import (
     AdminStatusChangeRequest,
     ManageWorkRoleOption,
 )
-from app.schemas.schedule import KIOSK_STEP_MINUTES
 from app.services.attendance_device_service import attendance_device_service
 from app.services.attendance_service import attendance_service, compute_state_and_anomalies
 from app.services.store_setting_service import upsert_store_setting
@@ -154,27 +154,76 @@ def _parse_time_hhmm(s: str):
     return _time(int(hh), int(mm))
 
 
-def _kiosk_shift_iso(today, day_start, start_hhmm: str, end_hhmm: str) -> tuple[str, str]:
+def _kiosk_shift_iso(operating_day, day_start, start_hhmm: str, end_hhmm: str) -> tuple[str, str]:
     """키오스크 HHmm 입력 → 영업일 창 기준 명시 벽시계 ISO(start_at, end_at).
 
-    키오스크는 "오늘(영업일)" 스케줄만 다루고 날짜를 표현할 UI가 없다. 영업일 D의
-    창은 [D의 경계, D+1의 경계)이므로, 경계(day_start, 기본 06:00) 이전 새벽 시각은
-    달력상 D+1이다. 이 번역이 없으면 저녁에 만든 새벽조(01:00~05:00)가 D 01:00
-    (이미 지난 시각)으로 앵커되어 즉시 no_show가 되는 실구멍이 있었다.
+    앵커는 **대상 스케줄의 영업일**이다 — "오늘"이 아니다. D10-1 로 키오스크의
+    "오늘만" 제약이 사라져 다른 날짜도 다루게 됐고, today 로 앵커하면 어제/내일
+    스케줄의 시각을 고칠 때 날짜가 통째로 오늘로 끌려온다.
+
+    영업일 D의 창은 [D의 경계, D+1의 경계)이므로, 경계(day_start, 기본 06:00) 이전
+    새벽 시각은 달력상 D+1이다. 이 번역이 없으면 저녁에 만든 새벽조(01:00~05:00)가
+    D 01:00(이미 지난 시각)으로 앵커되어 즉시 no_show가 되는 실구멍이 있었다.
     """
     from datetime import datetime as _dt, timedelta as _td
     from app.utils.timezone import resolve_day_start_time
 
     t_start = _parse_time_hhmm(start_hhmm)
     t_end = _parse_time_hhmm(end_hhmm)
-    next_day = today + _td(days=1)
+    next_day = operating_day + _td(days=1)
     boundary_next = resolve_day_start_time(day_start, next_day.weekday())
-    start_day = next_day if t_start < boundary_next else today
+    start_day = next_day if t_start < boundary_next else operating_day
     end_day = start_day + _td(days=1) if t_end <= t_start else start_day
     return (
         _dt.combine(start_day, t_start).strftime("%Y-%m-%dT%H:%M"),
         _dt.combine(end_day, t_end).strftime("%Y-%m-%dT%H:%M"),
     )
+
+
+def _kiosk_break_iso(
+    start_at_iso: str | None,
+    start_hhmm: str | None,
+    break_start_hhmm: str | None,
+    break_end_hhmm: str | None,
+    *,
+    explicit_start_at: str | None = None,
+    explicit_end_at: str | None = None,
+) -> tuple[str | None, str | None]:
+    """키오스크 휴게 HHmm → 근무 시작에 앵커한 벽시계 ISO.
+
+    시프트 시각과 **같은 앵커**를 쓴다 — 근무 시작보다 이른 휴게 시각은 자정을
+    넘긴 근무 안의 휴게이므로 +1일이다. 영업일에 앵커하면 마감조(21:00~02:00)의
+    01:00 휴게가 근무창 밖으로 나가 BREAK_OUTSIDE_SHIFT 로 저장이 거부된다.
+
+    명시 ISO(`explicit_*`)가 오면 그것이 우선 — 신 클라이언트가 이미 날짜까지
+    확정해 보낸 값을 서버가 다시 추론하지 않는다.
+
+    ⚠️ 서버는 휴게를 **자동으로 따라 움직이지 않는다.** D7-3 이 "항상 전체 전송"
+    이므로 시프트를 옮기며 휴게도 옮기는 것은 클라이언트가 계산해서 보낸다.
+    서버가 또 옮기면 같은 오프셋이 두 번 적용된다.
+    """
+    if explicit_start_at is not None or explicit_end_at is not None:
+        return explicit_start_at, explicit_end_at
+    if not break_start_hhmm and not break_end_hhmm:
+        return None, None
+    from datetime import datetime as _dt
+    from app.utils.timezone import assemble_break_datetime, parse_naive_iso
+
+    s_at = parse_naive_iso(start_at_iso)
+    if s_at is None:
+        # 근무 시작을 모르면 앵커할 곳이 없다 — 짝 검증(BREAK_PAIR_INCOMPLETE)이
+        # 아니라 조용한 무시가 되지 않도록 그대로 None 을 돌려 서비스가 판정한다.
+        return None, None
+    anchor_date = s_at.date()
+    st = _parse_time_hhmm(start_hhmm) if start_hhmm else s_at.time()
+
+    def _one(hhmm: str | None) -> str | None:
+        if not hhmm:
+            return None
+        dt: _dt | None = assemble_break_datetime(anchor_date, st, _parse_time_hhmm(hhmm))
+        return dt.strftime("%Y-%m-%dT%H:%M") if dt is not None else None
+
+    return _one(break_start_hhmm), _one(break_end_hhmm)
 
 
 async def _resolve_late_buffer(db: AsyncSession, organization_id, store_id) -> int:
@@ -243,8 +292,25 @@ def _combine_business_day(hhmm: str, today, day_start, tz_info) -> datetime:
 async def manage_list_today_schedules(
     auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    operating_day: _date | None = Query(
+        default=None,
+        description="Business day to list (YYYY-MM-DD). Defaults to today at this store.",
+    ),
 ) -> list[ManageScheduleRow]:
-    """현재 디바이스 매장의 오늘 스케줄 (status != cancelled/rejected/deleted)."""
+    """현재 디바이스 매장의 한 영업일 스케줄 (status != cancelled/rejected/deleted).
+
+    `operating_day` 를 지정하면 그 영업일, 없으면 오늘 — 기본값이 현행 동작이라
+    구버전 HTMA 에겐 아무것도 바뀌지 않는다(additive, 정책 1갈래).
+
+    이 파라미터가 없으면 D10-1(키오스크 날짜 제약 해제)은 **계약만 열리고 기능이
+    없다.** 오늘 것만 조회되니 다른 날 스케줄을 화면에 띄울 방법이 없어 수정·삭제
+    대상을 고를 수 없었다(F5).
+
+    매장은 여전히 기기에 고정되고, 과거 수정의 방어선은 급여 기간 잠금이다(D10-3).
+    조회 자체엔 상한을 두지 않는다 — 읽기는 되돌릴 수 없는 행위가 아니다.
+
+    응답 각 행에 `operating_day` 가 실려 있어 어느 영업일의 결과인지 알 수 있다.
+    """
     device, _session, _manager = auth
     from datetime import datetime as _dt, timezone as _tz
     from zoneinfo import ZoneInfo
@@ -256,7 +322,7 @@ async def manage_list_today_schedules(
 
     store_tz, day_start = await get_store_day_config(db, device.store_id)
     now_utc = _dt.now(_tz.utc)
-    today = get_work_date(store_tz, day_start, now_utc)
+    today = operating_day or get_work_date(store_tz, day_start, now_utc)
     tz_info = ZoneInfo(store_tz)
 
     rows = await db.execute(
@@ -326,9 +392,13 @@ async def manage_list_today_schedules(
                 position_name=sched.position_snapshot,
                 start_time=_format_time_hhmm(sched.start_time),
                 end_time=_format_time_hhmm(sched.end_time),
+                break_start_time=_format_time_hhmm(sched.break_start_time),
+                break_end_time=_format_time_hhmm(sched.break_end_time),
                 operating_day=sched.operating_day or sched.work_date,
                 start_at=_format_at(sched.start_at),
                 end_at=_format_at(sched.end_at),
+                break_start_at=_format_at(sched.break_start_at),
+                break_end_at=_format_at(sched.break_end_at),
                 status=sched.status,
                 attendance_id=att.id if att else None,
                 state=state,
@@ -408,30 +478,23 @@ async def manage_list_work_roles(
     ]
 
 
-async def _ensure_confirmed_today(db: AsyncSession, schedule_id: uuid.UUID, organization_id: uuid.UUID, manager_id: uuid.UUID) -> None:
-    """create_entry 가 SV 권한 정책으로 requested 가 되어버린 경우 강제 confirmed.
-
-    Kiosk manage 은 매니저가 직접 매장에서 즉시 운영을 하는 컨텍스트라 항상 confirmed.
-    """
-    from app.models.schedule import Schedule
-    from app.services.schedule_service import schedule_service
-
-    sch = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one_or_none()
-    if sch is None:
-        return
-    if sch.status == "requested":
-        await schedule_service.confirm_schedule(
-            db, schedule_id, organization_id, approved_by=manager_id
-        )
-
-
 @router.post("/manage/schedules", response_model=ManageScheduleRow, status_code=201)
 async def manage_create_schedule(
     data: ManageScheduleCreateRequest,
+    request: Request,
     auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ManageScheduleRow:
-    """오늘 새 스케줄을 매장에 생성. 항상 confirmed."""
+    """이 기기 매장에 새 스케줄 생성.
+
+    날짜 제약은 없다(D10-1, Q2) — 매장만 기기에 고정된다. 과거 수정에 대한
+    방어선은 급여 기간 잠금(D10-3)이지 "오늘만"이 아니다.
+
+    상태는 콘솔과 **같은 규칙**을 탄다 — `schedule.approval_required` 가 켜진
+    조직에서 SV 가 만들면 `requested` 로 남는다(D10-4). 예전엔 키오스크만
+    `_ensure_confirmed_today` 로 강제 승격해서 이 경로에서만 승인 절차가
+    우회됐다. 설정 기본값은 꺼짐이라 대부분의 조직에선 동작이 그대로다.
+    """
     device, _session, manager = auth
     from datetime import datetime as _dt, timezone as _tz
     from app.schemas.schedule import ScheduleCreate
@@ -440,32 +503,46 @@ async def manage_create_schedule(
 
     store_tz, day_start = await get_store_day_config(db, device.store_id)
     today = get_work_date(store_tz, day_start, _dt.now(_tz.utc))
+    # 앵커는 대상 영업일 — 클라가 다른 날짜를 지정하면 그 날짜 창으로 번역해야
+    # 새벽조(+1d) 판정이 맞는다.
+    operating_day = data.operating_day or today
 
     # 키오스크 HHmm → 영업일 창 기준 명시 datetime (클라가 명시 start_at을 보내면 그것 우선)
     if data.start_at is None and data.start_time and data.end_time:
-        _s_iso, _e_iso = _kiosk_shift_iso(today, day_start, data.start_time, data.end_time)
+        _s_iso, _e_iso = _kiosk_shift_iso(
+            operating_day, day_start, data.start_time, data.end_time
+        )
     else:
         _s_iso, _e_iso = data.start_at, data.end_at
+    # 휴게도 같은 규칙으로 조립 — 시작보다 이른 휴게는 자정 넘긴 근무 안의 휴게다.
+    _bs_iso, _be_iso = _kiosk_break_iso(
+        _s_iso, data.start_time, data.break_start_time, data.break_end_time,
+        explicit_start_at=data.break_start_at, explicit_end_at=data.break_end_at,
+    )
     payload = ScheduleCreate(
         store_id=str(device.store_id),
         user_id=str(data.user_id),
         work_role_id=str(data.work_role_id) if data.work_role_id else None,
-        work_date=today,
+        work_date=operating_day,
         start_time=data.start_time,
         end_time=data.end_time,
-        operating_day=data.operating_day or today,
+        operating_day=operating_day,
         start_at=_s_iso,
         end_at=_e_iso,
+        break_start_at=_bs_iso,
+        break_end_at=_be_iso,
         status="confirmed",
-        force=True,
+        # 무조건 force 금지(D9-1) — 경고만 있으면 409 로 돌려주고 클라이언트가
+        # 사용자에게 확인받아 force:true 로 재요청한다. 예전엔 서버가 여기서
+        # force 를 박아 겹침 경고를 아무도 못 보고 조용히 저장됐다.
+        #
+        # 단 **구버전 HTMA 만** 예전처럼 force 취급한다 — 그쪽엔 409 확인 모달이
+        # 없어서 겹침이 원인 모를 저장 실패로 보인다(app_version_compat 참조).
+        force=effective_force(request, data.force),
     )
     response = await schedule_service.create_entry(
         db, device.organization_id, payload, created_by=manager.id,
-        step_minutes=KIOSK_STEP_MINUTES,
     )
-    # SV 매니저 권한이면 requested 로 떨어졌을 수 있음 → 강제 confirmed
-    await _ensure_confirmed_today(db, uuid.UUID(response.id), device.organization_id, manager.id)
-    # 재조회하여 응답 빌드
     return await _manage_schedule_row(db, uuid.UUID(response.id))
 
 
@@ -473,10 +550,15 @@ async def manage_create_schedule(
 async def manage_update_schedule(
     schedule_id: uuid.UUID,
     data: ManageScheduleUpdateRequest,
+    request: Request,
     auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ManageScheduleRow:
-    """오늘 스케줄 시간/배정 수정. 매장+오늘 한정."""
+    """스케줄 시간/배정 수정. **매장만** 기기에 고정되고 날짜 제약은 없다(D10-1).
+
+    과거 날짜 수정의 방어선은 급여 기간 잠금(D10-3)이다 — 확정된 기간이면
+    schedule_service 가 `PAY_PERIOD_LOCKED` 로 막는다.
+    """
     device, _session, manager = auth
     from app.models.schedule import Schedule
     from app.schemas.schedule import ScheduleUpdate
@@ -485,34 +567,62 @@ async def manage_update_schedule(
     sch = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one_or_none()
     if sch is None or sch.store_id != device.store_id:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    # 오늘만 허용
     from datetime import datetime as _dt, timezone as _tz
     from app.utils.timezone import get_store_day_config, get_work_date
 
     store_tz, day_start = await get_store_day_config(db, device.store_id)
     today = get_work_date(store_tz, day_start, _dt.now(_tz.utc))
-    if sch.work_date != today:
-        raise HTTPException(status_code=400, detail="Only today's schedule can be edited from kiosk")
 
-    # 키오스크 HHmm → 영업일 창 기준 명시 datetime (둘 다 온 경우만 번역, 명시 start_at 우선)
-    if data.start_at is None and data.start_time and data.end_time:
-        _s_iso, _e_iso = _kiosk_shift_iso(today, day_start, data.start_time, data.end_time)
+    # 키오스크 HHmm → 영업일 창 기준 명시 datetime (명시 start_at 이 오면 그것 우선).
+    #
+    # 한쪽 시각만 온 부분 수정에서도 **기존 값과 병합해서** 번역한다.
+    # 예전엔 둘 다 온 경우만 번역해서, 시작만 고치면 번역이 통째로 스킵되고
+    # 구 인코딩 조립이 당일로 앵커해 새벽조 날짜가 틀어졌다.
+    # 이제 grid 검사가 "바뀐 값"만 보므로(D7-3) 안 건드린 쪽을 같이 보내도 안전하다.
+    # 앵커 우선순위: 이번에 지정된 영업일 > 기존 영업일 > 오늘.
+    # 영업일을 옮기는 수정에서 기존 영업일로 앵커하면 시각이 옛 날짜에 남아
+    # "시작 달력일이 영업일 창 밖"(START_DATE_OUT_OF_WINDOW) 에러가 난다.
+    _anchor_day = data.operating_day or sch.operating_day or today
+    _start_hhmm = data.start_time or _format_time_hhmm(sch.start_time)
+    _end_hhmm = data.end_time or _format_time_hhmm(sch.end_time)
+    if data.start_at is None and _start_hhmm and _end_hhmm:
+        _s_iso, _e_iso = _kiosk_shift_iso(_anchor_day, day_start, _start_hhmm, _end_hhmm)
     else:
         _s_iso, _e_iso = data.start_at, data.end_at
+
+    # 휴게 — **키를 보낸 경우에만** 손댄다.
+    #   보냄+값  → 그 값으로 설정
+    #   보냄+null → 지움 (B7: 지우는 방법은 null 하나로 통일)
+    #   아예 생략 → 기존값 유지 (휴게 필드를 모르는 구버전 HTMA 호환)
+    # 생략과 null 을 구분해야 하므로 kwargs 를 조건부로 만든다 —
+    # 항상 넘기면 구버전 요청이 매번 휴게를 지워버린다.
+    _break_fields = {
+        "break_start_time", "break_end_time", "break_start_at", "break_end_at",
+    }
+    _break_kwargs: dict = {}
+    if _break_fields & data.model_fields_set:
+        _bs_iso, _be_iso = _kiosk_break_iso(
+            _s_iso, _start_hhmm, data.break_start_time, data.break_end_time,
+            explicit_start_at=data.break_start_at, explicit_end_at=data.break_end_at,
+        )
+        _break_kwargs = {"break_start_at": _bs_iso, "break_end_at": _be_iso}
+
     payload = ScheduleUpdate(
         user_id=str(data.user_id) if data.user_id else None,
         work_role_id=str(data.work_role_id) if data.work_role_id else None,
-        start_time=data.start_time,
-        end_time=data.end_time,
+        start_time=_start_hhmm if data.start_at is None else data.start_time,
+        end_time=_end_hhmm if data.start_at is None else data.end_time,
         operating_day=data.operating_day,
         start_at=_s_iso,
         end_at=_e_iso,
-        force=True,
+        **_break_kwargs,
+        # create 와 같은 이유로 하드코딩 force 제거(D9-1) — 확인 흐름은 클라이언트가 탄다.
+        # 구버전 HTMA 만 예전처럼 force 취급(app_version_compat).
+        force=effective_force(request, data.force),
         reset_checklist=True,
     )
     await schedule_service.update_entry(
         db, schedule_id, device.organization_id, payload, actor=manager,
-        step_minutes=KIOSK_STEP_MINUTES,
     )
     return await _manage_schedule_row(db, schedule_id)
 
@@ -523,14 +633,16 @@ async def manage_delete_schedule(
     auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
-    """오늘 스케줄 삭제 — attendance 도 hard delete.
+    """스케줄 삭제 — 콘솔과 **완전히 같은 경로**(schedule soft delete + attendance cancelled).
 
-    Console 의 schedule delete 는 attendance 를 cancelled 로 마킹하지만, kiosk admin
-    delete 는 매니저가 매장에서 즉시 "없던 일로 한다"는 명확한 의도. attendance row 와
-    연결된 breaks/corrections 모두 cascade 로 정리하고 schedule 만 soft delete.
+    날짜 제약 없음(D10-1). 과거 삭제는 급여 기간 잠금이 막는다(D10-3).
+
+    예전엔 이 경로만 attendance 를 hard delete 했다. "매장에서 즉시 없던 일로 한다"는
+    의도였지만 FK CASCADE 로 breaks/corrections 까지 함께 소멸해서 **근태가 있었다는
+    사실 자체가 사라졌다** — 급여 근거 자료라 그건 허용되지 않는다(D10-2).
+    콘솔은 cancelled 로 마킹하고 있었으므로 그 비대칭을 없앴다.
     """
     device, _session, manager = auth
-    from app.models.attendance import Attendance
     from app.models.schedule import Schedule
     from app.services.schedule_service import schedule_service
 
@@ -538,26 +650,6 @@ async def manage_delete_schedule(
     if sch is None or sch.store_id != device.store_id:
         raise HTTPException(status_code=404, detail="Schedule not found")
 
-    from datetime import datetime as _dt, timezone as _tz
-    from app.utils.timezone import get_store_day_config, get_work_date
-
-    store_tz, day_start = await get_store_day_config(db, device.store_id)
-    today = get_work_date(store_tz, day_start, _dt.now(_tz.utc))
-    if sch.work_date != today:
-        raise HTTPException(status_code=400, detail="Only today's schedule can be deleted from kiosk")
-
-    # 1) attendance row hard delete (FK CASCADE 로 attendance_breaks /
-    #    attendance_corrections 도 함께 정리). schedule_service.delete_entry 가
-    #    cancel_attendance_for_schedule 를 호출해 status=cancelled 로 마킹하려 하지만
-    #    row 가 이미 없으면 no-op 처리되어 안전.
-    att = (await db.execute(
-        select(Attendance).where(Attendance.schedule_id == schedule_id)
-    )).scalar_one_or_none()
-    if att is not None:
-        await db.delete(att)
-        await db.flush()
-
-    # 2) schedule soft delete (status='deleted') — 기존 audit 정책 유지.
     await schedule_service.delete_entry(
         db, schedule_id, device.organization_id, actor=manager
     )
@@ -632,9 +724,13 @@ async def _manage_schedule_row(db: AsyncSession, schedule_id: uuid.UUID) -> Mana
         position_name=sched.position_snapshot,
         start_time=_format_time_hhmm(sched.start_time),
         end_time=_format_time_hhmm(sched.end_time),
+        break_start_time=_format_time_hhmm(sched.break_start_time),
+        break_end_time=_format_time_hhmm(sched.break_end_time),
         operating_day=sched.operating_day or sched.work_date,
         start_at=_format_at(sched.start_at),
         end_at=_format_at(sched.end_at),
+        break_start_at=_format_at(sched.break_start_at),
+        break_end_at=_format_at(sched.break_end_at),
         status=sched.status,
         attendance_id=att.id if att else None,
         state=state,

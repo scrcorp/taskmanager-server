@@ -127,7 +127,12 @@ async def test_manage_create_schedule_rejects_off_5min_grid(
     test_user: dict,
     staff_in_store: None,
 ) -> None:
-    """5분 grid 벗어난 시간은 422 로 거부 (키오스크 step = 5분)."""
+    """5분 grid 벗어난 시간은 400 으로 거부.
+
+    D6-4: 판정은 서비스 단일 관문에서만 한다. 예전엔 스키마 validator 가
+    먼저 걸어 422 가 나갔는데, 같은 위반이 두 형태로 나가면 클라가 양쪽을
+    처리해야 하므로 스키마 validator 를 제거했다.
+    """
     resp = await async_client.post(
         "/api/v1/attendance/manage/schedules",
         headers=manage_headers,
@@ -137,7 +142,8 @@ async def test_manage_create_schedule_rejects_off_5min_grid(
             "end_time": "14:00",
         },
     )
-    assert resp.status_code == 422, resp.text
+    assert resp.status_code == 400, resp.text
+    assert "5-minute increments" in resp.json()["detail"]
 
 
 async def test_manage_create_schedule_accepts_5min_grid(
@@ -220,7 +226,8 @@ async def test_manage_update_schedule_rejects_off_5min_grid(
         headers=manage_headers,
         json={"start_time": "11:07", "end_time": "15:00"},
     )
-    assert resp.status_code == 422, resp.text
+    assert resp.status_code == 400, resp.text
+    assert "5-minute increments" in resp.json()["detail"]
 
 
 # ── PATCH /manage/schedules/{id} (update) — _manage_schedule_row ──
@@ -442,14 +449,14 @@ async def test_manage_list_breaking_state_with_breaks(
 # ── console 회귀 — 키오스크 5분 완화가 console 로 새면 안 된다 ──
 
 
-async def test_console_schedule_still_rejects_off_30min_grid(
+async def test_console_schedule_now_accepts_5min_grid(
     async_client: AsyncClient,
     admin_headers: dict,
     test_user: dict,
     test_store_id: UUID,
     staff_in_store: None,
 ) -> None:
-    """console 은 그대로 30분 grid. 키오스크가 허용하는 10:15 가 여기선 거부돼야 한다."""
+    """D6: 콘솔도 5분 단위. 예전엔 30분이라 10:15 가 거부됐다."""
     resp = await async_client.post(
         "/api/v1/console/schedules",
         headers=admin_headers,
@@ -461,114 +468,89 @@ async def test_console_schedule_still_rejects_off_30min_grid(
             "end_time": "18:00",
         },
     )
-    assert resp.status_code == 400, resp.text
-    assert "hour or half-hour" in resp.json()["detail"]
-
-
-# ── SV 매니저 권한 — 승인 워크플로 OFF(기본)면 confirmed 스케줄도 직접 관리 ──
-
-
-@pytest_asyncio.fixture
-async def sv_manage_headers(
-    async_client: AsyncClient,
-    device_auth_headers: dict,
-    test_users: dict,
-    test_store_id: UUID,
-) -> dict:
-    """SV(testsv) 로 매니저 세션 오픈 — 매니저모드는 SV+ 부터 허용."""
-    sv = test_users["testsv"]
-    await _ensure_user_store(sv["id"], test_store_id, is_manager=True)
-    resp = await async_client.post(
-        "/api/v1/attendance/manage/session",
-        headers=device_auth_headers,
-        json={"pin": sv["clockin_pin"]},
-    )
     assert resp.status_code == 201, resp.text
-    return {**device_auth_headers, "X-Manage-Session": resp.json()["manage_token"]}
 
 
-async def _set_approval_required(store_id: UUID, value: bool) -> None:
-    """store 레벨 override 로 승인 워크플로 on/off."""
-    async with async_session() as db:
-        await db.execute(
-            text(
-                "INSERT INTO store_settings (id, store_id, key, value, updated_at) "
-                "VALUES (gen_random_uuid(), :sid, 'schedule.approval_required', CAST(:v AS jsonb), now()) "
-                "ON CONFLICT (store_id, key) DO UPDATE SET value = EXCLUDED.value"
-            ),
-            {"sid": str(store_id), "v": "true" if value else "false"},
-        )
-        await db.commit()
-
-
-async def _clear_approval_setting(store_id: UUID) -> None:
-    async with async_session() as db:
-        await db.execute(
-            text("DELETE FROM store_settings WHERE store_id = :sid AND key = 'schedule.approval_required'"),
-            {"sid": str(store_id)},
-        )
-        await db.commit()
-
-
-async def test_sv_manager_can_create_and_update_confirmed_schedule(
+async def test_console_schedule_rejects_off_5min_grid(
     async_client: AsyncClient,
-    sv_manage_headers: dict,
+    admin_headers: dict,
     test_user: dict,
     test_store_id: UUID,
     staff_in_store: None,
 ) -> None:
-    """기본값(승인 워크플로 OFF): SV 도 confirmed 스케줄을 만들고 고칠 수 있다."""
-    await _clear_approval_setting(test_store_id)
-    create = await async_client.post(
-        "/api/v1/attendance/manage/schedules",
-        headers=sv_manage_headers,
-        json={"user_id": str(test_user["id"]), "start_time": "11:00", "end_time": "15:00"},
+    """단위는 5분 하나 — 콘솔도 같은 문구로 거부한다."""
+    resp = await async_client.post(
+        "/api/v1/console/schedules",
+        headers=admin_headers,
+        json={
+            "user_id": str(test_user["id"]),
+            "store_id": str(test_store_id),
+            "work_date": (date.today() + timedelta(days=31)).isoformat(),
+            "start_time": "10:17",
+            "end_time": "18:00",
+        },
     )
-    assert create.status_code == 201, create.text
-    assert create.json()["status"] == "confirmed"
-    sid = create.json()["schedule_id"]
-
-    resp = await async_client.patch(
-        f"/api/v1/attendance/manage/schedules/{sid}",
-        headers=sv_manage_headers,
-        json={"start_time": "11:35", "end_time": "15:05"},
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["start_time"] == "11:35"
-
-    delete = await async_client.delete(
-        f"/api/v1/attendance/manage/schedules/{sid}", headers=sv_manage_headers,
-    )
-    assert delete.status_code == 204, delete.text
+    assert resp.status_code == 400, resp.text
+    assert "5-minute increments" in resp.json()["detail"]
 
 
-async def test_sv_manager_blocked_when_approval_required_on(
+async def test_partial_update_moves_start_to_dawn_with_correct_date(
     async_client: AsyncClient,
     manage_headers: dict,
-    sv_manage_headers: dict,
     test_user: dict,
-    test_store_id: UUID,
     staff_in_store: None,
 ) -> None:
-    """승인 워크플로 ON 인 매장에서는 SV 의 confirmed 스케줄 수정이 다시 막힌다."""
-    # GM 으로 confirmed 스케줄 생성 (SV 생성은 requested 로 떨어지므로)
-    await _clear_approval_setting(test_store_id)
+    """시작만 새벽 시각으로 바꾸면 달력일이 +1d 로 따라와야 한다 (D7-3 회귀).
+
+    예전엔 한쪽 시각만 오면 키오스크의 영업일 번역이 통째로 스킵되고
+    구 인코딩 조립이 기존 offset(0)으로 앵커해서, 새벽조가 **이미 지난 당일 02:00**
+    으로 저장돼 즉시 no_show 가 됐다. 이제 서버가 기존 종료 시각과 병합해
+    번역하므로 경계 규칙이 정상 적용된다.
+    """
+    # 테스트 매장 기본 경계는 00:00 이라 새벽 개념이 성립하지 않는다 — 06:00 으로 세팅.
+    # **반드시 원복한다** — 경계는 work_date 계산에 쓰이므로 남겨두면 뒤따르는
+    # 테스트의 no_show/late 판정을 통째로 바꿔버린다(실제로 겪음).
+    async def _set_boundary(value: str) -> None:
+        async with async_session() as db:
+            await db.execute(text(
+                "UPDATE stores SET day_start_time = CAST(:v AS jsonb)"
+            ), {"v": value})
+            await db.commit()
+
+    await _set_boundary('{"all": "06:00"}')
+    try:
+        await _run_dawn_partial_update_case(async_client, manage_headers, test_user)
+    finally:
+        await _set_boundary('{"all": "00:00"}')
+
+
+async def _run_dawn_partial_update_case(
+    async_client: AsyncClient, manage_headers: dict, test_user: dict,
+) -> None:
     create = await async_client.post(
         "/api/v1/attendance/manage/schedules",
         headers=manage_headers,
-        json={"user_id": str(test_user["id"]), "start_time": "12:00", "end_time": "16:00"},
+        json={
+            "user_id": str(test_user["id"]),
+            "start_time": "08:00",   # 경계 이후 → 영업일과 같은 달력일
+            "end_time": "13:00",
+        },
     )
     assert create.status_code == 201, create.text
-    sid = create.json()["schedule_id"]
+    body = create.json()
+    sid = body["schedule_id"]
+    operating_day = date.fromisoformat(body["operating_day"])
+    assert body["start_at"][:10] == operating_day.isoformat(), body
 
-    await _set_approval_required(test_store_id, True)
-    try:
-        resp = await async_client.patch(
-            f"/api/v1/attendance/manage/schedules/{sid}",
-            headers=sv_manage_headers,
-            json={"start_time": "12:30", "end_time": "16:00"},
-        )
-        assert resp.status_code == 403, resp.text
-        assert "GM or above" in resp.json()["detail"]
-    finally:
-        await _clear_approval_setting(test_store_id)
+    # 시작만 새벽으로 변경 — 종료는 보내지 않는다 (부분 수정)
+    resp = await async_client.patch(
+        f"/api/v1/attendance/manage/schedules/{sid}",
+        headers=manage_headers,
+        json={"start_time": "02:00"},
+    )
+    assert resp.status_code == 200, resp.text
+    after = resp.json()
+    assert after["start_at"][11:16] == "02:00", after
+    # 핵심: 경계(06:00) 이전이므로 달력일이 영업일 +1 이어야 한다
+    assert after["start_at"][:10] == (operating_day + timedelta(days=1)).isoformat(), after
+    assert after["operating_day"] == operating_day.isoformat(), after

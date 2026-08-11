@@ -27,6 +27,9 @@ from app.schemas.schedule import (
     RosterResponse, RosterRow, RosterColumn, RosterTotals, RosterFilterDomain,
 )
 from app.core.permissions import GM_PRIORITY, OWNER_PRIORITY, SV_PRIORITY, hide_cost_for_priority
+from fastapi import HTTPException
+
+from app.core import schedule_codes as codes
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 from app.utils.timezone import (
@@ -86,9 +89,7 @@ class ScheduleService:
         break_start_at: str | None,
         break_end_at: str | None,
         legacy_start_offset_days: int = 0,
-        client_at_fields: set[str] | None = None,
-        client_time_fields: set[str] | None = None,
-        step_minutes: int = SCHEDULE_STEP_MINUTES,
+        prev_at: dict[str, datetime | None] | None = None,
     ) -> dict:
         """구/신 입력을 정규화 — 신 인코딩 필드 dict 반환 (Wave 3: 구 컬럼 제거로 구 입력만 받아 조립).
 
@@ -126,39 +127,27 @@ class ScheduleService:
         if sdate is None and s_at is not None:
             sdate = s_at.date()
 
-        # 그리드 강제(기본 30분, 키오스크 경로는 step_minutes=5).
+        # 그리드 강제 — 단위는 SCHEDULE_STEP_MINUTES(5분) 하나뿐이다(D6).
         # **여기가 스케줄 시각 grid 의 단일 관문**이다 — 구(HH:MM)/신(ISO) 인코딩 양쪽 모두
-        # 이 지점에서만 판정한다. 스키마 validator 로 중복 검증하지 않는 이유는, step 이
-        # 경로마다 다르면(console 30 / kiosk 5) 상수 기반 스키마 검증이 그 차이를 표현하지
-        # 못하고 서로 어긋나기 때문.
-        # 검사 대상은 **클라이언트가 이번 요청에 실제로 보낸 필드만**.
-        # (entry에서 캐리된 값·워크인의 실제 clock-in 분 등 기존 비그리드 시각은 허용 —
-        #  전체 조립값에 걸면 워크인 스케줄의 레거시 수정이 거부되는 회귀 발생)
-        if client_at_fields is None:
-            client_at_fields = {
-                f for f, v in (("start_at", start_at), ("end_at", end_at),
-                               ("break_start_at", break_start_at), ("break_end_at", break_end_at))
-                if v is not None
-            }
-        _check_fields = set(client_at_fields)
-        # 구 인코딩(HH:MM)으로 온 필드는 조립된 datetime 을 같은 기준으로 검사한다.
-        _legacy_to_at = {
-            "start_time": "start_at", "end_time": "end_at",
-            "break_start_time": "break_start_at", "break_end_time": "break_end_at",
-        }
-        if client_time_fields is None:
-            client_time_fields = {
-                f for f, v in (("start_time", start_time), ("end_time", end_time),
-                               ("break_start_time", break_start_time), ("break_end_time", break_end_time))
-                if v is not None
-            }
-        _check_fields |= {_legacy_to_at[f] for f in client_time_fields if f in _legacy_to_at}
-
+        # 이 지점에서만 판정한다. 스키마 validator 로 중복 검증하면 같은 위반이 422 로도
+        # 나가 클라가 두 형태를 처리해야 하므로 금지(키오스크 validator 는 제거됨).
+        # 검사 대상은 **이번에 값이 실제로 바뀐 필드만**이다 (D7-3).
+        #
+        # 예전에는 "클라이언트가 보낸 필드"를 기준으로 삼았다. 그러면 클라가 안 건드린
+        # 필드를 생략해야만 기존 비그리드 값(워크인의 09:07 등)이 보존되는데,
+        # 생략하는 순간 서버가 날짜를 다시 조립할 근거를 잃어 새벽조(+1d)가 당일로
+        # 당겨지는 구멍이 생겼다. "바뀐 값" 기준이면 **클라가 항상 전체를 보내도 안전**하고,
+        # 안 건드린 값은 기존값과 같으니 자동으로 면제된다.
+        #
+        # prev_at=None 이면 신규 생성 — 모든 값이 새 값이므로 전부 검사한다.
         _grid_map = {"start_at": s_at, "end_at": e_at, "break_start_at": bs_at, "break_end_at": be_at}
-        for _f in _check_fields:
-            _v = _grid_map.get(_f)
-            if _v is not None and (_v.minute % step_minutes != 0 or _v.second != 0):
-                raise BadRequestError(grid_error_message(step_minutes))
+        for _f, _v in _grid_map.items():
+            if _v is None:
+                continue
+            if prev_at is not None and prev_at.get(_f) == _v:
+                continue  # 값이 그대로다 — 규칙은 입력에 적용되지 저장된 사실에 소급되지 않는다
+            if _v.minute % SCHEDULE_STEP_MINUTES != 0 or _v.second != 0:
+                raise BadRequestError(grid_error_message())
 
         # 브레이크 구간 검증 — 짝/순서/포함(적대 검증에서 확인된 구멍).
         # 역전(be≤bs)은 net 과지급(음수 브레이크), 근무창 밖 브레이크는 0-클램프로
@@ -437,8 +426,13 @@ class ScheduleService:
         description: str | None = None,
         reason: str | None = None,
         diff: dict[str, Any] | None = None,
+        acknowledged_warnings: list | None = None,
     ) -> None:
-        """Schedule audit log 생성. service 내에서 호출."""
+        """Schedule audit log 생성. service 내에서 호출.
+
+        acknowledged_warnings — 확인하고 넘어간 경고(D9-5).
+        "누가 어떤 경고를 알고도 진행했나" 를 조회할 수 있어야 한다.
+        """
         actor_role = None
         if actor and actor.role:
             actor_role = actor.role.code if hasattr(actor.role, "code") else None
@@ -451,6 +445,7 @@ class ScheduleService:
             description=description,
             reason=reason,
             diff=diff,
+            acknowledged_warnings=acknowledged_warnings,
         )
 
     @staticmethod
@@ -540,6 +535,37 @@ class ScheduleService:
             return float(org_hr), "org"
         return 0.0, None
 
+    @staticmethod
+    def _enforce_validation(validation: "ScheduleValidation", force: bool) -> list[dict]:
+        """검증 결과를 D9 계약대로 강제한다. 통과하면 확인된 경고 목록을 돌려준다.
+
+        | 요청 | 에러 있음 | 경고만 있음 | 깨끗함 |
+        |---|---|---|---|
+        | force 없음 | **400** 차단 | **409** + warnings, 저장 안 됨 | 저장 |
+        | force: true | **400** 차단(유효하지 않음) | 저장 + warnings 응답 | 저장 |
+
+        예전에는 `force` 를 인자로 받기만 하고 아무 데도 쓰지 않았고,
+        경고는 **실패했을 때만** 에러 메시지에 섞여 나가고 성공하면 버려졌다.
+        그래서 "다음 영업일 소속일 수 있다" 같은 경고를 아무도 본 적이 없다.
+        """
+        errs = [i.model_dump() for i in validation.errors]
+        warns = [i.model_dump() for i in validation.warnings]
+        if errs:
+            raise HTTPException(status_code=400, detail={
+                "code": codes.SCHEDULE_INVALID,
+                "message": codes.fallback_message(errs),
+                "errors": errs,
+                "warnings": warns,
+            })
+        if warns and not force:
+            raise HTTPException(status_code=409, detail={
+                "code": codes.SCHEDULE_WARNINGS_UNCONFIRMED,
+                "message": codes.fallback_message(warns),
+                "warnings": warns,
+                "retry": {"force": True},
+            })
+        return warns
+
     async def _validate_entry(
         self,
         db: AsyncSession,
@@ -555,8 +581,8 @@ class ScheduleService:
         cand_start_at: datetime | None = None,
         cand_end_at: datetime | None = None,
     ) -> ScheduleValidation:
-        errors: list[str] = []
-        warnings: list[str] = []
+        errors: list[dict] = []
+        warnings: list[dict] = []
 
         start_m = self._time_to_minutes(start_time)
         end_m = self._time_to_minutes(end_time)
@@ -567,37 +593,37 @@ class ScheduleService:
         if cand_start_at is not None and work_date is not None:
             _delta_days = (cand_start_at.date() - work_date).days
             if _delta_days < 0 or _delta_days > 1:
-                errors.append(
-                    "Start date must be on the operating day or the next day"
-                    f" ({work_date.isoformat()} or +1 day)."
-                )
+                errors.append(codes.issue(
+                    codes.START_DATE_OUT_OF_WINDOW,
+                    operating_day=work_date.isoformat(),
+                    start_date=cand_start_at.date().isoformat(),
+                ))
             else:
                 from app.utils.timezone import get_store_day_config, resolve_day_start_time
                 _, _day_cfg = await get_store_day_config(db, store_id)
                 _boundary = resolve_day_start_time(_day_cfg, cand_start_at.date().weekday())
                 if _delta_days == 1 and cand_start_at.time() >= _boundary:
-                    warnings.append(
-                        f"Start is at or after the store's day boundary ({_boundary.strftime('%H:%M')})."
-                        f" This shift may belong to the next operating day ({cand_start_at.date().isoformat()})."
-                        " Verify the operating day before saving."
-                    )
+                    warnings.append(codes.issue(
+                        codes.START_AFTER_DAY_BOUNDARY,
+                        boundary=_boundary.strftime("%H:%M"),
+                        start_date=cand_start_at.date().isoformat(),
+                    ))
                 elif _delta_days == 0 and cand_start_at.time() < _boundary:
                     # 대칭 경고 — 당일 새벽 시각(경계 이전)은 영업일 판정상 전날 소속.
                     # 이 영업일의 새벽조라면 start 날짜를 +1일로 지정해야 근태 매칭이 맞는다.
-                    warnings.append(
-                        f"Start is before the store's day boundary ({_boundary.strftime('%H:%M')}) —"
-                        " this time belongs to the previous operating day."
-                        " If this is an early-morning shift of THIS operating day,"
-                        " set the start date to the next day (+1d)."
-                    )
+                    warnings.append(codes.issue(
+                        codes.START_BEFORE_DAY_BOUNDARY,
+                        boundary=_boundary.strftime("%H:%M"),
+                        start_date=cand_start_at.date().isoformat(),
+                    ))
 
         # A-3: 0분 shift 차단
         if cand_start_at is not None and cand_end_at is not None:
             net_minutes = int((cand_end_at - cand_start_at).total_seconds() // 60)
             if net_minutes <= 0:
-                errors.append("Shift duration must be greater than 0 minutes")
+                errors.append(codes.issue(codes.ZERO_DURATION))
         elif start_m == end_m:
-            errors.append("Shift duration must be greater than 0 minutes")
+            errors.append(codes.issue(codes.ZERO_DURATION))
             net_minutes = 0
         else:
             # A-2 자정넘김: end < start는 overnight shift로 허용
@@ -619,9 +645,10 @@ class ScheduleService:
                 except (SettingNotRegisteredError, TypeError, ValueError):
                     max_hours = 16.0
             if net_minutes > max_hours * 60:
-                warnings.append(
-                    f"Shift is longer than {max_hours:g} hours ({net_minutes // 60}h {net_minutes % 60}m). Verify before saving."
-                )
+                warnings.append(codes.issue(
+                    codes.SHIFT_TOO_LONG,
+                    net_minutes=net_minutes, limit_hours=max_hours,
+                ))
 
         # 1. Time overlap check (datetime 구간 비교, 자정 넘김 정확)
         # 명시 cand instant(새벽근무 +1d 등)가 있으면 그것을, 없으면 영업일+시각 조립 폴백.
@@ -633,7 +660,9 @@ class ScheduleService:
             db, user_id, work_date, start_m, end_m, exclude_id,
             cand_start_at=_cand_s, cand_end_at=_cand_e,
         ):
-            errors.append("This employee already has an overlapping schedule")
+            # D9: 겹침은 **경고**다. 한 사람이 두 역할을 겹쳐 맡는 상황이 실제로
+            # 있을 수 있는데 에러로 두면 표현할 방법이 없다. 확인 후 진행(force).
+            warnings.append(codes.issue(codes.OVERLAPPING_SCHEDULE, user_id=str(user_id)))
 
         # 2. user-store relation + is_work_assignment check (A-8)
         # 직원이 해당 매장에 배정되어 있고, Work 플래그가 켜져있어야 스케줄 가능
@@ -650,9 +679,13 @@ class ScheduleService:
             )
             us_flag = us_row.scalar_one_or_none()
             if us_flag is None:
-                errors.append("This employee is not assigned to this store")
+                errors.append(codes.issue(
+                    codes.USER_NOT_IN_STORE, user_id=str(user_id), store_id=str(store_id),
+                ))
             elif us_flag is False:
-                errors.append("This employee is not marked for work at this store")
+                errors.append(codes.issue(
+                    codes.USER_NOT_MARKED_FOR_STORE, user_id=str(user_id), store_id=str(store_id),
+                ))
 
         valid = len(errors) == 0
         return ScheduleValidation(valid=valid, warnings=warnings, errors=errors)
@@ -938,9 +971,7 @@ class ScheduleService:
         organization_id: UUID,
         data: ScheduleCreate,
         created_by: UUID,
-        step_minutes: int = SCHEDULE_STEP_MINUTES,
     ) -> ScheduleResponse:
-        """step_minutes: 시각 grid 단위. console/벌크는 기본 30분, 키오스크는 5분."""
         store_id = UUID(data.store_id)
         # 폐점(closed) 매장엔 새 스케줄 생성 차단 (조회/수정/삭제는 허용)
         from app.services.store_service import store_service
@@ -953,7 +984,6 @@ class ScheduleService:
             break_start_time=data.break_start_time, break_end_time=data.break_end_time,
             start_at=data.start_at, end_at=data.end_at,
             break_start_at=data.break_start_at, break_end_at=data.break_end_at,
-            step_minutes=step_minutes,
         )
         start_time = norm["start_at"].time() if norm["start_at"] else None
         end_time = norm["end_at"].time() if norm["end_at"] else None
@@ -967,8 +997,11 @@ class ScheduleService:
 
         # (L3) 소급 차단 — 확정된 pay period 안의 과거 날짜로 스케줄 생성 금지.
         # 미래/미확정 날짜는 confirmed 기간이 없으므로 자연히 통과한다.
-        from app.services.payroll_lock_service import ensure_not_locked
-        await ensure_not_locked(db, store_id=store_id, work_date=norm["operating_day"])
+        # direction="into": 잠긴 기간 **안으로** 넣으려는 시도 (D10-3).
+        from app.services.payroll_lock_service import ensure_schedule_not_locked
+        await ensure_schedule_not_locked(
+            db, store_id=store_id, work_date=norm["operating_day"], direction="into",
+        )
 
         # status 유효성 확인 — Validate status value (draft/requested/confirmed)
         allowed_statuses = {"draft", "requested", "confirmed"}
@@ -990,9 +1023,7 @@ class ScheduleService:
             start_time, end_time, break_start, break_end, data.force,
             cand_start_at=norm["start_at"], cand_end_at=norm["end_at"],
         )
-        if not validation.valid:
-            detail = "; ".join(validation.errors + validation.warnings)
-            raise BadRequestError(f"Validation failed: {detail}")
+        acknowledged_warnings = self._enforce_validation(validation, data.force)
 
         net = net_minutes_from_datetimes(
             norm["start_at"], norm["end_at"], norm["break_start_at"], norm["break_end_at"]
@@ -1049,6 +1080,7 @@ class ScheduleService:
             await self._log_audit(
                 db, entry.id, audit_event, actor,
                 description=description,
+                acknowledged_warnings=acknowledged_warnings,
             )
 
             # confirmed 상태일 때만 체크리스트 인스턴스 자동 생성
@@ -1272,7 +1304,10 @@ class ScheduleService:
                 if not validation.valid:
                     conflicts.append(BulkPreviewConflict(
                         index=i,
-                        message="; ".join(validation.errors),
+                        message=codes.fallback_message(
+                            [e.model_dump() for e in validation.errors]
+                        ),
+                        errors=[e.model_dump() for e in validation.errors],
                     ))
                     continue
 
@@ -1390,7 +1425,11 @@ class ScheduleService:
                         note=item.note,
                         hourly_rate=item.hourly_rate,
                         reset_checklist=item.reset_checklist,
-                        force=False,
+                        # 다건 경로는 409 확인 흐름을 쓰지 않는다(S1-c).
+                        # 전체를 409 로 막으면 부분 성공의 의미가 사라지고, 한 항목의
+                        # 경고 때문에 나머지가 통째로 멈춘다. 저장은 진행하고 경고는
+                        # 항목별로 결과에 담는다. 에러는 여전히 항목별로 실패 처리된다.
+                        force=True,
                     )
                     await self.update_entry(db, entry_id, organization_id, update_data, actor=actor)
 
@@ -1570,9 +1609,7 @@ class ScheduleService:
         organization_id: UUID,
         data: ScheduleUpdate,
         actor: User | None = None,
-        step_minutes: int = SCHEDULE_STEP_MINUTES,
     ) -> ScheduleResponse:
-        """step_minutes: 시각 grid 단위. console/벌크는 기본 30분, 키오스크는 5분."""
         entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
         if entry is None:
             raise NotFoundError("Schedule not found")
@@ -1586,8 +1623,13 @@ class ScheduleService:
 
         # (L3) 확정된 pay period 안의 스케줄은 수정 불가. 새 영업일이 locked 기간으로
         # 이동하는 것도 아래(norm 계산 후)에서 추가로 막는다.
-        from app.services.payroll_lock_service import ensure_not_locked
-        await ensure_not_locked(db, store_id=entry.store_id, work_date=entry.operating_day)
+        # direction="out_of": 이미 잠긴 기간 안에 있는 근무를 건드리는 시도 —
+        # 잠긴 날짜에서 **빼내는** 수정도 여기서 막힌다 (D10-3).
+        from app.services.payroll_lock_service import ensure_schedule_not_locked
+        await ensure_schedule_not_locked(
+            db, store_id=entry.store_id, work_date=entry.operating_day,
+            direction="out_of",
+        )
 
         update_data: dict = {}
         # requested 스케줄 수정 시 변경 이력 기록용
@@ -1653,8 +1695,14 @@ class ScheduleService:
         # 신(datetime) 인코딩 입력 감지 (전환기 신 클라이언트) — 값은 아래 재조립 블록에서 반영.
         # 비교는 동일 포맷(ISO "YYYY-MM-DDTHH:MM")으로 정규화 — str(datetime)와 클라 ISO의
         # 포맷 차이로 같은 값이 항상 '변경'으로 기록되던 문제 방지.
+        # 휴게는 명시 null(=지움)도 변경으로 잡아야 한다 — 안 그러면
+        # modification_entries 가 비어 "실제 변경 없음"으로 조기반환되고
+        # 휴게 삭제가 조용히 유실된다(감사 로그에도 안 남는다).
+        _nullable_at = {"break_start_at", "break_end_at"}
         for _f in ("operating_day", "start_at", "end_at", "break_start_at", "break_end_at"):
-            if _f in data.model_fields_set and getattr(data, _f) is not None:
+            if _f in data.model_fields_set and (
+                getattr(data, _f) is not None or _f in _nullable_at
+            ):
                 _old = getattr(entry, _f, None)
                 _new = getattr(data, _f)
                 if _f == "operating_day":
@@ -1662,7 +1710,12 @@ class ScheduleService:
                     _news = str(_new)
                 else:
                     _olds = format_naive_iso(_old)
-                    _news = format_naive_iso(parse_naive_iso(_new)) if isinstance(_new, str) else str(_new)
+                    if _new is None:
+                        _news = None  # 지움 — str(None)="None" 이 이력에 새는 것 방지
+                    elif isinstance(_new, str):
+                        _news = format_naive_iso(parse_naive_iso(_new))
+                    else:
+                        _news = str(_new)
                 if _olds != _news:
                     _track(_f, _olds, _news)
         if data.note is not None:
@@ -1719,6 +1772,14 @@ class ScheduleService:
             f for f in _new_at_fields
             if f in data.model_fields_set and getattr(data, f) is not None
         }
+        # grid 검사 면제 기준 — entry 에 이미 저장돼 있던 시각.
+        # 조립 결과가 이것과 같으면 "안 바뀐 값"이므로 검사하지 않는다(D7-3).
+        _prev_at: dict[str, datetime | None] = {
+            "start_at": entry.start_at,
+            "end_at": entry.end_at,
+            "break_start_at": entry.break_start_at,
+            "break_end_at": entry.break_end_at,
+        }
         if data.model_fields_set & _time_fields:
             # operating_day: 명시값 > work_date 변경 시 그것 > entry 기존값
             if "operating_day" in data.model_fields_set and data.operating_day is not None:
@@ -1738,14 +1799,24 @@ class ScheduleService:
                               else format_naive_iso(entry.start_at)),
                     end_at=(data.end_at if "end_at" in _client_at
                             else format_naive_iso(entry.end_at)),
-                    break_start_at=(data.break_start_at if "break_start_at" in _client_at
+                    # 휴게만은 **명시 null = 지움**이다 (B7).
+                    # start_at/end_at 은 값이 없으면 스케줄 자체가 성립하지 않으니
+                    # None 을 "미제공"으로 보는 게 맞지만, 휴게는 없는 것이 정상
+                    # 상태라 "지움"을 표현할 방법이 반드시 필요하다.
+                    # `break_start_time`(구 인코딩)은 이미 같은 규칙이었는데
+                    # 신 인코딩만 빠져 있어서, 신 클라이언트는 휴게를 지울 수 없었다.
+                    # 생략(model_fields_set 밖)은 여전히 기존값 유지 — 휴게를 모르는
+                    # 구버전 클라이언트가 매 저장마다 휴게를 날리면 안 된다.
+                    break_start_at=(data.break_start_at
+                                    if "break_start_at" in data.model_fields_set
                                     else format_naive_iso(entry.break_start_at)),
-                    break_end_at=(data.break_end_at if "break_end_at" in _client_at
+                    break_end_at=(data.break_end_at
+                                  if "break_end_at" in data.model_fields_set
                                   else format_naive_iso(entry.break_end_at)),
-                    # 그리드 체크는 클라가 이번 PATCH에 실제로 보낸 필드만 (캐리값은 워크인 등 비그리드 허용)
-                    client_at_fields=_client_at,
-                    step_minutes=step_minutes,
-                )
+                    # 그리드 체크는 값이 실제로 바뀐 필드만 (D7-3) — 워크인 등 기존 비그리드
+                    # 시각은 그대로면 자동 면제된다.
+                    prev_at=_prev_at,
+                        )
             else:
                 # 구 인코딩(또는 work_date/시간 변경): 병합된 시각 locals에서 재조립.
                 # 기존 새벽근무(+1d)의 day-offset을 보존 — 구 클라이언트(키오스크/벌크)가
@@ -1763,33 +1834,35 @@ class ScheduleService:
                     start_at=None, end_at=None,
                     break_start_at=None, break_end_at=None,
                     legacy_start_offset_days=_off,
-                    # 그리드 체크는 이번 PATCH에 실제로 온 HH:MM 필드만 — 나머지는 entry 캐리값이라
-                    # 워크인 등 기존 비그리드 시각이 수정 자체를 막지 않게 한다.
-                    client_time_fields={
-                        _f for _f in ("start_time", "end_time", "break_start_time", "break_end_time")
-                        if _f in data.model_fields_set and getattr(data, _f) is not None
-                    },
-                    step_minutes=step_minutes,
-                )
+                    # 그리드 체크는 값이 실제로 바뀐 필드만 (D7-3).
+                    prev_at=_prev_at,
+                        )
 
         # Validate with new values — norm이 있으면 실제 instant로 검증(새벽근무 정확)
+        # 휴게도 norm 결과를 쓴다. 예전엔 구 인코딩 locals(new_break_*)만 봐서,
+        # 신 인코딩으로 휴게를 지우거나 옮겨도 검증은 **옛 휴게**를 기준으로 했다
+        # (net/길이 판정이 저장값과 어긋난다).
+        if norm is not None:
+            _v_bs = norm["break_start_at"].time() if norm["break_start_at"] else None
+            _v_be = norm["break_end_at"].time() if norm["break_end_at"] else None
+        else:
+            _v_bs, _v_be = new_break_start, new_break_end
         validation = await self._validate_entry(
             db, new_user_id, entry.store_id,
             (norm["operating_day"] if norm else new_work_date),
-            new_start, new_end, new_break_start, new_break_end,  # type: ignore[arg-type]
+            new_start, new_end, _v_bs, _v_be,  # type: ignore[arg-type]
             data.force, exclude_id=entry.id,
             cand_start_at=(norm["start_at"] if norm else entry.start_at),
             cand_end_at=(norm["end_at"] if norm else entry.end_at),
         )
-        if not validation.valid:
-            detail = "; ".join(validation.errors + validation.warnings)
-            raise BadRequestError(f"Validation failed: {detail}")
+        acknowledged_warnings = self._enforce_validation(validation, data.force)
 
         # (L3) 영업일이 바뀌는 수정이면 **새 날짜**도 locked 기간이 아니어야 한다 —
         # 미확정 날짜의 스케줄을 확정 기간 안으로 소급 이동시키는 우회 차단.
         if norm is not None and norm["operating_day"] != entry.operating_day:
-            await ensure_not_locked(
-                db, store_id=entry.store_id, work_date=norm["operating_day"]
+            await ensure_schedule_not_locked(
+                db, store_id=entry.store_id, work_date=norm["operating_day"],
+                direction="into",
             )
 
         if norm is not None:
@@ -1937,6 +2010,7 @@ class ScheduleService:
                 description=desc,
                 reason=(data.change_reason or "").strip() or None,
                 diff=audit_diff or None,
+                acknowledged_warnings=acknowledged_warnings,
             )
             result = await self._to_response(db, updated)
             await db.commit()
@@ -1965,8 +2039,12 @@ class ScheduleService:
             )
 
         # (L3) 확정된 pay period 안의 스케줄은 삭제 불가 (소급 차단).
-        from app.services.payroll_lock_service import ensure_not_locked
-        await ensure_not_locked(db, store_id=entry.store_id, work_date=entry.operating_day)
+        # 삭제는 잠긴 기간에서 근무를 통째로 **빼내는** 행위다 → direction="out_of".
+        from app.services.payroll_lock_service import ensure_schedule_not_locked
+        await ensure_schedule_not_locked(
+            db, store_id=entry.store_id, work_date=entry.operating_day,
+            direction="out_of",
+        )
         prior_status = entry.status
         try:
             await self._log_audit(
@@ -1977,8 +2055,15 @@ class ScheduleService:
                 db, entry_id, {"status": "deleted"}, organization_id,
             )
             # Eager attendance: cancelled 로 마킹 (기록 보존)
+            # 근태는 급여의 근거 자료라 "사라진 사실" 자체가 추적 가능해야 한다(D10-2) —
+            # 상태 전이를 Activity History 에도 남긴다. 행위자를 함께 넘기지 않으면
+            # 누가 지웠는지가 스케줄 audit 에만 남고 근태 쪽에선 유령 변경이 된다.
             from app.services.attendance_lifecycle_service import cancel_attendance_for_schedule
-            await cancel_attendance_for_schedule(db, entry_id)
+            await cancel_attendance_for_schedule(
+                db, entry_id,
+                by_user_id=actor.id if actor else None,
+                reason=f"Schedule deleted (was {prior_status})",
+            )
 
             await db.commit()
         except Exception:
@@ -2293,13 +2378,14 @@ class ScheduleService:
             b.start_time, b.end_time, b.break_start_time, b.break_end_time,
             force=False, exclude_id=b.id,
         )
-        errors: list[str] = []
-        if not val_a.valid:
-            errors.extend(val_a.errors)
-        if not val_b.valid:
-            errors.extend(val_b.errors)
-        if errors and not data.force:
-            raise BadRequestError(f"Switch would cause conflicts: {'; '.join(errors)}")
+        # R1 — switch 도 D9 계약을 그대로 쓴다. 예전엔 force 가 **에러까지** 우회해서
+        # "force 는 확인 후 진행"이라는 문장이 코드베이스 안에서 거짓이었다.
+        merged = ScheduleValidation(
+            valid=val_a.valid and val_b.valid,
+            errors=list(val_a.errors) + list(val_b.errors),
+            warnings=list(val_a.warnings) + list(val_b.warnings),
+        )
+        self._enforce_validation(merged, data.force)
 
         # 체크리스트 상태 확인
         from app.models.checklist import ChecklistInstance

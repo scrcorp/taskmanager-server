@@ -4,7 +4,6 @@
     - schedule_service._resolve_hourly_rate_with_source
     - schedule_service._list_to_responses (배치 경로 person_rates_map)
     - schedule_service.create_walk_in_schedule
-    - schedule_request_service._resolve_hourly_rate
     - user_service.get_user (raw hourly_rate 소스 + effective store-tier 버그 수정)
 
 증명 방식: users.hourly_rate 를 org_members 와 **다른 값**으로 심어 두고
@@ -30,7 +29,6 @@ from app.models.rate import HourlyRateHistory
 from app.models.schedule import Schedule
 from app.models.user import User
 from app.models.user_store import UserStore
-from app.services.schedule_request_service import schedule_request_service
 from app.services.schedule_service import schedule_service
 from app.services.user_service import user_service
 
@@ -229,39 +227,6 @@ async def test_walk_in_zero_when_no_person_rate(switch_ctx: dict) -> None:
         )
         assert float(entry.hourly_rate) == 0.0
         await db.rollback()
-
-
-# ---------------------------------------------------------------------------
-# schedule_request_service resolver
-# ---------------------------------------------------------------------------
-
-
-async def test_request_resolver_uses_org_members(switch_ctx: dict) -> None:
-    """schedule_request 의 cascade 도 org_members 소스."""
-    async with async_session() as db:
-        rate = await schedule_request_service._resolve_hourly_rate(
-            db, switch_ctx["user_id"], switch_ctx["store_id"],
-        )
-    assert rate == float(MEMBER_RATE)
-
-
-async def test_request_resolver_store_fallback(switch_ctx: dict) -> None:
-    """member rate NULL → store default (users 99 무시)."""
-    await _clear_member_rate(switch_ctx["member_id"])
-    async with async_session() as db:
-        rate = await schedule_request_service._resolve_hourly_rate(
-            db, switch_ctx["user_id"], switch_ctx["store_id"],
-        )
-    assert rate == float(STORE_RATE)
-
-
-async def test_request_resolver_override_wins(switch_ctx: dict) -> None:
-    """override 는 여전히 최우선."""
-    async with async_session() as db:
-        rate = await schedule_request_service._resolve_hourly_rate(
-            db, switch_ctx["user_id"], switch_ctx["store_id"], override=50.0,
-        )
-    assert rate == 50.0
 
 
 # ---------------------------------------------------------------------------

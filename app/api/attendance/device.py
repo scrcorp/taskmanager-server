@@ -55,17 +55,50 @@ async def _resolve_bool_setting(
         return False
 
 
+DEFAULT_SHIFT_MINUTES_KEY = "work.default_schedule_duration_minutes"
+DEFAULT_SHIFT_MINUTES_FALLBACK = 330
+
+
+async def _resolve_default_shift_minutes(db: AsyncSession, organization_id, store_id) -> int:
+    """신규 스케줄 기본 길이(분). 미등록/미할당/이상값이면 registry 기본값.
+
+    ⚠️ 0 이하는 fallback 으로 대체한다 — 길이 0 스케줄은 ZERO_DURATION 에러라
+    앱이 그 값을 그대로 쓰면 만들 수 있는 스케줄이 하나도 없어진다.
+    schedule_service 의 워크인 생성도 같은 방어를 한다(두 곳의 판정이 같아야 한다).
+    """
+    if store_id is None:
+        return DEFAULT_SHIFT_MINUTES_FALLBACK
+    try:
+        raw = await resolve_setting(
+            db,
+            key=DEFAULT_SHIFT_MINUTES_KEY,
+            organization_id=organization_id,
+            store_id=store_id,
+        )
+        value = int(raw) if raw is not None else DEFAULT_SHIFT_MINUTES_FALLBACK
+    except (SettingNotRegisteredError, TypeError, ValueError):
+        return DEFAULT_SHIFT_MINUTES_FALLBACK
+    return value if value > 0 else DEFAULT_SHIFT_MINUTES_FALLBACK
+
+
 async def _resolve_device_flags(
     db: AsyncSession, organization_id, store_id
-) -> tuple[bool, bool]:
-    """DeviceMe 에 실어보낼 store 설정 flag 들. (walk_in_allowed, tip_entry_enabled)"""
+) -> tuple[bool, bool, int]:
+    """DeviceMe 에 실어보낼 store 설정들.
+
+    (walk_in_allowed, tip_entry_enabled, default_schedule_duration_minutes)
+    기기가 이미 주기적으로 읽는 응답이라 설정 통로를 여기에 얹는다(D8-2).
+    """
     walk_in_allowed = await _resolve_bool_setting(
         db, "attendance.walk_in_allowed", organization_id, store_id
     )
     tip_entry_enabled = await _resolve_bool_setting(
         db, TIP_ENTRY_ENABLED_KEY, organization_id, store_id
     )
-    return walk_in_allowed, tip_entry_enabled
+    default_shift_minutes = await _resolve_default_shift_minutes(
+        db, organization_id, store_id
+    )
+    return walk_in_allowed, tip_entry_enabled, default_shift_minutes
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=201)
@@ -123,7 +156,7 @@ async def get_me(
                 offset_minutes = int(off.total_seconds() // 60)
         except Exception:
             offset_minutes = None
-    walk_in_allowed, tip_entry_enabled = await _resolve_device_flags(
+    walk_in_allowed, tip_entry_enabled, default_shift_minutes = await _resolve_device_flags(
         db, device.organization_id, device.store_id
     )
     return DeviceMeResponse(
@@ -137,6 +170,7 @@ async def get_me(
         work_date=work_date_str,
         walk_in_allowed=walk_in_allowed,
         tip_entry_enabled=tip_entry_enabled,
+        default_schedule_duration_minutes=default_shift_minutes,
         registered_at=device.registered_at,
         last_seen_at=device.last_seen_at,
     )
@@ -169,7 +203,7 @@ async def assign_store(
         except Exception:
             offset_minutes = None
 
-    walk_in_allowed, tip_entry_enabled = await _resolve_device_flags(
+    walk_in_allowed, tip_entry_enabled, default_shift_minutes = await _resolve_device_flags(
         db, device.organization_id, device.store_id
     )
     return DeviceMeResponse(
@@ -183,6 +217,7 @@ async def assign_store(
         work_date=work_date_str,
         walk_in_allowed=walk_in_allowed,
         tip_entry_enabled=tip_entry_enabled,
+        default_schedule_duration_minutes=default_shift_minutes,
         registered_at=device.registered_at,
         last_seen_at=device.last_seen_at,
     )

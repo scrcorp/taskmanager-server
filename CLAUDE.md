@@ -338,5 +338,30 @@ if priority == 30:               # → priority == SV_PRIORITY
 - HTTPException for error responses with proper status codes
 - Use dependency injection for db session and current user
 - All IDs are UUID
-- All timestamps are UTC with timezone (TIMESTAMPTZ)
+- **시각은 성격에 따라 저장 형식이 다르다 (MUST FOLLOW)** — 아래 "Time Representation Policy" 참조
 - snake_case for Python, camelCase for JSON response (via Pydantic alias)
+
+## Time Representation Policy (MUST FOLLOW)
+
+판별 기준은 하나다 — **"이 시각은 사람이 정한 것인가, 일어난 것인가."**
+
+| 성격 | 저장 | 예 |
+|---|---|---|
+| **계획·의도** (사람이 정한 것) | **naive 벽시계** (tz 없음) + 소속 매장의 tz로 해석 | 스케줄 start/end, 영업일 경계, 영업시간, 근무가능시간 |
+| **사건** (실제로 일어난 것) | **TIMESTAMPTZ** (절대시각, UTC) | 출퇴근, 휴게 시작/종료, 생성·수정 시각 |
+
+**금지**
+
+1. 벽시계 값을 **매장 식별자 없이** 다루지 않는다. 매장 없는 벽시계는 의미가 없다.
+2. 절대시각을 벽시계로 낮춰서 비교하지 않는다. 비교는 **벽시계를 매장 tz로 절대화한 뒤** 절대끼리 한다.
+3. 벽시계를 epoch/TIMESTAMPTZ로 **인코딩하지 않는다.** 값의 겉모습이 절대시각과 구별되지 않아,
+   누군가 tz를 적용해 포맷하는 순간 시각이 밀리고 타입이 같아 아무도 잡지 못한다.
+4. 시각 문자열에 **24를 넘는 표기(`26:00`)를 쓰지 않는다.** 자정 넘김은 날짜(datetime) 또는
+   명시적 날짜 오프셋 필드로 표현한다. "종료 < 시작이면 다음 날" 같은 **암묵 보정을 만들지 않는다.**
+
+**왜** — 계획을 절대시각으로 굳히면 서머타임 전환 후 스케줄이 조용히 한 시간 밀리고,
+봄 전환일의 02:00~03:00은 저장할 절대시각이 아예 없다.
+반대로 실적을 벽시계로 저장하면 가을 전환일 야간 근무가 8시간으로 계산되어(실제 9시간) 급여가 틀어진다.
+둘 다 실제로 깨지므로 통일이 아니라 **분류**가 답이다.
+
+> 상세와 근거: `docs/99_inbox/2026-08-09 스케줄 시간 정책 - 처음부터 정하기.md` (D1)

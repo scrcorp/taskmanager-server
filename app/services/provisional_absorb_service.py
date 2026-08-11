@@ -36,7 +36,6 @@ _UNIQUE_SCOPED: list[tuple[str, str, tuple[str, ...]]] = [
 # 단순 UPDATE 로 옮기면 되는 것들 — (모델 경로, user 컬럼명)
 _SIMPLE_MOVE: list[tuple[str, str]] = [
     ("app.models.schedule:Schedule", "user_id"),
-    ("app.models.schedule:ScheduleRequest", "user_id"),
     ("app.models.warning:Warning", "subject_user_id"),
     ("app.models.evaluation:Evaluation", "evaluatee_id"),
 ]

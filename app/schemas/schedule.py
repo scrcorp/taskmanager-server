@@ -1,6 +1,6 @@
 """스케줄 시스템 Pydantic 스키마.
 
-Schedule system Pydantic schemas for work roles, break rules, periods, requests, and entries.
+Schedule system Pydantic schemas for work roles, break rules, and entries.
 """
 
 import re
@@ -9,40 +9,41 @@ from datetime import date, datetime
 from pydantic import BaseModel, Field, field_validator
 
 # 스케줄 시간은 grid 단위로만 허용. 어긋나면 reject (반올림하지 않음).
-# 기본(console/벌크)은 30분, 키오스크(HTMA)는 5분 — 매장에서 즉석 보정을 하는 컨텍스트라
-# 30분 단위로는 실제 운영 시각을 표현하지 못해 별도 step 을 쓴다.
+#
+# **이 상수가 시각 입력 단위의 유일한 출처다** (D6).
+# 예전에는 console/벌크 30분, 키오스크 5분으로 갈라져 있었다. 그 차등 때문에
+#   - 같은 위반이 경로에 따라 400/422 로 다르게 나갔고
+#   - 프리뷰(기본 30분)와 저장(키오스크 5분)의 판정이 어긋났으며
+#   - 앱이 종료를 23:59 로 clamp 하면 어느 단위로도 배수가 아니어서 저녁 스케줄 생성이 막혔다.
+# 5분으로 통일한다. 기존 30분 데이터는 전부 5의 배수라 마이그레이션이 필요 없다.
+#
+# 표시 슬롯과는 별개다 — 콘솔 그리드는 30분 행 렌더링을 유지한다(블록 위치는 분 단위 overlap 계산).
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
-SCHEDULE_STEP_MINUTES = 30
-KIOSK_STEP_MINUTES = 5
+SCHEDULE_STEP_MINUTES = 5
 
 
-def grid_error_message(step_minutes: int) -> str:
+def grid_error_message() -> str:
     """step 위반 시 사용자에게 보여줄 문구 — 서버가 단일 출처."""
-    if step_minutes == 30:
-        return "Time must be on the hour or half-hour (:00 or :30)."
-    return f"Time must be in {step_minutes}-minute increments."
+    return f"Time must be in {SCHEDULE_STEP_MINUTES}-minute increments."
 
 
-def validate_grid(value: str | None, step_minutes: int) -> str | None:
-    """"HH:MM" 가 step_minutes 단위인지 검증. None/"" 은 통과 (optional 필드)."""
+def validate_grid(value: str | None) -> str | None:
+    """"HH:MM" 가 5분 단위인지 검증. None/"" 은 통과 (optional 필드).
+
+    ⚠️ 스키마 validator 로 쓰지 말 것. grid 판정의 단일 관문은
+    `schedule_service._normalize_shift_input` 이다 — 스키마에서 또 걸면
+    같은 위반이 422 로도 나가고, 워크인처럼 기존에 저장된 비배수 값을
+    수정조차 할 수 없게 된다(D7: 검사 대상은 이번에 바뀐 값뿐).
+    이 함수는 그 관문과 입력 파싱에서만 쓴다.
+    """
     if value is None or value == "":
         return value
     m = _HHMM_RE.match(value)
     if not m:
         raise ValueError("Time must be in HH:MM format.")
-    if int(m.group(2)) % step_minutes != 0:
-        raise ValueError(grid_error_message(step_minutes))
+    if int(m.group(2)) % SCHEDULE_STEP_MINUTES != 0:
+        raise ValueError(grid_error_message())
     return value
-
-
-def validate_30min_grid(value: str | None) -> str | None:
-    """console/벌크 경로용 30분 grid validator."""
-    return validate_grid(value, SCHEDULE_STEP_MINUTES)
-
-
-def validate_kiosk_grid(value: str | None) -> str | None:
-    """키오스크(HTMA) 경로용 5분 grid validator."""
-    return validate_grid(value, KIOSK_STEP_MINUTES)
 
 
 # ─── Work Role ───────────────────────────────────────
@@ -127,230 +128,11 @@ class BreakRuleResponse(BaseModel):
     updated_at: datetime
 
 
-# ─── Schedule Request Template ───────────────────────
-
-
-class RequestTemplateItemCreate(BaseModel):
-    day_of_week: int  # 0=Sun, 6=Sat
-    work_role_id: str
-    preferred_start_time: str | None = None
-    preferred_end_time: str | None = None
-
-
-class RequestTemplateCreate(BaseModel):
-    store_id: str | None = None
-    name: str
-    is_default: bool = False
-    items: list[RequestTemplateItemCreate] = []
-
-
-class RequestTemplateUpdate(BaseModel):
-    name: str | None = None
-    is_default: bool | None = None
-    items: list[RequestTemplateItemCreate] | None = None
-
-
-class RequestTemplateItemResponse(BaseModel):
-    id: str
-    template_id: str
-    day_of_week: int
-    work_role_id: str
-    work_role_name: str | None = None
-    store_name: str | None = None
-    preferred_start_time: str | None
-    preferred_end_time: str | None
-
-
-class RequestTemplateResponse(BaseModel):
-    id: str
-    user_id: str
-    store_id: str | None = None
-    name: str
-    is_default: bool
-    items: list[RequestTemplateItemResponse]
-    created_at: datetime
-    updated_at: datetime
-
-
-# ─── Schedule Request ────────────────────────────────
-
-
-class ScheduleRequestCreate(BaseModel):
-    store_id: str
-    work_role_id: str | None = None
-    work_date: date
-    preferred_start_time: str | None = None
-    preferred_end_time: str | None = None
-    break_start_time: str | None = None
-    break_end_time: str | None = None
-    note: str | None = None
-
-
-class ScheduleRequestStatusUpdate(BaseModel):
-    status: str  # accepted/modified/rejected
-
-
-class ScheduleRequestUpdate(BaseModel):
-    store_id: str | None = None
-    work_role_id: str | None = None
-    work_date: date | None = None
-    preferred_start_time: str | None = None
-    preferred_end_time: str | None = None
-    break_start_time: str | None = None
-    break_end_time: str | None = None
-    note: str | None = None
-
-
-class ScheduleRequestResponse(BaseModel):
-    id: str
-    user_id: str
-    user_name: str | None = None
-    store_id: str
-    store_name: str | None = None
-    work_role_id: str | None
-    work_role_name: str | None = None
-    work_date: date
-    preferred_start_time: str | None
-    preferred_end_time: str | None
-    break_start_time: str | None = None
-    break_end_time: str | None = None
-    note: str | None
-    status: str
-    submitted_at: datetime
-    created_at: datetime
-    original_preferred_start_time: str | None = None
-    original_preferred_end_time: str | None = None
-    original_work_role_id: str | None = None
-    original_user_id: str | None = None
-    original_user_name: str | None = None
-    original_work_date: date | None = None
-    created_by: str | None = None
-    rejection_reason: str | None = None
-    hourly_rate: float | None = 0  # 신청 시급 (Resolved). SV/Staff에는 redact되어 None.
-
-
-class ScheduleRequestFromTemplate(BaseModel):
-    store_id: str
-    date_from: date
-    date_to: date
-    template_id: str
-    on_conflict: str = "skip"  # "skip" | "replace"
-
-
-class ScheduleRequestCopyLastPeriod(BaseModel):
-    store_id: str
-    date_from: date
-    date_to: date
-    on_conflict: str = "skip"  # "skip" | "replace"
-
-
-class ScheduleRequestSkippedItem(BaseModel):
-    work_date: date
-    work_role_id: str | None = None
-    work_role_name: str | None = None
-    reason: str
-
-
-class ScheduleRequestFromTemplateResult(BaseModel):
-    created: list[ScheduleRequestResponse] = []
-    skipped: list[ScheduleRequestSkippedItem] = []
-    replaced: list[ScheduleRequestResponse] = []
-
-
-class ScheduleRequestBatchItem(BaseModel):
-    """배치 제출 - 신규 생성 항목."""
-    store_id: str
-    work_date: date
-    work_role_id: str | None = None
-    preferred_start_time: str | None = None  # "HH:MM"
-    preferred_end_time: str | None = None
-    break_start_time: str | None = None
-    break_end_time: str | None = None
-    note: str | None = None
-
-
-class ScheduleRequestBatchUpdate(BaseModel):
-    """배치 제출 - 기존 수정 항목."""
-    id: str
-    store_id: str | None = None
-    work_role_id: str | None = None
-    work_date: date | None = None
-    preferred_start_time: str | None = None
-    preferred_end_time: str | None = None
-    break_start_time: str | None = None
-    break_end_time: str | None = None
-    note: str | None = None
-
-
-class ScheduleRequestBatchSubmit(BaseModel):
-    """배치 제출 요청 — 생성/수정/삭제를 한번에."""
-    creates: list[ScheduleRequestBatchItem] = []
-    updates: list[ScheduleRequestBatchUpdate] = []
-    deletes: list[str] = []  # request UUIDs
-
-
-class ScheduleRequestBatchResult(BaseModel):
-    """배치 제출 결과."""
-    created: list[ScheduleRequestResponse] = []
-    updated: list[ScheduleRequestResponse] = []
-    deleted_count: int = 0
-    errors: list[str] = []
-
-
-class ScheduleRequestAdminCreate(BaseModel):
-    """Admin creates a request on behalf (not visible to staff until confirm)."""
-    store_id: str
-    user_id: str
-    work_role_id: str | None = None
-    work_date: date
-    preferred_start_time: str | None = None  # "HH:MM"
-    preferred_end_time: str | None = None
-    break_start_time: str | None = None
-    break_end_time: str | None = None
-    note: str | None = None
-    hourly_rate: float | None = None  # 시급 override (optional — auto-calculated if not provided)
-
-
-class ScheduleRequestAdminUpdate(BaseModel):
-    """Admin modifies a request — changes time/role/user/date. Auto-tracks originals."""
-    user_id: str | None = None
-    work_role_id: str | None = None
-    work_date: date | None = None
-    preferred_start_time: str | None = None
-    preferred_end_time: str | None = None
-    break_start_time: str | None = None
-    break_end_time: str | None = None
-    note: str | None = None
-    rejection_reason: str | None = None
-
-
-class ScheduleConfirmRequest(BaseModel):
-    """Bulk confirm requests for a date range → create schedule entries + work assignments."""
-    store_id: str
-    date_from: date
-    date_to: date
-
-
-class ScheduleConfirmResult(BaseModel):
-    entries_created: int
-    requests_confirmed: int
-    requests_rejected: int
-    errors: list[str] = []
-
-
-class ScheduleConfirmPreviewFail(BaseModel):
-    request_id: str
-    user_name: str | None = None
-    work_date: date
-    reason: str
-
-
-class ScheduleConfirmPreview(BaseModel):
-    """Confirm dry-run 결과 — DB 변경 없이 예측만 반환."""
-    will_confirm: int
-    will_skip_rejected: int
-    will_fail: list[ScheduleConfirmPreviewFail] = []
-
+# ─── 폐기: 신청(request) 스키마 ───────────────────────
+# 스케줄 신청 기능 폐기(2026-08-09)와 함께 제거.
+# `status='requested'` 자체는 승인 절차용으로 남아 있으며, SV 가 스케줄을 만들 때
+# `schedule_service.create_entry` 가 승인 설정에 따라 다운그레이드한다(D10-4).
+# 폐기된 것은 "신청을 만드는 별도 경로"이지 승인 대기 상태가 아니다.
 
 # ─── Schedule (확정 스케줄) ──────────────────────────
 
@@ -378,8 +160,8 @@ class ScheduleCreate(BaseModel):
     status: str = "confirmed"  # "requested" for app submissions, "confirmed" for direct admin creation
     force: bool = False  # Override warnings
 
-    # 시각 grid 검증은 여기서 하지 않는다 — step 이 경로마다 다르므로(console 30 / kiosk 5)
-    # schedule_service._normalize_shift_input 이 step 을 받아 단일 관문에서 판정한다.
+    # 시각 grid 검증은 여기서 하지 않는다 — 판정의 단일 관문은
+    # schedule_service._normalize_shift_input 이다(D6-4).
 
 
 class ScheduleUpdate(BaseModel):
@@ -569,10 +351,25 @@ class ScheduleBulkResult(BaseModel):
     items: list["ScheduleResponse"] = []
 
 
+class ScheduleIssue(BaseModel):
+    """검증 항목 하나 — 코드 + 파라미터 (D9-4).
+
+    문구는 클라이언트가 code 로 구성한다. 서버 문자열을 매칭하지 말 것.
+    코드 목록은 `app/core/schedule_codes.py` 가 단일 출처.
+    """
+    code: str
+    params: dict = {}
+
+
 class ScheduleValidation(BaseModel):
+    """프리뷰(/schedules/validate) 응답.
+
+    프리뷰는 "저장 시도"가 아니라 질의이므로 **항상 200** 이다(N3).
+    저장 경로의 400/409 와 상태 코드를 맞추지 않는다.
+    """
     valid: bool
-    warnings: list[str] = []
-    errors: list[str] = []
+    warnings: list[ScheduleIssue] = []
+    errors: list[ScheduleIssue] = []
 
 
 class FinalizeResult(BaseModel):
@@ -635,9 +432,13 @@ class BulkPreviewItem(BaseModel):
 
 
 class BulkPreviewConflict(BaseModel):
-    """충돌 항목 — index + 사유."""
+    """충돌 항목 — index + 사유.
+
+    `message` 는 fallback 이고, 새 클라이언트는 `errors` 의 code 로 문구를 구성한다(D9-4).
+    """
     index: int
     message: str
+    errors: list[ScheduleIssue] = []
 
 
 class BulkPreviewWarning(BaseModel):

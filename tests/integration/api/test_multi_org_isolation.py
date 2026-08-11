@@ -137,25 +137,6 @@ async def test_cross_org_store_detail_is_404(org2: dict, async_client: AsyncClie
     assert resp.status_code == 404, resp.text
 
 
-async def test_cross_org_schedule_request_status_change_is_404(
-    org2: dict, async_client: AsyncClient, admin_headers: dict
-):
-    """org1 admin 이 org2 의 schedule request 상태를 변경 시도 → 404 (write IDOR 차단)."""
-    resp = await async_client.patch(
-        f"/api/v1/console/schedule-requests/{org2['request_id']}/status",
-        headers=admin_headers,
-        json={"status": "rejected"},
-    )
-    assert resp.status_code == 404, resp.text
-
-    # org2 의 request 는 변경되지 않았어야 함 (여전히 requested).
-    async with async_session() as db:
-        sched = (
-            await db.execute(select(Schedule).where(Schedule.id == org2["request_id"]))
-        ).scalar_one()
-        assert sched.status == "requested"
-
-
 async def test_cross_org_user_detail_is_404(org2: dict, async_client: AsyncClient, admin_headers: dict):
     """org1 admin 이 org2 의 user_id 를 직접 조회 → 404 (users 도메인 org 스코프)."""
     resp = await async_client.get(
