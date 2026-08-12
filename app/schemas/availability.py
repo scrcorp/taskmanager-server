@@ -12,19 +12,24 @@ from datetime import datetime, time
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.availability import AVAILABILITY_STATES
+from app.schemas.schedule import SCHEDULE_STEP_MINUTES
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 def validate_5min_grid(value: str | None) -> str | None:
-    """"HH:MM" on a 5-minute grid; None/'' pass (optional)."""
+    """"HH:MM" on the shared step grid; None/'' pass (optional).
+
+    단위는 `SCHEDULE_STEP_MINUTES` 하나를 따른다(D6) — 예전엔 여기에 `% 5`가
+    독립 하드코딩되어 있어 스케줄 단위가 바뀌어도 같이 움직이지 않았다.
+    """
     if value is None or value == "":
         return value
     m = _HHMM_RE.match(value)
     if not m:
         raise ValueError("Time must be in HH:MM format.")
-    if int(m.group(2)) % 5 != 0:
-        raise ValueError("Time must be on a 5-minute boundary.")
+    if int(m.group(2)) % SCHEDULE_STEP_MINUTES != 0:
+        raise ValueError(f"Time must be on a {SCHEDULE_STEP_MINUTES}-minute boundary.")
     return value
 
 

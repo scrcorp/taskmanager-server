@@ -9,8 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
+from app.core.error_envelope import REQUEST_ID_HEADER, register_error_handlers
 from app.middleware.app_version_broadcast import AppVersionBroadcastMiddleware
 from app.middleware.axiom_logging import AxiomLoggingMiddleware
+from app.middleware.trace_id import TraceIdMiddleware
+from app.middleware.uncaught_exception import UncaughtExceptionMiddleware
 from app.utils.email_guard import PRODUCTION_ENVS
 
 app: FastAPI = FastAPI(
@@ -19,6 +22,13 @@ app: FastAPI = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# 미포착 예외 → 500 봉투. **가장 먼저 등록해야 가장 안쪽**이다
+# (`add_middleware` 는 `insert(0, ...)` 라서 나중에 등록한 것이 바깥).
+# 안쪽에 둬야 CORS·Axiom 등 바깥 미들웨어가 예외 대신 **완성된 500 응답**을 본다.
+# 이게 없으면 500 은 Starlette ServerErrorMiddleware(모든 user middleware 바깥)가
+# 만들어 CORS 를 건너뛰고, 브라우저 JS 가 500 봉투와 trace_id 를 **읽지 못한다**.
+app.add_middleware(UncaughtExceptionMiddleware)
 
 # Axiom API 로깅 미들웨어 — Axiom API request/response logging
 # CORS보다 먼저 등록하여 모든 요청을 캡처 (Registered before CORS to capture all requests)
@@ -34,7 +44,19 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # expose_headers 가 없으면 브라우저 JS 가 X-Request-Id 를 **읽지 못한다**.
+    # (봉투 본문의 error.trace_id 가 정본이지만, 헤더도 읽을 수 있어야 네트워크
+    #  탭/인터셉터에서 상관관계를 잡는다)
+    expose_headers=[REQUEST_ID_HEADER],
 )
+
+# trace_id 미들웨어 — **가장 마지막에 등록해야 가장 바깥**이 된다.
+# Starlette `add_middleware` 는 `user_middleware.insert(0, ...)` 라서 나중에 등록한 것이
+# 바깥이다. 바깥에 둬야 CORS/버전/Axiom 을 포함한 모든 경로에서 trace_id 가 살아 있다.
+app.add_middleware(TraceIdMiddleware)
+
+# 전역 예외 핸들러 등록 — 모든 에러 응답이 여기 하나를 통과한다(봉투 계약 G1).
+register_error_handlers(app)
 
 
 @app.get("/health")

@@ -31,6 +31,22 @@ from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setti
 router: APIRouter = APIRouter()
 
 
+def _validate_setting_value(key: str, value: object) -> None:
+    """저장 전 값 형태 검증.
+
+    registry 의 `validation_schema` 는 저장/반환만 되고 호출부가 0이라
+    실질적으로 아무것도 막지 못한다. 시간대 형태 키만이라도 입구에서 막는다 —
+    형태가 깨진 값은 파서에서 조용히 '미설정'이 되어 기능이 신호 없이 멈춘다.
+    """
+    from app.utils.timezone import validate_day_range_setting
+
+    try:
+        validate_day_range_setting(key, value)
+    except ValueError as e:
+        raise BadRequestError(f"Invalid value for '{key}': {e}")
+
+
+
 async def _guard_store(db: AsyncSession, current_user: User, store_id: UUID) -> None:
     """매장 설정 접근 가드 — cross-org IDOR 차단.
 
@@ -149,6 +165,7 @@ async def upsert_org_setting(
         raise BadRequestError(f"Setting key '{data.key}' is not registered")
     if "org" not in (registry.levels or []):
         raise BadRequestError(f"Setting '{data.key}' does not allow org-level override")
+    _validate_setting_value(data.key, data.value)
 
     existing = await db.scalar(
         select(OrgSetting).where(

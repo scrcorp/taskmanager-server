@@ -4,9 +4,19 @@
 이미 존재하는 키는 건드리지 않는다 (사용자가 이미 수정했을 수 있으므로).
 
 새 설정을 추가하려면 SETTINGS_SEED 리스트에 한 줄 추가하면 된다.
+
+⚠️ **이 시드는 INSERT-only 다** (app/main.py::seed_settings_registry).
+기존 키의 default_value/label/description 을 여기서 고쳐도 **DB에 반영되지 않는다.**
+이미 배포된 키의 값을 바꾸려면 **UPDATE 마이그레이션을 함께 써야 한다.**
+반대로 신규 키는 마이그레이션이 INSERT 주체이고(배포 즉시 반영), 이 시드는
+"없으면 넣는다"라 두 경로가 충돌하지 않는다 — 양쪽 정의를 항상 같이 고칠 것.
 """
 
 from typing import Any
+
+# 여러 모듈이 공유하는 키 문자열 — 오타 시 조용히 SettingNotRegisteredError 가 나므로 상수로 고정.
+STORE_OPERATING_HOURS_KEY = "store.operating_hours"
+SCHEDULE_RANGE_KEY = "schedule.range"
 
 
 class SettingDefinition:
@@ -120,10 +130,18 @@ SETTINGS_SEED: list[SettingDefinition] = [
         category="Work Availability",
     ),
     # ─── Work Rules ────────────────────────────────────
+    # 신규 스케줄의 기본 길이 (D8-2). 키를 새로 만들지 않고 이 키를 재사용한다 —
+    # 신설하면 같은 의미의 키가 둘이 되고, 더 나쁘게는 워크인 길이와 일반 생성 길이가
+    # 갈라져 급여 산정 근거가 경로별로 달라진다.
+    # ⚠️ 이 키는 이미 DB에 있으므로 아래 label/description 변경은 UPDATE 마이그레이션으로만 반영된다.
     SettingDefinition(
         key="work.default_schedule_duration_minutes",
-        label="Default shift duration (minutes)",
-        description="Default schedule length. Also the length of an auto-created walk-in schedule (end time = clock-in time + this value).",
+        label="Default shift length (minutes)",
+        description=(
+            "Length applied to a newly created schedule when the work role has no default times. "
+            "Also the length of an auto-created walk-in schedule (end time = clock-in time + this value). "
+            "Console, kiosk and app all read this one value."
+        ),
         value_type="number",
         default_value=330,
         category="Work Rules",
@@ -136,14 +154,63 @@ SETTINGS_SEED: list[SettingDefinition] = [
         default_value=30,
         category="Work Rules",
     ),
-    # ─── Schedule Range ─────────────────────────────────
+    # ─── Store Hours ────────────────────────────────────
+    # "시간 범위"를 뜻하는 축이 셋이고 서로 다르다 (D2). 합치지 않는다.
+    #   ① 영업일 경계  = 집계일이 바뀌는 시점        → stores.day_start_time 컬럼
+    #   ② 영업시간      = 손님에게 여는 시간          → store.operating_hours (아래)
+    #   ③ 스케줄 시간대 = 직원이 일할 수 있는 시간대  → schedule.range (아래, 키 이름은 옛 것)
+    # 포함 관계 ① ⊇ ③ ⊇ ② 가 곧 검증 규칙이다.
+    #
+    # 값 형태는 두 키가 공유한다 — 파서(app/utils/timezone.resolve_day_range)도 하나다:
+    #   {"mode":"all"|"per_day", "all":{...}, "per_day":{"mon":{...}}, "closed":["mon"]}
+    #   각 칸은 {"start":"HH:MM", "end":"HH:MM", "end_offset_days":0|1}
+    # 시각은 00:00~23:59 만. 자정 넘김은 end_offset_days 로만 표현한다 (D2-8).
+    #
+    # **휴무일은 closed 배열 하나로만 표현한다.**
+    # per_day 에서 요일 키를 지우는 것은 휴무가 아니라 all 폴백이다.
     SettingDefinition(
-        key="schedule.range",
-        label="Schedule Range",
-        description="Time range displayed on the schedule grid. Defines the start and end hours for the timetable.",
+        key=STORE_OPERATING_HOURS_KEY,
+        label="Store Operating Hours",
+        description=(
+            "Hours the store is open to customers. Staff working hours are set separately "
+            "and normally extend past these (prep and closing). "
+            "Days listed as closed still accept schedules, with a warning."
+        ),
         value_type="json",
-        default_value={"all": {"start": "06:00", "end": "23:00"}},
-        category="Schedule Range",
+        # 기본값은 **미설정**이다 (`all` 이 빈 칸). 형태만 표준이고 값은 없다.
+        # 영업시간은 매장마다 다르니 서버가 지어낼 수 없고, 지어내면 해롭다:
+        # 09:00–22:00 같은 값을 기본으로 두면 아직 아무도 설정하지 않은 매장에서
+        # 야간 시프트가 영업시간 밖으로 판정돼 **일일 리포트의 인원 부족 검사에서 통째로 빠진다.**
+        # "온종일 열림"(00:00→+1d 00:00)도 같은 문제다 — 포함 관계 판정이라
+        # 자정을 넘는 시프트는 24시간 창에도 들어가지 못한다.
+        # 미설정 = 제한 없음(전부 검사). 좁히려면 사람이 명시적으로 설정한다.
+        default_value={"mode": "all", "all": {}, "per_day": {}, "closed": []},
+        category="Store Hours",
+    ),
+    # ⚠️ 키 이름은 옛 것(그리드 "표시 범위")이고, **의미는 D2-4(직원 근무 가능 시간대)** 다.
+    # 이름을 바꾸지 않는 이유: 이 키는 settings_registry 의 PK이고 org_settings/store_settings 가
+    # FK로 참조한다. 실 데이터가 있는 키를 이름값 때문에 옮기는 것은 이득 대비 위험이 크다 (Q3).
+    # 사용자는 화면에서 label 만 보고 키 문자열은 개발자만 본다.
+    # SV 공백 판정 기준도 이 값이다 (D2-5) — 직원이 일하는 모든 시간에 SV가 있어야 한다는 규칙.
+    SettingDefinition(
+        key=SCHEDULE_RANGE_KEY,
+        label="Staff Working Hours",
+        description=(
+            "Hours staff can be scheduled — store operating hours plus prep and closing time. "
+            "The schedule grid draws this range, and supervisor coverage gaps are measured against it. "
+            "Keep it wider than the operating hours, or the difference is never checked for coverage."
+        ),
+        value_type="json",
+        # 실제 저장값은 {mode, all, per_day, closed} 인데 기본값만 {"all":{...}} 였다.
+        # 그 불일치 때문에 클라이언트마다 보정 코드(normalizeRange 등)가 생겼다 — 형태를 맞춰 없앤다.
+        default_value={
+            "mode": "all",
+            "all": {"start": "06:00", "end": "23:00", "end_offset_days": 0},
+            "per_day": {},
+            # 근무 가능 시간대에는 휴무 개념이 없다. 형태를 영업시간과 맞추기 위해서만 둔다.
+            "closed": [],
+        },
+        category="Store Hours",
     ),
     # ─── Attendance ─────────────────────────────────────
     SettingDefinition(

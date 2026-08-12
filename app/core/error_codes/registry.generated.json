@@ -1,0 +1,1035 @@
+{
+  "version": 1,
+  "generated_by": "python -m app.core.error_codes.audit --export",
+  "domains": {
+    "access": [
+      "NOT_A_MEMBER",
+      "ORG_ACCESS_REVOKED",
+      "ORG_LICENSE_INACTIVE"
+    ],
+    "attendance": [
+      "access_code_taken",
+      "early_clock_in_reason_required",
+      "pin_conflict"
+    ],
+    "common": [
+      "file_not_found",
+      "file_too_large",
+      "forbidden",
+      "invalid_file_type",
+      "invalid_folder",
+      "invalid_key",
+      "store_not_found"
+    ],
+    "hiring": [
+      "already_hired",
+      "application_not_found",
+      "cannot_withdraw",
+      "form_id_required",
+      "form_not_found",
+      "form_not_published",
+      "form_store_mismatch",
+      "invalid_accept",
+      "invalid_application_id",
+      "invalid_attachment_mime",
+      "invalid_form",
+      "invalid_form_id",
+      "invalid_stage",
+      "invalid_user_id",
+      "missing_required_answer",
+      "missing_required_attachment",
+      "no_draft",
+      "no_staff_role",
+      "not_hired",
+      "not_pending_form",
+      "not_yet_submitted",
+      "unknown_slot",
+      "use_hire_endpoint"
+    ],
+    "interviews": [
+      "already_confirmed",
+      "invalid_interviewer",
+      "invalid_slot",
+      "invalid_time",
+      "invalid_token",
+      "no_picks",
+      "not_in_interview",
+      "slot_confirmed",
+      "slot_not_found",
+      "slot_taken",
+      "token_expired",
+      "too_many"
+    ],
+    "payroll": [
+      "pay_period_already_confirmed",
+      "payroll_close_gates_failed"
+    ],
+    "schedule": [
+      "BREAK_OUTSIDE_SHIFT",
+      "BREAK_PAIR_INCOMPLETE",
+      "BREAK_REVERSED",
+      "OPERATING_DAY_OVERRIDDEN",
+      "OVERLAPPING_SCHEDULE",
+      "PAY_PERIOD_LOCKED",
+      "SCHEDULE_INVALID",
+      "SCHEDULE_WARNINGS_UNCONFIRMED",
+      "SHIFT_TOO_LONG",
+      "START_AFTER_DAY_BOUNDARY",
+      "START_BEFORE_DAY_BOUNDARY",
+      "START_DATE_OUT_OF_WINDOW",
+      "STORE_CLOSED_DAY",
+      "TIME_NOT_ON_GRID",
+      "USER_NOT_IN_STORE",
+      "USER_NOT_MARKED_FOR_STORE",
+      "WEEKLY_OVERTIME",
+      "ZERO_DURATION"
+    ],
+    "signup": [
+      "active_application_exists",
+      "credential_mismatch",
+      "credentials_split",
+      "email_taken",
+      "invalid_credentials",
+      "invalid_link",
+      "not_eligible",
+      "provisional_account",
+      "provisional_candidate_exists",
+      "signups_paused",
+      "username_taken"
+    ],
+    "store": [
+      "max_photos_reached",
+      "photo_not_found",
+      "store_closed"
+    ]
+  },
+  "codes": [
+    {
+      "code": "NOT_A_MEMBER",
+      "domain": "access",
+      "kind": "http",
+      "status": 403,
+      "message": "You are not a member of this organization.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/api.ts",
+        "console/src/types/index.ts",
+        "console/src/app/license-inactive/page.tsx"
+      ]
+    },
+    {
+      "code": "ORG_ACCESS_REVOKED",
+      "domain": "access",
+      "kind": "http",
+      "status": 403,
+      "message": "Your access to this organization has been revoked.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/api.ts",
+        "console/src/types/index.ts",
+        "console/src/app/license-inactive/page.tsx"
+      ]
+    },
+    {
+      "code": "ORG_LICENSE_INACTIVE",
+      "domain": "access",
+      "kind": "http",
+      "status": 403,
+      "message": "This organization's license is inactive.",
+      "hint": "Contact your administrator.",
+      "frozen": true,
+      "clients": [
+        "console/src/lib/api.ts",
+        "console/src/types/index.ts",
+        "console/src/app/license-inactive/page.tsx"
+      ]
+    },
+    {
+      "code": "access_code_taken",
+      "domain": "attendance",
+      "kind": "http",
+      "status": 409,
+      "message": "This code is already used by another organization. Choose a different code.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/hooks/useAttendanceDevices.ts"
+      ]
+    },
+    {
+      "code": "early_clock_in_reason_required",
+      "domain": "attendance",
+      "kind": "http",
+      "status": 400,
+      "message": "This shift starts in {minutes_early} minutes. To clock in now, enter a reason — your manager will see it.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "app/apps/attendance/lib/utils/early_clock_in_logic.dart",
+        "app/apps/attendance/lib/widgets/early_clock_in_dialog.dart"
+      ]
+    },
+    {
+      "code": "pin_conflict",
+      "domain": "attendance",
+      "kind": "http",
+      "status": 409,
+      "message": "This PIN is already in use by another employee.",
+      "hint": "Choose a different PIN.",
+      "frozen": true,
+      "clients": [
+        "console/src/hooks/useClockinPin.ts",
+        "app/apps/attendance/lib/screens/attendance/attendance_manage_staff_pins_screen.dart",
+        "app/apps/staff/lib/services/clockin_pin_service.dart"
+      ]
+    },
+    {
+      "code": "file_not_found",
+      "domain": "common",
+      "kind": "http",
+      "status": 404,
+      "message": "This file is no longer available.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "file_too_large",
+      "domain": "common",
+      "kind": "http",
+      "status": 400,
+      "message": "This file is too large.",
+      "hint": "Choose a smaller file and try again.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "forbidden",
+      "domain": "common",
+      "kind": "http",
+      "status": 403,
+      "message": "You do not have permission to do this.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_file_type",
+      "domain": "common",
+      "kind": "http",
+      "status": 400,
+      "message": "This file type is not supported.",
+      "hint": "Use a JPG, PNG, or WebP image.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_folder",
+      "domain": "common",
+      "kind": "http",
+      "status": 400,
+      "message": "This upload location is not allowed.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_key",
+      "domain": "common",
+      "kind": "http",
+      "status": 400,
+      "message": "This file reference is not valid.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "store_not_found",
+      "domain": "common",
+      "kind": "http",
+      "status": 404,
+      "message": "This store is not available.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/types/signup.ts",
+        "console/src/components/signup/InvalidLinkScreen.tsx"
+      ]
+    },
+    {
+      "code": "already_hired",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This applicant is already hired.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "application_not_found",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 404,
+      "message": "This application no longer exists.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "cannot_withdraw",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This application can no longer be withdrawn.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "form_id_required",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "Choose which form to fill in.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "form_not_found",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 404,
+      "message": "This form no longer exists.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "form_not_published",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This form is not published yet.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "form_store_mismatch",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This form belongs to a different store.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_accept",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This attachment rule is not valid.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_application_id",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This application reference is not valid.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_attachment_mime",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This attachment type is not accepted.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_form",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This form could not be saved.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_form_id",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This form reference is not valid.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_stage",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This stage change is not allowed.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_user_id",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This employee reference is not valid.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "missing_required_answer",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "Some required questions are not answered.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "missing_required_attachment",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "Some required attachments are missing.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "no_draft",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "No draft to publish.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "no_staff_role",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "Staff role not configured.",
+      "hint": "Create a staff role before hiring.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "not_hired",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "Only hired applications can be unhired.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "not_pending_form",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This application is not in form-filling state.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "not_yet_submitted",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "Wait for the applicant to submit the form.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "unknown_slot",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "This question no longer exists on the form.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "use_hire_endpoint",
+      "domain": "hiring",
+      "kind": "http",
+      "status": 400,
+      "message": "Use the hire action to move this applicant to hired.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "already_confirmed",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 409,
+      "message": "Your interview is already confirmed.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_interviewer",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 400,
+      "message": "This interviewer is not available for this store.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_slot",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 400,
+      "message": "Some times are no longer available.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_time",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 400,
+      "message": "This time value is not valid.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_token",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 400,
+      "message": "This scheduling link is not valid.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "no_picks",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 400,
+      "message": "Pick at least one time.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "not_in_interview",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 409,
+      "message": "This application is not in the interview stage.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "slot_confirmed",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 400,
+      "message": "Cancel the confirmed interview before deleting this slot.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "slot_not_found",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 404,
+      "message": "This time slot no longer exists.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "slot_taken",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 409,
+      "message": "One of those times was just booked. Please pick again.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "token_expired",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 410,
+      "message": "This scheduling link has expired.",
+      "hint": "Please contact the store.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "too_many",
+      "domain": "interviews",
+      "kind": "http",
+      "status": 400,
+      "message": "You picked more times than allowed.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "pay_period_already_confirmed",
+      "domain": "payroll",
+      "kind": "http",
+      "status": 409,
+      "message": "This pay period is already confirmed.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "payroll_close_gates_failed",
+      "domain": "payroll",
+      "kind": "http",
+      "status": 409,
+      "message": "Some close gates failed. Resolve every issue below, then confirm again.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "BREAK_OUTSIDE_SHIFT",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "Break must fall within the shift.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "BREAK_PAIR_INCOMPLETE",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "Break start and end must be provided together.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "BREAK_REVERSED",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "Break end must be after break start.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "OPERATING_DAY_OVERRIDDEN",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "The operating day differs from the automatic result.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "OVERLAPPING_SCHEDULE",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "This employee already has an overlapping schedule.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "PAY_PERIOD_LOCKED",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "This pay period is locked.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "SCHEDULE_INVALID",
+      "domain": "schedule",
+      "kind": "http",
+      "status": 400,
+      "message": "This schedule cannot be saved.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "SCHEDULE_WARNINGS_UNCONFIRMED",
+      "domain": "schedule",
+      "kind": "http",
+      "status": 409,
+      "message": "This schedule needs confirmation before saving.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "SHIFT_TOO_LONG",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "This shift is longer than the configured limit.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "START_AFTER_DAY_BOUNDARY",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "Start is at or after the store's day boundary.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "START_BEFORE_DAY_BOUNDARY",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "Start is before the store's day boundary.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "START_DATE_OUT_OF_WINDOW",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "Start date must be on the operating day or the next day.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "STORE_CLOSED_DAY",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "The store is closed on this day.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "TIME_NOT_ON_GRID",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "Time must be in {step_minutes}-minute increments.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "USER_NOT_IN_STORE",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "This employee is not assigned to this store.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "USER_NOT_MARKED_FOR_STORE",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "This employee is not marked for work at this store.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "WEEKLY_OVERTIME",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "Weekly hours exceed the configured limit.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "ZERO_DURATION",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "Shift duration must be greater than 0 minutes.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "active_application_exists",
+      "domain": "signup",
+      "kind": "http",
+      "status": 409,
+      "message": "You already have an application in progress at this store.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/components/signup/SignupFlow.tsx"
+      ]
+    },
+    {
+      "code": "credential_mismatch",
+      "domain": "signup",
+      "kind": "http",
+      "status": 409,
+      "message": "That username and password do not match an existing account.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/components/signup/SignupFlow.tsx"
+      ]
+    },
+    {
+      "code": "credentials_split",
+      "domain": "signup",
+      "kind": "http",
+      "status": 409,
+      "message": "Username and email belong to different existing accounts.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "email_taken",
+      "domain": "signup",
+      "kind": "http",
+      "status": 409,
+      "message": "This email is already in use.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "invalid_credentials",
+      "domain": "signup",
+      "kind": "http",
+      "status": 401,
+      "message": "That username or password is not correct.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/types/signup.ts",
+        "console/src/components/signup/SignupFlow.tsx",
+        "console/src/components/signup/DirectSignupFlow.tsx"
+      ]
+    },
+    {
+      "code": "invalid_link",
+      "domain": "signup",
+      "kind": "http",
+      "status": 404,
+      "message": "This sign-up link is not valid.",
+      "hint": "Ask your manager for a new link.",
+      "frozen": true,
+      "clients": [
+        "console/src/types/signup.ts",
+        "console/src/components/signup/InvalidLinkScreen.tsx"
+      ]
+    },
+    {
+      "code": "not_eligible",
+      "domain": "signup",
+      "kind": "http",
+      "status": 403,
+      "message": "You are not eligible to apply to this store.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/types/signup.ts",
+        "console/src/components/signup/SignupFlow.tsx",
+        "console/src/components/signup/DirectSignupFlow.tsx"
+      ]
+    },
+    {
+      "code": "provisional_account",
+      "domain": "signup",
+      "kind": "http",
+      "status": 400,
+      "message": "This account has not been claimed yet.",
+      "hint": "Share the claim code so the employee can sign up.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "provisional_candidate_exists",
+      "domain": "signup",
+      "kind": "http",
+      "status": 409,
+      "message": "An account may already be set up for you — ask your manager for the claim code, or continue to create a new account.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "app/apps/staff/lib/providers/auth_provider.dart",
+        "app/apps/staff/lib/screens/auth/register_screen.dart"
+      ]
+    },
+    {
+      "code": "signups_paused",
+      "domain": "signup",
+      "kind": "http",
+      "status": 404,
+      "message": "This store is not accepting new sign-ups right now.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/types/signup.ts",
+        "console/src/components/signup/InvalidLinkScreen.tsx"
+      ]
+    },
+    {
+      "code": "username_taken",
+      "domain": "signup",
+      "kind": "http",
+      "status": 409,
+      "message": "This username is already in use.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/types/signup.ts",
+        "console/src/components/signup/SignupFlow.tsx",
+        "console/src/components/signup/DirectSignupFlow.tsx",
+        "console/src/hooks/useHiring.ts"
+      ]
+    },
+    {
+      "code": "max_photos_reached",
+      "domain": "store",
+      "kind": "http",
+      "status": 400,
+      "message": "This store already has the maximum number of photos.",
+      "hint": "Delete a photo before adding another.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "photo_not_found",
+      "domain": "store",
+      "kind": "http",
+      "status": 404,
+      "message": "This photo no longer exists.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "store_closed",
+      "domain": "store",
+      "kind": "http",
+      "status": 409,
+      "message": "This store is closed and cannot accept new entries.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/hooks/useSchedules.ts",
+        "console/src/lib/scheduleCodes.ts"
+      ]
+    }
+  ]
+}

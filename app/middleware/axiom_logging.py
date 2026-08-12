@@ -6,6 +6,7 @@ Logs: API endpoint, method, data (body/params), status code, error reason.
 Sensitive fields (password, token, secret) are automatically masked.
 """
 
+import hashlib
 import time
 import json
 import re
@@ -17,6 +18,7 @@ from starlette.responses import Response
 from axiom_py import Client as AxiomClient
 
 from app.config import settings
+from app.core.error_envelope import current_trace_id
 
 # 마스킹 대상 필드 패턴 — Fields to mask in request/response bodies
 _SENSITIVE_KEYS = re.compile(
@@ -26,6 +28,28 @@ _SENSITIVE_KEYS = re.compile(
 
 # 로깅 제외 경로 — Paths excluded from logging
 _SKIP_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
+
+# 기기 식별 키를 남길 경로 — attendance 기기(HTMA)만 대상.
+_DEVICE_KEY_PREFIX = "/api/v1/attendance"
+
+
+def _device_key(request: Request) -> str | None:
+    """기기 토큰의 sha256 앞 12자.
+
+    왜 필요한가 — `detail` 을 제거하려면 "구버전 호출 0건이 N일 지속"을 판정해야 하고,
+    그러려면 **기기별** 마지막 앱 버전을 알아야 한다. 서버는 `attendance_devices.token_hash`
+    로 sha256 전체를 이미 보관하므로, 로그에 그 앞 12자만 남기면 새 테이블 없이
+    기기 row 와 join 된다.
+
+    평문 토큰이 아니라 해시 접두사라 되돌릴 수 없다 — 로그가 자격증명이 되지 않는다.
+    """
+    auth = request.headers.get("authorization") or ""
+    if not auth.lower().startswith("bearer "):
+        return None
+    token = auth[7:].strip()
+    if not token:
+        return None
+    return hashlib.sha256(token.encode()).hexdigest()[:12]
 
 
 def _mask_dict(data: Any, depth: int = 0) -> Any:
@@ -97,6 +121,7 @@ class AxiomLoggingMiddleware(BaseHTTPMiddleware):
 
         # 응답 처리 — Process response
         error_detail: str | None = None
+        error_code: str | None = None
         status_code: int = 500
         try:
             response = await call_next(request)
@@ -114,6 +139,16 @@ class AxiomLoggingMiddleware(BaseHTTPMiddleware):
                 try:
                     error_data = json.loads(resp_body)
                     error_detail = error_data.get("detail", str(error_data))
+                    # 봉투의 정본은 `error` 다. 코드를 따로 남겨야 Axiom 에서
+                    # code 별 집계(= code_source status 비율 감소 곡선)가 가능하다.
+                    envelope_error = error_data.get("error")
+                    if isinstance(envelope_error, dict):
+                        code = envelope_error.get("code")
+                        source = envelope_error.get("code_source")
+                        if isinstance(code, str):
+                            error_code = (
+                                f"{code}:{source}" if isinstance(source, str) else code
+                            )
                     if isinstance(error_detail, str) and len(error_detail) > 500:
                         error_detail = error_detail[:500] + "..."
                 except (json.JSONDecodeError, UnicodeDecodeError):
@@ -140,7 +175,21 @@ class AxiomLoggingMiddleware(BaseHTTPMiddleware):
                 "path": path,
                 "status_code": status_code,
                 "duration_ms": duration_ms,
+                # 화면에 뜬 id 로 로그를 짚는 것이 이 트랙의 핵심 가치다.
+                # 봉투(error.trace_id) / 헤더(X-Request-Id) / 이 필드가 모두 같은 값.
+                "trace_id": current_trace_id(),
             }
+
+            # 앱 버전 텔레메트리 — `detail` 레거시 미러를 언제 지울 수 있는지 판단하는
+            # 유일한 근거. "구버전 호출 0건이 N일 지속"을 이 두 필드로 집계한다.
+            # (X-App-Version 을 보내지 않는 구버전은 필드 자체가 없다 = 그것이 신호다)
+            app_version = request.headers.get("X-App-Version")
+            if app_version:
+                log_event["app_version"] = app_version
+            if path.startswith(_DEVICE_KEY_PREFIX):
+                device_key = _device_key(request)
+                if device_key:
+                    log_event["device_key"] = device_key
 
             if query_params:
                 log_event["query_params"] = _mask_dict(query_params)
@@ -150,6 +199,8 @@ class AxiomLoggingMiddleware(BaseHTTPMiddleware):
                 log_event["request_body"] = request_body
             if error_detail:
                 log_event["error"] = error_detail
+            if error_code:
+                log_event["error_code"] = error_code
 
             # Axiom 전송 (비동기 ingest) — Send to Axiom
             try:

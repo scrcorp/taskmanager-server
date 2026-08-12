@@ -273,7 +273,7 @@ class BulkUploadService:
                         continue
 
                     start_24, end_24, break_start_24, break_end_24 = parsed
-                    if self._is_off_30min_grid(start_24, end_24, break_start_24, break_end_24):
+                    if self._is_off_grid(start_24, end_24, break_start_24, break_end_24):
                         day_name = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][day_idx]
                         errors.append(f"Sheet '{sheet_name}', row {row_idx + 1}, {day_name}: times must be on :00 or :30 ('{cell}')")
                         continue
@@ -418,7 +418,7 @@ class BulkUploadService:
                         errors.append(f"Line {abs_line}, {day_name}: invalid '{cell}'")
                         continue
                     start_24, end_24, bs24, be24 = parsed
-                    if self._is_off_30min_grid(start_24, end_24, bs24, be24):
+                    if self._is_off_grid(start_24, end_24, bs24, be24):
                         day_name = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day_idx]
                         errors.append(f"Line {abs_line}, {day_name}: times must be on :00 or :30 ('{cell}')")
                         continue
@@ -468,8 +468,8 @@ class BulkUploadService:
         return {u.username.lower(): u for u in result.scalars().all()}
 
     @staticmethod
-    def _is_off_30min_grid(*times: str | None) -> bool:
-        """주어진 "HH:MM" 중 하나라도 30분 grid(:00/:30)를 벗어나면 True."""
+    def _is_off_grid(*times: str | None) -> bool:
+        """주어진 "HH:MM" 중 하나라도 SCHEDULE_STEP_MINUTES(5분) grid 를 벗어나면 True."""
         for t in times:
             if t and int(t.split(":")[1]) % SCHEDULE_STEP_MINUTES != 0:
                 return True

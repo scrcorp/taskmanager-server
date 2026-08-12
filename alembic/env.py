@@ -31,6 +31,13 @@ LEGACY_TABLES: dict[str, str] = {
     # 구 알림 시스템. 현재는 alerts 가 대체하지만 과거 이력 1479행이 남아 있다.
     # 삭제 조건: 이력 보존 판단이 끝나면 명시적 drop 마이그레이션으로 제거.
     "notifications": "구 알림 이력 보존 (alerts 로 대체됨)",
+    # 스케줄 신청 기능 폐기(2026-08-09)로 모델/서비스/API 를 제거했으나 테이블은 남긴다.
+    # 신청 행 자체는 schedules(status='requested') 에 있었고 이 테이블은 그보다 앞선
+    # 세대의 잔존물이다(dev 27행). 드롭하면 되돌릴 수 없어 보존만 한다.
+    # 삭제 조건: 이력 보존 판단이 끝나면 명시적 drop 마이그레이션으로 제거.
+    "schedule_requests": "폐기된 신청 기능의 구세대 테이블 (이력 보존)",
+    "schedule_request_templates": "폐기된 신청 템플릿 테이블 (이력 보존)",
+    "schedule_request_template_items": "폐기된 신청 템플릿 항목 테이블 (이력 보존)",
 }
 
 LEGACY_COLUMNS: dict[tuple[str, str], str] = {

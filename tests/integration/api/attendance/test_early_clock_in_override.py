@@ -94,13 +94,14 @@ async def _schedule_starting_in(
     async with async_session() as db:
         tz_name, _ = await get_store_day_config(db, test_store_id)
     local_now = datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name))
-    start_local = (local_now + timedelta(minutes=minutes)).time().replace(
-        second=0, microsecond=0
+    # 시각(time)만 뽑아 넘기면 local_now + minutes 가 자정을 넘는 순간 랩어라운드해
+    # "오늘 새벽" = 과거 스케줄이 되고 조기가 아니라 지각으로 판정된다.
+    # 벽시계 datetime 을 통째로 넘겨 실행 시각과 무관하게 만든다.
+    start_at = (local_now + timedelta(minutes=minutes)).replace(
+        second=0, microsecond=0, tzinfo=None
     )
-    end_local = (local_now + timedelta(minutes=minutes + 240)).time().replace(
-        second=0, microsecond=0
-    )
-    await make_schedule(test_user, start_time=start_local, end_time=end_local)
+    end_at = start_at + timedelta(minutes=240)
+    await make_schedule(test_user, start_at=start_at, end_at=end_at)
 
 
 async def _latest_attendance(user_id: UUID) -> Attendance:
