@@ -43,9 +43,15 @@ async def _make_attendance(
     *,
     status: str = "upcoming",
     clock_in: datetime | None = None,
+    day: date | None = None,
 ) -> UUID:
-    """오늘 09:00–17:00 스케줄 + attendance 한 건."""
-    day = _today()
+    """(기본) 오늘 09:00–17:00 스케줄 + attendance 한 건.
+
+    `day` 로 스케줄 날짜를 옮길 수 있다 — `clear_times` 후 status 는 **현재 시각**과
+    스케줄 시각을 비교해 재판정되므로, 그 판정 결과에 의존하는 테스트는 날짜를
+    미래로 밀어 시각 의존을 없애야 한다.
+    """
+    day = day or _today()
     async with async_session() as db:
         sched = Schedule(
             organization_id=test_user["organization_id"],
@@ -422,10 +428,24 @@ async def test_clear_times_wipes_records_and_keeps_before_values(
 async def test_clear_times_then_mark_no_show_succeeds(
     test_user: dict, test_store_id: UUID, _clean_state: None,
 ) -> None:
-    """정리 전에는 no-show 가 거부되고, 정리 후에는 통과한다 (막다른 길 해소)."""
-    clock_in = datetime.combine(_today(), time(9, 0), tzinfo=timezone.utc)
+    """정리 전에는 no-show 가 거부되고, 정리 후에는 통과한다 (막다른 길 해소).
+
+    스케줄을 **모레**로 두는 이유 — `clear_times` 는 status 를 스케줄 시각 대 현재
+    시각으로 재판정한다(`status_after_time_clear`). 오늘 09:00–17:00 이면 17:00 이 지난
+    뒤 실행할 때 이미 `no_show` 로 재판정되고, 이어지는 `mark_no_show` 가
+    "Already marked no-show" 로 거절해 **테스트가 오후에만 실패**했다.
+    미래 스케줄이면 언제 돌려도 `upcoming` 이라 판정이 고정된다.
+    (하루가 아니라 이틀 뒤인 것은 매장 tz 가 UTC 대비 최대 ±14h 라, 하루 뒤는
+     tz 에 따라 이미 지난 시각이 될 수 있기 때문이다.)
+    """
+    future_day = _today() + timedelta(days=2)
+    clock_in = datetime.combine(future_day, time(9, 0), tzinfo=timezone.utc)
     att_id = await _make_attendance(
-        test_user, test_store_id, status="working", clock_in=clock_in
+        test_user,
+        test_store_id,
+        status="working",
+        clock_in=clock_in,
+        day=future_day,
     )
 
     from app.utils.exceptions import BadRequestError

@@ -9,7 +9,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.schemas.schedule import validate_kiosk_grid
 
 
 # ── 앱/기기 측 요청 ────────────────────────────────────────
@@ -44,6 +43,15 @@ class DeviceMeResponse(BaseModel):
     # clock-out 시 tip 입력 화면 노출 여부 (store 설정 resolve, store 없으면 false).
     # 같은 매장의 모든 기기가 같은 값을 본다 — 한 기기에서 끄면 폴링으로 전파.
     tip_entry_enabled: bool = False
+    # 신규 스케줄의 기본 길이(분). `work.default_schedule_duration_minutes` 설정을
+    # resolve 한 값이며 매장 없으면 registry 기본값(330).
+    #
+    # 앱이 설정을 읽을 통로가 없어서 Flutter 에 330 이 하드코딩돼 있었다(D8-2) —
+    # 매장이 값을 바꿔도 키오스크만 옛 길이로 스케줄을 만들었다. 전용 엔드포인트를
+    # 새로 파는 대신 walk_in_allowed / tip_entry_enabled 와 같은 방식으로 여기에
+    # piggyback 한다(기기는 이미 이 응답을 주기적으로 읽는다). additive 변경이라
+    # 구버전 HTMA 는 이 필드를 무시한다.
+    default_schedule_duration_minutes: int = 330
     registered_at: datetime
     last_seen_at: datetime | None
 
@@ -343,10 +351,20 @@ class ManageScheduleRow(BaseModel):
     position_name: str | None
     start_time: str | None  # "HH:mm" (store tz)
     end_time: str | None
+    # 휴게 시각 — 시작/종료와 **같은 관례**로 HH:mm 과 벽시계 ISO 를 나란히 싣는다.
+    #
+    # 앱이 휴게 값을 읽지도 못해서 "손대지 않은 휴게 때문에 저장 거부"(휴게가
+    # 근무창 밖으로 밀려나는 경우) 데드락을 HTMA 에서 해소할 수 없었다(S4/B2·B4).
+    # 읽을 수 있어야 동반 이동 결과를 보여주거나 지우고 다시 넣을 수 있다.
+    # 둘 다 null = 휴게 없음. additive 라 구버전은 무시한다.
+    break_start_time: str | None = None  # "HH:mm"
+    break_end_time: str | None = None
     # 전환기 datetime 인코딩 — 벽시계 ISO "YYYY-MM-DDTHH:MM" (앱이 우선 소비)
     operating_day: date | None = None
     start_at: str | None = None
     end_at: str | None = None
+    break_start_at: str | None = None
+    break_end_at: str | None = None
     status: str
     attendance_id: UUID | None
     # manage UI 재설계(Issue 10): clock 이벤트 기반 state + anomaly 분리 + breaks 리스트
@@ -429,32 +447,57 @@ class ManageWorkRoleOption(BaseModel):
 
 
 class ManageScheduleCreateRequest(BaseModel):
-    """관리자가 오늘 스케줄을 새로 만들 때."""
+    """관리자가 스케줄을 새로 만들 때 (날짜 제약 없음 — 매장만 기기 고정, D10-1)."""
     user_id: UUID
     work_role_id: UUID | None = None
     start_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")  # "HH:mm"
     end_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    # 휴게 (선택). 짝으로만 유효 — 한쪽만 보내면 BREAK_PAIR_INCOMPLETE 에러다.
+    # 시각은 근무 시작에 앵커해 조립된다(시작보다 이른 값 = 자정 넘긴 근무의 휴게).
+    break_start_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    break_end_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
     # 전환기: 벽시계 datetime 인코딩 (신 클라이언트가 보내면 서버가 우선 사용)
     operating_day: date | None = None
     start_at: str | None = None
     end_at: str | None = None
+    break_start_at: str | None = None
+    break_end_at: str | None = None
+    # 경고 확인 후 재요청(D9-1). 서버가 409 + warnings[] 를 주면 클라이언트가
+    # 사용자에게 보여주고 확인받은 뒤 force:true 로 다시 보낸다.
+    # ⚠️ 구버전 HTMA 는 이 필드를 보내지 않아 False 가 된다 — 겹침 스케줄을 만들면
+    #    이제 409 를 만난다(예전엔 서버가 무조건 force 를 박아 조용히 저장됐다).
+    force: bool = False
 
-    # 키오스크는 5분 grid. console(30분)보다 촘촘한 이유는 매장에서 즉석으로
-    # 실제 운영 시각을 맞추는 컨텍스트라 30분 단위로는 표현이 안 되기 때문.
-    _validate_times = field_validator("start_time", "end_time")(validate_kiosk_grid)
+    # grid 검증은 여기서 하지 않는다 — 판정의 단일 관문은
+    # schedule_service._normalize_shift_input 이다(D6-4).
+    # 스키마에서 또 걸면 같은 위반이 422 로도 나가 클라가 두 형태를 처리해야 하고,
+    # 워크인처럼 이미 저장된 비배수 값이 실린 요청을 통째로 막아버린다(D7).
 
 
 class ManageScheduleUpdateRequest(BaseModel):
-    """관리자가 오늘 스케줄 시간/배정을 수정할 때."""
+    """관리자가 스케줄 시간/배정을 수정할 때 (날짜 제약 없음, D10-1)."""
     user_id: UUID | None = None
     work_role_id: UUID | None = None
     start_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
     end_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    # 휴게 — **보내면 그 값, `null` 을 보내면 지움, 아예 생략하면 기존값 유지**.
+    #
+    # D7-3 이 "항상 전체 전송"이므로 신 클라이언트에게 "생략"이라는 선택지는 없다.
+    # 따라서 지우는 방법은 `null` 하나로 통일한다(B7). 부분 전송 의미론을 따로
+    # 만들면 같은 요청이 클라이언트 버전에 따라 다른 뜻이 되어 추적이 불가능해진다.
+    # "생략 = 유지"는 오직 구버전(휴게 필드 자체를 모르는 HTMA) 호환용이다.
+    # 짝으로만 유효 — 지울 때도 시작/종료를 **둘 다** null 로 보내야 한다.
+    break_start_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    break_end_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
     operating_day: date | None = None
     start_at: str | None = None
     end_at: str | None = None
+    break_start_at: str | None = None
+    break_end_at: str | None = None
+    # create 와 동일 — 경고 확인 후 재요청용. 기본 False (구버전 미전송 = 확인 필요).
+    force: bool = False
 
-    _validate_times = field_validator("start_time", "end_time")(validate_kiosk_grid)
+    # grid 검증 없음 — 위 ManageScheduleCreateRequest 주석 참조.
 
 
 class AdminClockActionRequest(BaseModel):

@@ -6,7 +6,6 @@ Covers CRUD operations for organizations (tenants) and stores (locations).
 
 import re
 from datetime import datetime
-from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -219,7 +218,8 @@ class StoreUpdate(BaseModel):
     phone: str | None = None  # 변경할 연락처 (New phone, optional)
     email: str | None = None  # 변경할 이메일 (New email, optional)
     status: str | None = None  # 매장 상태 변경 (preparing/open/paused/closed, optional)
-    operating_hours: dict[str, Any] | None = None  # 운영시간 JSONB (Operating hours, optional)
+    # 영업시간(operating_hours)은 이 스키마에 없다 — settings registry 키 `store.operating_hours`
+    # 로 옮겼고(D2-3), 설정 API(/console/settings)로 저장한다.
     day_start_time: dict[str, str] | None = None  # 영업일 경계 시각 (Day boundary, optional)
     max_work_hours_weekly: int | None = None  # 주간 최대 근무시간 (Max weekly hours, optional)
     state_code: str | None = None  # 주(State) 코드 (US state code, optional)
@@ -257,7 +257,7 @@ class StoreResponse(BaseModel):
     sort_order: int = 0  # 정렬 순서 (Manual display order)
     is_active: bool  # 활성 상태(파생 = status==open). 구 필드 호환용 (Derived active flag)
     require_approval: bool = True  # 승인 필요 여부 (Schedule approval required)
-    operating_hours: dict[str, Any] | None = None  # 운영시간 (Operating hours JSONB)
+    # 영업시간(operating_hours)은 응답에서 제거됨 — settings registry 키 `store.operating_hours` (D2-3).
     day_start_time: dict[str, str] | None = None  # 영업일 경계 시각 (Day boundary JSONB)
     max_work_hours_weekly: int | None = None  # 주간 최대 근무시간 (Max weekly hours)
     state_code: str | None = None  # 주(State) 코드 (US state code)

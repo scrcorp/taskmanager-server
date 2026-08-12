@@ -205,8 +205,9 @@ class Store(Base):
     # True: SV가 생성한 스케줄은 GM 승인 후 배정 생성
     # False: SV가 생성하면 즉시 배정 생성
     require_approval: Mapped[bool] = mapped_column(Boolean, default=True)
-    # 운영시간 — Store operating hours as JSONB (e.g. {"mon": {"open": "09:00", "close": "22:00"}, ...})
-    operating_hours: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 운영시간(영업시간)은 여기 없다 — settings registry 키 `store.operating_hours` 로 옮겼다 (D2-3).
+    # 컬럼 시절엔 미설정이 NULL 이라 호출부마다 폴백을 각자 짜야 했고, 결국 전 매장 NULL 인 채로
+    # 방치돼 리포트의 영업시간 필터가 사실상 아무 일도 하지 않았다. registry 는 cascade 를 준다.
     # 영업일 경계 시각 — Day boundary start time per weekday (JSONB)
     # Format: {"all": "06:00"} or {"mon": "06:00", "tue": "07:00", ...}
     # NOT operating hours — defines when a work day starts for attendance/schedule purposes.

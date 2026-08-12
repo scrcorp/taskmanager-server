@@ -110,7 +110,9 @@ class StoreService:
             "sort_order": store.sort_order,
             "is_active": store.is_active,
             "require_approval": store.require_approval,
-            "operating_hours": store.operating_hours,
+            # 영업시간은 더 이상 매장 컬럼이 아니다 — settings registry 키 `store.operating_hours`
+            # 로 옮겼다 (D2-3). 컬럼은 미설정이 NULL 이라 호출부마다 폴백을 각자 짜게 되고,
+            # 실제로 그래서 전 매장 NULL 로 방치됐다. registry 는 매장 → 조직 → 기본값 cascade 를 준다.
             "day_start_time": store.day_start_time,
             "max_work_hours_weekly": store.max_work_hours_weekly,
             "state_code": store.state_code,
@@ -251,6 +253,22 @@ class StoreService:
             create_data["group_id"] = data.group_id
         if data.number_range_start is not None:
             create_data["number_range_start"] = data.number_range_start
+
+        # 영업일 경계는 조직 기본값의 **스냅샷**이다 (D2-2). 라이브 cascade 가 아니다 —
+        # cascade 로 두면 조직 기본값을 바꾸는 순간 기존 매장의 경계가 소리 없이 따라 움직이고,
+        # 그것은 이미 확정된 과거 집계(급여 기간·일일 리포트)를 흔든다.
+        # 조직이 미설정이면 매장도 미설정으로 두고 런타임 기본값(06:00)에 맡긴다.
+        from sqlalchemy import select as _select
+        from app.models.organization import Organization
+        from app.utils.timezone import store_day_start_from_org
+
+        org_day_start = await db.scalar(
+            _select(Organization.day_start_time).where(Organization.id == organization_id)
+        )
+        day_start_snapshot = store_day_start_from_org(org_day_start)
+        if day_start_snapshot is not None:
+            create_data["day_start_time"] = day_start_snapshot
+
         try:
             store: Store = await store_repository.create(db, create_data)
             # 매장 생성 즉시 v0 (DEFAULT_FORM_CONFIG) published row 자동 삽입.

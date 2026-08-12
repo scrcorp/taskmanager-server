@@ -23,6 +23,7 @@ class ScheduleAuditLogRepository:
         description: str | None = None,
         reason: str | None = None,
         diff: dict[str, Any] | None = None,
+        acknowledged_warnings: list | None = None,
     ) -> ScheduleAuditLog:
         log = ScheduleAuditLog(
             schedule_id=schedule_id,
@@ -33,6 +34,7 @@ class ScheduleAuditLogRepository:
             description=description,
             reason=reason,
             diff=diff,
+            acknowledged_warnings=acknowledged_warnings or None,
         )
         db.add(log)
         await db.flush()

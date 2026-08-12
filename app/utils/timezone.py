@@ -131,6 +131,138 @@ def resolve_day_start_time(day_start_time: dict | None, weekday: int) -> time:
     return time(int(h), int(m))
 
 
+def store_day_start_from_org(org_day_start: time | None) -> dict | None:
+    """조직 기본 경계(Time 단일값) → 매장 day_start_time JSONB 형태로 감쌉니다 (D2-2).
+
+    org 는 `Time` 하나, store 는 요일별 JSONB 라 모양이 다르다. 이 변환이
+    호출부마다 흩어지면 `{"all": ...}` 를 빠뜨린 쪽이 조용히 기본 06:00 으로
+    떨어진다 — 그래서 변환은 여기 한 곳에만 둔다.
+
+    쓰임은 **매장 생성 시 스냅샷 복사** 하나뿐이다. 라이브 cascade 가 아니다:
+    조직 기본값을 나중에 바꿨을 때 기존 매장의 경계가 따라 움직이면 이미 확정된
+    과거 집계(급여·리포트)가 소리 없이 흔들린다(D1 "사건은 재해석하지 않는다").
+
+    Args:
+        org_day_start: organizations.day_start_time (Time, 미설정이면 None)
+
+    Returns:
+        dict | None: {"all": "HH:MM"} 또는 org 미설정 시 None
+                     (None 이면 매장도 미설정 → DEFAULT_DAY_START_TIME 폴백)
+    """
+    if org_day_start is None:
+        return None
+    return {"all": f"{org_day_start.hour:02d}:{org_day_start.minute:02d}"}
+
+
+# ─── 일자별 시간 범위 설정 값 (D2-7 / D2-8) ────────────────────────
+#
+# `store.operating_hours`(영업시간)와 `schedule.range`(직원 근무 가능 시간대)가
+# **공유하는 값 형태**. 두 키의 의미는 다르지만 모양이 하나여야 파서도 하나로 끝난다.
+#
+#     {"mode": "all" | "per_day",
+#      "all":     {"start": "11:00", "end": "02:00", "end_offset_days": 1},
+#      "per_day": {"mon": {...}, ...},
+#      "closed":  ["mon"]}
+#
+# 시각은 언제나 `00:00~23:59`. 자정 넘김은 `end_offset_days` 로만 표현한다 —
+# `26:00` 같은 24 초과 표기와 "종료 < 시작이면 다음 날" 암묵 보정은 **둘 다 폐기**됐다(D2-8).
+# 암묵 보정이 이번 사고들의 원인이었다: 앱은 규칙을 몰라 23:59 로 clamp 했고,
+# 서버는 알고 있었고, 부분 수정에서는 적용되다 말았다.
+#
+# 24시간 운영의 모호성도 오프셋이 해소한다 —
+# `11:00–11:00 offset 0` = 0시간, `11:00–11:00 offset 1` = 24시간.
+
+MINUTES_PER_DAY = 1440
+
+
+def parse_wall_clock_minutes(value: str | None) -> int | None:
+    """`"HH:MM"`(00:00~23:59) → 자정 기준 분. 형식·범위를 벗어나면 None.
+
+    **24 이상을 받지 않는다.** 옛 `26:00` 저장값은 마이그레이션이 오프셋 형태로
+    정규화하며, 여기서 관용적으로 받아주면 폐기한 표기가 되살아난다.
+    파싱 실패는 예외가 아니라 None — 설정 하나가 리포트 전체를 죽이지 않게.
+    """
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        hh, mm = value.split(":", 1)
+        h, m = int(hh), int(mm)
+    except (ValueError, AttributeError):
+        return None
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return None
+    return h * 60 + m
+
+
+def _range_entry_to_minutes(entry: dict | None) -> tuple[int, int] | None:
+    """`{"start","end","end_offset_days"}` 한 칸 → (시작분, 종료분).
+
+    종료분은 **시작과 같은 날 자정 기준**이라 오프셋만큼 1440 이 더해진다.
+    따라서 `end >= start` 가 자동으로 성립하고, 길이 0(= start==end, offset 0)도
+    그대로 표현된다.
+    """
+    if not isinstance(entry, dict):
+        return None
+    start = parse_wall_clock_minutes(entry.get("start"))
+    end = parse_wall_clock_minutes(entry.get("end"))
+    if start is None or end is None:
+        return None
+    offset = entry.get("end_offset_days", 0)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        offset = 0
+    end += offset * MINUTES_PER_DAY
+    if end < start:
+        # 오프셋이 잘못 들어와 음수 길이가 된 경우. 암묵 보정(+1일)을 하지 않는다 —
+        # 보정하면 잘못된 설정이 그럴듯하게 동작해 아무도 고치지 않는다.
+        return None
+    return (start, end)
+
+
+def is_closed_weekday(value: dict | None, weekday: int) -> bool:
+    """그 요일이 휴무로 지정됐는지 (D2-6).
+
+    **휴무는 `closed` 배열 하나로만 표현한다.** `per_day` 에서 요일 키를 지우는 것은
+    휴무가 아니라 `all` 폴백이다 — 둘을 섞으면 "월요일 설정을 지웠더니 매장이
+    문을 닫은 것으로 집계"되는 사고가 난다.
+    """
+    if not isinstance(value, dict):
+        return False
+    closed = value.get("closed")
+    if not isinstance(closed, list):
+        return False
+    return _WEEKDAY_KEYS[weekday] in closed
+
+
+def resolve_day_range(value: dict | None, weekday: int) -> tuple[int, int] | None:
+    """설정 값에서 해당 요일의 (시작분, 종료분)을 뽑는다. 표준 형태 전용 파서.
+
+    반환 None 의 의미는 셋 다 "적용할 범위가 없다"로 같다 —
+    미설정 / 휴무 / 값이 표준 형태가 아님. 호출부는 셋을 구분할 필요가 없고,
+    구분이 필요하면 `is_closed_weekday()` 를 따로 부른다.
+
+    Args:
+        value: `{mode, all, per_day, closed}` 표준 값
+        weekday: Python weekday (0=Mon, 6=Sun)
+
+    Returns:
+        tuple[int, int] | None: (시작분, 종료분). 종료분은 오프셋이 반영돼 1440 을 넘을 수 있다.
+    """
+    if not isinstance(value, dict):
+        return None
+    if is_closed_weekday(value, weekday):
+        return None
+
+    if value.get("mode") == "per_day":
+        per_day = value.get("per_day")
+        if isinstance(per_day, dict):
+            got = _range_entry_to_minutes(per_day.get(_WEEKDAY_KEYS[weekday]))
+            if got is not None:
+                return got
+            # 그 요일 키가 없으면 all 폴백. 휴무가 아니다 (위 is_closed_weekday 참조).
+
+    return _range_entry_to_minutes(value.get("all"))
+
+
 def get_work_date(tz_name: str, day_start_time: dict | None, utc_now: datetime | None = None) -> date:
     """경계 시각 기준으로 work_date를 결정합니다.
 
@@ -365,3 +497,55 @@ def calculate_cross_midnight_minutes(start_time: time, end_time: time) -> int:
         # Crosses midnight
         return (24 * 60 - start_minutes) + end_minutes
     return end_minutes - start_minutes
+
+
+# 시간대 형태를 쓰는 설정 키 — 저장 전에 값 형태를 검증한다.
+# 여기 없는 키는 검증하지 않는다(기존 키의 자유 형태를 깨지 않기 위함).
+DAY_RANGE_SETTING_KEYS: frozenset[str] = frozenset({
+    "store.operating_hours",
+    "schedule.range",
+})
+
+
+def validate_day_range_setting(key: str, value: object) -> None:
+    """시간대 설정 값의 형태를 검증한다. 어긋나면 ValueError.
+
+    **왜 저장 시점에 막는가** — 파서는 형태가 깨진 값을 예외 없이 None(=미설정)으로
+    떨어뜨린다. 설정 하나가 리포트 전체를 죽이지 않게 한 의도적 설계인데,
+    그 대가로 잘못 저장된 값이 **아무 신호 없이** 기능을 멈춘다.
+    실제로 24 초과 표기(`26:00`)가 들어가면 그 매장의 SV 공백 검사가 조용히 사라진다.
+    입구에서 거절하는 것이 유일한 방어다.
+    """
+    if key not in DAY_RANGE_SETTING_KEYS:
+        return
+    if value is None or not isinstance(value, dict):
+        raise ValueError("Value must be an object.")
+
+    def _check_entry(entry: object, where: str) -> None:
+        if entry in (None, {}):
+            return  # 미설정 — 허용(제한 없음)
+        if not isinstance(entry, dict):
+            raise ValueError(f"{where} must be an object.")
+        for field in ("start", "end"):
+            raw = entry.get(field)
+            if raw is None:
+                raise ValueError(f"{where}.{field} is required.")
+            if parse_wall_clock_minutes(raw) is None:
+                raise ValueError(
+                    f"{where}.{field} must be \"HH:MM\" between 00:00 and 23:59"
+                    " (24+ notation is not allowed — use end_offset_days)."
+                )
+        off = entry.get("end_offset_days", 0)
+        if off not in (0, 1):
+            raise ValueError(f"{where}.end_offset_days must be 0 or 1.")
+
+    _check_entry(value.get("all"), "all")
+    per_day = value.get("per_day") or {}
+    if not isinstance(per_day, dict):
+        raise ValueError("per_day must be an object.")
+    for day, entry in per_day.items():
+        _check_entry(entry, f"per_day.{day}")
+
+    closed = value.get("closed", [])
+    if closed is not None and not isinstance(closed, list):
+        raise ValueError("closed must be an array of weekday keys.")
