@@ -119,6 +119,13 @@ class AppError(HTTPException):
 
     클라이언트는 이 셋을 신뢰해 맥락별 위치(폼=inline / 액션=toast / 로드=배너)에 배치한다.
     임의로 일반화한 가짜 메시지를 만들지 않는다.
+
+    직접 쓰지 말고 `app.core.error_codes` 의 선언된 코드를 호출하라::
+
+        raise SIGNUPS_PAUSED()          # status/message/hint 가 선언부에 있다
+
+    이 클래스를 매번 `status_code=…, code=…, message=…` 로 채우는 형태가
+    **문자열 raise 보다 길어서** 2026-06-22 도입 후 2개월간 실사용이 1건뿐이었다(G6).
     """
 
     def __init__(
@@ -128,10 +135,16 @@ class AppError(HTTPException):
         code: str,
         message: str,
         hint: str | None = None,
+        params: dict[str, object] | None = None,
     ) -> None:
-        detail: dict[str, str] = {"code": code, "message": message}
+        detail: dict[str, object] = {"code": code, "message": message}
         if hint is not None:
             detail["hint"] = hint
+        if params:
+            # **평탄하게** 펼친다 — 한 겹 감싸면 구버전 HTMA 가 `minutes_early` 를 못 찾아
+            # "0m early" 로 틀린 값을 맞는 것처럼 표시한다(X3). 봉투의 `error.params` 는
+            # 전역 핸들러가 이 평탄 detail 에서 다시 모아준다.
+            detail.update(params)
         super().__init__(status_code=status_code, detail=detail)
 
 
@@ -149,3 +162,15 @@ class CaptureTimeRequiredError(AppError):
             message="This photo is missing its capture time.",
             hint="Retake it with the camera, or choose a photo that still has its time information.",
         )
+
+
+# 부팅 시 전역 중복 검사(G4)를 반드시 돌리기 위한 import.
+#
+# 이 모듈은 앱 부팅 경로에서 항상 import 된다(`error_envelope` → `exceptions`).
+# 레지스트리를 여기서 끌어오면 도메인 파일 전체가 import 되어, 같은 코드 문자열을 두 곳에서
+# 선언했을 때 **서버가 아예 뜨지 않는다.** 코드 충돌은 배포 후 조용히 오작동하는 종류라
+# 부팅에서 잡는 편이 낫다.
+#
+# 파일 맨 아래에 두는 이유 — 레지스트리는 위의 `AppError` 를 import 한다. 위쪽에 두면
+# 순환 import 로 깨진다. (이 한 줄을 옮기지 말 것.)
+import app.core.error_codes  # noqa: E402,F401

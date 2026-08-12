@@ -420,6 +420,8 @@ async def make_schedule(test_store_id: UUID, _tracked_schedule_ids: list):
         work_date: date | None = None,
         start_time: time | None = time(9, 0),
         end_time: time | None = time(17, 0),
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
     ) -> UUID:
         from app.utils.timezone import get_store_day_config, get_work_date
 
@@ -429,9 +431,12 @@ async def make_schedule(test_store_id: UUID, _tracked_schedule_ids: list):
             wd = work_date or get_work_date(tz_name, day_cfg, datetime.now(timezone.utc))
             # Wave 3: 구 컬럼 제거 — operating_day + start_at/end_at 로 생성.
             # end<=start(자정 넘김)면 end_at 을 익일로.
-            s_at = datetime.combine(wd, start_time) if start_time else None
-            e_at = datetime.combine(wd, end_time) if end_time else None
-            if s_at and e_at and e_at <= s_at:
+            # start_at/end_at 을 직접 받으면 그대로 쓴다.
+            # work_date + time 조합은 자정을 넘는 순간 "오늘 00:10" = 과거가 되어버려서,
+            # 실행 시각에 따라 조기/지각 판정이 뒤집히는 flake 의 원인이었다.
+            s_at = start_at or (datetime.combine(wd, start_time) if start_time else None)
+            e_at = end_at or (datetime.combine(wd, end_time) if end_time else None)
+            if end_at is None and s_at and e_at and e_at <= s_at:
                 e_at += timedelta(days=1)
             sched = Schedule(
                 organization_id=user_info["organization_id"],
