@@ -6,7 +6,7 @@ hire (applicant→user), block/unblock.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 from uuid import UUID, uuid4
 
@@ -28,6 +28,7 @@ from app.core.hiring import (
     APPLICATION_STAGES,
     DEFAULT_FORM_CONFIG,
     HiringFormConfig,
+    set_application_stage,
 )
 from app.core.permissions import STAFF_PRIORITY
 from app.models.hiring import (
@@ -236,6 +237,7 @@ def _serialize_application(
         "notes": app.notes,
         "submitted_at": app.submitted_at.isoformat(),
         "updated_at": app.updated_at.isoformat(),
+        "rejected_at": app.rejected_at.isoformat() if app.rejected_at else None,
         "candidate": {
             "id": str(candidate.id),
             "username": candidate.username,
@@ -350,6 +352,8 @@ async def list_applications_all(
     sort: str = "recent",
     page: int = 1,
     per_page: int = 20,
+    stale_days: Optional[int] = None,
+    include_stale: Optional[str] = None,
 ) -> dict:
     """접근 가능한 모든 매장의 지원자를 가로질러 조회 (Inbox).
 
@@ -362,9 +366,16 @@ async def list_applications_all(
       q         지원자 이름/이메일/username 부분일치 검색
       sort      'recent'(submitted_at desc, 기본) | 'updated'(updated_at desc)
       page/per_page  페이지네이션 (1-base)
+      stale_days     지정 시 '오래 방치된' 카드를 items 에서 제외 (Pipeline 보드용).
+                     rejected/withdrawn → COALESCE(rejected_at, updated_at) 기준,
+                     pending_form → updated_at 기준. 미지정이면 기존과 동일하게 전부 포함.
+      include_stale  위 제외에서 면제할 버킷 comma 목록 ('pending_form','rejected').
+                     컬럼별 'Show older' 토글이 서로 독립 동작하도록.
 
     counts 는 store/q 필터는 반영하되 stage 필터·페이지네이션과 무관한 전체 단계별 집계
-    (Inbox 상단 summary strip 용).
+    (Inbox 상단 summary strip 용) — stale_days 의 영향을 받지 않는다.
+    stale_hidden 은 stale 조건에 걸리는 개수 (include_stale 로 면제해도 그대로 세어서
+    토글 라벨 'Show 12 older' / 'Hide 12 older' 가 흔들리지 않게 한다).
     """
     org_id = current_user.organization_id
     accessible = await get_accessible_store_ids(db, current_user)
@@ -372,11 +383,35 @@ async def list_applications_all(
     # GM/SV 인데 관리 매장이 하나도 없으면 즉시 빈 결과
     if accessible is not None and len(accessible) == 0:
         empty_counts = {s: 0 for s in APPLICATION_STAGES}
-        return {"items": [], "total": 0, "page": page, "per_page": per_page, "pages": 0, "counts": empty_counts}
+        return {
+            "items": [], "total": 0, "page": page, "per_page": per_page, "pages": 0,
+            "counts": empty_counts, "stale_hidden": {"pending_form": 0, "rejected": 0},
+        }
 
     # 특정 매장 필터 시 접근 권한 검증 (403 → 누수 방지)
     if store_id is not None:
         await check_store_access(db, current_user, store_id)
+
+    # ── stale(오래 방치) 버킷 정의 ─────────────────────────────
+    # 각 버킷 = (해당 stage 조건, 그 stage 의 '마지막 액션' 시각 컬럼)
+    stale_exempt = {
+        s.strip() for s in (include_stale or "").split(",") if s.strip()
+    }
+    stale_cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=stale_days)
+        if stale_days is not None and stale_days >= 0
+        else None
+    )
+    stale_buckets: dict[str, tuple] = {
+        "rejected": (
+            Application.stage.in_(("rejected", "withdrawn")),
+            func.coalesce(Application.rejected_at, Application.updated_at),
+        ),
+        "pending_form": (
+            Application.stage == "pending_form",
+            Application.updated_at,
+        ),
+    }
 
     def _scoped(stmt):
         stmt = (
@@ -409,6 +444,13 @@ async def list_applications_all(
         filtered = filtered.where(Application.stage.in_(("new", "screen", "interview", "review")))
     elif stage and stage in APPLICATION_STAGES:
         filtered = filtered.where(Application.stage == stage)
+
+    # stale 제외 — 면제(include_stale)되지 않은 버킷만 잘라낸다
+    if stale_cutoff is not None:
+        for bucket, (stage_cond, ts_col) in stale_buckets.items():
+            if bucket in stale_exempt:
+                continue
+            filtered = filtered.where(~and_(stage_cond, ts_col < stale_cutoff))
 
     # 정렬
     order_col = desc(Application.updated_at) if sort == "updated" else desc(Application.submitted_at)
@@ -472,6 +514,21 @@ async def list_applications_all(
     for st, cnt in count_rows.all():
         counts[st] = int(cnt)
 
+    # stale_hidden — 버킷별로 stale 조건에 걸리는 개수 (면제 여부와 무관)
+    stale_hidden: dict[str, int] = {k: 0 for k in stale_buckets}
+    if stale_cutoff is not None:
+        for bucket, (stage_cond, ts_col) in stale_buckets.items():
+            n = (
+                await db.execute(
+                    _scoped(
+                        select(func.count(Application.id))
+                        .select_from(Application)
+                        .join(Candidate, Candidate.id == Application.candidate_id)
+                    ).where(stage_cond, ts_col < stale_cutoff)
+                )
+            ).scalar() or 0
+            stale_hidden[bucket] = int(n)
+
     pages = (total + per_page - 1) // per_page
     from app.utils.timezone import get_org_timezone
     return {
@@ -481,6 +538,7 @@ async def list_applications_all(
         "per_page": per_page,
         "pages": pages,
         "counts": counts,
+        "stale_hidden": stale_hidden,
         # 확정 인터뷰 시각을 org timezone 으로 표시하기 위함 (브라우저 tz 아님)
         "org_timezone": await get_org_timezone(db, org_id),
     }
@@ -661,7 +719,7 @@ async def patch_application(
                 **actor,
             })
             entered_interview = body.stage == "interview" and app_obj.stage != "interview"
-            app_obj.stage = body.stage
+            set_application_stage(app_obj, body.stage)
             if entered_interview:
                 # interview 진입 → 토큰 발급 + 지원자에게 시간 선택 초대 메일 (best-effort)
                 from app.services.interview_email_service import issue_and_send_invite
@@ -852,7 +910,7 @@ async def hire_application(
             "at": _now_iso(),
             "note": f"Hired and created user {user.username}",
         })
-    app_obj.stage = "hired"
+    set_application_stage(app_obj, "hired")
     await db.commit()
 
     return {
@@ -918,7 +976,7 @@ async def unhire_application(
         "at": _now_iso(),
         "note": "Unhired — staff connection to this store removed",
     })
-    app_obj.stage = "review"
+    set_application_stage(app_obj, "review")
     await db.commit()
 
     return {

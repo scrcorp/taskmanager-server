@@ -24,6 +24,7 @@ from app.core.hiring import (
     HiringFormConfig,
     MAX_ATTACHMENT_BYTES,
     MAX_ATTACHMENT_MB,
+    set_application_stage,
 )
 from app.core.url_encoding import decode_uuid
 from app.database import get_db
@@ -648,7 +649,7 @@ async def complete_application(
 
     application.form_id = form.id if form else None
     application.data = {"answers": answer_snaps, "attachments": attachment_snaps}
-    application.stage = "new"
+    set_application_stage(application, "new")
     await db.commit()
     await db.refresh(application)
 
@@ -705,7 +706,7 @@ async def withdraw_application(
             },
         )
 
-    application.stage = "withdrawn"
+    set_application_stage(application, "withdrawn")
     await db.commit()
     await db.refresh(application)
     return {"application_id": str(application.id), "stage": application.stage}

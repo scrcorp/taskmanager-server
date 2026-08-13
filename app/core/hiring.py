@@ -7,6 +7,7 @@ Form 정의(질문/첨부)는 store_hiring_forms.config JSONB에 저장되며,
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, Field
@@ -232,3 +233,25 @@ MANAGER_VISIBLE_STAGES: tuple[ApplicationStage, ...] = (
     "rejected",
     "withdrawn",
 )
+# 지원이 끝난(더 진행되지 않는) 단계. rejected_at 이 채워지는 구간.
+CLOSED_STAGES: tuple[ApplicationStage, ...] = ("rejected", "withdrawn")
+
+
+def set_application_stage(application, new_stage: str) -> None:
+    """Application.stage 변경 단일 경로. rejected_at 을 함께 유지한다.
+
+    stage 를 직접 대입하지 말고 항상 이 함수를 쓸 것 — 전이 지점이
+    콘솔 patch / 지원자 withdraw / unhire 로 흩어져 있어서, 직접 대입하면
+    rejected_at 이 조용히 어긋난다.
+
+    - rejected/withdrawn 으로 **진입**: rejected_at = now
+    - 거기서 **이탈**: rejected_at = None (되돌리면 다시 최근 카드로 취급)
+    - closed → closed (rejected ↔ withdrawn): 최초 종료 시각 유지
+    """
+    was_closed = application.stage in CLOSED_STAGES
+    now_closed = new_stage in CLOSED_STAGES
+    application.stage = new_stage
+    if now_closed and not was_closed:
+        application.rejected_at = datetime.now(timezone.utc)
+    elif not now_closed:
+        application.rejected_at = None
