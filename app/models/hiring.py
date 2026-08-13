@@ -165,6 +165,12 @@ class Application(Base):
     )
     interview_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # rejected/withdrawn 으로 진입한 시각. 그 단계를 벗어나면 NULL 로 되돌린다.
+    # Pipeline 보드에서 "최근 N일" 거절만 남기고 접기 위한 기준 시각.
+    # (updated_at 은 메모 수정만 해도 갱신되므로 기준으로 쓸 수 없다)
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # 변경 히스토리 — [{action, before, after, by_user_id, by_username, at}, ...]
     history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
     submitted_at: Mapped[datetime] = mapped_column(
