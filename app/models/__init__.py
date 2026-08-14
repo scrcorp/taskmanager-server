@@ -37,6 +37,9 @@ from app.models.attendance import QRCode, Attendance, AttendanceCorrection
 from app.models.attendance_break import AttendanceBreak
 from app.models.attendance_device import AttendanceDevice
 from app.models.access_code import AccessCode
+from app.models.push_subscription import PushSubscription
+from app.models.alert_preference_audit import AlertPreferenceAudit
+from app.models.push_delivery import PushDelivery
 from app.models.access_code_audit import AccessCodeAudit
 from app.models.evaluation import EvalTemplate, Evaluation
 from app.models.warning import Warning
@@ -78,6 +81,9 @@ __all__ = [
     "AttendanceBreak",
     "AttendanceDevice",
     "AccessCode",
+    "PushSubscription",
+    "AlertPreferenceAudit",
+    "PushDelivery",
     "AccessCodeAudit",
     "EvalTemplate", "Evaluation",
     "Warning",

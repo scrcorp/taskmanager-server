@@ -163,6 +163,34 @@ class Settings(BaseSettings):
     # 세션 유효 시간(분)
     BACKOFFICE_SESSION_MAX_AGE_MINUTES: int = 60
 
+    # ── Web Push (VAPID) ──────────────────────────────────
+    # 웹 푸시 발송 시 "이 요청은 진짜 우리 서버" 임을 구글/애플 중계 서버에 증명하는 키 쌍.
+    #
+    #   PUBLIC  : 비밀이 아니다. 앱이 subscribe() 할 때 넘겨야 하므로 API 로 내려준다.
+    #   PRIVATE : 서버 밖으로 절대 나가지 않는다.
+    #
+    # ⚠️ 구독은 "구독 당시 사용한 공개키" 에 묶인다. 키를 교체하면 기존 구독 전부가
+    #    조용히(에러 없이) 무효가 되어 전 직원이 재설치·재허용해야 한다.
+    #    prod 키는 한 번 정하면 바꾸지 말 것. 환경별로 다른 키를 쓴다.
+    VAPID_PUBLIC_KEY: str = ""
+    VAPID_PRIVATE_KEY: str = ""
+    # VAPID JWT 의 연락처(sub) — 중계 서버가 문제 시 연락할 곳. mailto: 또는 https:
+    VAPID_SUBJECT: str = "mailto:support@hermesops.site"
+
+    # 미확인 알림 다이제스트 — 하루 1회 "안 본 알림 N건" 을 모아 보낸다.
+    # 시각은 **조직 타임존 기준 로컬 시(hour)** 다. UTC 고정으로 쏘면 조직마다
+    # 한밤중에 울린다. 스케줄러는 매시 깨어나 해당 시각인 조직만 처리한다.
+    PUSH_DIGEST_ENABLED: bool = True
+    PUSH_DIGEST_HOUR: int = 9
+
+    @property
+    def push_enabled(self) -> bool:
+        """푸시 활성 조건 — 키 쌍이 둘 다 있어야 발송/구독을 연다.
+
+        비어있으면 기능 자체를 끈 것으로 본다(로컬에서 키 없이 서버를 띄우는 경우).
+        """
+        return bool(self.VAPID_PUBLIC_KEY and self.VAPID_PRIVATE_KEY)
+
     @property
     def backoffice_enabled(self) -> bool:
         """backoffice 활성 조건 — 비밀경로 + 운영자 해시 둘 다 설정돼야 마운트."""

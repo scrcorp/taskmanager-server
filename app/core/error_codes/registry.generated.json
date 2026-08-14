@@ -64,6 +64,9 @@
       "pay_period_already_confirmed",
       "payroll_close_gates_failed"
     ],
+    "push": [
+      "PUSH_NOT_CONFIGURED"
+    ],
     "schedule": [
       "BREAK_OUTSIDE_SHIFT",
       "BREAK_PAIR_INCOMPLETE",
@@ -625,6 +628,16 @@
       "status": 409,
       "message": "Some close gates failed. Resolve every issue below, then confirm again.",
       "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PUSH_NOT_CONFIGURED",
+      "domain": "push",
+      "kind": "http",
+      "status": 503,
+      "message": "Push notifications are not available right now.",
+      "hint": "This server has no push configuration. Contact your administrator.",
       "frozen": false,
       "clients": []
     },
