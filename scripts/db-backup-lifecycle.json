@@ -1,0 +1,17 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-db-dumps",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "db/" },
+      "Expiration": { "Days": 90 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
+    },
+    {
+      "ID": "abort-incomplete-uploads",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}

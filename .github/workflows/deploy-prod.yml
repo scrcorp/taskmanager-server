@@ -21,8 +21,36 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          # 기본값(false)이면 중간 명령이 실패해도 나머지가 계속 실행되고 step 이
+          # 성공으로 끝난다. 백업 실패 시 배포를 멈추려면 반드시 필요.
+          script_stop: true
           script: |
             cd ~/taskmanager-server
             git pull origin main
+
+            # 배포마다 `--build` 를 하므로 옛 이미지 레이어와 빌드 캐시가 계속 쌓인다.
+            # 디스크가 차면 이 아래 pg_dump 가 먼저 실패하므로, 공간 확보가 먼저다.
+            #
+            # 절대 `--volumes` 를 붙이지 말 것 — compose 의 `uploads` 볼륨이 지워진다.
+            # `-a` 도 쓰지 않는다(사용 중이 아닌 이미지까지 날려 매 배포 재다운로드).
+            df -h / | tail -1
+            docker container prune -f
+            docker image prune -f
+            docker builder prune -f --filter until=168h
+            df -h / | tail -1
+
+            # 마이그레이션 직전 DB 스냅샷 → S3.
+            # 컨테이너가 뜨면서 start.sh 가 `alembic upgrade head` 를 무인 실행하므로,
+            # 이 덤프가 마이그레이션을 되돌릴 유일한 수단이다. 실패하면 배포를 멈춘다.
+            # 긴급 시에만 `SKIP_DB_BACKUP=1` 로 넘길 것.
+            # 업로드 성공 후 오래된 백업 정리까지 같이 한다 —
+            # EC2 .env 의 DB_BACKUP_RETENTION_DAYS 로 켜고, 비어있으면 아무것도 안 지운다.
+            ./scripts/db-backup.sh predeploy-$(echo "${{ github.sha }}" | cut -c1-7)
+
             docker compose down
             docker compose up -d --build
+
+            # 새 이미지로 교체되면서 직전 이미지가 dangling 이 된다. 바로 회수해야
+            # 다음 배포까지 디스크를 붙들고 있지 않는다.
+            docker image prune -f
+            df -h / | tail -1

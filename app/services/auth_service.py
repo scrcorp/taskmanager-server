@@ -385,8 +385,7 @@ class AuthService:
             generate_unique_clockin_pin,
         )
 
-        # prefix 충돌 회피 발급 — 단순 generate_clockin_pin() 은 기존 4자리 PIN 을
-        # prefix 로 갖는 값을 뽑을 수 있다 (오인식 사고 경로).
+        # 중복 회피 발급 — 단순 generate_clockin_pin() 은 uniqueness 를 보장하지 않는다.
         clockin_pin = await generate_unique_clockin_pin(
             db, ghost.organization_id, exclude_user_id=ghost.id
         )
@@ -547,8 +546,7 @@ class AuthService:
         )
 
         password_hash: str = hash_password(data.password)
-        # prefix 충돌 회피 — 기존 4자리 PIN 을 앞에 두는 6자리가 뽑히면
-        # 그 사람으로 오인식될 수 있다.
+        # 중복 회피 발급 — 이미 쓰이는 값이 뽑히면 저장이 409 로 튕긴다.
         clockin_pin = await generate_unique_clockin_pin(db, organization_id)
         user: User = User(
             organization_id=organization_id,

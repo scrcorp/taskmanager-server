@@ -16,5 +16,8 @@ htmlcov/
 
 uploads/
 
+# db-backup.sh 임시 덤프 (업로드 후 삭제되지만 실패 시 남을 수 있다)
+.backup-tmp/
+
 # exception
 !.env.example

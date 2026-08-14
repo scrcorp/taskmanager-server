@@ -25,6 +25,15 @@ jobs:
             cd ~/taskmanager-server-staging
             git pull origin staging
 
+            # prod 와 같은 EC2 디스크를 쓴다. 여기서도 매번 build 하므로 옛 레이어와
+            # 빌드 캐시를 먼저 회수해야 prod 배포 시 pg_dump 할 공간이 남는다.
+            # `--volumes` 금지 — prod compose 의 uploads 볼륨까지 지워진다.
+            df -h / | tail -1
+            docker container prune -f
+            docker image prune -f
+            docker builder prune -f --filter until=168h
+            df -h / | tail -1
+
             # 기존 컨테이너 중지 (DB 연결 해제)
             docker compose -f docker-compose.staging.yml down
 

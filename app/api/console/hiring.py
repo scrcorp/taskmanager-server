@@ -42,7 +42,7 @@ from app.models.organization import Store
 from app.models.user import Role, User
 from app.models.user_store import UserStore
 from app.services.attendance_device_service import (
-    assert_no_pin_prefix_conflict,
+    assert_no_pin_conflict,
     generate_clockin_pin,
     generate_unique_clockin_pin,
 )
@@ -859,7 +859,7 @@ async def hire_application(
             )
         else:
             # 클라가 preview 로 받아 들고 있던 값 — 그 사이 다른 직원이 선점했을 수 있다.
-            await assert_no_pin_prefix_conflict(
+            await assert_no_pin_conflict(
                 db, current_user.organization_id, clockin_pin
             )
         # 클라가 미리 보여준 uuid를 받았으면 그대로 사용 (모달의 User ID = 실제 user.id 보장)

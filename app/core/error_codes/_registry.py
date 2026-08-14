@@ -55,7 +55,7 @@ class ErrorCode:
     1. HTTP 에러 (`kind="http"`) — 그대로 raise 한다::
 
            raise SIGNUPS_PAUSED()
-           raise PIN_CONFLICT(reason="prefix", conflicting_empid="1043")
+           raise PIN_CONFLICT(reason="exact", conflicting_empid="1043")
 
     2. 검증 항목 (`kind="item"`) — 응답 하나에 여러 개가 `errors`/`warnings` 배열로 실린다.
        스케줄 검증이 이 모양이다. `issue()` 로 만든다.
