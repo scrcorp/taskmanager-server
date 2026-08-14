@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
+from app.services.push_dispatch import dispatch_alert_push
 from app.core.alert_categories import (
     category_for_type,
     is_email_enabled,
@@ -36,6 +37,17 @@ class AlertService:
     Alert service providing shared read/unread operations
     and auto-creation for various entity types.
     """
+
+    async def _create_alert(self, db: AsyncSession, **kwargs) -> Alert:
+        """알림 행을 만들고 웹 푸시 발송을 예약한다.
+
+        alert_repository.create_alert 를 직접 부르지 말고 항상 이걸 쓴다 —
+        그래야 "알림함에 쌓이면 푸시도 나간다" 는 규칙이 한 곳에서 지켜진다.
+        푸시는 백그라운드로 나가며, 커밋되지 않은 알림에는 발송되지 않는다.
+        """
+        alert: Alert = await alert_repository.create_alert(db, **kwargs)
+        dispatch_alert_push(alert)
+        return alert
 
     # --- 공통 조회/읽음 처리 (Shared read/unread operations) ---
 
@@ -221,7 +233,7 @@ class AlertService:
 
         alerts: list[Alert] = []
         for uid in filtered:
-            alert: Alert = await alert_repository.create_alert(
+            alert: Alert = await self._create_alert(
                 db,
                 organization_id=schedule.organization_id,
                 user_id=uid,
@@ -247,7 +259,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, schedule.user_id, "schedule_approved"):
             return None
         message: str = f"Your schedule for {schedule.work_date} has been approved"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=schedule.organization_id,
             user_id=schedule.user_id,
@@ -271,7 +283,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, schedule.user_id, "schedule_assigned"):
             return None
         message: str = f"New schedule assigned for {schedule.work_date}"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=schedule.organization_id,
             user_id=schedule.user_id,
@@ -298,7 +310,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, recipient_id, "reply"):
             return None
         message = f"{author_name} replied on your {context_label}"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=organization_id,
             user_id=recipient_id,
@@ -323,7 +335,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, recipient_id, "report_submitted"):
             return None
         message = f"{author_name} submitted a {context_label}"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=organization_id,
             user_id=recipient_id,
@@ -348,7 +360,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, recipient_id, "report_reviewed"):
             return None
         message = f"{reviewer_name} reviewed your {context_label}"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=organization_id,
             user_id=recipient_id,
@@ -381,7 +393,7 @@ class AlertService:
         filtered = await self._filter_in_app_recipients(db, user_ids, "notice")
 
         for uid in filtered:
-            alert: Alert = await alert_repository.create_alert(
+            alert: Alert = await self._create_alert(
                 db,
                 organization_id=notice.organization_id,
                 user_id=uid,
@@ -440,7 +452,7 @@ class AlertService:
         for manager in managers:
             if manager.id not in in_app_enabled_ids:
                 continue
-            notif = await alert_repository.create_alert(
+            notif = await self._create_alert(
                 db,
                 organization_id=instance.organization_id,
                 user_id=manager.id,
@@ -463,7 +475,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, item.reviewer_id, "checklist_re_review"):
             return None
         message = "Checklist item resubmitted for re-review"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=instance.organization_id,
             user_id=item.reviewer_id,
@@ -503,7 +515,7 @@ class AlertService:
 
         alerts: list[Alert] = []
         for uid in filtered:
-            alert: Alert = await alert_repository.create_alert(
+            alert: Alert = await self._create_alert(
                 db,
                 organization_id=organization_id,
                 user_id=uid,
@@ -554,7 +566,7 @@ class AlertService:
         alerts: list[Alert] = []
         for uid in filtered:
             alerts.append(
-                await alert_repository.create_alert(
+                await self._create_alert(
                     db,
                     organization_id=organization_id,
                     user_id=uid,
@@ -589,7 +601,7 @@ class AlertService:
             message = f"Please re-sign your warning in the app: {title}"
         else:
             message = f"You have received a warning: {title}"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=organization_id,
             user_id=subject_user_id,
@@ -611,7 +623,7 @@ class AlertService:
 
         if await self._is_in_app_enabled_for_user(db, old_user_id, "schedule_substitute"):
             old_msg = f"Substituted out: schedule for {schedule.work_date} has been reassigned"
-            alerts.append(await alert_repository.create_alert(
+            alerts.append(await self._create_alert(
                 db,
                 organization_id=schedule.organization_id,
                 user_id=old_user_id,
@@ -623,7 +635,7 @@ class AlertService:
 
         if await self._is_in_app_enabled_for_user(db, new_user_id, "schedule_substitute"):
             new_msg = f"Substituted in: you have been assigned to schedule for {schedule.work_date}"
-            alerts.append(await alert_repository.create_alert(
+            alerts.append(await self._create_alert(
                 db,
                 organization_id=schedule.organization_id,
                 user_id=new_user_id,

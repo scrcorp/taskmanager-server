@@ -7,7 +7,7 @@ Follows 3-layer architecture: Router → Service → Repository.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -126,8 +126,15 @@ async def get_my_alert_preferences(
 @router.put("/profile/alert-preferences", response_model=AlertPreferencesResponse)
 async def update_my_alert_preferences(
     data: AlertPreferencesUpdate,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AlertPreferencesResponse:
-    """내 알림 선호 부분 업데이트."""
-    return await profile_service.update_alert_preferences(db, current_user, data)
+    """내 알림 선호 부분 업데이트.
+
+    변경분은 alert_preference_audits 에 이력으로 남는다 — 나중에 "그 시점에
+    알림을 꺼둔 상태였는지" 를 확인할 근거가 된다.
+    """
+    return await profile_service.update_alert_preferences(
+        db, current_user, data, user_agent=request.headers.get("user-agent")
+    )
