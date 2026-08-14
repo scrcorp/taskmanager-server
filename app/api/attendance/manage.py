@@ -1529,13 +1529,13 @@ async def manage_update_staff_pin(
     auth: Annotated[tuple, Depends(get_current_attendance_manage_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ManageStaffPinRevealResponse:
-    """직원 PIN 을 직접 지정 (4~6자리). 중복·prefix 충돌 시 409."""
+    """직원 PIN 을 직접 지정 (4~6자리). 같은 번호를 이미 쓰는 사람이 있으면 409."""
     from app.models.clockin_pin_audit import PIN_AUDIT_UPDATE
     from app.repositories.clockin_pin_audit_repository import (
         clockin_pin_audit_repository,
     )
     from app.services.attendance_device_service import (
-        assert_no_pin_prefix_conflict,
+        assert_no_pin_conflict,
         commit_pin_or_409,
     )
 
@@ -1544,7 +1544,7 @@ async def manage_update_staff_pin(
     target = await _load_store_staff(db, device, user_id)
 
     # store_id 전달 — 충돌 유저가 이 기기 매장 밖이면 409 detail.other_store=true
-    await assert_no_pin_prefix_conflict(
+    await assert_no_pin_conflict(
         db,
         device.organization_id,
         data.clockin_pin,

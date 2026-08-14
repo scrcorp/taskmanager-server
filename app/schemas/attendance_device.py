@@ -5,6 +5,7 @@ admin device management surface.
 """
 
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -205,6 +206,48 @@ class ClockinPinResponse(BaseModel):
 class ClockinPinUpdateRequest(BaseModel):
     """PIN 수동 변경 요청. 4~6자리 숫자."""
     clockin_pin: str = Field(..., pattern=r"^\d{4,6}$")
+
+
+# ── PIN 찾기 도구 (콘솔 Staff 페이지) ───────────────────────
+
+class ClockinPinHolder(BaseModel):
+    """PIN 을 들고 있는 직원 한 명. 콘솔 PIN 도구 전용(clockin_pin:read 필요).
+
+    출퇴근 409 계약과 달리 이름·PIN 값을 실어 준다 — 이 응답은 권한자만 받고,
+    권한자는 어차피 직원 상세에서 같은 값을 볼 수 있다.
+    """
+    user_id: UUID
+    full_name: str
+    username: str | None = None
+    role_name: str | None = None
+    is_active: bool
+    is_provisional: bool
+    clockin_pin: str | None = None
+    # lookup 응답에서만 채움 — 이 사람이 조회한 PIN 을 이미 쓰고 있으면 "exact".
+    # (앞자리만 겹치는 다른 길이의 PIN 은 충돌이 아니다 — 2026-08-13 규칙 변경)
+    conflict: Literal["exact"] | None = None
+
+
+class ClockinPinLookupResponse(BaseModel):
+    """GET /console/users/clockin-pin/lookup — 이 PIN 을 지금 배정할 수 있는가."""
+    pin: str
+    available: bool
+    # 충돌 사유. available=True 면 None. 값은 exact 하나뿐(같은 번호를 이미 쓰는 중).
+    reason: Literal["exact"] | None = None
+    holders: list[ClockinPinHolder] = []
+
+
+class ClockinPinDirectoryResponse(BaseModel):
+    """GET /console/users/clockin-pin/directory — 이름/PIN 으로 직원 찾기."""
+    items: list[ClockinPinHolder]
+    # 서버 상한(limit)에 걸려 잘렸는지 — 콘솔이 "더 좁혀서 검색" 안내를 띄운다.
+    truncated: bool = False
+
+
+class ClockinPinSuggestResponse(BaseModel):
+    """GET /console/users/clockin-pin/suggest — 안 쓰이는 PIN 추천(배정은 안 함)."""
+    pin: str | None
+    length: int
 
 
 class AttendanceStoreOption(BaseModel):
