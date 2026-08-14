@@ -34,6 +34,10 @@ VALIDATION_UNCONFIRMED_AUTO_CLOCKOUT = "unconfirmed_auto_clockout"
 VALIDATION_TIP_PERIOD_NOT_CONFIRMED = "tip_period_not_confirmed"  # 계산 규칙 4
 # 조기 출근 강행 미확인 — 예정 밖 근무시간이 급여에 그대로 들어가므로 사람이 한 번 본다
 VALIDATION_UNCONFIRMED_EARLY_CLOCK_IN = "unconfirmed_early_clock_in"
+# 겹친 근무 — 같은 사람의 두 근무가 시간상 겹치면 같은 시간이 두 번 지급된다 (D15).
+# **확인 도장(escape hatch)이 없다** — "승인된 겹침" 은 정의상 이중 지급이라
+# 해소 경로는 한쪽을 정정/취소하는 것뿐이다.
+VALIDATION_OVERLAPPING_ATTENDANCE = "overlapping_attendance"
 
 
 class RateSegment(BaseModel):

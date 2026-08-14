@@ -9,6 +9,7 @@ in-app 알림이 비활성화된 사용자는 자동 skip 한다. 이메일 발�
 should_send_email() 헬퍼로 동일하게 가드.
 """
 
+from datetime import date, datetime, timezone
 from typing import Sequence
 from uuid import UUID
 
@@ -571,6 +572,92 @@ class AlertService:
                     organization_id=organization_id,
                     user_id=uid,
                     alert_type="early_clock_in_override",
+                    message=message,
+                    reference_type="attendance",
+                    reference_id=attendance_id,
+                )
+            )
+        return alerts
+
+    # 겹침 알림 중복 억제 창(분). 직원이 "이거 아님" 을 반복하면 매니저 알림함이
+    # 도배되므로 같은 사람·같은 영업일에 대해 이 간격 안에는 1건만 보낸다.
+    OVERLAP_ALERT_DEDUP_MINUTES = 60
+
+    async def create_for_overlapping_clock_in(
+        self,
+        db: AsyncSession,
+        attendance_id: UUID,
+        organization_id: UUID,
+        staff_user_id: UUID,
+        staff_name: str,
+        work_date: date,
+    ) -> list[Alert]:
+        """겹쳐 출근(D15) 시 매니저/SV 알림. 같은 (직원, 영업일) 은 60분에 1건.
+
+        직원은 이 상태를 스스로 정리할 수 없다 — 한쪽을 취소·정정하는 건 매니저
+        권한이다. 그래서 알림이 유일한 즉시 전달 경로다.
+        """
+        from datetime import timedelta as _td
+
+        from app.models.attendance import Attendance as _Attendance
+
+        # 같은 직원의 같은 영업일 attendance 들에 대해 최근에 나간 알림이 있으면 skip.
+        sibling_ids = list(
+            (
+                await db.execute(
+                    select(_Attendance.id).where(
+                        _Attendance.user_id == staff_user_id,
+                        _Attendance.work_date == work_date,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if sibling_ids:
+            since = datetime.now(timezone.utc) - _td(
+                minutes=self.OVERLAP_ALERT_DEDUP_MINUTES
+            )
+            recent = await db.scalar(
+                select(Alert.id)
+                .where(
+                    # 컬럼명은 `type` 이다 (repository 인자명만 alert_type).
+                    Alert.type == "overlapping_clock_in",
+                    Alert.reference_type == "attendance",
+                    Alert.reference_id.in_(sibling_ids),
+                    Alert.created_at >= since,
+                )
+                .limit(1)
+            )
+            if recent is not None:
+                return []
+
+        message = (
+            f"{staff_name} clocked in to a second shift while the first is still open"
+        )
+        gm_result = await db.execute(
+            select(User.id)
+            .join(Role, User.role_id == Role.id)
+            .join(RolePermission, Role.id == RolePermission.role_id)
+            .join(Permission, RolePermission.permission_id == Permission.id)
+            .where(User.organization_id == organization_id)
+            .where(User.is_active.is_(True))
+            .where(Permission.code == "schedules:update")
+            .where(User.id != staff_user_id)
+        )
+        gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
+        filtered = await self._filter_in_app_recipients(
+            db, gm_ids, "overlapping_clock_in"
+        )
+
+        alerts: list[Alert] = []
+        for uid in filtered:
+            alerts.append(
+                await alert_repository.create_alert(
+                    db,
+                    organization_id=organization_id,
+                    user_id=uid,
+                    alert_type="overlapping_clock_in",
                     message=message,
                     reference_type="attendance",
                     reference_id=attendance_id,

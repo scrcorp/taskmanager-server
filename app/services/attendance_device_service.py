@@ -8,6 +8,7 @@ shared store device performs on behalf of any staff member.
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 import string
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ from datetime import date, datetime, timezone
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -49,6 +50,11 @@ class IdentifyContext:
     today_status / current_break / scheduled_end 는 device 가 store 미할당이거나
     오늘 attendance 가 없으면 None. (primary attendance 기준)
     today_attendances 는 오늘 모든 attendance(=schedule) 목록 (Issue 8 다중 schedule).
+
+    default_schedule_id 는 "앱이 기본으로 다룰 shift"(D13/D14). clock-in 대상이라는
+    뜻이 아니다 — 활성 shift 가 있으면 그것이 기본이고, 그 shift 는 clock-in 불가다.
+    server_time 은 **판정용이 아니라 신선도용**이다. picker 를 열어둔 채 시간이 흐르면
+    프리뷰가 낡으므로 앱이 이 값 기준으로 재조회를 판단한다. 판정은 언제나 서버가 한다.
     """
     user: User
     today_status: str | None = None
@@ -56,6 +62,8 @@ class IdentifyContext:
     scheduled_end: datetime | None = None
     today_attendances: list[dict] = field(default_factory=list)
     stale_attendances: list[dict] = field(default_factory=list)  # Issue 11
+    default_schedule_id: UUID | None = None
+    server_time: datetime | None = None
 
 
 def generate_device_token() -> str:
@@ -430,10 +438,14 @@ class AttendanceDeviceService:
         manager_user_id: UUID,
         break_type: str | None = None,
         reason: str | None = None,
+        schedule_id: UUID | None = None,
     ) -> Attendance:
         """매니저가 manage 모드에서 임의 사용자 attendance 를 처리.
 
         PIN 우회. early clock-in/out 가드 우회. note 에 manager 표시.
+
+        `schedule_id` 는 겹침(D15) 상태에서 **어느 shift 를 처리하는지** 지목한다.
+        미지정이면 기존처럼 첫 번째 열린 row 가 대상이다.
         """
         return await self.perform_clock_action(
             db,
@@ -446,6 +458,7 @@ class AttendanceDeviceService:
             skip_pin_check=True,
             skip_early_guards=True,
             manager_user_id=manager_user_id,
+            schedule_id=schedule_id,
         )
 
     async def verify_user_pin(
@@ -475,6 +488,125 @@ class AttendanceDeviceService:
         if user.clockin_pin != pin:
             raise BadRequestError("Invalid PIN")
         return user
+
+    # ── 매장 Manager/SV 명단 (조기 출근 사유의 "누가 불렀나") ──────────────
+    #
+    # 목록 API 와 clock-in 의 `early_clock_in_requested_by` 검증이 **같은 규칙**을 써야
+    # 한다. 규칙이 갈리면 "앱이 방금 받은 명단에서 골랐는데 서버가 거부" 가 난다.
+    # 그래서 산출 규칙은 아래 `_store_manager_query()` 한 곳에만 있다.
+
+    def _store_manager_query(
+        self,
+        *,
+        organization_id: UUID,
+        store_id: UUID,
+        exclude_user_id: UUID | None = None,
+    ):
+        """조기 출근을 요청했을 법한 사람 = 해당 매장의 Manager/SV.
+
+        포함 규칙 (계약 §4):
+          - `SUPER_OWNER_PRIORITY < priority <= SV_PRIORITY` — Super Owner 는 매장 운영을
+            하지 않으므로 제외, Owner/GM/SV 는 포함.
+          - active + 미삭제. 비활성/퇴사자는 부를 수 없는 사람이다.
+          - Owner 는 `user_stores` 행 없이도 전 매장 관리로 취급하는 기존 규칙을 따른다.
+            그 외에는 이 매장에 소속(`user_stores`)돼 있어야 한다.
+            `is_manager=True` 로 더 좁히지 않는 이유: 실제로 부르는 일이 잦은
+            `is_work_assignment` SV 가 빠져 "직접 입력" 으로 새어나가 집계가 비어버린다.
+          - 본인 제외 — "누가 불렀나" 에 자기 자신은 답이 아니다.
+        """
+        from app.core.permissions import SUPER_OWNER_PRIORITY, SV_PRIORITY, OWNER_PRIORITY
+        from app.models.user import Role
+
+        assigned_here = (
+            select(UserStore.id)
+            .where(UserStore.user_id == User.id, UserStore.store_id == store_id)
+            .exists()
+        )
+        query = (
+            select(User)
+            .join(Role, Role.id == User.role_id)
+            .options(selectinload(User.role))
+            .where(
+                User.organization_id == organization_id,
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+                Role.priority > SUPER_OWNER_PRIORITY,
+                Role.priority <= SV_PRIORITY,
+                or_(Role.priority <= OWNER_PRIORITY, assigned_here),
+            )
+            .order_by(Role.priority.asc(), User.full_name.asc())
+        )
+        if exclude_user_id is not None:
+            query = query.where(User.id != exclude_user_id)
+        return query
+
+    async def list_store_managers(
+        self,
+        db: AsyncSession,
+        *,
+        organization_id: UUID,
+        store_id: UUID,
+        asking_user_id: UUID,
+    ) -> list[dict]:
+        """매장 Manager/SV 명단 — 조기 출근 사유 단계에서만 조회한다.
+
+        빈 목록도 정상이다(200 []). 앱은 항상 "Someone else" 로 계속 진행할 수 있다.
+        """
+        from app.utils.names import display_name
+
+        result = await db.execute(
+            self._store_manager_query(
+                organization_id=organization_id,
+                store_id=store_id,
+                exclude_user_id=asking_user_id,
+            )
+        )
+        # 표시할 이름이 없는 계정은 **아예 내리지 않는다.**
+        # username 으로 폴백하면 키오스크 화면에 로그인 계정명(`admin` 등)이 뜬다 —
+        # 이 엔드포인트가 PIN 게이트까지 두는 이유(매니저 명단 = 사회공학 표적)와
+        # 정면으로 어긋난다. 이름이 없으면 직원이 그 사람을 알아보지도 못하므로
+        # 목록에 둘 값어치도 없다. 명단이 비어도 "직접 입력" 으로 계속 진행할 수 있다.
+        rows: list[dict] = []
+        for u in result.scalars().all():
+            name = (display_name(u) or "").strip()
+            if not name:
+                continue
+            rows.append(
+                {
+                    "user_id": u.id,
+                    "full_name": name,
+                    "role_name": u.role.name if u.role else "",
+                    "role_priority": u.role.priority if u.role else 999,
+                }
+            )
+        return rows
+
+    async def _is_valid_reason_user(
+        self,
+        db: AsyncSession,
+        *,
+        candidate_id: UUID,
+        organization_id: UUID,
+        store_id: UUID,
+        asking_user_id: UUID,
+    ) -> bool:
+        """`early_clock_in_requested_by` 가 명단 규칙을 통과하는지.
+
+        목록(`list_store_managers`)과 **같은 규칙**이어야 한다 — 이름 없는 계정은
+        목록에 없으므로 id 로 지목하는 것도 받지 않는다.
+        """
+        from app.utils.names import display_name
+
+        found = await db.scalar(
+            self._store_manager_query(
+                organization_id=organization_id,
+                store_id=store_id,
+                exclude_user_id=asking_user_id,
+            ).where(User.id == candidate_id)
+        )
+        if found is None:
+            return False
+        return bool((display_name(found) or "").strip())
 
     async def identify_manager_by_pin(
         self,
@@ -575,7 +707,7 @@ class AttendanceDeviceService:
 
         from app.models.schedule import Schedule
         from app.services.attendance_service import compute_effective_status
-        from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
+        from app.services.attendance_threshold_service import resolve_thresholds
         from app.utils.timezone import get_store_day_config, get_work_date
 
         now = datetime.now(timezone.utc)
@@ -592,7 +724,12 @@ class AttendanceDeviceService:
         stale_rows = list(
             (
                 await db.execute(
-                    select(Attendance.work_date, Attendance.status, Attendance.clock_in)
+                    select(
+                        Attendance.id,
+                        Attendance.work_date,
+                        Attendance.status,
+                        Attendance.clock_in,
+                    )
                     .where(
                         Attendance.user_id == user.id,
                         Attendance.store_id == store_id,
@@ -606,10 +743,32 @@ class AttendanceDeviceService:
                 )
             ).all()
         )
-        stale = [
-            {"work_date": wd, "status": st, "clock_in_display": _tz_hhmm(ci)}
-            for (wd, st, ci) in stale_rows
-        ]
+        # 어제 영업일의 **진행 중** 야간조는 아래 후보 목록(today_attendances)에 그대로
+        # 실려 Clock Out 을 제시한다 — 그 경우 여기서 다시 "지난 근무가 안 닫혔다"
+        # 경고까지 띄우면, 화면이 바로 옆에서 해결책을 주고 있는데도 사고처럼 보인다.
+        # 목록에 실린 attendance 는 아래에서 제외한다(`_prune_stale`).
+        def _stale_items(exclude_ids: set[UUID]) -> list[dict]:
+            return [
+                {"work_date": wd, "status": st, "clock_in_display": _tz_hhmm(ci)}
+                for (att_id, wd, st, ci) in stale_rows
+                if att_id not in exclude_ids
+            ]
+
+        stale = _stale_items(set())
+
+        from datetime import timedelta as _td_prev_day
+
+        from app.utils.attendance_judgement import ClockInKind, judge_clock_in
+        from app.utils.attendance_overlap import overlapping_keys_from_rows
+        from app.utils.attendance_shift_candidates import (
+            ShiftCandidate,
+            clock_in_eligibility,
+            is_open_prev_day_candidate,
+            pick_default_shift,
+            sort_shift_candidates,
+        )
+
+        yesterday = today - _td_prev_day(days=1)
 
         rows = list(
             (
@@ -625,31 +784,61 @@ class AttendanceDeviceService:
                 )
             ).all()
         )
+        seen_schedule_ids = {
+            att.schedule_id for att, _sch in rows if att.schedule_id is not None
+        }
+
+        # clock-in 후보 조회(Schedule 기준)와 목록(Attendance 기준)의 **출처를 맞춘다**.
+        # 두 쿼리가 갈리면 (a) eager 훅이 누락한 스케줄은 picker 에 안 보이는데 서버는
+        # 고를 수 있고, (b) 어제 영업일 야간조 shift 는 어느 쪽에도 안 나온다.
+        sched_rows = list(
+            (
+                await db.execute(
+                    select(Schedule, Attendance)
+                    .outerjoin(Attendance, Attendance.schedule_id == Schedule.id)
+                    .where(
+                        Schedule.user_id == user.id,
+                        Schedule.store_id == store_id,
+                        Schedule.operating_day.in_([today, yesterday]),
+                        Schedule.status == "confirmed",
+                    )
+                )
+            ).all()
+        )
+        for schedule, att in sched_rows:
+            if schedule.id in seen_schedule_ids:
+                continue
+            if att is not None and att.status == "cancelled":
+                continue
+            seen_schedule_ids.add(schedule.id)
+            rows.append((att, schedule))
+
         if not rows:
             return IdentifyContext(user=user, stale_attendances=stale)
 
-        try:
-            late_buf_raw = await resolve_setting(
-                db,
-                key="attendance.late_buffer_minutes",
-                organization_id=organization_id,
-                store_id=store_id,
-            )
-            late_buffer = int(late_buf_raw) if late_buf_raw is not None else 5
-        except (SettingNotRegisteredError, TypeError, ValueError):
-            late_buffer = 5
+        thresholds = await resolve_thresholds(
+            db, organization_id=organization_id, store_id=store_id
+        )
+        late_buffer = thresholds.late_buffer
 
         def _display(value: datetime | None) -> str | None:
             if value is None:
                 return None
             return value.astimezone(tz_info).strftime("%H:%M")
 
-        # 각 row → item dict (effective status + scheduled times + current_break)
-        items: list[dict] = []
+        # 겹침 표시 — 앱이 "두 shift 에 출근해 있다" 배너를 해소될 때까지 띄우는 근거.
+        overlap_ids = overlapping_keys_from_rows(
+            [(att.id, att.clock_in, att.clock_out) for att, _s in rows if att is not None],
+            now=now,
+        )
+
+        # 각 row → (후보, item dict). 후보는 정렬/기본선택 규칙(clock-in 경로와 공용)에,
+        # item 은 응답에 쓴다.
+        entries: list[tuple[ShiftCandidate, dict]] = []
         for att, schedule in rows:
             eff_status = compute_effective_status(
-                att_status=att.status,
-                att_clock_in=att.clock_in,
+                att_status=att.status if att is not None else "upcoming",
+                att_clock_in=att.clock_in if att is not None else None,
                 schedule_start_time=schedule.start_time if schedule else None,
                 schedule_end_time=schedule.end_time if schedule else None,
                 schedule_work_date=schedule.work_date if schedule else None,
@@ -671,8 +860,36 @@ class AttendanceDeviceService:
                 sched_start_utc = _ss.astimezone(timezone.utc) if _ss else None
                 sched_end_utc = _se.astimezone(timezone.utc) if _se else None
 
+            candidate = ShiftCandidate(
+                schedule_id=schedule.id if schedule is not None else None,
+                operating_day=(
+                    schedule.operating_day if schedule is not None
+                    else (att.work_date if att is not None else None)
+                ),
+                scheduled_start=sched_start_utc,
+                scheduled_end=sched_end_utc,
+                attendance_id=att.id if att is not None else None,
+                attendance_status=att.status if att is not None else None,
+                clock_in=att.clock_in if att is not None else None,
+                clock_out=att.clock_out if att is not None else None,
+            )
+            # 어제 영업일 shift 를 목록에 남기는 조건은 두 갈래다.
+            #  (a) **아직 진행 중**(찍고 안 닫음) — 무조건 남긴다. 매장 day_start 를
+            #      넘겨 끝나는 야간조가 여기다. 이 row 를 빼면 today_status 가 null 이
+            #      되어 앱이 Clock Out 을 아예 못 띄우고, Clock In 을 누르면 서버의
+            #      열린-row 가드가 400 으로 막아 키오스크에서 퇴근이 불가능해진다.
+            #  (b) 미출근 후보 — clock-in 경로와 **같은 조건**(종료 후 4시간 이내)일
+            #      때만. 안 그러면 picker 가 보여준 shift 를 서버가 거부하는 화면이 된다.
+            if (
+                candidate.operating_day is not None
+                and candidate.operating_day < today
+                and not candidate.is_active
+                and not is_open_prev_day_candidate(candidate, now=now)
+            ):
+                continue
+
             cur_break: dict | None = None
-            if eff_status == "on_break":
+            if eff_status == "on_break" and att is not None:
                 br = (
                     await db.execute(
                         select(AttendanceBreak)
@@ -690,34 +907,84 @@ class AttendanceDeviceService:
                         "started_at": br.started_at,
                     }
 
-            items.append({
-                "schedule_id": att.schedule_id,
+            eligible, ineligible_reason = clock_in_eligibility(candidate)
+            # 판정 프리뷰 — "지금 이 shift 로 찍으면 어떻게 기록되는가"(D3).
+            # **숫자만** 내린다. "3h 12m late" 문자열은 앱이 l10n 으로 조립한다.
+            # 계산은 clock-in 실기록과 똑같이 judge_clock_in 을 쓴다 — 앱이 자체 계산하면
+            # 초 버림 지점이 하나 더 생기고 화면과 기록이 갈린다(D16).
+            preview: dict | None = None
+            if eligible:
+                verdict = judge_clock_in(
+                    now,
+                    sched_start_utc,
+                    late_buffer=thresholds.late_buffer,
+                    early_threshold=thresholds.early_clock_in,
+                )
+                preview = {
+                    "kind": verdict.kind.value,
+                    "minutes_early": verdict.minutes_early,
+                    "minutes_late": verdict.minutes_late,
+                    "reason_required": verdict.kind is ClockInKind.EARLY,
+                }
+
+            entries.append((candidate, {
+                "schedule_id": candidate.schedule_id,
+                "attendance_id": candidate.attendance_id,
+                "operating_day": candidate.operating_day,
                 "status": eff_status,
                 "scheduled_start": sched_start_utc,
                 "scheduled_end": sched_end_utc,
                 "scheduled_start_display": _display(sched_start_utc),
                 "scheduled_end_display": _display(sched_end_utc),
+                "clock_in": candidate.clock_in,
+                "clock_in_display": _display(candidate.clock_in),
+                "clock_in_eligible": eligible,
+                "ineligible_reason": ineligible_reason,
+                "is_default": False,
+                "overlapping": candidate.attendance_id in overlap_ids,
+                "clock_in_preview": preview,
                 "current_break": cur_break,
-            })
+            }))
 
-        # 우선순위 정렬: working > on_break > late > soon > upcoming > no_show > clocked_out
-        rank = {
-            "working": 0, "on_break": 1, "late": 2, "soon": 3,
-            "upcoming": 4, "no_show": 5, "clocked_out": 6,
+        if not entries:
+            return IdentifyContext(user=user, stale_attendances=stale)
+
+        # 정렬 = 활성 → 미출근(오늘 시간순 → 어제) → 완료/불가 (§1.3). status 랭크
+        # (upcoming 4 < no_show 5) 를 버린 이유가 원인 A 다 — 미출근 오전 shift 가
+        # no_show 로 강등돼 저녁 shift 뒤로 밀리면서 앱이 저녁 id 를 실어 보냈다.
+        #
+        # `today=` 를 반드시 넘긴다. 이 목록은 오늘·어제가 섞여 있고, 어제 shift 의
+        # 시작 시각은 오늘 것보다 항상 이르다 — 안 넘기면 어제 결근 shift 가 0번 +
+        # default_schedule_id 를 가져가고, 구버전 HTMA 는 그 id 를 그대로 실어 보내
+        # (명시 선택으로 수용된다) 오늘 근무가 통째로 어제 영업일에 귀속된다.
+        order = {
+            id(candidate): index
+            for index, candidate in enumerate(
+                sort_shift_candidates([c for c, _i in entries], today=today)
+            )
         }
-        items.sort(key=lambda it: (
-            rank.get(it["status"], 99),
-            it["scheduled_start"] or datetime.max.replace(tzinfo=timezone.utc),
-        ))
+        entries.sort(key=lambda pair: order[id(pair[0])])
+
+        default = pick_default_shift([c for c, _i in entries], today=today)
+        default_schedule_id = default.schedule_id if default is not None else None
+        items = [item for _c, item in entries]
+        for candidate, item in entries:
+            if default is not None and candidate is default:
+                item["is_default"] = True
 
         primary = items[0]
+        listed_ids = {
+            item["attendance_id"] for item in items if item["attendance_id"] is not None
+        }
         return IdentifyContext(
             user=user,
             today_status=primary["status"],
             current_break=primary["current_break"],
             scheduled_end=primary["scheduled_end"],
             today_attendances=items,
-            stale_attendances=stale,
+            stale_attendances=_stale_items(listed_ids),
+            default_schedule_id=default_schedule_id,
+            server_time=now,
         )
 
     # ── Clock 동작 ─────────────────────────────────────────
@@ -751,6 +1018,8 @@ class AttendanceDeviceService:
         manager_user_id: UUID | None = None,
         schedule_id: UUID | None = None,
         walk_in: bool = False,
+        allow_overlap: bool = False,
+        early_clock_in_requested_by: UUID | None = None,
     ) -> Attendance:
         """기기 + user_id + PIN 으로 clock in/out/break 처리.
 
@@ -760,6 +1029,21 @@ class AttendanceDeviceService:
 
         Admin override 모드 (skip_pin_check=True) 는 매니저가 키오스크 관리자 모드에서
         타인 attendance 를 처리할 때 사용. PIN 우회 + early in/out 가드 우회.
+
+        `schedule_id` 는 clock_in 뿐 아니라 clock_out/break 에서도 **대상 row 를 지목**한다
+        (D15 겹침 이후엔 열린 row 가 둘일 수 있어 "첫 번째 열린 row" 규칙만으로는 어느
+        shift 를 닫는지 아무도 모른다). 미지정이면 기존 `_active_row()` fallback 그대로.
+
+        `allow_overlap` 은 "다른 shift 가 열려 있는 걸 알면서 또 찍는다" 는 직원의 확인이다.
+        플래그 하나로 가드를 통째로 여는 게 아니라, 명시 `schedule_id` 가 열린 row 와 다른
+        shift 를 가리킬 때만 연다 — 자동 선택(fallback)으로는 절대 열리지 않는다.
+        키오스크 더블탭/네트워크 재시도가 조용히 두 row 를 만드는 것을 지금 이 가드
+        하나가 막고 있기 때문이다.
+
+        `early_clock_in_requested_by` 는 "누가 일찍 오라고 했나"(D9) 의 **식별자**다.
+        표시용 문자열은 지금처럼 `reason` 으로 들어와 타임라인에 남고, 이 값은 별도
+        컬럼에 저장된다. early override 가 성립할 때만 소비하며 그 외엔 조용히 무시한다
+        (구버전 HTMA 는 아예 보내지 않는다).
         """
         if device.store_id is None:
             raise BadRequestError("Device has no store assigned")
@@ -794,8 +1078,29 @@ class AttendanceDeviceService:
         # clock-in 외 액션(break/clock_out)은 "지금 활성" row 기준.
         # working → on_break → late 순으로 찾고, 없으면 None.
         def _active_row() -> Attendance | None:
-            for target_status in ("working", "on_break", "late"):
+            # 겹침 허용(D15) 이후엔 열린 row 가 둘일 수 있다. 그때 "첫 번째 열린 row"
+            # 규칙만 남겨두면 매니저가 어느 shift 를 퇴근시켰는지 알 수 없으므로,
+            # 호출자가 schedule_id 로 지목하면 그것을 먼저 쓴다.
+            if schedule_id is not None:
                 for r in rows_ext:
+                    if r.schedule_id == schedule_id and r.status in (
+                        "working", "on_break", "late",
+                    ):
+                        return r
+            # 미지정 fallback. `list_user_day()` 에는 ORDER BY 가 없어 DB 가 주는 순서가
+            # 사실상 임의다 — 열린 row 가 둘일 때(D15) "어느 shift 를 닫는지 아무도
+            # 모르는" 상태가 된다. 최소한 규칙은 하나로 못 박는다: **가장 최근에 찍은
+            # 것부터**. 앱의 기본 제시(`pick_default_shift` 의 활성 정렬)와 같은 규칙이라
+            # 화면이 가리킨 shift 와 실제로 닫히는 shift 가 어긋나지 않는다.
+            ordered_rows = sorted(
+                rows_ext,
+                key=lambda r: (
+                    0 if r.clock_in is not None else 1,
+                    -(r.clock_in.timestamp() if r.clock_in is not None else 0.0),
+                ),
+            )
+            for target_status in ("working", "on_break", "late"):
+                for r in ordered_rows:
                     if r.status == target_status:
                         return r
             return None
@@ -812,41 +1117,131 @@ class AttendanceDeviceService:
         break_before: tuple[datetime | None, datetime | None, str | None] = (None, None, None)
 
         if action == "clock_in":
-            # 1) 실제로 출근중인 shift(clock_in 있고 clock_out 없는 working/on_break) 만 차단.
-            #    late는 "스케줄 지났는데 미출근" 상태일 수 있어 clock_in 여부로 판단해야 한다 —
-            #    이전 shift가 단순 미출근(late, clock_in IS NULL)이면 새 shift clock-in 허용.
-            active = next(
-                (r for r in rows_ext
-                 if r.clock_in is not None and r.clock_out is None
-                 and r.status in ("working", "on_break", "late")),
-                None,
-            )
-            if active is not None:
-                raise BadRequestError("Previous shift not clocked out. Clock out first.")
-
-            # 2) clock-in 대상 schedule 선택 — 이 매장/유저/오늘 confirmed 중
-            #    "아직 clock_in 안 된" attendance row 와 묶인 것만 후보.
+            # 1) clock-in 대상 shift 후보 — identify 와 **같은 순수 규칙**을 쓴다.
+            #    두 경로가 각자 후보를 고르던 것이 원인 A 의 절반이었다
+            #    (키오스크는 Schedule 기준 "가장 가까운 미래", identify 는 status 랭크).
             from app.models.schedule import Schedule
-            from datetime import timedelta as _td
             from zoneinfo import ZoneInfo as _Zi
 
+            from app.utils.attendance_shift_candidates import (
+                ShiftCandidate,
+                pick_fallback_shift,
+                split_candidates,
+            )
+
+            yesterday = today - _td_prev(days=1)
             sch_result = await db.execute(
                 select(Schedule)
                 .where(
                     Schedule.user_id == user.id,
                     Schedule.store_id == store_id,
-                    Schedule.operating_day == today,
+                    # (D4) 야간조 — 매장 day_start 경계를 넘겨 지각하면 어제 영업일 라벨의
+                    # shift 로 찍어야 한다. 어제 것은 아래 split_candidates 가 "미출근 +
+                    # 종료 후 4시간 이내" 로 다시 좁힌다.
+                    Schedule.operating_day.in_([today, yesterday]),
                     Schedule.status == "confirmed",
                 )
                 .order_by(Schedule.start_at.asc().nulls_last())
             )
-            all_candidates = list(sch_result.scalars().all())
+            all_schedules = list(sch_result.scalars().all())
+            schedule_by_id = {s.id: s for s in all_schedules}
+            today_schedules = [s for s in all_schedules if s.operating_day == today]
 
-            # 이미 끝난(clocked_out) shift 는 후보에서 제외.
-            done_schedule_ids = {r.schedule_id for r in day_rows if r.status == "clocked_out" and r.schedule_id is not None}
-            candidates = [s for s in all_candidates if s.id not in done_schedule_ids]
+            tz = _Zi(store_tz)
 
-            if not candidates:
+            def _instants(s):
+                return resolve_schedule_instants(
+                    start_at=s.start_at, end_at=s.end_at, work_date=s.work_date,
+                    start_time=s.start_time, end_time=s.end_time, tz_name=tz.key,
+                )
+
+            def _start_dt(s):
+                return _instants(s)[0]
+
+            def _end_dt(s):
+                return _instants(s)[1]
+
+            # 후보의 attendance 사실(찍었나/닫혔나)은 이미 읽어 둔 오늘/어제 row 에서 온다
+            # — 후보 조회 때문에 쿼리를 더 늘리지 않는다.
+            att_by_schedule = {
+                r.schedule_id: r
+                for r in (list(day_rows) + list(prev_rows))
+                if r.schedule_id is not None
+            }
+
+            def _to_candidate(s) -> ShiftCandidate:
+                att = att_by_schedule.get(s.id)
+                return ShiftCandidate(
+                    schedule_id=s.id,
+                    operating_day=s.operating_day,
+                    scheduled_start=_start_dt(s),
+                    scheduled_end=_end_dt(s),
+                    attendance_id=att.id if att is not None else None,
+                    attendance_status=att.status if att is not None else None,
+                    clock_in=att.clock_in if att is not None else None,
+                    clock_out=att.clock_out if att is not None else None,
+                )
+
+            today_candidates, prev_candidates = split_candidates(
+                [_to_candidate(s) for s in all_schedules], now=now, today=today
+            )
+            candidates = today_candidates + prev_candidates
+
+            # 2) 이중 clock-in 가드 — 실제로 출근중인 shift(clock_in 있고 clock_out 없는
+            #    working/on_break/late) 가 있으면 원칙적으로 차단. late 는 "스케줄 지났는데
+            #    미출근" 일 수 있어 clock_in 여부로 판단한다 (미출근 late 는 막지 않는다).
+            #
+            #    D15 예외: 직원이 **다른 shift 를 명시적으로 지목**하고 겹침을 확인
+            #    (`allow_overlap`)했을 때만 연다. 자동 선택으로는 열리지 않는다.
+            open_rows = [
+                r for r in rows_ext
+                if r.clock_in is not None and r.clock_out is None
+                and r.status in ("working", "on_break", "late")
+            ]
+            overlap_open_rows: list[Attendance] = []
+            if open_rows:
+                open_schedule_ids = {r.schedule_id for r in open_rows}
+                picks_other_shift = (
+                    schedule_id is not None
+                    and schedule_id not in open_schedule_ids
+                    and any(c.schedule_id == schedule_id for c in candidates)
+                )
+                if not picks_other_shift:
+                    # 같은 shift 재출근 / 자동 선택 / 후보 밖 지목 — 전부 기존 그대로 막는다.
+                    # 구버전 HTMA 는 today_attendances[0](= 활성 shift) 를 보내므로 항상 여기.
+                    raise BadRequestError("Previous shift not clocked out. Clock out first.")
+                if not allow_overlap:
+                    from app.core.error_codes.attendance import (
+                        OVERLAPPING_CLOCK_IN_CONFIRMATION_REQUIRED,
+                    )
+
+                    first_open = open_rows[0]
+                    open_sched = schedule_by_id.get(first_open.schedule_id)
+                    o_start, o_end = (
+                        _instants(open_sched) if open_sched is not None else (None, None)
+                    )
+
+                    def _hhmm(value: datetime | None) -> str | None:
+                        return value.astimezone(tz).strftime("%H:%M") if value else None
+
+                    raise OVERLAPPING_CLOCK_IN_CONFIRMATION_REQUIRED(
+                        open_attendance_ids=[str(r.id) for r in open_rows],
+                        open_schedule_ids=[
+                            str(r.schedule_id) for r in open_rows if r.schedule_id
+                        ],
+                        open_scheduled_start_display=_hhmm(o_start),
+                        open_scheduled_end_display=_hhmm(o_end),
+                    )
+                overlap_open_rows = list(open_rows)
+
+            # 3) 오늘 후보가 없으면 워크인 경로. **어제 후보는 이 판단에 넣지 않는다** —
+            #    어제 결근 shift 하나가 남아 있다고 워크인을 막으면 오늘의 근무가 통째로
+            #    하루 전 영업일에 귀속되어 급여 기간이 밀린다. 단 직원이 어제 shift 를
+            #    명시적으로 지목했다면 그건 사람의 판단이므로 워크인을 만들지 않는다.
+            explicitly_picked = schedule_id is not None and any(
+                c.schedule_id == schedule_id for c in candidates
+            )
+            if not today_candidates and not explicitly_picked:
                 # 사용할 수 있는 "열린" 스케줄이 없음. 매장이 walk_in 을 허용하고 요청이
                 # 워크인 의도이면, 오늘 스케줄이 아예 없든 / 이전 (워크인)shift 가 모두
                 # clocked_out 이든 관계없이 **새 워크인 스케줄을 생성**한다. → 퇴근 후
@@ -883,73 +1278,69 @@ class AttendanceDeviceService:
                         store_tz=store_tz,
                         created_by=user.id,
                     )
-                    candidates = [walk_in_schedule]
+                    schedule_by_id[walk_in_schedule.id] = walk_in_schedule
+                    walk_in_candidate = _to_candidate(walk_in_schedule)
+                    today_candidates = [walk_in_candidate]
+                    candidates = [walk_in_candidate]
                     # 방금 생성한 워크인 스케줄을 사용한다. 클라가 이전 (clocked_out)
                     # shift 의 schedule_id 를 실어 보냈더라도 그건 무시 — 안 그러면
                     # 아래 명시-선택 체크에서 새 스케줄과 불일치로 거부된다.
                     schedule_id = None
-                elif not all_candidates:
+                elif schedule_id is not None:
+                    # 직원이 고른 shift 가 후보 밖이다(끝났거나, 취소됐거나, 4시간 지난
+                    # 어제 shift). 여기서 "오늘 스케줄 없음" 으로 답하면 앱은 막다른
+                    # 길만 보고 끝난다 — 아래 명시-선택 체크로 흘려보내 구조화된
+                    # `shift_not_available` 을 받게 한다(앱은 identify 를 다시 부른다).
+                    pass
+                elif not today_schedules:
                     raise BadRequestError("No scheduled shift for today at this store")
                 else:
                     raise BadRequestError("All today's shifts are already completed")
 
-            tz = _Zi(store_tz)
-
-            def _instants(s):
-                return resolve_schedule_instants(
-                    start_at=s.start_at, end_at=s.end_at, work_date=s.work_date,
-                    start_time=s.start_time, end_time=s.end_time, tz_name=tz.key,
-                )
-
-            def _start_dt(s):
-                return _instants(s)[0]
-
-            def _end_dt(s):
-                return _instants(s)[1]
-
-            schedule = None
-            # (Issue 8) client 가 명시적으로 schedule 을 선택한 경우 그것을 사용.
-            # 단 candidates (= clock-in 가능한 미완료 shift) 에 있어야 함.
-            # clocked_out 등으로 candidates 에 없으면 명시 거부 (우선순위 fallback 안 함).
+            # 4) 대상 shift 확정.
+            selected = None
             if schedule_id is not None:
-                schedule = next((s for s in candidates if s.id == schedule_id), None)
-                if schedule is None:
+                # (Issue 8) client 가 명시적으로 선택한 shift. 후보 밖(clocked_out /
+                # 취소 / 4시간 지난 어제 shift)이면 fallback 하지 않고 거부한다 —
+                # 앱이 방금 받은 목록에서 고른 값이므로 불일치는 목록이 낡았다는 뜻이고,
+                # 앱은 이 코드를 보고 identify 를 다시 불러 picker 를 갱신한다.
+                selected = next(
+                    (c for c in candidates if c.schedule_id == schedule_id), None
+                )
+                if selected is None:
+                    from app.core.error_codes.attendance import SHIFT_NOT_AVAILABLE
+
+                    raise SHIFT_NOT_AVAILABLE(schedule_id=str(schedule_id))
+            else:
+                # 서버 fallback — **오늘 후보 중 시간순 첫 미출근** 하나뿐이다(D14).
+                # 예전의 "진행중 window → 가장 가까운 미래 → 가장 최근 종료" 우선순위는
+                # 2순위가 정확히 원인 A 였다: 오전 shift 를 놓치고 13:05 에 찍으면
+                # 17:00 shift 가 잡혀 지각이 조기출근으로 기록됐다.
+                selected = pick_fallback_shift(today_candidates)
+                if selected is None:
+                    # 오늘 후보가 "미출근" 없이 활성 shift 뿐인 경우. 정상 흐름에서는
+                    # 위 이중 clock-in 가드가 이미 막았으므로(자동 선택으로는 겹침이
+                    # 열리지 않는다) 여기 도달하는 건 상태가 어긋난 기록뿐이다.
+                    # 문구는 가드와 같은 것을 쓴다 — 직원이 할 일이 똑같기 때문이다.
+                    # (후보가 아예 없는 경우는 위 3) 에서 이미 걸러졌다. 같은 문구를
+                    #  두 곳에서 만들지 않는다.)
                     raise BadRequestError(
-                        "Selected shift is not available for clock-in"
+                        "Previous shift not clocked out. Clock out first."
                     )
-            # 우선순위 1: 현재 window (start <= now <= end) 안에 있는 스케줄
-            if schedule is None:
-                for s in candidates:
-                    sd = _start_dt(s)
-                    ed = _end_dt(s)
-                    if sd is not None and ed is not None and sd <= now <= ed:
-                        schedule = s
-                        break
-            # 우선순위 2: 가장 가까운 미래 (start > now)
-            if schedule is None:
-                future = [s for s in candidates if (_start_dt(s) or datetime.min.replace(tzinfo=tz)) > now]
-                if future:
-                    future.sort(key=lambda s: _start_dt(s) or datetime.max.replace(tzinfo=tz))
-                    schedule = future[0]
-            # 우선순위 3: 가장 최근 종료 (end < now)
-            if schedule is None:
-                past = [s for s in candidates if (_end_dt(s) or datetime.max.replace(tzinfo=tz)) < now]
-                if past:
-                    past.sort(key=lambda s: _end_dt(s) or datetime.min.replace(tzinfo=tz), reverse=True)
-                    schedule = past[0]
-            if schedule is None:
-                schedule = candidates[0]
 
-            # late 판정 — clock_in > scheduled_start + LATE_BUFFER
-            from app.services.attendance_service import LATE_BUFFER_MINUTES
-            from app.utils.settings_resolver import (
-                SettingNotRegisteredError,
-                resolve_setting,
-            )
+            schedule = schedule_by_id[selected.schedule_id]
 
+            # early/late 판정 — 임계값 2종 모두 매장 설정에서 온다.
+            # (예전엔 early 만 설정을 읽고 late 는 모듈 상수 0분이라 한 함수 안에서
+            #  판정 소스가 갈렸다. 판정 자체는 공용 순수 함수가 한다.)
             from app.services.attendance_service import (
                 ANOMALY_EARLY_CLOCK_IN_OVERRIDE,
             )
+            from app.services.attendance_threshold_service import (
+                resolve_early_clock_in_threshold,
+                resolve_late_buffer,
+            )
+            from app.utils.attendance_judgement import ClockInKind, judge_clock_in
 
             status_val = "working"
             anomalies: list[str] | None = None
@@ -958,21 +1349,21 @@ class AttendanceDeviceService:
             early_override_preapproved = False
             scheduled_start = _start_dt(schedule)
             if scheduled_start is not None:
-                # Early clock-in threshold — 이보다 이르면 사유 없이는 못 찍는다.
-                try:
-                    raw = await resolve_setting(
-                        db,
-                        key="attendance.early_clock_in_threshold_minutes",
-                        organization_id=device.organization_id,
-                        store_id=store_id,
-                    )
-                    early_threshold = int(raw) if raw is not None else 5
-                except (SettingNotRegisteredError, TypeError, ValueError):
-                    early_threshold = 5
+                early_threshold = await resolve_early_clock_in_threshold(
+                    db, organization_id=device.organization_id, store_id=store_id
+                )
+                late_buffer = await resolve_late_buffer(
+                    db, organization_id=device.organization_id, store_id=store_id
+                )
                 # late/early 판정은 분 단위로만 한다(초는 버림). clock_in 은 초까지 저장하되
                 # "정시 출근(같은 분)"이 초 차이로 late 로 찍히지 않게 한다. 워크인은 start=
                 # clock-in(분 내림)이라 이 규칙으로 자연히 early/late 가 아니게 된다(특수예외 불필요).
-                now_min = now.replace(second=0, microsecond=0)
+                verdict = judge_clock_in(
+                    now,
+                    scheduled_start,
+                    late_buffer=late_buffer,
+                    early_threshold=early_threshold,
+                )
                 # 조기 clock-in override — 예정보다 이르면 차단이 아니라 "사유 요구".
                 # 매니저/SV 가 현장에 없어도 직원이 직접 찍을 수 있어야 하기 때문
                 # (일찍 와달라고 부른 경우). 사유가 오면 통과시키고 anomaly 로 표시한다.
@@ -982,15 +1373,13 @@ class AttendanceDeviceService:
                 # 근무는 특이사항으로 보여야 하기 때문. 다만 사유는 요구하지 않고,
                 # 확인이 이미 끝난 것으로 처리한다(매니저가 그 자리에서 승인한 행위라
                 # 다시 확인시키면 이중 확인). 자동 확인은 Phase 2 의 확인 컬럼이 담당.
-                if now_min < scheduled_start - _td(minutes=early_threshold):
+                if verdict.kind is ClockInKind.EARLY:
                     early_clock_in_override = True
                     early_override_preapproved = skip_early_guards
                     if not skip_early_guards and not (reason and reason.strip()):
                         from fastapi import HTTPException, status
 
-                        minutes_early = int(
-                            (scheduled_start - now_min).total_seconds() / 60
-                        )
+                        minutes_early = verdict.minutes_early
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
                             detail={
@@ -1006,9 +1395,35 @@ class AttendanceDeviceService:
                             },
                         )
                     anomalies = [ANOMALY_EARLY_CLOCK_IN_OVERRIDE]
-                if now_min > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
+                elif verdict.kind is ClockInKind.LATE:
+                    # elif — early 와 late 는 배타. 예전엔 두 분기가 각각 anomalies 를
+                    # 대입해서 late 가 early 라벨을 지웠다.
                     status_val = "late"
                     anomalies = ["late"]
+
+            # ── 조기 출근 요청자(D9) ────────────────────────────────────────
+            # early override 가 성립할 때만 의미를 둔다. 정시/지각 출근에 딸려온 값은
+            # 조용히 버린다 — 구버전/오용 내성(에러로 만들면 무해한 요청이 막힌다).
+            #
+            # 명단 밖 id 는 **조용한 null 저장이 아니라 400** 이다. 앱이 방금 서버에서
+            # 받은 명단에서 고른 값이므로 불일치는 클라 버그이거나 변조이고, 조용히
+            # 버리면 이 컬럼을 만든 이유(동명이인·개명 추적)가 그대로 사라진다.
+            # 앱은 이 코드를 받으면 id 를 떼고 같은 사유로 1회 자동 재시도하므로
+            # 키오스크 앞에서 출근이 막히지는 않는다.
+            requested_by: UUID | None = None
+            if early_clock_in_override and early_clock_in_requested_by is not None:
+                from app.core.error_codes.attendance import INVALID_REASON_USER
+
+                valid = await self._is_valid_reason_user(
+                    db,
+                    candidate_id=early_clock_in_requested_by,
+                    organization_id=device.organization_id,
+                    store_id=store_id,
+                    asking_user_id=user.id,
+                )
+                if not valid:
+                    raise INVALID_REASON_USER()
+                requested_by = early_clock_in_requested_by
 
             # Eager 모델: 이 schedule 에 묶인 attendance row 는 이미 존재해야 함.
             # upcoming/late/no_show 상태에서 clock-in 시 update.
@@ -1026,6 +1441,9 @@ class AttendanceDeviceService:
                         if a not in existing_anoms:
                             existing_anoms.append(a)
                 target.anomalies = existing_anoms or None
+                # 이번 clock-in 이 요청자 값의 소유자다 — early 가 아니면 None 으로
+                # 되돌린다. 지운 뒤 다시 찍은 기록에 옛 요청자가 유령으로 붙지 않게.
+                target.early_clock_in_requested_by = requested_by
                 if early_clock_in_override and early_override_preapproved:
                     # 매니저가 그 자리에서 승인한 조기 출근 — 라벨은 남기되 확인은 끝난 것.
                     target.early_clock_in_confirmed_by = manager_user_id
@@ -1042,7 +1460,8 @@ class AttendanceDeviceService:
                         "store_id": store_id,
                         "user_id": user.id,
                         "schedule_id": schedule.id,
-                        "work_date": today,
+                        # 어제 영업일 shift(D4)로 찍으면 급여 귀속도 그 영업일이다.
+                        "work_date": selected.operating_day or today,
                         "clock_in": now,
                         "clock_in_timezone": store_tz,
                         "status": status_val,
@@ -1057,8 +1476,29 @@ class AttendanceDeviceService:
                             if early_clock_in_override and early_override_preapproved
                             else None
                         ),
+                        "early_clock_in_requested_by": requested_by,
                     },
                 )
+
+            # 겹침 라벨 — 두 row **모두**에 붙는다. 어느 화면에서 보든 드러나야 하기 때문.
+            # 라벨은 표시용이고, 이중 지급을 실제로 막는 것은 payroll 확정 게이트
+            # (overlapping_attendance) 의 시간 구간 판정이다.
+            if overlap_open_rows:
+                from app.services.attendance_service import refresh_overlap_anomaly
+
+                await refresh_overlap_anomaly(
+                    db, user_id=user.id, work_date=attendance.work_date, now=now
+                )
+                await db.flush()
+                # 라우터가 응답에 실어 앱이 안내를 띄운다. **표시 문구는 서버가 만들지
+                # 않는다** — 앱은 l10n(en/es), 표시 소유권은 클라에 있다.
+                attendance._overlap_info = {  # type: ignore[attr-defined]
+                    "is_overlapping": True,
+                    "other_attendance_ids": [str(r.id) for r in overlap_open_rows],
+                    "other_schedule_ids": [
+                        str(r.schedule_id) for r in overlap_open_rows if r.schedule_id
+                    ],
+                }
         elif action == "break_start":
             if attendance is None:
                 raise BadRequestError("Must clock in first")
@@ -1124,12 +1564,10 @@ class AttendanceDeviceService:
                 raise BadRequestError("Already clocked out")
 
             # Early clock-out 검증 — schedule end 의 threshold 이전이면 reason 필수.
-            from datetime import timedelta as _td2
-            from zoneinfo import ZoneInfo as _Zi2
-            from app.utils.settings_resolver import (
-                SettingNotRegisteredError as _SNRE,
-                resolve_setting as _resolve,
+            from app.services.attendance_threshold_service import (
+                resolve_early_leave_threshold,
             )
+            from app.utils.attendance_judgement import judge_clock_out
 
             is_early = False
             sched_end_dt = None
@@ -1143,18 +1581,15 @@ class AttendanceDeviceService:
                         start_at=_sch.start_at, end_at=_sch.end_at, work_date=_sch.work_date,
                         start_time=_sch.start_time, end_time=_sch.end_time, tz_name=store_tz,
                     )
-                    try:
-                        _raw = await _resolve(
-                            db,
-                            key="attendance.early_leave_threshold_minutes",
-                            organization_id=device.organization_id,
-                            store_id=store_id,
-                        )
-                        _early_thresh = int(_raw) if _raw is not None else 5
-                    except (_SNRE, TypeError, ValueError):
-                        _early_thresh = 5
-                    if now.replace(second=0, microsecond=0) < sched_end_dt - _td2(minutes=_early_thresh):
-                        is_early = True
+                    _early_thresh = await resolve_early_leave_threshold(
+                        db,
+                        organization_id=device.organization_id,
+                        store_id=store_id,
+                    )
+                    # 판정은 분 단위 (초 버림) — 20:50 정각 퇴근은 조기가 아니다.
+                    is_early = judge_clock_out(
+                        now, sched_end_dt, early_leave_threshold=_early_thresh
+                    ).is_early
             if not skip_early_guards and is_early and not (reason and reason.strip()):
                 raise BadRequestError(
                     "Early clock-out requires a reason. Please provide one."
@@ -1190,6 +1625,14 @@ class AttendanceDeviceService:
                 # early-clock-out 사유는 attendance_corrections 에 기록 (note 더럽히지 않음).
                 # 매니저가 console 에서 note 따로 메모하는 영역과 분리.
 
+            await db.flush()
+            # 겹침은 파생 라벨이다 — 퇴근으로 구간이 줄면 겹침이 사라질 수 있으므로
+            # 만들 수 있는 지점뿐 아니라 **없앨 수 있는 지점**에서도 다시 계산한다.
+            from app.services.attendance_service import refresh_overlap_anomaly
+
+            await refresh_overlap_anomaly(
+                db, user_id=user.id, work_date=attendance.work_date, now=now
+            )
             await db.flush()
             await db.refresh(attendance)
         else:
@@ -1280,7 +1723,46 @@ class AttendanceDeviceService:
                 scheduled_start=scheduled_start,
                 reason=reason or "",
             )
+        if getattr(attendance, "_overlap_info", None) is not None:
+            await self._notify_overlapping_clock_in(
+                db, attendance=attendance, device=device, user=user
+            )
         return attendance
+
+    async def _notify_overlapping_clock_in(
+        self,
+        db: AsyncSession,
+        *,
+        attendance: Attendance,
+        device: AttendanceDevice,
+        user: User,
+    ) -> None:
+        """겹침 clock-in 매니저 알림 (best-effort).
+
+        직원이 스스로 정리할 수 없는 상태이므로(한쪽을 취소·정정하는 건 매니저 권한)
+        매니저가 반드시 알아야 한다. 알림 실패가 출근을 되돌리면 안 되므로 전부 삼킨다.
+        단 **삼키되 남긴다** — 개발 중 이 except 가 컬럼명 오타(`Alert.alert_type`)를
+        통째로 가려서, 알림이 한 번도 안 나가는데 테스트도 화면도 아무 말이 없었다.
+        """
+        try:
+            from app.services.alert_service import alert_service
+            from app.utils.names import display_name
+
+            await alert_service.create_for_overlapping_clock_in(
+                db,
+                attendance_id=attendance.id,
+                organization_id=device.organization_id,
+                staff_user_id=user.id,
+                staff_name=display_name(user),
+                work_date=attendance.work_date,
+            )
+            await db.commit()
+        except Exception:
+            # 알림 실패는 출근 성립에 영향 없음 — 기록만 남기고 넘어간다.
+            logging.getLogger(__name__).exception(
+                "[attendance] overlapping clock-in alert failed for %s",
+                attendance.id,
+            )
 
     async def _notify_early_clock_in(
         self,
@@ -1305,16 +1787,9 @@ class AttendanceDeviceService:
 
             if scheduled_start is None or attendance.clock_in is None:
                 return
-            minutes_early = max(
-                0,
-                int(
-                    (
-                        scheduled_start
-                        - attendance.clock_in.replace(second=0, microsecond=0)
-                    ).total_seconds()
-                    / 60
-                ),
-            )
+            # 몇 분 일찍인지 — 판정과 같은 분 절삭 규칙(R2)을 쓴다. 여기서 따로
+            # 빼기 계산을 하면 알림 문구와 400 응답의 minutes_early 가 갈린다.
+            minutes_early = minutes_between(attendance.clock_in, scheduled_start)
             staff_name = display_name(user)
 
             await alert_service.create_for_early_clock_in(

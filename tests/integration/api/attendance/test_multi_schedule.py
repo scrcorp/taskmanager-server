@@ -187,4 +187,7 @@ async def test_clock_in_with_clocked_out_schedule_id_rejected(
         },
     )
     assert resp.status_code == 400, resp.text
-    assert "not available" in resp.json()["detail"].lower()
+    # 구조화된 도메인 코드 — 앱은 이 코드를 보고 identify 를 다시 불러 picker 를 갱신한다.
+    detail = resp.json()["detail"]
+    assert detail["code"] == "shift_not_available", detail
+    assert detail["schedule_id"] == str(done)

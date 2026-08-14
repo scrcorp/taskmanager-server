@@ -9,7 +9,7 @@ invariants when admins modify attendance from the console:
 콘솔에서 status 를 직접 바꾸는 경로는 없어진다. 대신 이 서비스의 액션을 거친다.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -103,9 +103,14 @@ class AttendanceActionService:
         """clock_in 시각 vs 스케줄 시작시간 → working / late 판정.
 
         스케줄이 없거나 start_time 이 없으면 working.
+
+        임계값은 매장 설정(attendance.late_buffer_minutes) 이고, 판정은 공용
+        순수 함수가 한다 — 예전엔 이 경로만 상수 0분 + **초를 살린 비교**라서
+        17:05:30 이 지각으로 기록됐다(다른 경로는 분 절삭 + 설정 5분).
         """
         from app.models.schedule import Schedule
-        from app.services.attendance_service import LATE_BUFFER_MINUTES
+        from app.services.attendance_threshold_service import resolve_late_buffer
+        from app.utils.attendance_judgement import is_late_arrival
         from app.utils.timezone import get_store_day_config
         from sqlalchemy import select
 
@@ -124,10 +129,15 @@ class AttendanceActionService:
         )
         if scheduled_start is None:
             return "working", None
+        late_buffer = await resolve_late_buffer(
+            db,
+            organization_id=attendance.organization_id,
+            store_id=attendance.store_id,
+        )
         # at 이 UTC 인지 store-local 인지 정규화 — UTC 비교 기준으로 변환
         at_utc = at.astimezone(timezone.utc)
         scheduled_start_utc = scheduled_start.astimezone(timezone.utc)
-        if at_utc > scheduled_start_utc + timedelta(minutes=LATE_BUFFER_MINUTES):
+        if is_late_arrival(at_utc, scheduled_start_utc, late_buffer=late_buffer):
             return "late", ["late"]
         return "working", None
 
@@ -181,6 +191,19 @@ class AttendanceActionService:
             raise
 
     # ── 액션들 ──────────────────────────────────────────────────────────
+
+    async def _refresh_overlap(self, db: AsyncSession, attendance: Attendance) -> None:
+        """겹침 라벨 재계산 — 겹침을 만들거나 없앨 수 있는 모든 지점에서 부른다.
+
+        콘솔 경로(이 서비스)에는 겹침 가드가 없어서 매니저가 두 shift 를 각각
+        clock-in 시키면 라벨 없이 겹침이 만들어진다. 반대로 한쪽을 정정/취소하면
+        반대편 라벨이 낡은 채 남는다. 그래서 "붙이기" 가 아니라 매번 다시 계산한다.
+        """
+        from app.services.attendance_service import refresh_overlap_anomaly
+
+        await refresh_overlap_anomaly(
+            db, user_id=attendance.user_id, work_date=attendance.work_date
+        )
 
     async def clock_in(
         self,
@@ -238,6 +261,8 @@ class AttendanceActionService:
             reason=reason,
             by_user_id=by_user_id,
         )
+        await db.flush()
+        await self._refresh_overlap(db, attendance)
         await db.flush()
         await self._commit_or_rollback(db)
         await db.refresh(attendance)
@@ -306,6 +331,8 @@ class AttendanceActionService:
             reason=reason,
             by_user_id=by_user_id,
         )
+        await db.flush()
+        await self._refresh_overlap(db, attendance)
         await db.flush()
         await self._commit_or_rollback(db)
         await db.refresh(attendance)
@@ -561,6 +588,10 @@ class AttendanceActionService:
         attendance.auto_clock_out_confirmed_by = None
         attendance.early_clock_in_confirmed_at = None
         attendance.early_clock_in_confirmed_by = None
+        # 조기 출근 요청자도 같이 지운다 — 지워진 출근에 "누가 불렀나" 만 남으면
+        # 유령이 되고, 나중에 다시 clock-in 했을 때 다른 사유에 그대로 붙는다.
+        # (사유 문자열 자체는 attendance_corrections 에 append-only 로 남는다.)
+        attendance.early_clock_in_requested_by = None
 
         for b in breaks:
             await db.delete(b)
@@ -625,6 +656,8 @@ class AttendanceActionService:
             )
 
         await db.flush()
+        await self._refresh_overlap(db, attendance)
+        await db.flush()
         await self._commit_or_rollback(db)
         await db.refresh(attendance)
         return attendance
@@ -658,6 +691,8 @@ class AttendanceActionService:
             reason=reason,
             by_user_id=by_user_id,
         )
+        await db.flush()
+        await self._refresh_overlap(db, attendance)
         await db.flush()
         await self._commit_or_rollback(db)
         await db.refresh(attendance)
@@ -712,6 +747,8 @@ class AttendanceActionService:
             reason=reason,
             by_user_id=by_user_id,
         )
+        await db.flush()
+        await self._refresh_overlap(db, attendance)
         await db.flush()
         await self._commit_or_rollback(db)
         await db.refresh(attendance)

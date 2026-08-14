@@ -1965,12 +1965,16 @@ class ScheduleService:
             updated = await schedule_repository.update(db, entry_id, update_data, organization_id)
             if updated is None:
                 raise NotFoundError("Schedule not found")
-            # Eager attendance: schedule 시간/상태 변경 후 attendance.status 재계산.
-            # clock_in 있는 row 는 손대지 않음 (출근 기록 보존).
+            # Eager attendance: schedule 시간/상태 변경 후 attendance 라벨 재판정.
+            # clock_in 이 있는 row 도 대상이다 — 보존해야 하는 건 시각이지 라벨이 아니다
+            # (D11). 시각(clock_in/clock_out)은 건드리지 않고 status/anomalies 만 다시
+            # 매기며, 전/후는 attendance timeline 에 actor 이름으로 남는다.
             from app.services.attendance_lifecycle_service import (
                 recompute_attendance_for_schedule_change,
             )
-            await recompute_attendance_for_schedule_change(db, updated)
+            await recompute_attendance_for_schedule_change(
+                db, updated, actor_id=actor.id if actor else None
+            )
             # Audit log: build diff from modification_entries
             audit_diff: dict[str, Any] = {
                 m["field"]: {"old": m.get("old_value"), "new": m.get("new_value")}

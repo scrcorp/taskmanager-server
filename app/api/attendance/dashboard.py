@@ -34,7 +34,6 @@ from app.schemas.attendance_device import (
     TodayStaffRow,
 )
 from app.services.attendance_service import compute_effective_status, compute_state_and_anomalies
-from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 from app.utils.timezone import get_store_day_config, get_work_date, resolve_schedule_instants
 
 
@@ -86,18 +85,13 @@ async def today_staff(
         for br in br_rows.scalars().all():
             break_map.setdefault(br.attendance_id, []).append(br)
 
-    # late_buffer 설정 — effective status 계산용
+    # late_buffer 설정 — effective status 계산용 (해석기 하나만 사용)
+    from app.services.attendance_threshold_service import resolve_late_buffer
+
     organization_id = triples[0][0].organization_id
-    try:
-        late_buf_raw = await resolve_setting(
-            db,
-            key="attendance.late_buffer_minutes",
-            organization_id=organization_id,
-            store_id=device.store_id,
-        )
-        late_buffer = int(late_buf_raw) if late_buf_raw is not None else 5
-    except (SettingNotRegisteredError, TypeError, ValueError):
-        late_buffer = 5
+    late_buffer = await resolve_late_buffer(
+        db, organization_id=organization_id, store_id=device.store_id
+    )
     SOON_THRESHOLD_MINUTES = 5
 
     def display_store_tz(value):
