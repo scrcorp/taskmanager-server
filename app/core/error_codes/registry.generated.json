@@ -71,6 +71,9 @@
     "push": [
       "PUSH_NOT_CONFIGURED"
     ],
+    "reports": [
+      "REPORT_NOT_VISIBLE"
+    ],
     "schedule": [
       "BREAK_OUTSIDE_SHIFT",
       "BREAK_PAIR_INCOMPLETE",
@@ -688,6 +691,16 @@
       "status": 503,
       "message": "Push notifications are not available right now.",
       "hint": "This server has no push configuration. Contact your administrator.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "REPORT_NOT_VISIBLE",
+      "domain": "reports",
+      "kind": "http",
+      "status": 403,
+      "message": "You do not have access to this report.",
+      "hint": "Only the author and higher-ranked managers can open it.",
       "frozen": false,
       "clients": []
     },

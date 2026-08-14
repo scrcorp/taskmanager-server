@@ -86,6 +86,7 @@ async def list_my_reports(
     date_from: Annotated[str | None, Query()] = None,
     date_to: Annotated[str | None, Query()] = None,
     period: Annotated[str | None, Query()] = None,
+    # deprecated — 무시된다. 가시성은 서버가 직급 규칙으로만 판단한다.
     show_all: Annotated[bool, Query()] = False,
     only_mine: Annotated[bool, Query()] = True,
     page: int = 1,
@@ -120,6 +121,7 @@ async def get_my_report(
     current_user: Annotated[User, Depends(require_permission("reports:read"))],
 ) -> dict:
     r = await report_service.get_report(db, report_id, current_user.organization_id)
+    await report_service.assert_can_view(db, current_user, r)
     return await report_service.build_response(db, r, include_comments=True)
 
 

@@ -45,6 +45,8 @@ async def list_reports(
     date_to: Annotated[str | None, Query()] = None,
     period: Annotated[str | None, Query()] = None,
     status: Annotated[str | None, Query()] = None,
+    # deprecated — 가시성 우회 스위치였다. 지금은 무시한다(우회 가능하면 가시성이 아니다).
+    # 구버전 클라가 여전히 보내므로 422 를 피하려 파라미터만 남겨둔다.
     show_all: Annotated[bool, Query()] = False,
     page: int = 1,
     per_page: int = 20,
@@ -81,6 +83,7 @@ async def get_report(
     r = await report_service.get_report(db, report_id, current_user.organization_id)
     if r.store_id:
         await check_store_access(db, current_user, r.store_id)
+    await report_service.assert_can_view(db, current_user, r)
     return await report_service.build_response(db, r, include_comments=True)
 
 
@@ -105,6 +108,8 @@ async def update_report(
     current_user: Annotated[User, Depends(require_permission("reports:update"))],
 ) -> dict:
     from app.core.permissions import is_gm_plus
+    r0 = await report_service.get_report(db, report_id, current_user.organization_id)
+    await report_service.assert_can_view(db, current_user, r0)
     r = await report_service.update_report(
         db,
         report_id,
@@ -124,6 +129,8 @@ async def transition_issue_status(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("reports:update"))],
 ) -> dict:
+    r0 = await report_service.get_report(db, report_id, current_user.organization_id)
+    await report_service.assert_can_view(db, current_user, r0)
     r = await report_service.transition_issue_status(
         db, report_id, current_user.organization_id, current_user.id, data.status
     )
@@ -141,6 +148,7 @@ async def review_report(
     r = await report_service.get_report(db, report_id, current_user.organization_id)
     if r.store_id:
         await check_store_access(db, current_user, r.store_id)
+    await report_service.assert_can_view(db, current_user, r)
     r = await report_service.review_report(
         db, report_id, current_user.organization_id, current_user.id, data.feedback
     )
@@ -157,6 +165,7 @@ async def acknowledge_report(
     r = await report_service.get_report(db, report_id, current_user.organization_id)
     if r.store_id:
         await check_store_access(db, current_user, r.store_id)
+    await report_service.assert_can_view(db, current_user, r)
     await report_service.acknowledge_report(
         db, report_id, current_user.organization_id, current_user.id
     )
@@ -170,6 +179,8 @@ async def delete_report(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("reports:delete"))],
 ) -> None:
+    r = await report_service.get_report(db, report_id, current_user.organization_id)
+    await report_service.assert_can_view(db, current_user, r)
     await report_service.delete_report(db, report_id, current_user.organization_id)
 
 
@@ -180,6 +191,10 @@ async def add_comment(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("reports:update"))],
 ) -> dict:
+    r = await report_service.get_report(db, report_id, current_user.organization_id)
+    if r.store_id:
+        await check_store_access(db, current_user, r.store_id)
+    await report_service.assert_can_view(db, current_user, r)
     c = await report_service.add_comment(
         db, report_id, current_user.organization_id, current_user.id, data
     )

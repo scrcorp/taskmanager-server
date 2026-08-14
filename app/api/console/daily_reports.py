@@ -7,8 +7,10 @@ from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import check_store_access, get_accessible_store_ids, require_permission
+from app.core.permissions import is_owner
 from app.database import get_db
 from app.models.user import User
+from app.core.error_codes.reports import REPORT_NOT_VISIBLE
 from app.schemas.daily_report import DailyReportCommentCreate, DailyReportResponse
 from app.services.daily_report_service import daily_report_service
 
@@ -42,6 +44,9 @@ async def list_reports(
         page=page,
         per_page=per_page,
         accessible_store_ids=accessible,
+        # legacy 라우트(콘솔 UI 미사용). 통합 /reports 와 같은 원칙으로 최소 권한:
+        # Owner 외에는 본인 작성분만. 상세는 아래 get_report 에서 동일하게 차단.
+        author_id=None if is_owner(current_user) else current_user.id,
     )
     items = await daily_report_service.build_responses_batch(db, reports)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
@@ -55,6 +60,8 @@ async def get_report(
 ) -> dict:
     report = await daily_report_service.get_report(db, report_id, current_user.organization_id)
     await check_store_access(db, current_user, report.store_id)
+    if not is_owner(current_user) and report.author_id != current_user.id:
+        raise REPORT_NOT_VISIBLE()
     return await daily_report_service.build_response(db, report, include_details=True)
 
 
