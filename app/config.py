@@ -175,7 +175,7 @@ class Settings(BaseSettings):
     VAPID_PUBLIC_KEY: str = ""
     VAPID_PRIVATE_KEY: str = ""
     # VAPID JWT 의 연락처(sub) — 중계 서버가 문제 시 연락할 곳. mailto: 또는 https:
-    VAPID_SUBJECT: str = "mailto:support@hermesops.site"
+    VAPID_SUBJECT: str = "mailto:hello@tigersplus.com"
 
     # 미확인 알림 다이제스트 — 하루 1회 "안 본 알림 N건" 을 모아 보낸다.
     # 시각은 **조직 타임존 기준 로컬 시(hour)** 다. UTC 고정으로 쏘면 조직마다
