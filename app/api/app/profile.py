@@ -25,7 +25,7 @@ from app.schemas.user import (
 )
 from app.services.attendance_device_service import (
     commit_pin_or_409,
-    assert_no_pin_prefix_conflict,
+    assert_no_pin_conflict,
     generate_unique_clockin_pin,
 )
 from app.services.profile_service import profile_service
@@ -107,7 +107,7 @@ async def update_my_clockin_pin(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ClockinPinResponse:
     """내 PIN 을 직접 지정. 본인만 가능 (JWT 인증)."""
-    await assert_no_pin_prefix_conflict(
+    await assert_no_pin_conflict(
         db, current_user.organization_id, body.clockin_pin, exclude_user_id=current_user.id
     )
     current_user.clockin_pin = body.clockin_pin

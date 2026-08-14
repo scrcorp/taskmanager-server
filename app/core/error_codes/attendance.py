@@ -26,7 +26,10 @@ PIN_CONFLICT = ATTENDANCE.legacy(
         "app/apps/staff/lib/services/clockin_pin_service.dart",
     ),
 )
-"""params: reason("exact"|"prefix"), other_store(bool|None).
+"""params: reason("exact"), other_store(bool|None).
+
+reason 은 exact 하나뿐 — 앞자리가 겹치는 다른 길이의 PIN 은 2026-08-13 부터 허용한다
+(구버전 클라이언트의 "prefix" 분기는 더 이상 발사되지 않는다).
 
 타인의 PIN 값·이름은 어떤 필드에도 싣지 않는다 — 키오스크 화면은 고객 눈에도 띈다.
 """

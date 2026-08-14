@@ -142,14 +142,14 @@ def test_registry_is_loaded_by_importing_exceptions() -> None:
 
 
 def test_raise_is_one_line_and_detail_is_flat() -> None:
-    exc = PIN_CONFLICT(reason="prefix", other_store=False)
+    exc = PIN_CONFLICT(reason="exact", other_store=False)
     assert exc.status_code == 409
     # 평탄 구조 — 구버전 클라가 최상위에서 읽는다(X3).
     assert exc.detail == {
         "code": "pin_conflict",
         "message": "This PIN is already in use by another employee.",
         "hint": "Choose a different PIN.",
-        "reason": "prefix",
+        "reason": "exact",
         "other_store": False,
     }
 

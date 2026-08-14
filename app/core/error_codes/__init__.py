@@ -14,7 +14,7 @@ status·문구·hint 는 선언부에 이미 있다. `raise NotFoundError("...")
 
 부가 데이터를 실을 때::
 
-    raise PIN_CONFLICT(reason="prefix", other_store=False)
+    raise PIN_CONFLICT(reason="exact", other_store=False)
 
 `detail` 은 `{"code", "message", "reason", "other_store"}` 처럼 **평탄**하게 나간다.
 구버전 클라가 최상위에서 그 값을 읽기 때문이다(X3).

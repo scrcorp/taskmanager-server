@@ -287,14 +287,18 @@ async def test_update_pin_rejects_bad_length(
     assert resp.status_code == 422, resp.text
 
 
-async def test_update_pin_rejects_prefix_conflict(
+async def test_update_pin_allows_prefix_overlap(
     async_client: AsyncClient,
     gm_manage_headers: dict,
     staff_in_store: dict,
     test_users: dict,
     restore_pins: None,
 ) -> None:
-    """다른 직원 PIN 을 prefix 로 갖는 값은 409."""
+    """다른 직원 PIN(`4455`)을 앞자리로 갖는 `445566` 도 저장된다.
+
+    2026-08-13 규칙 개정 — 충돌은 정확히 같은 값 하나뿐이다. 키오스크 식별이
+    정확 일치라 짧은 PIN 이 긴 PIN 을 가로채지 않는다.
+    """
     async with async_session() as db:
         await db.execute(
             text("UPDATE users SET clockin_pin='4455' WHERE id=:id"),
@@ -307,7 +311,8 @@ async def test_update_pin_rejects_prefix_conflict(
         headers=gm_manage_headers,
         json={"clockin_pin": "445566"},
     )
-    assert resp.status_code == 409, resp.text
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["clockin_pin"] == "445566"
 
 
 # ── 409 detail 계약 (pin_conflict) ─────────────────────────
@@ -400,37 +405,6 @@ async def test_update_pin_exact_conflict_other_store_detail(
             await _ensure_user_store(
                 outsider["id"], test_store_id, is_manager=True
             )
-
-
-async def test_update_pin_prefix_conflict_detail(
-    async_client: AsyncClient,
-    gm_manage_headers: dict,
-    staff_in_store: dict,
-    test_users: dict,
-    test_store_id: UUID,
-    restore_pins: None,
-) -> None:
-    """prefix 충돌 → reason=prefix + 겹침 안내 (충돌 PIN 값은 절대 비노출)."""
-    sv = test_users["testsv"]
-    await _ensure_user_store(sv["id"], test_store_id, is_manager=False)
-    await _set_pin(sv["id"], "6644")
-
-    resp = await async_client.patch(
-        f"/api/v1/attendance/manage/staff-pins/{staff_in_store['id']}",
-        headers=gm_manage_headers,
-        json={"clockin_pin": "664422"},
-    )
-    assert resp.status_code == 409, resp.text
-    detail = resp.json()["detail"]
-    assert detail["code"] == "pin_conflict"
-    assert detail["reason"] == "prefix"
-    assert detail["other_store"] is False
-    assert detail["message"] == (
-        "This PIN overlaps with another employee's PIN "
-        "(numbers that start the same)."
-    )
-    # 충돌 상대 PIN(제출값의 앞자리)이 응답 본문에 없다 — echo 금지
-    assert "6644" not in resp.text
 
 
 async def test_regenerate_changes_pin(
@@ -528,10 +502,13 @@ async def test_failed_update_leaves_no_audit(
     test_users: dict,
     restore_pins: None,
 ) -> None:
-    """409 로 막힌 변경은 감사 로그도 남기지 않는다 (롤백 확인)."""
+    """409 로 막힌 변경은 감사 로그도 남기지 않는다 (롤백 확인).
+
+    409 를 만드는 건 이제 같은 번호 중복뿐이다 (prefix 규칙 폐지).
+    """
     async with async_session() as db:
         await db.execute(
-            text("UPDATE users SET clockin_pin='5511' WHERE id=:id"),
+            text("UPDATE users SET clockin_pin='551122' WHERE id=:id"),
             {"id": str(test_users["testsv"]["id"])},
         )
         await db.commit()

@@ -15,7 +15,7 @@ from datetime import date, datetime, timezone
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import literal, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -90,12 +90,9 @@ async def generate_unique_clockin_pin(
     exclude_user_id: UUID | None = None,
     attempts: int = 10,
 ) -> str:
-    """org 안에서 중복·prefix 충돌이 없는 6자리 PIN 생성.
+    """org 안에서 중복이 없는 6자리 PIN 생성.
 
-    `generate_clockin_pin()` 은 uniqueness 를 보장하지 않는데, 4~6자리 가변 도입 후엔
-    "기존 4자리 PIN 을 prefix 로 갖는 6자리" 가 뽑힐 수 있어 재시도가 필요하다.
-    (예: 기존 `1234` 가 있으면 `123456` 은 뽑으면 안 된다)
-
+    `generate_clockin_pin()` 은 uniqueness 를 보장하지 않으므로 충돌 시 재시도한다.
     `attempts` 회 모두 실패하면 마지막 후보를 그대로 반환 — 최종 방어는
     unique 제약(`commit_pin_or_409`) 이다. org 당 PIN 수를 감안하면 실제로는
     1회차에 거의 끝난다.
@@ -105,68 +102,110 @@ async def generate_unique_clockin_pin(
     pin = generate_clockin_pin()
     for _ in range(attempts):
         try:
-            await assert_no_pin_prefix_conflict(
-                db, organization_id, pin, exclude_user_id
-            )
+            await assert_no_pin_conflict(db, organization_id, pin, exclude_user_id)
             return pin
         except HTTPException:
             pin = generate_clockin_pin()
     return pin
 
 
-async def assert_no_pin_prefix_conflict(
+async def suggest_available_clockin_pin(
+    db: AsyncSession,
+    organization_id: UUID,
+    length: int = 4,
+    exclude_user_id: UUID | None = None,
+) -> str | None:
+    """org 안에서 바로 쓸 수 있는(충돌 없는) `length` 자리 PIN 하나. 없으면 None.
+
+    `generate_unique_clockin_pin` 은 6자리 고정 + 배정용이라 "관리자가 짧은 PIN 을
+    직접 고르려고 빈 번호를 찾는" 용도로는 맞지 않는다. 여기서는 org 의 PIN 을 한 번만
+    읽어와 메모리에서 후보를 검사한다 — 4자리 공간(10,000)이 작아서 랜덤 재시도보다
+    확정적이고, 공간이 꽉 찼을 때 None 을 정확히 돌려줄 수 있다.
+
+    후보 순서는 랜덤 시작점부터 순회 — 연속 호출이 늘 같은 번호를 주지 않게.
+    """
+    if not 4 <= length <= 6:
+        raise ValueError("length must be between 4 and 6")
+
+    stmt = select(User.clockin_pin).where(
+        User.organization_id == organization_id,
+        User.clockin_pin.isnot(None),
+    )
+    if exclude_user_id is not None:
+        stmt = stmt.where(User.id != exclude_user_id)
+    existing_set: set[str] = {p for p in (await db.execute(stmt)).scalars().all() if p}
+
+    space = 10**length
+    start = secrets.randbelow(space)
+    for offset in range(space):
+        candidate = f"{(start + offset) % space:0{length}d}"
+        if candidate in existing_set:
+            continue
+        return candidate
+    return None
+
+
+async def find_pin_conflicts(
+    db: AsyncSession,
+    organization_id: UUID,
+    pin: str,
+    exclude_user_id: UUID | None = None,
+) -> list[tuple[UUID, str]]:
+    """org 안에서 `pin` 을 이미 쓰고 있는 (user_id, clockin_pin) 목록. 없으면 빈 리스트.
+
+    충돌 = **정확히 같은 값** 하나뿐이다. 길이가 다르면 서로 다른 PIN 이며,
+    앞자리가 겹쳐도(`4885` / `488528`) 둘 다 쓸 수 있다 — 키오스크 식별이
+    정확 일치(`clockin_pin == pin`)라 짧은 쪽이 긴 쪽을 가로채지 않는다.
+
+    조회 전용이라 예외를 던지지 않는다. 배정 가능 여부만 알고 싶은 콘솔 lookup 과
+    "막아야 하는가" 를 판정하는 assert 가 같은 판정을 보게 하려고 분리했다 —
+    한쪽만 고치면 "available 이라 했는데 저장은 409" 가 난다.
+    """
+    stmt = select(User.id, User.clockin_pin).where(
+        User.organization_id == organization_id,
+        User.clockin_pin == pin,
+    )
+    if exclude_user_id is not None:
+        stmt = stmt.where(User.id != exclude_user_id)
+
+    rows = (await db.execute(stmt)).all()
+    return [(row[0], row[1]) for row in rows]
+
+
+async def assert_no_pin_conflict(
     db: AsyncSession,
     organization_id: UUID,
     pin: str,
     exclude_user_id: UUID | None = None,
     store_id: UUID | None = None,
 ) -> None:
-    """org 안에서 PIN prefix 충돌을 막는다. 충돌 시 409 (구조화 detail).
+    """org 안에서 PIN 중복을 막는다. 이미 쓰는 사람이 있으면 409 (구조화 detail).
 
-    PIN 길이가 4~6 로 가변이라 `uq_user_org_clockin_pin`(정확 일치) 만으로는 부족하다.
-    A=`1234`, B=`123456` 이 공존하면 B 가 앞 4자리만 누르고 확인을 눌렀을 때 A 로 식별돼
-    **남의 이름으로 출퇴근이 찍힌다.** 그래서 다음 두 방향을 모두 거부한다.
+    충돌은 **정확히 같은 값** 뿐이다. 앞자리가 겹치는 다른 길이의 PIN(`4885` /
+    `488528`)은 서로 다른 PIN 으로 공존한다 — 키오스크 식별이 정확 일치라
+    짧은 쪽이 긴 쪽을 가로채지 않는다. (2026-08-13 결정: 이전의 prefix 금지
+    규칙 제거. 남는 위험은 "6자리 직원이 4자리에서 멈추고 확인" 뿐인데,
+    그 뒤 이름 확인 다이얼로그가 한 번 더 막는다.)
 
-        - 신규 PIN 이 기존 PIN 의 prefix        (new=`1234`,   기존=`123456`)
-        - 기존 PIN 이 신규 PIN 의 prefix        (new=`123456`, 기존=`1234`)
-
-    정확히 같은 값도 이 조건에 걸리므로 중복 검사까지 겸한다(선 검사 → 친절한 409,
-    동시성으로 빠져나간 경우는 `commit_pin_or_409` 의 unique 위반이 최종 방어).
+    선 검사로 친절한 409 를 주고, 동시성으로 빠져나간 경우는
+    `commit_pin_or_409` 의 unique 위반이 최종 방어다.
 
     409 detail 계약 (모든 클라이언트 공통):
-        {"code": "pin_conflict", "reason": "exact"|"prefix",
+        {"code": "pin_conflict", "reason": "exact",
          "other_store": true|false|null, "message": "<영어 사유 문장>"}
 
-    - reason: 충돌 PIN 이 제출 PIN 과 정확히 같으면 exact,
-      길이가 다른 두 PIN 이 앞자리를 공유(양방향)하면 prefix.
+    - reason: 항상 exact (prefix 값은 2026-08-13 이후 발생하지 않는다).
     - other_store: manage(키오스크) 경로에서만 채움 — `store_id` 가 주어지면
       충돌 유저가 그 매장(user_stores)에 없을 때 True. 그 외 경로는 None.
     - 타인의 PIN 값·이름은 어떤 필드에도 절대 싣지 않는다.
     """
     from fastapi import HTTPException, status
 
-    stmt = (
-        select(User.id, User.clockin_pin)
-        .where(
-            User.organization_id == organization_id,
-            User.clockin_pin.isnot(None),
-            or_(
-                User.clockin_pin.startswith(pin),
-                literal(pin).startswith(User.clockin_pin),
-            ),
-        )
-        # exact 충돌을 우선 선택 — exact/prefix 충돌이 공존해도 reason 이 결정적이게.
-        .order_by((User.clockin_pin == pin).desc())
-    )
-    if exclude_user_id is not None:
-        stmt = stmt.where(User.id != exclude_user_id)
-
-    row = (await db.execute(stmt.limit(1))).first()
-    if row is None:
+    conflicts = await find_pin_conflicts(db, organization_id, pin, exclude_user_id)
+    if not conflicts:
         return
 
-    conflict_user_id, conflict_pin = row
-    reason = "exact" if conflict_pin == pin else "prefix"
+    conflict_user_id, _conflict_pin = conflicts[0]
 
     other_store: bool | None = None
     if store_id is not None:
@@ -182,21 +221,17 @@ async def assert_no_pin_prefix_conflict(
         ).scalar_one_or_none()
         other_store = in_store is None
 
-    if reason == "prefix":
-        message = (
-            "This PIN overlaps with another employee's PIN "
-            "(numbers that start the same)."
-        )
-    elif other_store is True:
-        message = "This PIN is already in use by an employee at another store."
-    else:
-        message = "This PIN is already in use by another employee."
+    message = (
+        "This PIN is already in use by an employee at another store."
+        if other_store is True
+        else "This PIN is already in use by another employee."
+    )
 
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={
             "code": "pin_conflict",
-            "reason": reason,
+            "reason": "exact",
             "other_store": other_store,
             "message": message,
         },

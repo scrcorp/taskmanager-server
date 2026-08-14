@@ -437,16 +437,59 @@ async def list_user_rate_changes(
 # ── Clockin PIN (attendance device 용) ───────────────────────────
 from sqlalchemy import select as _select  # noqa: E402
 
+from app.models.user import Role  # noqa: E402
 from app.schemas.attendance_device import (  # noqa: E402
+    ClockinPinDirectoryResponse,
+    ClockinPinHolder,
+    ClockinPinLookupResponse,
     ClockinPinResponse,
+    ClockinPinSuggestResponse,
     ClockinPinUpdateRequest,
 )
 from app.services.attendance_device_service import (  # noqa: E402
     commit_pin_or_409,
-    assert_no_pin_prefix_conflict,
+    assert_no_pin_conflict,
+    find_pin_conflicts,
     generate_unique_clockin_pin,
+    suggest_available_clockin_pin,
 )
 from app.utils.exceptions import NotFoundError  # noqa: E402
+
+
+# PIN 도구가 한 번에 돌려주는 최대 인원. 이름 검색이 너무 넓으면 잘라내고
+# truncated=True 로 알린다 (콘솔이 "검색어를 좁히세요" 안내).
+PIN_DIRECTORY_LIMIT = 50
+
+
+def _pin_holder(user: User, role_name: str | None, conflict: str | None = None) -> ClockinPinHolder:
+    """User 행 → PIN 도구용 응답 항목."""
+    return ClockinPinHolder(
+        user_id=user.id,
+        full_name=user.full_name,
+        username=user.username,
+        role_name=role_name,
+        is_active=user.is_active,
+        is_provisional=user.is_provisional,
+        clockin_pin=user.clockin_pin,
+        conflict=conflict,  # type: ignore[arg-type]
+    )
+
+
+async def _fetch_users_with_roles(
+    db: AsyncSession, org_id: UUID, user_ids: list[UUID]
+) -> list[tuple[User, str | None]]:
+    """user_ids 를 org 스코프로 (User, role_name) 쌍으로 읽어온다. 순서는 입력 순."""
+    if not user_ids:
+        return []
+    rows = (
+        await db.execute(
+            _select(User, Role.name)
+            .join(Role, Role.id == User.role_id, isouter=True)
+            .where(User.organization_id == org_id, User.id.in_(user_ids))
+        )
+    ).all()
+    by_id = {row[0].id: (row[0], row[1]) for row in rows}
+    return [by_id[uid] for uid in user_ids if uid in by_id]
 
 
 async def _fetch_org_user(db: AsyncSession, user_id: UUID, org_id: UUID) -> User:
@@ -457,6 +500,92 @@ async def _fetch_org_user(db: AsyncSession, user_id: UUID, org_id: UUID) -> User
     if user is None:
         raise NotFoundError("User not found")
     return user
+
+
+# 리터럴 경로는 /{user_id}/... 보다 먼저 선언한다 — "clockin-pin" 이 user_id 로
+# 파싱되어 422 가 나는 사고를 막기 위해.
+@router.get("/clockin-pin/lookup", response_model=ClockinPinLookupResponse)
+async def lookup_clockin_pin(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("clockin_pin:read"))],
+    pin: Annotated[str, Query(pattern=r"^\d{4,6}$", description="조회할 PIN (4~6자리)")],
+) -> ClockinPinLookupResponse:
+    """Staff PIN 도구 — 이 PIN 이 지금 배정 가능한지 + 막고 있는 직원.
+
+    저장 경로(`assert_no_pin_conflict`)와 같은 판정을 쓰므로
+    available=true 면 그대로 저장해도 409 가 나지 않는다(동시성 제외).
+    """
+    org_id: UUID = current_user.organization_id
+    conflicts = await find_pin_conflicts(db, org_id, pin)
+    if not conflicts:
+        return ClockinPinLookupResponse(pin=pin, available=True, reason=None, holders=[])
+
+    # 충돌은 같은 번호를 이미 쓰는 사람뿐이고, org 안에서 unique 라 사실상 한 명이다.
+    pairs = await _fetch_users_with_roles(db, org_id, [uid for uid, _ in conflicts])
+    holders = [
+        _pin_holder(user, role_name, conflict="exact") for user, role_name in pairs
+    ]
+    return ClockinPinLookupResponse(
+        pin=pin, available=False, reason="exact", holders=holders
+    )
+
+
+@router.get("/clockin-pin/directory", response_model=ClockinPinDirectoryResponse)
+async def list_clockin_pin_directory(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("clockin_pin:read"))],
+    q: Annotated[str | None, Query(description="이름/username 부분 일치, 또는 PIN 앞자리")] = None,
+    include_inactive: Annotated[bool, Query(description="비활성 직원 포함")] = False,
+) -> ClockinPinDirectoryResponse:
+    """Staff PIN 도구 — 이름 또는 PIN 으로 직원 + 현재 PIN 목록 조회.
+
+    `q` 가 숫자면 PIN 앞자리 검색으로도 매칭한다(이름에 숫자를 쓰는 경우가 없어
+    둘을 OR 로 붙여도 결과가 흐려지지 않는다). 빈 `q` 는 PIN 이 있는 직원부터
+    이름순으로 상위 `PIN_DIRECTORY_LIMIT` 명.
+    """
+    from sqlalchemy import or_ as _or
+
+    org_id: UUID = current_user.organization_id
+    stmt = (
+        _select(User, Role.name)
+        .join(Role, Role.id == User.role_id, isouter=True)
+        .where(User.organization_id == org_id)
+    )
+    if not include_inactive:
+        # 유령(미가입)은 is_active=False 지만 PIN 관리 대상이라 면제.
+        stmt = stmt.where(_or(User.is_active.is_(True), User.is_provisional.is_(True)))
+
+    term = (q or "").strip()
+    if term:
+        conditions = [
+            User.full_name.ilike(f"%{term}%"),
+            User.username.ilike(f"%{term}%"),
+        ]
+        if term.isdigit():
+            conditions.append(User.clockin_pin.startswith(term))
+        stmt = stmt.where(_or(*conditions))
+
+    stmt = stmt.order_by(User.full_name).limit(PIN_DIRECTORY_LIMIT + 1)
+    rows = (await db.execute(stmt)).all()
+    truncated = len(rows) > PIN_DIRECTORY_LIMIT
+    items = [_pin_holder(row[0], row[1]) for row in rows[:PIN_DIRECTORY_LIMIT]]
+    return ClockinPinDirectoryResponse(items=items, truncated=truncated)
+
+
+@router.get("/clockin-pin/suggest", response_model=ClockinPinSuggestResponse)
+async def suggest_clockin_pin(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("clockin_pin:read"))],
+    length: Annotated[int, Query(ge=4, le=6, description="추천 PIN 자릿수")] = 4,
+) -> ClockinPinSuggestResponse:
+    """Staff PIN 도구 — 안 쓰이는 PIN 하나 추천. 배정은 하지 않는다.
+
+    자릿수 공간이 전부 막혔으면 pin=null — 콘솔이 "자릿수를 늘리세요" 로 안내한다.
+    """
+    pin = await suggest_available_clockin_pin(
+        db, current_user.organization_id, length=length
+    )
+    return ClockinPinSuggestResponse(pin=pin, length=length)
 
 
 @router.get("/{user_id}/clockin-pin", response_model=ClockinPinResponse)
@@ -494,9 +623,26 @@ async def update_user_clockin_pin(
 ) -> ClockinPinResponse:
     """Staff detail — attendance device PIN 직접 지정 (관리자)."""
     user = await _fetch_org_user(db, user_id, current_user.organization_id)
-    await assert_no_pin_prefix_conflict(
+    await assert_no_pin_conflict(
         db, current_user.organization_id, body.clockin_pin, exclude_user_id=user.id
     )
     user.clockin_pin = body.clockin_pin
     await commit_pin_or_409(db)
     return ClockinPinResponse(user_id=user.id, clockin_pin=user.clockin_pin)
+
+
+@router.delete("/{user_id}/clockin-pin", response_model=ClockinPinResponse)
+async def clear_user_clockin_pin(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("clockin_pin:update"))],
+) -> ClockinPinResponse:
+    """Staff PIN 도구 — PIN 제거(번호를 비운다).
+
+    PIN 이 없는 직원은 키오스크에서 PIN 으로 출퇴근할 수 없다 — 퇴사자나
+    잘못 들어간 번호를 비워 그 번호를 다시 쓸 수 있게 하는 용도.
+    """
+    user = await _fetch_org_user(db, user_id, current_user.organization_id)
+    user.clockin_pin = None
+    await db.commit()
+    return ClockinPinResponse(user_id=user.id, clockin_pin=None)
