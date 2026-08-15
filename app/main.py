@@ -177,14 +177,14 @@ async def start_scheduler() -> None:
             max_instances=1,
             coalesce=True,
         )
-        # 각 org timezone 기준 15시. scheduler는 UTC지만 service 안에서 org tz로 today를 재계산하므로
-        # 한국/미국 orgs 모두 자기 timezone 15시 근방에 발송될 수 있도록 매 hour 0분에 깨운 뒤
-        # tz별 15시인 org만 발송하는 방식이 정석이지만, 현재 단일 org 기준이라 hour=15 단일 트리거로 충분.
-        # 운영 timezone은 settings.SCHEDULE_REPORT_TIMEZONE 에서 지정.
-        report_tz_name = settings.SCHEDULE_REPORT_TIMEZONE or "UTC"
+        # 매시 정각에 깨어나, 지금이 자기 발송 시각인 org 만 보낸다.
+        # 고정 시각 트리거는 스케줄러 tz 와 org tz 가 갈리는 순간 하루가 통째로 어긋나고,
+        # org 마다 다른 시각을 줄 수도 없다. 시각 판단은 서비스 안에서 org 로컬로 한다
+        # (발송 시각 = org 설정 schedule.report_times, 기본 7,15,22).
+        # push_digest_tick 이 이미 쓰는 패턴이다.
         scheduler.add_job(
             run_daily_report_tick,
-            trigger=CronTrigger(hour=15, minute=0, timezone=report_tz_name),
+            trigger=CronTrigger(minute=0, timezone="UTC"),
             id="schedule_daily_report",
             replace_existing=True,
             max_instances=1,
@@ -210,7 +210,7 @@ async def start_scheduler() -> None:
             coalesce=True,
         )
         scheduler.start()
-        logger.info("[scheduler] APScheduler started (attendance_state_tick, schedule_daily_report tz=%s, rate_change_daily_tick, push_digest_tick hour=%s)", report_tz_name, settings.PUSH_DIGEST_HOUR)
+        logger.info("[scheduler] APScheduler started (attendance_state_tick, schedule_daily_report hourly+org-local, rate_change_daily_tick, push_digest_tick hour=%s)", settings.PUSH_DIGEST_HOUR)
 
 
 @app.on_event("shutdown")
@@ -273,52 +273,23 @@ async def seed_settings_registry() -> None:
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def ensure_issue_default_template() -> None:
-    """System default issue template (org_id=NULL, store_id=NULL) 1건 보장.
+    """System default issue template (org_id=NULL, store_id=NULL) 1건 보장 + 멱등 보정.
 
-    매장이 customize 안 한 경우의 fallback. 6개 기본 카테고리 시드.
+    매장이 customize 안 한 경우의 fallback. 기본 카테고리 시드.
+    이미 시드된 환경에도 새 기본 카테고리(review 등)와 description 프리셋이 들어가야 하므로,
+    row 가 있으면 return 하지 않고 **없는 것만** 채운다.
+
+    보정 대상은 system default row 뿐이다 — org/store 가 자체 카테고리를 만든 템플릿은
+    운영자 커스터마이즈이므로 건드리지 않는다.
     """
     import logging
-    from sqlalchemy import select
     from app.database import async_session
-    from app.models.report import ReportTemplate
-    from app.schemas.report import DEFAULT_ISSUE_CATEGORIES
+    from app.services.report_service import ensure_system_issue_template
 
     logger = logging.getLogger("uvicorn.error")
     try:
         async with async_session() as db:
-            existing = await db.execute(
-                select(ReportTemplate).where(
-                    ReportTemplate.type == "issue",
-                    ReportTemplate.organization_id.is_(None),
-                    ReportTemplate.store_id.is_(None),
-                    ReportTemplate.is_default.is_(True),
-                )
-            )
-            if existing.scalar_one_or_none():
-                return
-            categories = [
-                {
-                    "code": code,
-                    "label": code.replace("_", " ").title(),
-                    "color": None,
-                    "sort_order": idx + 1,
-                    "is_active": True,
-                }
-                for idx, code in enumerate(DEFAULT_ISSUE_CATEGORIES)
-            ]
-            db.add(
-                ReportTemplate(
-                    type="issue",
-                    organization_id=None,
-                    store_id=None,
-                    name="Default Issue Form",
-                    is_default=True,
-                    is_active=True,
-                    payload={"categories": categories, "custom_fields": []},
-                )
-            )
-            await db.commit()
-            logger.info("Created system default issue template")
+            await ensure_system_issue_template(db)
     except Exception as e:
         logger.warning(f"Failed to ensure default issue template: {e}")
 

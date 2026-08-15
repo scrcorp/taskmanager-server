@@ -879,6 +879,113 @@ def _resolved_style() -> str:
     return "color:#475569;text-decoration:line-through;"
 
 
+def _wrap_schedule_report_shell(
+    *,
+    org_name: str,
+    sent_date: date,
+    summary_html: str,
+    sections_html: str,
+    admin_base_url: str,
+) -> str:
+    """리포트 메일 껍데기 — 헤더 / 요약 / 본문 / CTA / 푸터.
+
+    전체 모드와 축약 모드가 같은 껍데기를 써야 두 메일이 서로 다른 문서처럼 보이지 않는다.
+    """
+    schedule_link = f"{admin_base_url.rstrip('/')}/schedules"
+
+    html = f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  /* Row hover — 마우스 올린 행 / block 의 배경이 옅은 파랑으로 강조, View 버튼은 파랑으로 채워짐 */
+  .row-hover, .row-block {{ transition: background 0.12s; }}
+  .row-hover:hover, .row-hover:hover .row-block, .row-block:hover {{ background: #EFF6FF !important; }}
+  .row-hover:hover .view-link, .row-block:hover .view-link {{ background: #2563EB; color: #FFFFFF !important; border-color:#2563EB !important; }}
+  .view-link {{ display:inline-block; padding:5px 12px; border:1px solid #2563EB; border-radius:4px; font-size:14px; font-weight:700; color:#2563EB; text-decoration:none; transition: background 0.12s, color 0.12s; }}
+  .view-link:hover {{ background:#2563EB; color:#FFFFFF !important; }}
+</style>
+</head>
+<body style="margin:0;padding:0;background-color:#F1F5F9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0F172A;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F1F5F9;">
+    <tr><td align="center" style="padding:24px 12px;">
+      <table role="presentation" width="760" cellpadding="0" cellspacing="0" style="max-width:760px;width:100%;background-color:#FFFFFF;border:1px solid #CBD5E1;">
+        <tr>
+          <td style="padding:28px 32px 20px;border-bottom:3px solid #0F172A;">
+            <div style="font-size:13px;color:#475569;letter-spacing:1.8px;font-weight:800;">HTM · DAILY SCHEDULE REPORT</div>
+            <div style="font-size:26px;font-weight:800;color:#0F172A;margin-top:8px;">{escape(org_name)}</div>
+            <div style="font-size:15px;color:#0F172A;margin-top:6px;">Sent: <b>{escape(sent_date.isoformat())}</b></div>
+          </td>
+        </tr>
+        {summary_html}
+        {sections_html}
+        <tr>
+          <td style="padding:28px 32px;border-top:1px solid #CBD5E1;">
+            <a href="{escape(schedule_link)}" style="display:inline-block;padding:14px 24px;background:#0F172A;color:#FFFFFF;text-decoration:none;border-radius:6px;font-size:16px;font-weight:800;">Open Schedule Console →</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:16px 32px;background:#F8FAFC;border-top:1px solid #CBD5E1;">
+            <div style="font-size:13px;color:#0F172A;font-weight:600;">Automated daily report · HTM</div>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+    return html
+
+
+_COMPACT_NEW_LIMIT = 10
+
+
+def _compact_detail_block(diff: "ReportDiff", limit: int = _COMPACT_NEW_LIMIT) -> str:
+    """full=False 용 축약 블록 — 신규 이슈 상위 N건 + "상세는 첨부 PDF" 안내.
+
+    본문에서 매트릭스/섹션을 들어낸 자리를 채운다. 여기서 잘라내는 정보는 전부
+    첨부 PDF 에 있으므로 손실이 아니다 — 반대로 잘리지 않아서 처음으로 다 읽힌다.
+    """
+    new_issues = list(diff.new)
+    shown = new_issues[:limit]
+    rest = len(new_issues) - len(shown)
+
+    if shown:
+        rows = "".join(
+            f"""<tr><td style="padding:6px 0;font-size:14px;color:#0F172A;border-bottom:1px solid #E2E8F0;">
+                  <span style="display:inline-block;background:#B91C1C;color:#fff;font-size:11px;font-weight:800;padding:1px 6px;border-radius:3px;margin-right:8px;">NEW</span>
+                  {escape(i.label)}
+                </td></tr>"""
+            for i in shown
+        )
+        more = (
+            f"""<tr><td style="padding:8px 0 0;font-size:14px;color:#475569;">
+                  + {rest} more new item(s) in the attached PDF.
+                </td></tr>"""
+            if rest > 0 else ""
+        )
+        body = f"""<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}{more}</table>"""
+    else:
+        body = """<div style="font-size:14px;color:#475569;">No new issues since the last report.</div>"""
+
+    return f"""
+        <tr>
+          <td style="padding:20px 32px 8px;">
+            <div style="font-size:17px;font-weight:800;color:#0F172A;margin-bottom:10px;">New since last report</div>
+            {body}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:12px 32px 20px;">
+            <div style="padding:14px 16px;background:#F8FAFC;border:1px solid #CBD5E1;border-radius:6px;font-size:14px;color:#0F172A;">
+              <b>Full detail is in the attached PDF</b> — staffing matrix, supervisor coverage,
+              and every overtime / no-break row.
+            </div>
+          </td>
+        </tr>"""
+
+
 def build_schedule_daily_report_email(
     *,
     org_name: str,
@@ -889,15 +996,28 @@ def build_schedule_daily_report_email(
     stores: list["StoreInfo"],
     cells: list["ShiftCell"],
     admin_base_url: str,
+    full: bool = True,
 ) -> tuple[str, str]:
-    """공문서 톤 — 큰 섹션 H2 + 매트릭스/list. 디자인 최소화."""
+    """공문서 톤 — 큰 섹션 H2 + 매트릭스/list. 디자인 최소화.
+
+    Args:
+        full: True 면 전체 4개 섹션(기존 동작). False 면 요약 + 신규 이슈 상위 N건만
+            남기고 상세는 첨부 PDF 에 맡긴다.
+
+            **왜 스위치인가**: 전체 본문은 매장 수에 비례해 무한히 자라서 Gmail 이
+            ~102KB 에서 잘라먹는다(2026-08-14 prod 실측 180KB). 크론만 full=False 를
+            넘기고, `GET /preview` 는 기본값 그대로라 전체 문서를 계속 보여준다.
+    """
     period_label = f"{target_dates[0].isoformat()} ~ {target_dates[-1].isoformat()}"
     subject = f"[Schedule Report] {sent_date.isoformat()} ({org_name})"
     planned_caption = f"Schedule for {period_label} ({len(target_dates)} days)"
     actual_caption = f"{yesterday.isoformat()} attendance — final state (corrections reflected)" if yesterday else "Previous day attendance — final state"
 
     # ─── Summary ────────────────────────────────────────────────
-    all_issues = list(diff.new) + list(diff.ongoing) + list(diff.resolved)
+    # resolved 는 세지 않는다 — 이미 해소된 항목이라 아래 표에 행이 없다.
+    # 예전엔 여기에 포함돼서 헤더는 "Overtime 8" 인데 표에는 4행뿐인 상태가 됐고,
+    # 카운터가 0 이 아니면 빨강이라 해소된 날에도 경고처럼 보였다.
+    all_issues = list(diff.new) + list(diff.ongoing)
     sv_gap_n = sum(1 for i in all_issues if i.category == "sv_gap")
     ot_planned_n = sum(1 for i in all_issues if i.category == "over_6h")
     ot_actual_n = sum(1 for i in all_issues if i.category == "att_over_6h")
@@ -924,6 +1044,17 @@ def build_schedule_daily_report_email(
             </div>
           </td>
         </tr>"""
+
+    if not full:
+        # 축약 모드 — 무거운 섹션은 만들지도 않는다(문자열 조립 자체가 비용이다).
+        sections_html = _compact_detail_block(diff)
+        return subject, _wrap_schedule_report_shell(
+            org_name=org_name,
+            sent_date=sent_date,
+            summary_html=summary_html,
+            sections_html=sections_html,
+            admin_base_url=admin_base_url,
+        )
 
     # ─── Section 1: Staffing by Shift ───────────────────────────
     cells_by_store: dict[str, list["ShiftCell"]] = {}
@@ -983,54 +1114,17 @@ def build_schedule_daily_report_email(
         admin_base_url=admin_base_url,
     )
 
-    schedule_link = f"{admin_base_url.rstrip('/')}/schedules"
-
-    html = f"""\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<style>
-  /* Row hover — 마우스 올린 행 / block 의 배경이 옅은 파랑으로 강조, View 버튼은 파랑으로 채워짐 */
-  .row-hover, .row-block {{ transition: background 0.12s; }}
-  .row-hover:hover, .row-hover:hover .row-block, .row-block:hover {{ background: #EFF6FF !important; }}
-  .row-hover:hover .view-link, .row-block:hover .view-link {{ background: #2563EB; color: #FFFFFF !important; border-color:#2563EB !important; }}
-  .view-link {{ display:inline-block; padding:5px 12px; border:1px solid #2563EB; border-radius:4px; font-size:14px; font-weight:700; color:#2563EB; text-decoration:none; transition: background 0.12s, color 0.12s; }}
-  .view-link:hover {{ background:#2563EB; color:#FFFFFF !important; }}
-</style>
-</head>
-<body style="margin:0;padding:0;background-color:#F1F5F9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0F172A;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F1F5F9;">
-    <tr><td align="center" style="padding:24px 12px;">
-      <table role="presentation" width="760" cellpadding="0" cellspacing="0" style="max-width:760px;width:100%;background-color:#FFFFFF;border:1px solid #CBD5E1;">
-        <tr>
-          <td style="padding:28px 32px 20px;border-bottom:3px solid #0F172A;">
-            <div style="font-size:13px;color:#475569;letter-spacing:1.8px;font-weight:800;">HTM · DAILY SCHEDULE REPORT</div>
-            <div style="font-size:26px;font-weight:800;color:#0F172A;margin-top:8px;">{escape(org_name)}</div>
-            <div style="font-size:15px;color:#0F172A;margin-top:6px;">Sent: <b>{escape(sent_date.isoformat())}</b></div>
-          </td>
-        </tr>
-        {summary_html}
-        {sec1}
+    sections_html = f"""{sec1}
         {sec2}
         {sec3}
-        {sec4}
-        <tr>
-          <td style="padding:28px 32px;border-top:1px solid #CBD5E1;">
-            <a href="{escape(schedule_link)}" style="display:inline-block;padding:14px 24px;background:#0F172A;color:#FFFFFF;text-decoration:none;border-radius:6px;font-size:16px;font-weight:800;">Open Schedule Console →</a>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:16px 32px;background:#F8FAFC;border-top:1px solid #CBD5E1;">
-            <div style="font-size:13px;color:#0F172A;font-weight:600;">Automated daily report · HTM</div>
-          </td>
-        </tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>"""
-    return subject, html
+        {sec4}"""
+    return subject, _wrap_schedule_report_shell(
+        org_name=org_name,
+        sent_date=sent_date,
+        summary_html=summary_html,
+        sections_html=sections_html,
+        admin_base_url=admin_base_url,
+    )
 
 
 def build_early_clock_in_email(

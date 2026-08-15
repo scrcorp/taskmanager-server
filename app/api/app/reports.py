@@ -12,10 +12,16 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_permission
+from app.api.issue_recipients import (
+    resolve_issue_expected_viewers,
+    resolve_issue_recipients,
+)
 from app.config import settings
 from app.database import get_db
 from app.models.user import User
 from app.schemas.report import (
+    IssueExpectedViewersResponse,
+    IssueRecipientsResponse,
     ReportCommentCreate,
     ReportCreate,
     ReportResponse,
@@ -112,6 +118,41 @@ async def list_my_reports(
     )
     items = await report_service.build_responses_batch(db, reports)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
+
+
+# NOTE: 반드시 /{report_id} **위에** 선언한다 (아래면 UUID path 로 파싱돼 422).
+@router.get("/issue-recipients", response_model=IssueRecipientsResponse)
+async def list_issue_recipients(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("reports:read"))],
+    store_id: Annotated[UUID | None, Query()] = None,
+    report_id: Annotated[UUID | None, Query()] = None,
+) -> dict:
+    """console 과 동일한 body — 작성 화면 후보 / 상세 화면 현재 수신자."""
+    return await resolve_issue_recipients(
+        db, current_user, store_id=store_id, report_id=report_id
+    )
+
+
+# NOTE: /{report_id} 위에 선언 (아래면 UUID path 로 파싱돼 422).
+@router.get("/issue-viewers", response_model=IssueExpectedViewersResponse)
+async def list_issue_expected_viewers(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("reports:read"))],
+    scope: Annotated[str, Query()] = "default",
+    store_id: Annotated[UUID | None, Query()] = None,
+    report_id: Annotated[UUID | None, Query()] = None,
+    extra_user_ids: Annotated[list[UUID] | None, Query()] = None,
+) -> dict:
+    """console 과 동일한 body — 조회 범위별 예상 조회자 미리보기."""
+    return await resolve_issue_expected_viewers(
+        db,
+        current_user,
+        store_id=store_id,
+        report_id=report_id,
+        scope=scope,
+        extra_user_ids=extra_user_ids,
+    )
 
 
 @router.get("/{report_id}", response_model=ReportResponse)

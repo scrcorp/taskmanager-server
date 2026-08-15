@@ -132,6 +132,7 @@ _NAV = [
     ("Organizations", "/tools/orgs"),
     ("Users", None),
     ("Tools · EMPID", "/tools/empid"),
+    ("Tools · Push", "/tools/push"),
     ("Changelog", "/tools/changelog"),
 ]
 
@@ -176,7 +177,8 @@ def dashboard_html(base: str, admin: str) -> HTMLResponse:
         "Operator console shell is live. Tools:<br><br>"
         f"• <a href='{base}/tools/orgs'><b>Organizations</b></a> — list every org + create new (org bootstrap)<br>"
         "• <b>Users</b> — cross-org lookup (soon)<br>"
-        f"• <a href='{base}/tools/empid'><b>Tools · EMPID Reconciliation</b></a> — legacy employee-number import"
+        f"• <a href='{base}/tools/empid'><b>Tools · EMPID Reconciliation</b></a> — legacy employee-number import<br>"
+        f"• <a href='{base}/tools/push'><b>Tools · Push Diagnostics</b></a> — why a user didn't get a notification (read-only)"
         "</div></div>"
     )
     return shell(base, admin, "/dashboard", "Dashboard", content, "HTM Backoffice — Dashboard")

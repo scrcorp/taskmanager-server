@@ -15,7 +15,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.services.push_dispatch import dispatch_alert_push
 from app.core.alert_categories import (
@@ -486,33 +486,109 @@ class AlertService:
             reference_id=item.id,
         )
 
+    def attendance_recipient_query(
+        self,
+        *,
+        organization_id: UUID,
+        store_id: UUID,
+        exclude_user_id: UUID | None = None,
+    ):
+        """근태 알림(근태수정 / 조기출근 강행 / 겹침출근) 수신자.
+
+        Recipient rule for attendance alerts:
+        **that store's checked managers, plus Owner (and Super Owner).**
+
+        포함 규칙 — 아래 둘 중 **하나만 맞으면** 수신자다:
+          1. 그 매장에 `is_manager=True` 로 배정된 사람 — 콘솔 Staff > Detail 의
+             매장별 manager 체크가 그대로 기준이다. **GM 도 여기에 걸려야 받는다**
+             (그 매장 GM 만 받는다는 뜻). SV 든 GM 든 직급으로는 안 들어온다.
+          2. `priority <= OWNER_PRIORITY` (Owner / Super Owner) — 오너는 오너라서
+             받는다. 매장 배정과 무관하게 항상.
+
+        그 밖에:
+          - active + 미삭제. 비활성/퇴사자는 조치할 수 없는 사람이다.
+          - 본인 제외 — 자기 행위를 자기에게 알리지 않는다.
+
+        `schedules:update` **권한**으로 고르지 않는 이유: 그 권한은 SV 기본 세트에
+        들어 있는 데다 매장 스코프가 없어서, 조직 전체 SV/GM 이 전 매장 근태 알림을
+        받아버린다(실제 발생한 문제). 직급이 아니라 **매장 manager 체크**가 기준이다.
+
+        매장 조건을 join 이 아니라 EXISTS 로 거는 이유: join 이면 `user_stores` 행이
+        하나도 없는 Owner 가 통째로 빠진다(규칙 2 가 무력화된다). EXISTS 는 행을
+        늘리지도 않아 중복 발송 걱정도 없다.
+
+        in-app 과 email 이 이 쿼리를 공유한다. 수신 범위를 바꿀 일이 생기면
+        **여기만** 고칠 것 — 따로 짜면 두 채널이 조용히 갈린다.
+        """
+        from app.core.permissions import OWNER_PRIORITY
+        from app.models.user_store import UserStore
+
+        manages_this_store = (
+            select(UserStore.id)
+            .where(
+                UserStore.user_id == User.id,
+                UserStore.store_id == store_id,
+                UserStore.is_manager.is_(True),
+            )
+            .exists()
+        )
+        query = (
+            select(User.id, User.email)
+            .join(Role, User.role_id == Role.id)
+            .where(
+                User.organization_id == organization_id,
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+                or_(manages_this_store, Role.priority <= OWNER_PRIORITY),
+            )
+        )
+        if exclude_user_id is not None:
+            query = query.where(User.id != exclude_user_id)
+        return query
+
+    async def _attendance_recipient_ids(
+        self,
+        db: AsyncSession,
+        *,
+        organization_id: UUID,
+        store_id: UUID,
+        exclude_user_id: UUID | None,
+        alert_type: str,
+    ) -> list[UUID]:
+        """근태 알림 in-app 수신자 id 목록 (선호도 가드 적용 후)."""
+        result = await db.execute(
+            self.attendance_recipient_query(
+                organization_id=organization_id,
+                store_id=store_id,
+                exclude_user_id=exclude_user_id,
+            )
+        )
+        recipient_ids: list[UUID] = [row[0] for row in result.all()]
+        return await self._filter_in_app_recipients(db, recipient_ids, alert_type)
+
     async def create_for_attendance_correction(
         self,
         db: AsyncSession,
         attendance_id: UUID,
         organization_id: UUID,
+        store_id: UUID,
         corrected_by: UUID,
         field_name: str,
     ) -> list[Alert]:
-        """근태 수정 시 GM 이상 사용자에게 알림을 자동 생성합니다.
+        """근태 수정 시 그 매장 manager + Owner 에게 알림을 자동 생성합니다.
 
-        Auto-create alerts for GM+ users when an attendance record is corrected.
+        Auto-create alerts for that store's checked managers and Owners when an
+        attendance record is corrected. 수신자 규칙은 `attendance_recipient_query` 참조.
         """
         message: str = f"Attendance record corrected: {field_name}"
 
-        # schedules:update 권한 보유 사용자 조회 — Find users with schedule management permission
-        gm_result = await db.execute(
-            select(User.id)
-            .join(Role, User.role_id == Role.id)
-            .join(RolePermission, Role.id == RolePermission.role_id)
-            .join(Permission, RolePermission.permission_id == Permission.id)
-            .where(User.organization_id == organization_id)
-            .where(User.is_active.is_(True))
-            .where(Permission.code == "schedules:update")
-            .where(User.id != corrected_by)
+        filtered = await self._attendance_recipient_ids(
+            db,
+            organization_id=organization_id,
+            store_id=store_id,
+            exclude_user_id=corrected_by,
+            alert_type="attendance_corrected",
         )
-        gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
-        filtered = await self._filter_in_app_recipients(db, gm_ids, "attendance_corrected")
 
         alerts: list[Alert] = []
         for uid in filtered:
@@ -538,10 +614,11 @@ class AlertService:
         staff_name: str,
         minutes_early: int,
     ) -> list[Alert]:
-        """조기 출근 강행 시 매니저/SV 에게 알림을 생성합니다.
+        """조기 출근 강행 시 그 매장 manager + Owner 에게 알림을 생성합니다.
 
         Auto-create alerts when staff force an early clock-in with a reason.
         매니저가 현장에 없어서 벌어지는 일이라, 늦게라도 반드시 눈에 들어와야 한다.
+        수신자 규칙은 `attendance_recipient_query` 참조.
         email 은 호출자가 should_send_email 가드와 함께 별도로 보낸다
         (checklist/report 알림과 동일한 분업).
         """
@@ -549,19 +626,12 @@ class AlertService:
             f"{staff_name} clocked in {minutes_early} minutes before their shift"
         )
 
-        gm_result = await db.execute(
-            select(User.id)
-            .join(Role, User.role_id == Role.id)
-            .join(RolePermission, Role.id == RolePermission.role_id)
-            .join(Permission, RolePermission.permission_id == Permission.id)
-            .where(User.organization_id == organization_id)
-            .where(User.is_active.is_(True))
-            .where(Permission.code == "schedules:update")
-            .where(User.id != staff_user_id)
-        )
-        gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
-        filtered = await self._filter_in_app_recipients(
-            db, gm_ids, "early_clock_in_override"
+        filtered = await self._attendance_recipient_ids(
+            db,
+            organization_id=organization_id,
+            store_id=store_id,
+            exclude_user_id=staff_user_id,
+            alert_type="early_clock_in_override",
         )
 
         alerts: list[Alert] = []
@@ -588,11 +658,12 @@ class AlertService:
         db: AsyncSession,
         attendance_id: UUID,
         organization_id: UUID,
+        store_id: UUID,
         staff_user_id: UUID,
         staff_name: str,
         work_date: date,
     ) -> list[Alert]:
-        """겹쳐 출근(D15) 시 매니저/SV 알림. 같은 (직원, 영업일) 은 60분에 1건.
+        """겹쳐 출근(D15) 시 그 매장 manager + Owner 알림. 같은 (직원, 영업일) 은 60분에 1건.
 
         직원은 이 상태를 스스로 정리할 수 없다 — 한쪽을 취소·정정하는 건 매니저
         권한이다. 그래서 알림이 유일한 즉시 전달 경로다.
@@ -635,19 +706,12 @@ class AlertService:
         message = (
             f"{staff_name} clocked in to a second shift while the first is still open"
         )
-        gm_result = await db.execute(
-            select(User.id)
-            .join(Role, User.role_id == Role.id)
-            .join(RolePermission, Role.id == RolePermission.role_id)
-            .join(Permission, RolePermission.permission_id == Permission.id)
-            .where(User.organization_id == organization_id)
-            .where(User.is_active.is_(True))
-            .where(Permission.code == "schedules:update")
-            .where(User.id != staff_user_id)
-        )
-        gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
-        filtered = await self._filter_in_app_recipients(
-            db, gm_ids, "overlapping_clock_in"
+        filtered = await self._attendance_recipient_ids(
+            db,
+            organization_id=organization_id,
+            store_id=store_id,
+            exclude_user_id=staff_user_id,
+            alert_type="overlapping_clock_in",
         )
 
         alerts: list[Alert] = []

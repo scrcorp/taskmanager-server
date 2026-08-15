@@ -12,10 +12,12 @@ from app.api.backoffice.routes import router as backoffice_router
 from app.api.backoffice.tools.empid import router as _empid_router
 from app.api.backoffice.tools.changelog import router as _changelog_router
 from app.api.backoffice.tools.organizations import router as _orgs_router
+from app.api.backoffice.tools.push_diag import router as _push_diag_router
 
 # 도구 라우터를 backoffice 라우터에 장착 (비밀경로 prefix 하위)
 backoffice_router.include_router(_orgs_router)
 backoffice_router.include_router(_empid_router)
 backoffice_router.include_router(_changelog_router)
+backoffice_router.include_router(_push_diag_router)
 
 __all__ = ["backoffice_router"]

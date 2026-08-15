@@ -16,9 +16,15 @@ from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import check_store_access, get_accessible_store_ids, require_permission
+from app.api.issue_recipients import (
+    resolve_issue_expected_viewers,
+    resolve_issue_recipients,
+)
 from app.database import get_db
 from app.models.user import User
 from app.schemas.report import (
+    IssueExpectedViewersResponse,
+    IssueRecipientsResponse,
     ReportCommentCreate,
     ReportCreate,
     ReportResponse,
@@ -72,6 +78,48 @@ async def list_reports(
     )
     items = await report_service.build_responses_batch(db, reports)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
+
+
+# NOTE: 반드시 /{report_id} **위에** 선언한다. 아래에 두면 FastAPI 가
+# "issue-recipients" 를 UUID path param 으로 파싱해 422 가 난다.
+@router.get("/issue-recipients", response_model=IssueRecipientsResponse)
+async def list_issue_recipients(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("reports:read"))],
+    store_id: Annotated[UUID | None, Query()] = None,
+    report_id: Annotated[UUID | None, Query()] = None,
+) -> dict:
+    """이슈 알림 수신자(후보) 목록.
+
+    store_id 만 주면 작성 화면용 후보, report_id 를 주면 그 리포트의 현재 수신자.
+    """
+    return await resolve_issue_recipients(
+        db, current_user, store_id=store_id, report_id=report_id
+    )
+
+
+# NOTE: /{report_id} 위에 선언 (아래면 UUID path 로 파싱돼 422).
+@router.get("/issue-viewers", response_model=IssueExpectedViewersResponse)
+async def list_issue_expected_viewers(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("reports:read"))],
+    scope: Annotated[str, Query()] = "default",
+    store_id: Annotated[UUID | None, Query()] = None,
+    report_id: Annotated[UUID | None, Query()] = None,
+    extra_user_ids: Annotated[list[UUID] | None, Query()] = None,
+) -> dict:
+    """선택한 조회 범위에서 실제로 볼 수 있게 되는 사람 미리보기 (app 과 동일 body).
+
+    store_all 은 인원이 많아 목록 대신 summary 만 내려간다(mode="summary").
+    """
+    return await resolve_issue_expected_viewers(
+        db,
+        current_user,
+        store_id=store_id,
+        report_id=report_id,
+        scope=scope,
+        extra_user_ids=extra_user_ids,
+    )
 
 
 @router.get("/{report_id}", response_model=ReportResponse)

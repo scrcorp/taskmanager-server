@@ -257,6 +257,14 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     ("payroll:read",    "payroll", "read",    "View pay periods, payroll entries and rate history", False),
     ("payroll:confirm", "payroll", "confirm", "Confirm pay periods (freeze payroll entries)", False),
     ("payroll:export",  "payroll", "export",  "Export confirmed payroll data", False),
+
+    # ── Contacts (조직 전화번호부 — read 는 SV 이상 기본, 쓰기 3종은 기본 부여 없이 개인 배정) ──
+    # 설계 D2/D3: "일부 인원만 추가 가능"이 요구사항이라 create/update/delete 는
+    # gm/sv 기본 세트에서 제외하고 개인 권한으로만 배정한다. read 만 있으면 변경 신청 가능.
+    ("contacts:read",   "contacts", "read",   "View contacts directory", False),
+    ("contacts:create", "contacts", "create", "Create contacts", False),
+    ("contacts:update", "contacts", "update", "Edit contacts", False),
+    ("contacts:delete", "contacts", "delete", "Delete contacts", False),
 ]
 
 # 편의용: code → description 조회
@@ -290,6 +298,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         "warnings:upload",
         # Payroll 은 기본 Owner 전용 (급여 확정/열람/export) — 필요 시 개별 부여.
         "payroll:read", "payroll:confirm", "payroll:export",
+        # Contacts 쓰기는 기본 role 부여 없이 개인 배정 (설계 D3). GM 도 read 만.
+        "contacts:create", "contacts:update", "contacts:delete",
     },
     "sv": {
         "stores:read", "users:read",
@@ -312,6 +322,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         # 가이드 §1.1: 사이클 확정은 Owner/GM 위주. SV 는 entry 수정·누락 추가만.
         "tips:read", "tips:edit_own", "tips:edit_all", "tips:add_for_others",
         "tips:form_view",
+        # 연락처는 SV 이상 열람 (D2). 쓰기는 개인 배정 (D3).
+        "contacts:read",
     },
     "staff": {
         "daily_reports:read", "daily_reports:create", "daily_reports:update",
