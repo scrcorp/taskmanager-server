@@ -44,9 +44,40 @@ class DailyReportPayload(BaseModel):
 # ── Issue Report payload ───────────────────────────────────────────
 
 # 시스템 기본 카테고리. store별 customize는 report_templates(type='issue').payload.categories로.
-DEFAULT_ISSUE_CATEGORIES = ["equipment", "safety", "customer", "staff", "inventory", "other"]
+DEFAULT_ISSUE_CATEGORIES = [
+    "equipment", "safety", "customer", "staff", "inventory", "review", "other",
+]
 ISSUE_SEVERITIES = ["low", "medium", "high", "critical"]
 ISSUE_STATUSES = ["open", "in_progress", "closed"]
+
+# 카테고리를 고르면 description 에 프리필할 "제목 줄" 원문 (클라가 프리필, 서버는 저장만).
+# 키가 없는 카테고리는 프리셋 없음.
+#
+# 항목 사이에 빈 줄을 넣는다 — 줄이 붙어 있으면 작성자가 어디에 뭘 쓰는지 구분이 안 된다.
+DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES: dict[str, str] = {
+    "review": (
+        "Platform:\n\n"
+        "Rating:\n\n"
+        "What was said:\n\n"
+        "How we responded:\n\n"
+        "Follow-up needed:\n\n"
+        "Plan:"
+    ),
+}
+
+# 지난 버전의 프리셋 원문. startup 보정이 **이 값들만** 새 원문으로 갈아끼운다.
+# (운영자가 직접 고친 문구나 null 로 비운 항목은 건드리지 않는다)
+LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES: dict[str, list[str]] = {
+    "review": [
+        "Platform:\nRating:\nWhat was said:\nHow we responded:\nFollow-up needed:\nPlan:",
+    ],
+}
+
+# 조회 범위 — **확대 전용**. 축소(author_only)는 만들지 않는다(은폐 방지).
+#   default   : 현행 규칙 (작성자 + 그 매장 manager 중 작성자보다 상위 직급 + extra_viewers)
+#   managers  : + 그 매장 manager 전원 (직급 무관)
+#   store_all : + 그 매장 배정 인원 전원
+ISSUE_VISIBILITY_SCOPES = ["default", "managers", "store_all"]
 
 
 class IssueCategoryDef(BaseModel):
@@ -56,6 +87,8 @@ class IssueCategoryDef(BaseModel):
     color: str | None = None  # 표시용 hex color
     sort_order: int = 0
     is_active: bool = True
+    # 이 카테고리를 고르면 작성 화면 description 에 프리필할 원문. None = 프리셋 없음.
+    description_template: str | None = None
 
 
 class IssueCustomFieldDef(BaseModel):
@@ -108,7 +141,10 @@ class IssueLinks(BaseModel):
 
 
 class IssueExtraViewers(BaseModel):
-    """기본 조회권자(작성자 + 매장 SV+) 외에 추가로 보게 할 사람/포지션."""
+    """콕 집어 추가한 수신자 — 조회권 + 이메일 알림을 함께 받는다.
+
+    position_ids 는 미구현 (position-user 매핑 도입 전까지 무시).
+    """
     user_ids: list[str] = []
     position_ids: list[str] = []
 
@@ -120,11 +156,79 @@ class IssueReportPayload(BaseModel):
     attachments: list[IssueAttachment] = []
     links: IssueLinks = Field(default_factory=IssueLinks)
     extra_viewers: IssueExtraViewers = Field(default_factory=IssueExtraViewers)
+    # 확대 전용 조회 범위 (ISSUE_VISIBILITY_SCOPES). 키 없음 = "default".
+    visibility_scope: str = "default"
+    # DEPRECATED (2026-08-14) — 자동 수신자(그 매장 GM 이상)는 해제 불가가 되어
+    # 이 키는 **아무 효과가 없다**. 구버전 클라가 계속 보내므로 받기만 하고 무시한다.
+    notify_excluded_user_ids: list[str] = []
     # 매장별 커스텀 필드 응답 (field_id → value)
     custom_field_values: dict[str, Any] = Field(default_factory=dict)
     # 향후 promote 시 채워짐. 신규 키는 linked_task_id, 구버전 데이터는 linked_issue_id 도 인식.
     linked_task_id: str | None = None
     linked_issue_id: str | None = None  # legacy, backward compat
+
+
+# ── Issue notification recipients ──────────────────────────────────
+
+
+class IssueRecipientItem(BaseModel):
+    """이슈 알림 수신자 1명.
+
+    source: "auto" = 그 매장에 배정된 GM 이상 (항상 수신, 해제 불가),
+            "added" = payload.extra_viewers.user_ids 로 콕 집어 추가한 사람.
+    is_recipient: 지금 실제로 알림을 받는가. 새 규칙에서는 항상 True
+                  (auto 는 해제 불가, added 는 지우면 목록에서 사라진다).
+                  구버전 클라 호환으로 필드는 남긴다.
+    can_remove: 작성 화면에서 이 사람을 뺄 수 있는가. auto=False(잠김), added=True.
+    """
+    user_id: str
+    full_name: str
+    role_label: str
+    role_priority: int
+    source: str
+    is_recipient: bool
+    can_remove: bool = True
+
+
+class IssueRecipientsResponse(BaseModel):
+    store_id: str
+    report_id: str | None = None
+    items: list[IssueRecipientItem] = []
+
+
+class IssueExpectedViewerItem(BaseModel):
+    """선택한 조회 범위에서 이 리포트를 볼 수 있게 되는 사람 1명.
+
+    reason: "author" | "gm_or_above" | "store_manager" | "added"
+    reason_label: 그대로 UI 에 찍을 영어 문구 (클라가 코드→문구 매핑을 또 만들지 않게).
+    is_notified: 조회권만이 아니라 알림까지 받는가.
+    """
+    user_id: str
+    full_name: str
+    role_label: str
+    role_priority: int
+    reason: str
+    reason_label: str
+    is_notified: bool
+
+
+class IssueExpectedViewersSummary(BaseModel):
+    label: str
+    count: int
+
+
+class IssueExpectedViewersResponse(BaseModel):
+    """조회 범위 미리보기.
+
+    mode="list"    : items 에 실제 사람 목록 (default / managers)
+    mode="summary" : items 는 빈 배열, summary 만 (store_all — 인원이 많아 목록을 만들지 않는다)
+    """
+    store_id: str
+    report_id: str | None = None
+    scope: str
+    mode: str
+    summary: IssueExpectedViewersSummary
+    items: list[IssueExpectedViewerItem] = []
 
 
 # ── Template CRUD ──────────────────────────────────────────────────

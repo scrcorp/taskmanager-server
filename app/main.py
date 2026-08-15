@@ -273,52 +273,23 @@ async def seed_settings_registry() -> None:
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def ensure_issue_default_template() -> None:
-    """System default issue template (org_id=NULL, store_id=NULL) 1건 보장.
+    """System default issue template (org_id=NULL, store_id=NULL) 1건 보장 + 멱등 보정.
 
-    매장이 customize 안 한 경우의 fallback. 6개 기본 카테고리 시드.
+    매장이 customize 안 한 경우의 fallback. 기본 카테고리 시드.
+    이미 시드된 환경에도 새 기본 카테고리(review 등)와 description 프리셋이 들어가야 하므로,
+    row 가 있으면 return 하지 않고 **없는 것만** 채운다.
+
+    보정 대상은 system default row 뿐이다 — org/store 가 자체 카테고리를 만든 템플릿은
+    운영자 커스터마이즈이므로 건드리지 않는다.
     """
     import logging
-    from sqlalchemy import select
     from app.database import async_session
-    from app.models.report import ReportTemplate
-    from app.schemas.report import DEFAULT_ISSUE_CATEGORIES
+    from app.services.report_service import ensure_system_issue_template
 
     logger = logging.getLogger("uvicorn.error")
     try:
         async with async_session() as db:
-            existing = await db.execute(
-                select(ReportTemplate).where(
-                    ReportTemplate.type == "issue",
-                    ReportTemplate.organization_id.is_(None),
-                    ReportTemplate.store_id.is_(None),
-                    ReportTemplate.is_default.is_(True),
-                )
-            )
-            if existing.scalar_one_or_none():
-                return
-            categories = [
-                {
-                    "code": code,
-                    "label": code.replace("_", " ").title(),
-                    "color": None,
-                    "sort_order": idx + 1,
-                    "is_active": True,
-                }
-                for idx, code in enumerate(DEFAULT_ISSUE_CATEGORIES)
-            ]
-            db.add(
-                ReportTemplate(
-                    type="issue",
-                    organization_id=None,
-                    store_id=None,
-                    name="Default Issue Form",
-                    is_default=True,
-                    is_active=True,
-                    payload={"categories": categories, "custom_fields": []},
-                )
-            )
-            await db.commit()
-            logger.info("Created system default issue template")
+            await ensure_system_issue_template(db)
     except Exception as e:
         logger.warning(f"Failed to ensure default issue template: {e}")
 

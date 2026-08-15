@@ -20,6 +20,53 @@ REPORT_NOT_VISIBLE = REPORTS.code(
 )
 
 
+# ── Issue sharing / notification recipients ────────────────────────
+# 공유 설정은 조용히 실패하면 안 된다 — 작성자는 공유했다고 믿는데 아무도 못 보는 상태가
+# 되기 때문이다. 그래서 모르는 값·조직 밖 사용자는 400 으로 되돌린다.
+
+ISSUE_VISIBILITY_SCOPE_INVALID = REPORTS.code(
+    "ISSUE_VISIBILITY_SCOPE_INVALID",
+    400,
+    "That sharing option is not available.",
+    hint="Choose one of: default, managers, store_all.",
+)
+
+ISSUE_RECIPIENT_IDS_INVALID = REPORTS.code(
+    "ISSUE_RECIPIENT_IDS_INVALID",
+    400,
+    "The recipient list is not in a readable format.",
+    hint="Reload the recipient list and pick the people again.",
+)
+
+ISSUE_RECIPIENT_NOT_IN_ORG = REPORTS.code(
+    "ISSUE_RECIPIENT_NOT_IN_ORG",
+    400,
+    "Some selected people are no longer active members of this organization.",
+    hint="Remove them from the recipient list and submit again.",
+)
+
+ISSUE_RECIPIENTS_TARGET_REQUIRED = REPORTS.code(
+    "ISSUE_RECIPIENTS_TARGET_REQUIRED",
+    400,
+    "A store or a report is required to look up recipients.",
+    hint="Send store_id (new issue) or report_id (existing issue).",
+)
+
+ISSUE_RECIPIENTS_STORE_MISMATCH = REPORTS.code(
+    "ISSUE_RECIPIENTS_STORE_MISMATCH",
+    400,
+    "The requested store does not match the report's store.",
+    hint="Send report_id alone, or pair it with its own store.",
+)
+
+ISSUE_RECIPIENTS_UNAVAILABLE = REPORTS.code(
+    "ISSUE_RECIPIENTS_UNAVAILABLE",
+    400,
+    "This report does not have notification recipients.",
+    hint="Only issue reports tied to a store have recipients.",
+)
+
+
 # ── 스케줄 일일 리포트 설정 검증 ────────────────────────
 # 값이 깨진 채 저장되면 파서가 조용히 버려서 리포트가 신호 없이 멈춘다.
 # 그래서 저장 입구에서 막고, 어떤 항목이 잘못됐는지 그대로 돌려준다.
