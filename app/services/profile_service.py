@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.alert_categories import CATEGORIES, normalize_preferences
+from app.models.alert_preference_audit import AlertPreferenceAudit
 from app.models.user import Role, User
 from app.repositories.user_repository import user_repository
 from app.schemas.user import (
@@ -172,6 +173,7 @@ class ProfileService:
             prefs[code] = AlertCategoryChannel(
                 in_app=val.get("in_app"),
                 email=val.get("email"),
+                push=val.get("push"),
             )
         categories = [
             AlertCategoryMeta(
@@ -179,6 +181,7 @@ class ProfileService:
                 label=c["label"],
                 description=c["description"],
                 email_available=c["email_available"],
+                push_available=True,
             )
             for c in CATEGORIES
         ]
@@ -191,11 +194,57 @@ class ProfileService:
         """현재 사용자의 알림 선호 + 카테고리 메타 조회."""
         return self._build_preferences_response(current_user)
 
+
+    # 이력에 남기는 채널 목록. 여기 없는 키는 기록하지 않는다.
+    _AUDITED_CHANNELS = ("in_app", "email", "push")
+
+    def _record_preference_changes(
+        self,
+        db: AsyncSession,
+        *,
+        user: User,
+        changed_by: User,
+        before: dict,
+        after: dict,
+        user_agent: str | None,
+    ) -> None:
+        """before → after 를 (카테고리, 채널) 단위로 비교해 변경분만 이력 행으로 추가.
+
+        값은 3-상태(True/False/None)다. None 은 "미설정 = 기본값 따름" 으로
+        False 와 의미가 다르므로 그대로 보존한다. 값이 안 바뀐 항목은 기록하지 않는다.
+        """
+        codes = set(before) | set(after)
+        for code in codes:
+            old_ch = before.get(code) or {}
+            new_ch = after.get(code) or {}
+            if not isinstance(old_ch, dict):
+                old_ch = {}
+            if not isinstance(new_ch, dict):
+                new_ch = {}
+            for channel in self._AUDITED_CHANNELS:
+                old_val = old_ch.get(channel)
+                new_val = new_ch.get(channel)
+                if old_val == new_val:
+                    continue
+                db.add(
+                    AlertPreferenceAudit(
+                        organization_id=user.organization_id,
+                        user_id=user.id,
+                        changed_by_user_id=changed_by.id,
+                        category_code=code,
+                        channel=channel,
+                        old_value=old_val,
+                        new_value=new_val,
+                        user_agent=user_agent,
+                    )
+                )
+
     async def update_alert_preferences(
         self,
         db: AsyncSession,
         current_user: User,
         data: AlertPreferencesUpdate,
+        user_agent: str | None = None,
     ) -> AlertPreferencesResponse:
         """알림 선호 부분 업데이트 — 받은 카테고리/채널만 머지.
 
@@ -220,6 +269,17 @@ class ProfileService:
 
         # 모두 None/default 가 된 카테고리는 삭제 (저장소 깔끔하게)
         existing = {k: v for k, v in existing.items() if v}
+
+        # 변경 이력 — "언제 껐는지" 를 증명할 수 있어야 하므로 저장 전에 diff 를 남긴다.
+        # 같은 트랜잭션에 넣어, 설정 저장이 실패하면 이력도 남지 않게 한다.
+        self._record_preference_changes(
+            db,
+            user=current_user,
+            changed_by=current_user,
+            before=dict(current_user.alert_preferences or {}),
+            after=existing,
+            user_agent=user_agent,
+        )
 
         try:
             current_user.alert_preferences = existing

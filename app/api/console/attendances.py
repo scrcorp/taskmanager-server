@@ -91,10 +91,17 @@ async def list_attendances(
         db, attendance_ids
     )
 
+    # late_buffer 는 (org, store) 별 1회만 해석해 주입 — 행마다 설정 조회하면 N+1.
+    from app.services.attendance_threshold_service import resolve_late_buffer_cached
+
+    lb_cache: dict = {}
     items: list[dict] = []
     for a in attendances:
+        late_buffer = await resolve_late_buffer_cached(
+            db, lb_cache, organization_id=a.organization_id, store_id=a.store_id
+        )
         response: dict = await attendance_service.build_response(
-            db, a, breaks=breaks_map.get(a.id, [])
+            db, a, breaks=breaks_map.get(a.id, []), late_buffer=late_buffer
         )
         response["correction_count"] = correction_counts.get(a.id, 0)
         items.append(response)

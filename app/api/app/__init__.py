@@ -32,6 +32,7 @@ from app.api.app.checklist_instances import router as checklist_instances_router
 # Phase 3 — Communication 라우터 임포트
 from app.api.app.notices import router as notices_router
 from app.api.app.alerts import router as alerts_router
+from app.api.app.push import router as push_router
 from app.api.app.warnings import router as warnings_router
 
 # Phase 5 — Attendance 라우터 임포트
@@ -96,6 +97,8 @@ app_router.include_router(checklist_instances_router, prefix="/my/checklist-inst
 # ---------------------------------------------------------------------------
 app_router.include_router(notices_router, prefix="/my/notices", tags=["My Notices"])
 app_router.include_router(alerts_router, prefix="/my/alerts", tags=["My Alerts"])
+# 웹 푸시 구독 — 기기 단위. 알림 자체가 아니라 "어디로 보낼지" 를 관리한다.
+app_router.include_router(push_router, prefix="/my/push", tags=["My Push"])
 app_router.include_router(warnings_router, prefix="/my/warnings", tags=["My Warnings"])
 
 # ---------------------------------------------------------------------------

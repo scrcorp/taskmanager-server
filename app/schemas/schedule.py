@@ -349,6 +349,9 @@ class ScheduleBulkResult(BaseModel):
     failed: int = 0
     errors: list[str] = []
     items: list["ScheduleResponse"] = []
+    # 저장은 됐지만 확인이 필요한 항목들 (겹침·초과근무·영업일 경계 등).
+    # 비어 있으면 경고 없이 저장된 것.
+    warnings: list["BulkEntryWarnings"] = []
 
 
 class ScheduleIssue(BaseModel):
@@ -359,6 +362,18 @@ class ScheduleIssue(BaseModel):
     """
     code: str
     params: dict = {}
+
+
+class BulkEntryWarnings(BaseModel):
+    """벌크 항목 하나에 붙은 경고 — 요청 배열의 index 로 어떤 항목인지 지목한다.
+
+    문구는 클라이언트가 code 로 구성한다(D9-4). index 를 주는 이유는
+    "어떤 직원의 어느 날 근무인지"를 클라이언트가 자기 요청 배열에서
+    바로 찾아 보여줄 수 있게 하기 위함이다 — 서버 문장에 이름/날짜를
+    끼워 넣는 것보다 정확하고, 번역·표기도 클라이언트 쪽에 남는다.
+    """
+    index: int
+    warnings: list[ScheduleIssue] = []
 
 
 class ScheduleValidation(BaseModel):

@@ -140,6 +140,30 @@ def summary(sites: list[Site]) -> dict[str, int]:
 _PLACEHOLDERS = frozenset({"<indirect>", "<assembled>"})
 
 
+def _declared_identifiers() -> set[str]:
+    """레지스트리 코드가 묶여 있는 **파이썬 식별자** 이름들.
+
+    `scan()` 은 AST 만 보므로 `raise SHIFT_NOT_AVAILABLE(...)` 에서 얻는 값은 코드
+    문자열이 아니라 식별자다. 신규 `UPPER_SNAKE` 코드는 둘이 같아서 여태 문제가
+    없었지만, 이미 배포되어 개명할 수 없는 `legacy()` lower_snake 코드는 식별자와
+    코드 문자열이 다르다 — 그대로 두면 "선언했는데 선언하라" 고 보고한다.
+    """
+    import importlib
+    import pkgutil
+
+    from app.core.error_codes._registry import ErrorCode
+
+    package = importlib.import_module("app.core.error_codes")
+    names: set[str] = set()
+    for info in pkgutil.iter_modules(package.__path__):
+        module = importlib.import_module(f"{package.__name__}.{info.name}")
+        names |= {
+            name for name, value in vars(module).items()
+            if isinstance(value, ErrorCode)
+        }
+    return names
+
+
 def unregistered_codes(sites: list[Site]) -> set[str]:
     """raise 되지만 선언되지 않은 코드 — 있으면 레지스트리가 실태를 덜 담고 있다는 뜻.
 
@@ -147,7 +171,7 @@ def unregistered_codes(sites: list[Site]) -> set[str]:
     """
     from app.core.error_codes import all_codes
 
-    declared = set(all_codes())
+    declared = set(all_codes()) | _declared_identifiers()
     return {
         s.code
         for s in sites

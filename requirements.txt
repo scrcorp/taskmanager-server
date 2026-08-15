@@ -52,3 +52,7 @@ Pillow==12.2.0
 # HEIC/HEIF 디코드 — 아이폰 사진(HEIC)을 WebP 로 변환하기 위한 Pillow 플러그인.
 # manylinux/macOS wheel 에 libheif 번들 포함 → prod EC2 에 시스템 패키지 불필요.
 pillow-heif==0.21.0
+
+# Web Push (VAPID) — staff 앱 PWA 푸시 알림 발송.
+# 순수 파이썬(cryptography/http-ece 기반)이라 시스템 패키지 불필요.
+pywebpush==2.4.0

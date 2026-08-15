@@ -185,3 +185,69 @@ class TestPreviewAlwaysReturns200:
         body = resp.json()
         assert body["valid"] is False
         assert any(e["code"] == codes.ZERO_DURATION for e in body["errors"]), body
+
+
+class TestBulkDoesNotStopOnWarnings:
+    """S1-c — 다건 경로는 경고로 배치를 멈추지 않는다.
+
+    왜 중요한가 (2026-08-14 현장):
+      벌크 저장이 첫 경고 항목에서 409 로 통째로 튕겼다. 그런데 `create_entry` 는
+      건별로 commit 하므로 **앞 항목은 이미 저장된 상태**였고, 클라이언트에는
+      "created: 0" 으로 보고돼 사용자가 재시도하면 중복이 생겼다.
+      게다가 겹침·초과근무는 경고(확인 후 진행)라서 애초에 배정을 막으면 안 된다.
+    """
+
+    async def test_warning_entry_is_saved_and_reported(
+        self, async_client: AsyncClient, admin_headers, staff_assigned,
+    ):
+        day = FUTURE + timedelta(days=3)
+        first = _payload(staff_assigned, work_date=day.isoformat())
+        resp = await async_client.post(CREATE_URL, json=first, headers=admin_headers)
+        assert resp.status_code == 201, resp.text
+
+        # 같은 사람, 같은 날, 겹치는 시간 = 경고(OVERLAPPING_SCHEDULE)
+        overlapping = _payload(
+            staff_assigned, work_date=day.isoformat(),
+            start_time="10:00", end_time="16:00",
+        )
+        bulk = await async_client.post(
+            f"{CREATE_URL}/bulk",
+            json={"entries": [overlapping], "skip_on_conflict": False},
+            headers=admin_headers,
+        )
+        assert bulk.status_code == 200, bulk.text
+        body = bulk.json()
+        # 저장은 된다 — 경고는 배정을 막지 않는다
+        assert body["created"] == 1, body
+        # 그리고 무엇을 확인해야 하는지 항목별로 보고된다
+        assert body["warnings"], body
+        entry = body["warnings"][0]
+        assert entry["index"] == 0
+        assert any(w["code"] == codes.OVERLAPPING_SCHEDULE for w in entry["warnings"]), entry
+
+    async def test_clean_bulk_reports_no_warnings(
+        self, async_client: AsyncClient, admin_headers, staff_assigned,
+    ):
+        resp = await async_client.post(
+            f"{CREATE_URL}/bulk",
+            json={"entries": [_payload(staff_assigned)], "skip_on_conflict": False},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["created"] == 1, body
+        assert body["warnings"] == [], body
+
+    async def test_bulk_still_fails_the_entry_on_a_real_error(
+        self, async_client: AsyncClient, admin_headers, staff_assigned,
+    ):
+        """force 는 에러를 뚫지 않는다 — 0분 근무는 벌크에서도 저장되면 안 된다."""
+        resp = await async_client.post(
+            f"{CREATE_URL}/bulk",
+            json={"entries": [_zero_duration(staff_assigned)], "skip_on_conflict": False},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["created"] == 0, body
+        assert body["failed"] == 1, body

@@ -9,6 +9,7 @@ in-app 알림이 비활성화된 사용자는 자동 skip 한다. 이메일 발�
 should_send_email() 헬퍼로 동일하게 가드.
 """
 
+from datetime import date, datetime, timezone
 from typing import Sequence
 from uuid import UUID
 
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
+from app.services.push_dispatch import dispatch_alert_push
 from app.core.alert_categories import (
     category_for_type,
     is_email_enabled,
@@ -36,6 +38,17 @@ class AlertService:
     Alert service providing shared read/unread operations
     and auto-creation for various entity types.
     """
+
+    async def _create_alert(self, db: AsyncSession, **kwargs) -> Alert:
+        """알림 행을 만들고 웹 푸시 발송을 예약한다.
+
+        alert_repository.create_alert 를 직접 부르지 말고 항상 이걸 쓴다 —
+        그래야 "알림함에 쌓이면 푸시도 나간다" 는 규칙이 한 곳에서 지켜진다.
+        푸시는 백그라운드로 나가며, 커밋되지 않은 알림에는 발송되지 않는다.
+        """
+        alert: Alert = await alert_repository.create_alert(db, **kwargs)
+        dispatch_alert_push(alert)
+        return alert
 
     # --- 공통 조회/읽음 처리 (Shared read/unread operations) ---
 
@@ -221,7 +234,7 @@ class AlertService:
 
         alerts: list[Alert] = []
         for uid in filtered:
-            alert: Alert = await alert_repository.create_alert(
+            alert: Alert = await self._create_alert(
                 db,
                 organization_id=schedule.organization_id,
                 user_id=uid,
@@ -247,7 +260,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, schedule.user_id, "schedule_approved"):
             return None
         message: str = f"Your schedule for {schedule.work_date} has been approved"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=schedule.organization_id,
             user_id=schedule.user_id,
@@ -271,7 +284,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, schedule.user_id, "schedule_assigned"):
             return None
         message: str = f"New schedule assigned for {schedule.work_date}"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=schedule.organization_id,
             user_id=schedule.user_id,
@@ -298,7 +311,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, recipient_id, "reply"):
             return None
         message = f"{author_name} replied on your {context_label}"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=organization_id,
             user_id=recipient_id,
@@ -323,7 +336,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, recipient_id, "report_submitted"):
             return None
         message = f"{author_name} submitted a {context_label}"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=organization_id,
             user_id=recipient_id,
@@ -348,7 +361,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, recipient_id, "report_reviewed"):
             return None
         message = f"{reviewer_name} reviewed your {context_label}"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=organization_id,
             user_id=recipient_id,
@@ -381,7 +394,7 @@ class AlertService:
         filtered = await self._filter_in_app_recipients(db, user_ids, "notice")
 
         for uid in filtered:
-            alert: Alert = await alert_repository.create_alert(
+            alert: Alert = await self._create_alert(
                 db,
                 organization_id=notice.organization_id,
                 user_id=uid,
@@ -440,7 +453,7 @@ class AlertService:
         for manager in managers:
             if manager.id not in in_app_enabled_ids:
                 continue
-            notif = await alert_repository.create_alert(
+            notif = await self._create_alert(
                 db,
                 organization_id=instance.organization_id,
                 user_id=manager.id,
@@ -463,7 +476,7 @@ class AlertService:
         if not await self._is_in_app_enabled_for_user(db, item.reviewer_id, "checklist_re_review"):
             return None
         message = "Checklist item resubmitted for re-review"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=instance.organization_id,
             user_id=item.reviewer_id,
@@ -503,7 +516,7 @@ class AlertService:
 
         alerts: list[Alert] = []
         for uid in filtered:
-            alert: Alert = await alert_repository.create_alert(
+            alert: Alert = await self._create_alert(
                 db,
                 organization_id=organization_id,
                 user_id=uid,
@@ -554,11 +567,97 @@ class AlertService:
         alerts: list[Alert] = []
         for uid in filtered:
             alerts.append(
-                await alert_repository.create_alert(
+                await self._create_alert(
                     db,
                     organization_id=organization_id,
                     user_id=uid,
                     alert_type="early_clock_in_override",
+                    message=message,
+                    reference_type="attendance",
+                    reference_id=attendance_id,
+                )
+            )
+        return alerts
+
+    # 겹침 알림 중복 억제 창(분). 직원이 "이거 아님" 을 반복하면 매니저 알림함이
+    # 도배되므로 같은 사람·같은 영업일에 대해 이 간격 안에는 1건만 보낸다.
+    OVERLAP_ALERT_DEDUP_MINUTES = 60
+
+    async def create_for_overlapping_clock_in(
+        self,
+        db: AsyncSession,
+        attendance_id: UUID,
+        organization_id: UUID,
+        staff_user_id: UUID,
+        staff_name: str,
+        work_date: date,
+    ) -> list[Alert]:
+        """겹쳐 출근(D15) 시 매니저/SV 알림. 같은 (직원, 영업일) 은 60분에 1건.
+
+        직원은 이 상태를 스스로 정리할 수 없다 — 한쪽을 취소·정정하는 건 매니저
+        권한이다. 그래서 알림이 유일한 즉시 전달 경로다.
+        """
+        from datetime import timedelta as _td
+
+        from app.models.attendance import Attendance as _Attendance
+
+        # 같은 직원의 같은 영업일 attendance 들에 대해 최근에 나간 알림이 있으면 skip.
+        sibling_ids = list(
+            (
+                await db.execute(
+                    select(_Attendance.id).where(
+                        _Attendance.user_id == staff_user_id,
+                        _Attendance.work_date == work_date,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if sibling_ids:
+            since = datetime.now(timezone.utc) - _td(
+                minutes=self.OVERLAP_ALERT_DEDUP_MINUTES
+            )
+            recent = await db.scalar(
+                select(Alert.id)
+                .where(
+                    # 컬럼명은 `type` 이다 (repository 인자명만 alert_type).
+                    Alert.type == "overlapping_clock_in",
+                    Alert.reference_type == "attendance",
+                    Alert.reference_id.in_(sibling_ids),
+                    Alert.created_at >= since,
+                )
+                .limit(1)
+            )
+            if recent is not None:
+                return []
+
+        message = (
+            f"{staff_name} clocked in to a second shift while the first is still open"
+        )
+        gm_result = await db.execute(
+            select(User.id)
+            .join(Role, User.role_id == Role.id)
+            .join(RolePermission, Role.id == RolePermission.role_id)
+            .join(Permission, RolePermission.permission_id == Permission.id)
+            .where(User.organization_id == organization_id)
+            .where(User.is_active.is_(True))
+            .where(Permission.code == "schedules:update")
+            .where(User.id != staff_user_id)
+        )
+        gm_ids: list[UUID] = [row[0] for row in gm_result.all()]
+        filtered = await self._filter_in_app_recipients(
+            db, gm_ids, "overlapping_clock_in"
+        )
+
+        alerts: list[Alert] = []
+        for uid in filtered:
+            alerts.append(
+                await alert_repository.create_alert(
+                    db,
+                    organization_id=organization_id,
+                    user_id=uid,
+                    alert_type="overlapping_clock_in",
                     message=message,
                     reference_type="attendance",
                     reference_id=attendance_id,
@@ -589,7 +688,7 @@ class AlertService:
             message = f"Please re-sign your warning in the app: {title}"
         else:
             message = f"You have received a warning: {title}"
-        return await alert_repository.create_alert(
+        return await self._create_alert(
             db,
             organization_id=organization_id,
             user_id=subject_user_id,
@@ -611,7 +710,7 @@ class AlertService:
 
         if await self._is_in_app_enabled_for_user(db, old_user_id, "schedule_substitute"):
             old_msg = f"Substituted out: schedule for {schedule.work_date} has been reassigned"
-            alerts.append(await alert_repository.create_alert(
+            alerts.append(await self._create_alert(
                 db,
                 organization_id=schedule.organization_id,
                 user_id=old_user_id,
@@ -623,7 +722,7 @@ class AlertService:
 
         if await self._is_in_app_enabled_for_user(db, new_user_id, "schedule_substitute"):
             new_msg = f"Substituted in: you have been assigned to schedule for {schedule.work_date}"
-            alerts.append(await alert_repository.create_alert(
+            alerts.append(await self._create_alert(
                 db,
                 organization_id=schedule.organization_id,
                 user_id=new_user_id,

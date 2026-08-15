@@ -15,9 +15,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 
-from app.core.permissions import GM_PRIORITY, SV_PRIORITY
+from app.core.error_codes.reports import REPORT_NOT_VISIBLE
+from app.core.permissions import STAFF_PRIORITY, is_owner
 from app.models.organization import Store
 from app.models.report import (
     Report,
@@ -181,22 +182,110 @@ def _build_daily_payload_from_template(template: ReportTemplate, period: str) ->
     return {"period": period, "sections": sections}
 
 
-def _issue_visibility_clause(user: User):
-    """이슈 리포트 visibility 추가 조건.
+def _author_priority_subq():
+    """Report.author_id 의 role priority 를 뽑는 correlated scalar subquery."""
+    return (
+        select(Role.priority)
+        .select_from(User)
+        .join(Role, Role.id == User.role_id)
+        .where(User.id == Report.author_id)
+        .correlate(Report)
+        .scalar_subquery()
+    )
 
-    - SV+ (priority <= SV_PRIORITY): 매장 내 모든 이슈 (accessible_store_ids로 처리, 추가 조건 None)
-    - Staff (priority > SV_PRIORITY): 자기 작성 OR extra_viewers.user_ids에 자신
-      OR payload.share_with_store_all=True (작성자가 전체 공유 토글)
+
+def _manages_report_store_exists(user: User):
+    """이 리포트의 매장에서 내가 manager 인가 (user_stores.is_manager) — correlated EXISTS.
+
+    매장 배정(user_stores)만으로는 남의 리포트를 볼 근거가 안 된다. 같은 매장에서
+    같이 일한다는 뜻일 뿐이기 때문이다. **관리 책임(is_manager)이 있는 매장에서만**
+    아래 직급의 리포트가 열린다.
     """
-    priority = user.role.priority if user.role else 999
-    if priority <= SV_PRIORITY:
+    return (
+        select(UserStore.id)
+        .where(
+            UserStore.user_id == user.id,
+            UserStore.store_id == Report.store_id,
+            UserStore.is_manager.is_(True),
+        )
+        .correlate(Report)
+        .exists()
+    )
+
+
+def _report_visibility_clause(user: User):
+    """리포트 조회 가시성 조건 (모든 타입 공통).
+
+    두 축이 **동시에** 만족해야 남의 리포트가 열린다.
+
+    1. 직급 — 작성자가 나보다 **아래 직급**이어야 한다. 동급·상급은 manager 여도 못 본다.
+    2. 매장 — 그 리포트의 매장에서 내가 **manager(user_stores.is_manager)** 여야 한다.
+       배정만 된 매장(같이 일하는 매장)은 근거가 안 된다.
+
+    - 내가 쓴 것은 매장·직급과 무관하게 항상 보인다.
+    - Owner+ (priority <= OWNER_PRIORITY): 제한 없음 (None)
+    - issue 타입은 작성자가 명시적으로 공유한 경우(extra_viewers.user_ids /
+      share_with_store_all) 추가로 열어준다 — 명시 공유는 위 두 축보다 우선.
+
+    매장 범위 제한(accessible_store_ids)은 호출부에서 별도로 한 번 더 적용된다.
+    """
+    if is_owner(user):
         return None
+    priority = user.role.priority if user.role else 999
     user_str = str(user.id)
-    return or_(
+    conds = [
         Report.author_id == user.id,
+        # 아래 직급 + 그 매장의 manager. author 없는 리포트는 priority NULL → 제외.
+        and_(
+            _author_priority_subq() > priority,
+            _manages_report_store_exists(user),
+        ),
+        # 명시 공유 (issue 전용 payload 키)
         Report.payload["extra_viewers"]["user_ids"].op("?")(user_str),
         Report.payload["share_with_store_all"].astext == "true",
+    ]
+    return or_(*conds)
+
+
+def can_view_report(
+    user: User,
+    report: Report,
+    author_priority: int | None,
+    manages_store: bool,
+) -> bool:
+    """단건 조회 가시성 — _report_visibility_clause 의 파이썬 판정 버전.
+
+    manages_store: 이 리포트의 매장에서 viewer 가 manager 인가.
+    """
+    if is_owner(user):
+        return True
+    if report.author_id == user.id:
+        return True
+    priority = user.role.priority if user.role else 999
+    if author_priority is not None and author_priority > priority and manages_store:
+        return True
+    payload = report.payload or {}
+    extra = (payload.get("extra_viewers") or {}).get("user_ids") or []
+    if str(user.id) in [str(u) for u in extra]:
+        return True
+    return bool(payload.get("share_with_store_all"))
+
+
+async def _author_priority_of(db: AsyncSession, report: Report) -> int:
+    """리포트 작성자의 role priority. 작성자가 없으면 STAFF 취급(가장 하위).
+
+    알림 수신자를 가시성 규칙과 맞추는 데 쓴다 — 열 수 없는 사람에게 알림을 보내면
+    받는 쪽에는 403 로 끝나는 알림만 남는다.
+    """
+    if not report.author_id:
+        return STAFF_PRIORITY
+    res = await db.execute(
+        select(Role.priority)
+        .select_from(User)
+        .join(Role, Role.id == User.role_id)
+        .where(User.id == report.author_id)
     )
+    return res.scalar() or STAFF_PRIORITY
 
 
 async def _resolve_issue_viewers(
@@ -205,7 +294,7 @@ async def _resolve_issue_viewers(
     """이슈 리포트의 조회권자 user_id 집합.
 
     - 작성자
-    - 매장 SV+ (role priority <= SV_PRIORITY 이고 user_stores에 해당 매장 있음)
+    - 그 매장의 manager(user_stores.is_manager) 중 작성자보다 상위 직급인 사람
     - payload.extra_viewers.user_ids
     - payload.extra_viewers.position_ids 는 향후 (position-user 매핑 도입 후)
     """
@@ -214,14 +303,17 @@ async def _resolve_issue_viewers(
         viewers.add(report.author_id)
 
     if report.store_id:
-        # 매장의 SV+ user
+        # 이 매장의 **manager 이면서 작성자보다 상위 직급인 사람만** — 가시성 규칙과 동일.
+        # (배정만 된 동료 SV 는 이 리포트를 열 수 없으므로 알림도 보내지 않는다)
+        author_priority = await _author_priority_of(db, report)
         q = (
             select(User.id)
             .join(Role, Role.id == User.role_id)
             .join(UserStore, UserStore.user_id == User.id)
             .where(
                 UserStore.store_id == report.store_id,
-                Role.priority <= SV_PRIORITY,
+                UserStore.is_manager.is_(True),
+                Role.priority < author_priority,
                 User.is_active.is_(True),
                 User.deleted_at.is_(None),
             )
@@ -256,18 +348,22 @@ async def _resolve_issue_managers(
 ) -> set[UUID]:
     """이슈 리포트의 매장 관리자(GM+) user_id 집합. 사용자 표현 '관리자는 무조건 받음' 대상.
 
-    매장 SV+에서 더 좁혀 매장 GM+(priority <= GM_PRIORITY) 또는 user_stores.is_manager=True.
+    그 매장의 manager(user_stores.is_manager) 중 작성자보다 상위 직급인 사람.
+    (가시성 규칙과 같은 조건 — 못 여는 사람에게 메일을 보내지 않는다)
     """
     managers: set[UUID] = set()
     if not report.store_id:
         return managers
+    author_priority = await _author_priority_of(db, report)
     q = (
         select(User.id)
         .join(Role, Role.id == User.role_id)
         .join(UserStore, UserStore.user_id == User.id)
         .where(
             UserStore.store_id == report.store_id,
-            or_(Role.priority <= GM_PRIORITY, UserStore.is_manager.is_(True)),
+            UserStore.is_manager.is_(True),
+            # 동급·하위에게는 보이지 않으므로 알림도 보내지 않는다.
+            Role.priority < author_priority,
             User.is_active.is_(True),
             User.deleted_at.is_(None),
         )
@@ -665,18 +761,18 @@ class ReportService:
         per_page: int = 20,
         accessible_store_ids: list[UUID] | None = None,
         viewer: User | None = None,
-        show_all: bool = False,
+        show_all: bool = False,  # deprecated — 무시. 라우터 하위호환용으로만 남아 있다.
     ):
         payload_filters: dict | None = None
         if period:
             payload_filters = {"period": period}
         exclude_status = "draft" if (status is None and exclude_draft) else None
 
-        # issue 타입은 staff(priority > SV)에게 visibility 필터 적용.
-        # show_all=True면 매장 관리자(SV+)가 일부러 전체 보기 모드로 전환한 경우 — 무시.
+        # 가시성: 모든 타입에 직급 기반 필터 적용 (자기 것 + 하위 직급 작성분).
+        # show_all 은 더 이상 이 필터를 우회하지 못한다 — 우회 가능하면 필터가 아니다.
         extra_clause = None
-        if type == "issue" and viewer is not None and not show_all:
-            extra_clause = _issue_visibility_clause(viewer)
+        if viewer is not None:
+            extra_clause = _report_visibility_clause(viewer)
 
         return await report_repository.get_by_org(
             db, organization_id,
@@ -696,6 +792,37 @@ class ReportService:
         if not r:
             raise NotFoundError("Report not found")
         return r
+
+    async def assert_can_view(
+        self, db: AsyncSession, viewer: User, report: Report
+    ) -> None:
+        """단건 조회 가시성 검사 — list 필터와 같은 규칙.
+
+        (자기 것) 또는 (아래 직급 작성 + 그 매장의 manager) 또는 (issue 명시 공유).
+        list 에서 안 보이는 리포트를 id 직접 호출로 열 수 있으면 필터가 아니므로,
+        상세/리뷰/확인/댓글 등 '내용을 보는' 경로는 모두 이 검사를 거친다.
+        """
+        author_priority: int | None = None
+        if report.author_id:
+            res = await db.execute(
+                select(Role.priority)
+                .select_from(User)
+                .join(Role, Role.id == User.role_id)
+                .where(User.id == report.author_id)
+            )
+            author_priority = res.scalar()
+        manages_store = False
+        if report.store_id:
+            mres = await db.execute(
+                select(UserStore.id).where(
+                    UserStore.user_id == viewer.id,
+                    UserStore.store_id == report.store_id,
+                    UserStore.is_manager.is_(True),
+                )
+            )
+            manages_store = mres.first() is not None
+        if not can_view_report(viewer, report, author_priority, manages_store):
+            raise REPORT_NOT_VISIBLE()
 
     async def create_report(
         self,
@@ -1097,13 +1224,16 @@ class ReportService:
         try:
             from app.services.alert_service import alert_service
 
+            author_priority = await _author_priority_of(db, report)
             q = (
                 select(User.id, User.full_name)
                 .join(Role, Role.id == User.role_id)
                 .join(UserStore, UserStore.user_id == User.id)
                 .where(
                     UserStore.store_id == report.store_id,
-                    Role.priority <= SV_PRIORITY,
+                    # 가시성 규칙과 동일 — manager 이면서 상위 직급인 사람만 이 리포트를 연다.
+                    UserStore.is_manager.is_(True),
+                    Role.priority < author_priority,
                     User.is_active.is_(True),
                     User.deleted_at.is_(None),
                 )

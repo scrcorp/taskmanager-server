@@ -117,9 +117,16 @@ async def staff_on_meal_break(
     async with async_session() as db:
         tz_name, _day_cfg = await get_store_day_config(db, test_store_id)
     local_now = datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name))
-    start_local = (local_now - timedelta(hours=1)).time().replace(second=0, microsecond=0)
-    end_local = (local_now + timedelta(hours=4)).time().replace(second=0, microsecond=0)
-    await make_schedule(test_user, start_time=start_local, end_time=end_local)
+    # 벽시계(time)가 아니라 datetime 으로 넘긴다 — `.time()` 만 떼면 자정 직후
+    # (local_now - 1h) 가 전날 시각으로 감기는데 operating_day 는 오늘이라
+    # 스케줄이 ~23시간 뒤 미래로 잡히고 clock-in 이 early 로 거부된다.
+    start_at_local = (local_now - timedelta(hours=1)).replace(
+        second=0, microsecond=0, tzinfo=None
+    )
+    end_at_local = (local_now + timedelta(hours=4)).replace(
+        second=0, microsecond=0, tzinfo=None
+    )
+    await make_schedule(test_user, start_at=start_at_local, end_at=end_at_local)
     base = {"user_id": str(test_user["id"]), "pin": test_user["clockin_pin"]}
 
     ci = await async_client.post(

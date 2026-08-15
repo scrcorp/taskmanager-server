@@ -134,6 +134,13 @@ class Attendance(Base):
     early_clock_in_confirmed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # 조기 출근 강행 확인 일시 — payroll 마감 게이트의 판정 근거 (UTC)
     early_clock_in_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 조기 출근 **요청자**(= "누가 일찍 오라고 했나") FK — D9.
+    # 표시용 문자열("Asked to come in early (John Kim)")은 attendance_corrections.reason 에
+    # 남고, 식별은 여기서 한다. 문자열만 남기면 동명이인 구분·개명 후 추적·요청자별 집계가
+    # 전부 불가능하고 **나중에 소급해서 채울 수 없다.**
+    # "직접 입력(Someone else)" 은 명단 밖 사람이라 id 자체가 없으므로 NULL 이 정상이다
+    # (구버전 HTMA 도 이 값을 보내지 않는다 — 비어 있는 게 정상인 컬럼).
+    early_clock_in_requested_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)

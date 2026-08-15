@@ -8,9 +8,13 @@
       "ORG_LICENSE_INACTIVE"
     ],
     "attendance": [
+      "DEVICE_NO_STORE",
       "access_code_taken",
       "early_clock_in_reason_required",
-      "pin_conflict"
+      "invalid_reason_user",
+      "overlapping_clock_in_confirmation_required",
+      "pin_conflict",
+      "shift_not_available"
     ],
     "common": [
       "file_not_found",
@@ -63,6 +67,12 @@
     "payroll": [
       "pay_period_already_confirmed",
       "payroll_close_gates_failed"
+    ],
+    "push": [
+      "PUSH_NOT_CONFIGURED"
+    ],
+    "reports": [
+      "REPORT_NOT_VISIBLE"
     ],
     "schedule": [
       "BREAK_OUTSIDE_SHIFT",
@@ -147,6 +157,16 @@
       ]
     },
     {
+      "code": "DEVICE_NO_STORE",
+      "domain": "attendance",
+      "kind": "http",
+      "status": 400,
+      "message": "This device is not assigned to a store yet.",
+      "hint": "Ask a manager to pick a store in the device settings.",
+      "frozen": false,
+      "clients": []
+    },
+    {
       "code": "access_code_taken",
       "domain": "attendance",
       "kind": "http",
@@ -172,6 +192,30 @@
       ]
     },
     {
+      "code": "invalid_reason_user",
+      "domain": "attendance",
+      "kind": "http",
+      "status": 400,
+      "message": "That person is no longer on this store's manager list.",
+      "hint": "Submit again without picking a person, or pick someone from the current list.",
+      "frozen": false,
+      "clients": [
+        "app/apps/attendance/lib/widgets/early_clock_in_dialog.dart"
+      ]
+    },
+    {
+      "code": "overlapping_clock_in_confirmation_required",
+      "domain": "attendance",
+      "kind": "http",
+      "status": 400,
+      "message": "You are still clocked in to another shift. Clock in anyway?",
+      "hint": null,
+      "frozen": false,
+      "clients": [
+        "app/apps/attendance/lib/screens/attendance/attendance_main_screen.dart"
+      ]
+    },
+    {
       "code": "pin_conflict",
       "domain": "attendance",
       "kind": "http",
@@ -183,6 +227,18 @@
         "console/src/hooks/useClockinPin.ts",
         "app/apps/attendance/lib/screens/attendance/attendance_manage_staff_pins_screen.dart",
         "app/apps/staff/lib/services/clockin_pin_service.dart"
+      ]
+    },
+    {
+      "code": "shift_not_available",
+      "domain": "attendance",
+      "kind": "http",
+      "status": 400,
+      "message": "That shift is no longer available for clock-in. Pick another one.",
+      "hint": "Re-identify with your PIN to see the current list of shifts.",
+      "frozen": false,
+      "clients": [
+        "app/apps/attendance/lib/screens/attendance/attendance_main_screen.dart"
       ]
     },
     {
@@ -625,6 +681,26 @@
       "status": 409,
       "message": "Some close gates failed. Resolve every issue below, then confirm again.",
       "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PUSH_NOT_CONFIGURED",
+      "domain": "push",
+      "kind": "http",
+      "status": 503,
+      "message": "Push notifications are not available right now.",
+      "hint": "This server has no push configuration. Contact your administrator.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "REPORT_NOT_VISIBLE",
+      "domain": "reports",
+      "kind": "http",
+      "status": 403,
+      "message": "You do not have access to this report.",
+      "hint": "Only the author and higher-ranked managers can open it.",
       "frozen": false,
       "clients": []
     },

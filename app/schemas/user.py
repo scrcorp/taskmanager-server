@@ -381,6 +381,8 @@ class AlertCategoryChannel(BaseModel):
 
     in_app: bool | None = None
     email: bool | None = None
+    # 웹 푸시(PWA 배너). in_app 과 독립 — 끄면 폰은 조용하지만 알림함에는 쌓인다.
+    push: bool | None = None
 
 
 class AlertCategoryMeta(BaseModel):
@@ -390,6 +392,9 @@ class AlertCategoryMeta(BaseModel):
     label: str
     description: str
     email_available: bool
+    # 푸시는 전 카테고리 지원. 필드를 두는 이유는 클라가 메타만 보고 격자를
+    # 그릴 수 있게 하기 위함 — email_available 과 대칭.
+    push_available: bool = True
 
 
 class AlertPreferencesResponse(BaseModel):

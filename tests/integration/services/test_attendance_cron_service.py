@@ -284,6 +284,102 @@ async def test_no_show_promotion_skips_row_with_real_clock_out(
     assert "no_show" not in (att.anomalies or [])
 
 
+# ── (D15) 겹친 근무는 자동 마감 대상에서 뺀다 ────────────────────────
+
+
+async def _make_second_overdue_shift(
+    test_user: dict, store_id: UUID, *, start: time, end: time, clock_in: time,
+    clock_out: time | None = None,
+) -> UUID:
+    """같은 사람의 어제 두 번째 shift + attendance → attendance id.
+
+    `clock_out` 을 주면 이미 닫힌 근무(= auto 대상 아님)가 된다.
+    """
+    yesterday = _yesterday_utc()
+    async with async_session() as db:
+        sched = Schedule(
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+            store_id=store_id,
+            operating_day=yesterday,
+            start_at=datetime.combine(yesterday, start),
+            end_at=datetime.combine(yesterday, end),
+            status="confirmed",
+        )
+        db.add(sched)
+        await db.flush()
+        att = Attendance(
+            organization_id=test_user["organization_id"],
+            store_id=store_id,
+            user_id=test_user["id"],
+            schedule_id=sched.id,
+            work_date=yesterday,
+            clock_in=datetime.combine(yesterday, clock_in, tzinfo=timezone.utc),
+            clock_in_timezone="UTC",
+            clock_out=(
+                datetime.combine(yesterday, clock_out, tzinfo=timezone.utc)
+                if clock_out
+                else None
+            ),
+            clock_out_timezone="UTC" if clock_out else None,
+            status="clocked_out" if clock_out else "working",
+        )
+        db.add(att)
+        await db.commit()
+        return att.id
+
+
+async def test_auto_clock_out_skips_overlapping_open_shifts(
+    test_user: dict, test_store_id: UUID, _clean_state: None,
+) -> None:
+    """겹쳐 열린 두 근무는 **둘 다** 자동 마감하지 않는다 (D15).
+
+    자동으로 닫으면 두 shift 모두 "그럴듯하게 완결된 기록" 이 되어 **이중 지급이
+    자동화**된다. 사람이 한쪽을 정정/취소해야 하고, 그때까지 `open_shift` 게이트가
+    급여 확정을 막고 미퇴근 알림이 매니저를 계속 찌른다 — 의도한 압박이다.
+    """
+    # 09:00–12:00 (09:05 출근) + 11:00–15:00 (11:30 출근) → 11:30~12:00 이 겹친다.
+    _sched_id, first_id = await _make_overdue_attendance(test_user, test_store_id)
+    second_id = await _make_second_overdue_shift(
+        test_user, test_store_id,
+        start=time(11, 0), end=time(15, 0), clock_in=time(11, 30),
+    )
+
+    async with async_session() as db:
+        count = await _auto_clock_out_overdue(db)
+    assert count == 0, "겹친 근무를 자동 마감했다 — 이중 지급 경로가 열린다"
+
+    for att_id in (first_id, second_id):
+        att = await _get_attendance(att_id)
+        assert att.clock_out is None
+        assert att.status == "working"
+        assert "auto_clocked_out" not in (att.anomalies or [])
+
+
+async def test_auto_clock_out_still_runs_next_to_a_closed_earlier_shift(
+    test_user: dict, test_store_id: UUID, _clean_state: None,
+) -> None:
+    """앞 shift 를 제대로 닫고 온 사람의 열린 근무는 평소대로 자동 마감된다.
+
+    겹침 skip 이 "하루 두 shift" 를 통째로 막아버리면 근무가 영영 안 닫히고
+    `open_shift` 게이트가 매 기간 걸린다 — 오탐 쪽 비용도 크다는 뜻이라 경계를
+    따로 못 박는다. (05:00–09:00 닫힘 + 09:00 시작 열림 = 맞닿기만 한다.)
+    """
+    await _make_second_overdue_shift(
+        test_user, test_store_id,
+        start=time(5, 0), end=time(9, 0), clock_in=time(5, 0), clock_out=time(9, 0),
+    )
+    _sched_id, open_id = await _make_overdue_attendance(test_user, test_store_id)
+
+    async with async_session() as db:
+        count = await _auto_clock_out_overdue(db)
+    assert count == 1
+
+    att = await _get_attendance(open_id)
+    assert att.clock_out is not None
+    assert "auto_clocked_out" in (att.anomalies or [])
+
+
 # ── (c) fetch↔write race — write-time 원자 가드 ──────────────────────
 
 
@@ -336,3 +432,33 @@ async def test_write_time_guard_blocks_concurrent_real_clock_out(
     assert att.total_work_minutes == 167
     assert "auto_clocked_out" not in (att.anomalies or [])
     assert await _get_corrections(att_id) == []
+
+
+# ── (e) 종료시각 뒤에 지각 출근한 근무는 자동 마감하지 않는다 (AL-5) ─────────
+
+
+async def test_late_clock_in_after_scheduled_end_is_not_auto_closed(
+    test_user: dict, test_store_id: UUID, _clean_state: None,
+) -> None:
+    """clock_in 이 sched_end 보다 뒤면 자동 마감 대상에서 빠진다.
+
+    shift 선택(④)으로 "종료시각이 지난 shift 에 지각 출근" 이 정상 경로가 되면서
+    이 조합이 흔해졌다. 예전엔 clock_out=sched_end 로 찍혀 **clock_out < clock_in**
+    인 음수 근무가 만들어졌다 — 실제로 재현된 사고다.
+    """
+    yesterday = _yesterday_utc()
+    # 스케줄 09:00–12:00 인데 13:30 에 출근했다.
+    late_in = datetime.combine(yesterday, time(13, 30), tzinfo=timezone.utc)
+    _sched_id, att_id = await _make_overdue_attendance(
+        test_user, test_store_id, status="late", clock_in=late_in,
+    )
+
+    async with async_session() as db:
+        count = await _auto_clock_out_overdue(db)
+    assert count == 0, "clock_in 보다 이른 cutoff 로 마감하면 안 된다"
+
+    att = await _get_attendance(att_id)
+    assert att.clock_out is None, "열린 채로 두고 사람이 정리하게 한다"
+    assert att.status == "late"
+    assert "auto_clocked_out" not in (att.anomalies or [])
+    assert not await _get_corrections(att_id)

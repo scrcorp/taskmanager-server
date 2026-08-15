@@ -57,6 +57,8 @@ from app.core.error_codes import common as _common  # noqa: F401,E402
 from app.core.error_codes import hiring as _hiring  # noqa: F401,E402
 from app.core.error_codes import interviews as _interviews  # noqa: F401,E402
 from app.core.error_codes import payroll as _payroll  # noqa: F401,E402
+from app.core.error_codes import push as _push  # noqa: F401,E402
+from app.core.error_codes import reports as _reports  # noqa: F401,E402
 from app.core.error_codes import schedule as _schedule  # noqa: F401,E402
 from app.core.error_codes import signup as _signup  # noqa: F401,E402
 from app.core.error_codes import store as _store  # noqa: F401,E402
@@ -68,6 +70,7 @@ _DOMAIN_MODULES = (
     _hiring,
     _interviews,
     _payroll,
+    _reports,
     _schedule,
     _signup,
     _store,

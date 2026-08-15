@@ -46,7 +46,7 @@ rate (계산 규칙 1):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Sequence
 from uuid import UUID
@@ -74,6 +74,7 @@ from app.schemas.payroll import (
     CALC_VERSION,
     VALIDATION_BELOW_MINIMUM_WAGE,
     VALIDATION_OPEN_SHIFT,
+    VALIDATION_OVERLAPPING_ATTENDANCE,
     VALIDATION_RATE_MISSING,
     VALIDATION_TIP_PERIOD_NOT_CONFIRMED,
     VALIDATION_UNCONFIRMED_AUTO_CLOCKOUT,
@@ -437,6 +438,7 @@ class PayrollCalcService:
         day_data = await self._load_live_days(db, store_id, live_start, p_end)
         # 검증 플래그는 현 기간 일자만 (경계 걸친 주의 전기 일자는 전기 preview 몫)
         open_shift_dates = self._clip_dates(day_data.open_shift_dates, p_start, p_end)
+        overlap_dates_map = self._clip_dates(day_data.overlap_dates, p_start, p_end)
         auto_clockout_dates = self._clip_dates(
             day_data.auto_clockout_dates, p_start, p_end
         )
@@ -452,6 +454,7 @@ class PayrollCalcService:
         candidate_ids |= {uid for uid, v in tips_map.items() if v != 0}
         candidate_ids |= set(open_shift_dates)
         candidate_ids |= set(auto_clockout_dates)
+        candidate_ids |= set(overlap_dates_map)
 
         # ── 분류 + 금액 (사용자별) ───────────────────────────────────
         org_id = period.organization_id
@@ -543,6 +546,7 @@ class PayrollCalcService:
                 sources=sources,
                 open_dates=open_shift_dates.get(user_id, []),
                 auto_dates=auto_clockout_dates.get(user_id, []),
+                overlap_dates=overlap_dates_map.get(user_id, []),
             )
             rows.append(row)
 
@@ -570,6 +574,11 @@ class PayrollCalcService:
         attendance_ids: dict[tuple[UUID, date], UUID | None]  # 1:1 이면 id
         open_shift_dates: dict[UUID, list[date]]  # clock_in 有 + clock_out 無
         auto_clockout_dates: dict[UUID, list[date]]  # anomaly auto_clocked_out
+        # 시간이 겹친 근무 (D15) — 확정 게이트 ⑦ 의 사전 경고. 판정 규칙은
+        # app/utils/attendance_overlap.py 하나뿐이라 게이트와 갈리지 않는다.
+        # 여기서는 이 매장 범위만 본다(preview 는 매장 단위) — 게이트는 org 전역이라
+        # 매장 preview 에 안 보이던 겹침이 확정 시점에 새로 걸릴 수 있다.
+        overlap_dates: dict[UUID, list[date]]
         # 표시용 벽시계 (store-tz) — 지급 판정에는 쓰지 않는다 (분은 C1 net 이 원천)
         shifts: dict[tuple[UUID, date], list[WorkedShift]]
         breaks: dict[tuple[UUID, date], list[WorkedBreak]]
@@ -651,15 +660,39 @@ class PayrollCalcService:
                 shifts[(user_id, work_date)] = day_shifts
             if day_breaks:
                 breaks[(user_id, work_date)] = day_breaks
+        # 겹침 — 사용자별로 구간을 모아 한 번에 판정.
+        from app.utils.attendance_overlap import overlapping_keys_from_rows
+
+        now_utc = datetime.now(timezone.utc)
+        by_user_rows: dict[UUID, list[tuple]] = {}
+        att_meta: dict[UUID, tuple[UUID, date]] = {}
+        for att in attendances:
+            if att.clock_in is None:
+                continue
+            by_user_rows.setdefault(att.user_id, []).append(
+                (att.id, att.clock_in, att.clock_out)
+            )
+            att_meta[att.id] = (att.user_id, att.work_date)
+        overlap: dict[UUID, list[date]] = {}
+        for user_id, user_rows in by_user_rows.items():
+            for att_id in overlapping_keys_from_rows(user_rows, now=now_utc):
+                _uid, wd = att_meta[att_id]
+                dates = overlap.setdefault(_uid, [])
+                if wd not in dates:
+                    dates.append(wd)
+
         for dates in open_shift.values():
             dates.sort()
         for dates in auto_out.values():
+            dates.sort()
+        for dates in overlap.values():
             dates.sort()
         return self._LiveDayData(
             nets=nets,
             attendance_ids=att_ids,
             open_shift_dates=open_shift,
             auto_clockout_dates=auto_out,
+            overlap_dates=overlap,
             shifts=shifts,
             breaks=breaks,
         )
@@ -917,6 +950,7 @@ class PayrollCalcService:
         sources: dict | None,
         open_dates: list[date],
         auto_dates: list[date],
+        overlap_dates: list[date],
     ) -> PayrollPreviewRow:
         paid_days: list[DayClassification] = sorted(
             result["paid_days"], key=lambda d: d.work_date
@@ -1062,6 +1096,17 @@ class PayrollCalcService:
                     message=(
                         "Auto clock-out has not been confirmed on: "
                         + ", ".join(str(d) for d in auto_dates)
+                    ),
+                    user_id=user.id,
+                )
+            )
+        if overlap_dates:
+            validations.append(
+                PreviewValidation(
+                    code=VALIDATION_OVERLAPPING_ATTENDANCE,
+                    message=(
+                        "Two shifts overlap in time (the same hours would be paid "
+                        "twice) on: " + ", ".join(str(d) for d in overlap_dates)
                     ),
                     user_id=user.id,
                 )

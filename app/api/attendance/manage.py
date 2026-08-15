@@ -227,19 +227,16 @@ def _kiosk_break_iso(
 
 
 async def _resolve_late_buffer(db: AsyncSession, organization_id, store_id) -> int:
-    """attendance.late_buffer_minutes 설정 (없으면 5분)."""
-    if organization_id is None:
-        return 5
-    try:
-        raw = await resolve_setting(
-            db,
-            key="attendance.late_buffer_minutes",
-            organization_id=organization_id,
-            store_id=store_id,
-        )
-        return int(raw) if raw is not None else 5
-    except (SettingNotRegisteredError, TypeError, ValueError):
-        return 5
+    """attendance.late_buffer_minutes 설정.
+
+    해석은 공용 해석기(attendance_threshold_service)에 위임한다 — fallback 기본값이
+    파일마다 흩어져 있으면 같은 근태 행이 화면과 DB 에서 다른 판정을 받는다.
+    """
+    from app.services.attendance_threshold_service import resolve_late_buffer
+
+    return await resolve_late_buffer(
+        db, organization_id=organization_id, store_id=store_id
+    )
 
 
 def _break_entries(breaks, tz_info) -> list[ManageBreakEntry]:
@@ -772,9 +769,13 @@ async def manage_clock_action(
     await _ensure_active_schedule_for_user(db, device, data.user_id)
 
     if action == "cancel_clock_in":
-        return await _manage_cancel_clock_in(db, device, data.user_id, manager, reason)
+        return await _manage_cancel_clock_in(
+            db, device, data.user_id, manager, reason, data.schedule_id
+        )
     if action == "cancel_clock_out":
-        return await _manage_cancel_clock_out(db, device, data.user_id, manager, reason)
+        return await _manage_cancel_clock_out(
+            db, device, data.user_id, manager, reason, data.schedule_id
+        )
 
     valid_actions = {"clock_in", "clock_out", "break_start", "break_end"}
     if action not in valid_actions:
@@ -791,6 +792,8 @@ async def manage_clock_action(
         break_type=data.break_type,
         reason=reason if reason != "(no reason provided)" else None,
         manager_user_id=manager.id,
+        # 겹침(D15) 상태에서 어느 shift 를 처리하는지 지목. 미지정이면 기존 fallback.
+        schedule_id=data.schedule_id,
     )
 
     response = await attendance_service.build_response(db, attendance)
@@ -1198,6 +1201,7 @@ async def _manage_cancel_clock_in(
     user_id: uuid.UUID,
     manager: User,
     reason: str,
+    schedule_id: uuid.UUID | None = None,
 ) -> dict:
     """clock_in 을 취소하고 attendance 를 upcoming 으로 되돌림.
 
@@ -1215,8 +1219,15 @@ async def _manage_cancel_clock_in(
     today = get_work_date(store_tz, day_start, _dt.now(_tz.utc))
     day_rows = await attendance_repository.list_user_day(db, user_id, today)
     target: Attendance | None = None
+    # 겹침(D15) 이후엔 열린 row 가 둘일 수 있다 — 매니저가 어느 shift 를 취소하는지
+    # 지목했으면 그것을, 아니면 기존처럼 첫 번째 열린 row 를 대상으로 한다.
     for r in day_rows:
-        if r.store_id == device.store_id and r.clock_in is not None and r.clock_out is None:
+        if (
+            r.store_id == device.store_id
+            and r.clock_in is not None
+            and r.clock_out is None
+            and (schedule_id is None or r.schedule_id == schedule_id)
+        ):
             target = r
             break
     if target is None:
@@ -1279,11 +1290,14 @@ async def _manage_cancel_clock_out(
     user_id: uuid.UUID,
     manager: User,
     reason: str,
+    schedule_id: uuid.UUID | None = None,
 ) -> dict:
     """clock_out 을 되돌림 — attendance 를 다시 working 상태로 복귀.
 
     clock_in 은 유지. clock_out / clock_out_timezone / total_work_minutes 만 초기화.
     안전: 오늘 + 이 매장의 clocked_out row 만 대상.
+    하루에 끝난 shift 가 둘 이상이면 **매니저가 누른 행**(`schedule_id`)을 되살린다 —
+    지목이 없으면 기존처럼 첫 번째 clocked_out row.
     clock_in 이 없는 row 를 reopen 하는 건 무의미하므로 거부 — clock-in 부터 다시 하라고 안내.
     reason 은 클라이언트가 작성한 사유 그대로 attendance_corrections 에 기록.
     """
@@ -1301,6 +1315,7 @@ async def _manage_cancel_clock_out(
             r.store_id == device.store_id
             and r.clock_out is not None
             and r.status == "clocked_out"
+            and (schedule_id is None or r.schedule_id == schedule_id)
         ):
             target = r
             break

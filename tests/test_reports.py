@@ -807,3 +807,375 @@ async def test_issue_report_lifecycle_regression(
 
     # daily 와 달리 issue 는 deadline 없음
     assert body["deadline_at"] is None
+
+
+# ===================================================================
+# Integration: 직급 기반 리포트 가시성 (자기 것 + 하위 직급 작성분만)
+# ===================================================================
+
+
+@pytest_asyncio.fixture
+async def peer_users(seed_organization: dict, seed_roles: dict[str, UUID], test_store_id: UUID):
+    """동급 비교용 2번째 SV/GM 생성 + 관련 유저 전원 test_store 에 연결.
+
+    콘솔 목록은 accessible_store_ids 로 매장 스코프를 먼저 거르므로,
+    가시성(직급) 규칙만 검증하려면 모두 같은 매장에 있어야 한다.
+    """
+    from app.models.user import User as UserModel
+    from app.models.user_store import UserStore
+    from app.utils.password import hash_password
+
+    org_id: UUID = seed_organization["id"]
+    created: list[tuple[UUID, UUID]] = []          # 이 픽스처가 만든 배정 (teardown 시 삭제)
+    restored: list[tuple[UUID, UUID, bool]] = []   # 뒤집은 is_manager (teardown 시 복원)
+    # 이름은 시드 계정(testsv/testgm)과 **부분일치하지 않게** 짓는다.
+    # "testsv2" 로 뒀더니 다른 테스트의 q="testsv" 검색에 끼어들어 깨졌다(실측).
+    specs = [
+        ("peersv", "Peer Supervisor", "supervisor"),
+        ("peergm", "Peer Manager", "general_manager"),
+    ]
+    async with async_session() as db:
+        for username, full_name, role_name in specs:
+            u = (
+                await db.execute(
+                    select(UserModel).where(
+                        UserModel.username == username,
+                        UserModel.organization_id == org_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if u is None:
+                db.add(
+                    UserModel(
+                        organization_id=org_id,
+                        role_id=seed_roles[role_name],
+                        username=username,
+                        full_name=full_name,
+                        password_hash=hash_password("1234"),
+                        is_active=True,
+                    )
+                )
+                await db.commit()
+
+        usernames = ["testgm", "peergm", "testsv", "peersv", "teststaff"]
+        users = {
+            u.username: u
+            for u in (
+                await db.execute(
+                    select(UserModel).where(
+                        UserModel.username.in_(usernames),
+                        UserModel.organization_id == org_id,
+                    )
+                )
+            ).scalars().all()
+        }
+        for username, u in users.items():
+            link = (
+                await db.execute(
+                    select(UserStore).where(
+                        UserStore.user_id == u.id, UserStore.store_id == test_store_id
+                    )
+                )
+            ).scalar_one_or_none()
+            # 가시성은 **그 매장의 manager 여부**로 갈린다.
+            # testsv/testgm/peersv/peergm = manager, teststaff = 일반 배정.
+            wants_manager = username != "teststaff"
+            if link is None:
+                created.append((u.id, test_store_id))
+                db.add(
+                    UserStore(
+                        user_id=u.id,
+                        store_id=test_store_id,
+                        is_manager=wants_manager,
+                    )
+                )
+            elif link.is_manager != wants_manager:
+                restored.append((u.id, test_store_id, link.is_manager))
+                link.is_manager = wants_manager
+        await db.commit()
+        ids = {name: u.id for name, u in users.items()}
+
+    yield ids
+
+    # 세션 공용 시드(testsv/teststaff/...)의 매장 배정을 건드렸으므로 반드시 되돌린다.
+    # 남겨두면 매장 스코프를 검사하는 다른 테스트가 조용히 깨진다(실측).
+    async with async_session() as db:
+        # 이 픽스처가 만든 동급 비교용 계정은 DB 에 남기지 않는다 —
+        # 시드 유저 목록을 단언하는 다른 테스트(PIN 디렉터리 등)가 깨진다.
+        peer_ids = [ids[n] for n in ("peersv", "peergm") if n in ids]
+        if peer_ids:
+            rids = (
+                await db.execute(select(Report.id).where(Report.author_id.in_(peer_ids)))
+            ).scalars().all()
+            if rids:
+                await db.execute(
+                    delete(ReportAcknowledgement).where(
+                        ReportAcknowledgement.report_id.in_(rids)
+                    )
+                )
+                await db.execute(
+                    delete(ReportComment).where(ReportComment.report_id.in_(rids))
+                )
+                await db.execute(delete(Report).where(Report.id.in_(rids)))
+            await db.execute(
+                delete(ReportAcknowledgement).where(
+                    ReportAcknowledgement.user_id.in_(peer_ids)
+                )
+            )
+            await db.execute(delete(ReportComment).where(ReportComment.user_id.in_(peer_ids)))
+            await db.execute(delete(UserStore).where(UserStore.user_id.in_(peer_ids)))
+            await db.execute(delete(UserModel).where(UserModel.id.in_(peer_ids)))
+        await db.commit()
+
+    async with async_session() as db:
+        for uid, sid in created:
+            await db.execute(
+                delete(UserStore).where(
+                    UserStore.user_id == uid, UserStore.store_id == sid
+                )
+            )
+        for uid, sid, was in restored:
+            link = (
+                await db.execute(
+                    select(UserStore).where(
+                        UserStore.user_id == uid, UserStore.store_id == sid
+                    )
+                )
+            ).scalar_one_or_none()
+            if link is not None:
+                link.is_manager = was
+        await db.commit()
+
+
+async def _create_submitted_daily(client, token: str, store_id: UUID, report_date: str) -> str:
+    r = await client.post(
+        "/api/v1/app/my/reports",
+        headers=_h(token),
+        json={
+            "type": "daily",
+            "store_id": str(store_id),
+            "report_date": report_date,
+            "payload": {"period": "lunch"},
+        },
+    )
+    if r.status_code == 409:
+        # 같은 store/date/period 슬롯이 이미 있으면 그걸 쓴다 (재실행 내성)
+        rid = r.json()["detail"]["existing_report_id"]
+    else:
+        assert r.status_code == 201, r.text
+        rid = r.json()["id"]
+    sub = await client.post(f"/api/v1/app/my/reports/{rid}/submit", headers=_h(token))
+    assert sub.status_code in (200, 400), sub.text
+    return rid
+
+
+@pytest.mark.asyncio
+async def test_console_report_visibility_by_rank(
+    client, report_perms, daily_template, peer_users, test_store_id
+):
+    """SV 는 다른 SV/GM 리포트를, GM 은 다른 GM 리포트를 목록에서 못 본다."""
+    rd = "2030-07-01"
+    tokens = {name: await _login(name) for name in
+              ["teststaff", "testsv", "peersv", "testgm", "peergm", "testadmin"]}
+    ids = {
+        name: await _create_submitted_daily(client, tokens[name], test_store_id, rd)
+        for name in ["teststaff", "testsv", "peersv", "testgm", "peergm"]
+    }
+
+    async def _visible(viewer: str) -> set[str]:
+        r = await client.get(
+            "/api/v1/console/reports",
+            headers=_h(tokens[viewer]),
+            params={"type": "daily", "date_from": rd, "date_to": rd, "per_page": 100},
+        )
+        assert r.status_code == 200, r.text
+        return {item["id"] for item in r.json()["items"]}
+
+    # SV: 자기 것 + staff 것만. 다른 SV / GM 것은 안 보임.
+    sv_seen = await _visible("testsv")
+    assert ids["testsv"] in sv_seen
+    assert ids["teststaff"] in sv_seen
+    assert ids["peersv"] not in sv_seen
+    assert ids["testgm"] not in sv_seen
+    assert ids["peergm"] not in sv_seen
+
+    # GM: 자기 것 + SV/staff 것. 다른 GM 것은 안 보임.
+    gm_seen = await _visible("testgm")
+    assert ids["testgm"] in gm_seen
+    assert ids["testsv"] in gm_seen
+    assert ids["peersv"] in gm_seen
+    assert ids["teststaff"] in gm_seen
+    assert ids["peergm"] not in gm_seen
+
+    # Owner(super_owner): 전부 보임
+    owner_seen = await _visible("testadmin")
+    assert set(ids.values()) <= owner_seen
+
+
+@pytest.mark.asyncio
+async def test_console_report_detail_blocked_for_peer(
+    client, report_perms, daily_template, peer_users, test_store_id
+):
+    """목록에서 가려진 리포트는 id 직접 호출(상세/리뷰/확인/댓글)도 403."""
+    rd = "2030-07-02"
+    sv = await _login("testsv")
+    sv2 = await _login("peersv")
+    gm = await _login("testgm")
+    gm2 = await _login("peergm")
+
+    sv2_report = await _create_submitted_daily(client, sv2, test_store_id, rd)
+    gm2_report = await _create_submitted_daily(client, gm2, test_store_id, rd)
+
+    for token, rid in [(sv, sv2_report), (sv, gm2_report), (gm, gm2_report)]:
+        det = await client.get(f"/api/v1/console/reports/{rid}", headers=_h(token))
+        assert det.status_code == 403, det.text
+        rev = await client.post(
+            f"/api/v1/console/reports/{rid}/review",
+            headers=_h(token), json={"feedback": "peek"},
+        )
+        assert rev.status_code == 403, rev.text
+        ack = await client.post(
+            f"/api/v1/console/reports/{rid}/acknowledge", headers=_h(token)
+        )
+        assert ack.status_code == 403, ack.text
+        cmt = await client.post(
+            f"/api/v1/console/reports/{rid}/comments",
+            headers=_h(token), json={"content": "peek"},
+        )
+        assert cmt.status_code == 403, cmt.text
+
+    # 하위 직급(SV2) 리포트는 GM 이 정상 조회 가능 — 규칙이 과하게 막지 않는지 확인
+    ok = await client.get(f"/api/v1/console/reports/{sv2_report}", headers=_h(gm))
+    assert ok.status_code == 200, ok.text
+
+
+@pytest.mark.asyncio
+async def test_app_report_show_all_cannot_bypass_visibility(
+    client, report_perms, daily_template, peer_users, test_store_id
+):
+    """app 목록에서 only_mine=false / show_all=true 로도 동급 리포트를 못 본다."""
+    rd = "2030-07-03"
+    sv = await _login("testsv")
+    sv2 = await _login("peersv")
+    sv2_report = await _create_submitted_daily(client, sv2, test_store_id, rd)
+    own = await _create_submitted_daily(client, sv, test_store_id, rd)
+
+    r = await client.get(
+        "/api/v1/app/my/reports",
+        headers=_h(sv),
+        params={"type": "daily", "only_mine": "false", "show_all": "true",
+                "date_from": rd, "date_to": rd, "per_page": 100},
+    )
+    assert r.status_code == 200, r.text
+    seen = {i["id"] for i in r.json()["items"]}
+    assert own in seen
+    assert sv2_report not in seen
+
+    det = await client.get(f"/api/v1/app/my/reports/{sv2_report}", headers=_h(sv))
+    assert det.status_code == 403, det.text
+
+
+@pytest_asyncio.fixture
+async def non_manager_store(seed_organization: dict, second_store_id: UUID, peer_users: dict):
+    """testsv 와 teststaff 를 2번째 매장에 배정하되 **testsv 는 manager 아님**.
+
+    "같은 매장에서 같이 일한다" 와 "그 매장을 관리한다" 를 가르는 케이스.
+    """
+    from app.models.user_store import UserStore
+
+    created: list[UUID] = []
+    restored: list[tuple[UUID, bool]] = []
+    async with async_session() as db:
+        for name, is_manager in [("testsv", False), ("teststaff", False), ("testgm", True)]:
+            uid = peer_users[name]
+            link = (
+                await db.execute(
+                    select(UserStore).where(
+                        UserStore.user_id == uid, UserStore.store_id == second_store_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if link is None:
+                created.append(uid)
+                db.add(
+                    UserStore(user_id=uid, store_id=second_store_id, is_manager=is_manager)
+                )
+            else:
+                restored.append((uid, link.is_manager))
+                link.is_manager = is_manager
+        await db.commit()
+
+    yield second_store_id
+
+    async with async_session() as db:
+        for uid in created:
+            await db.execute(
+                delete(UserStore).where(
+                    UserStore.user_id == uid, UserStore.store_id == second_store_id
+                )
+            )
+        for uid, was in restored:
+            link = (
+                await db.execute(
+                    select(UserStore).where(
+                        UserStore.user_id == uid,
+                        UserStore.store_id == second_store_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if link is not None:
+                link.is_manager = was
+        # 이 테스트가 2번째 매장에 만든 리포트도 정리 (clean_reports 는 test_store 만 본다)
+        rids = (
+            await db.execute(
+                select(Report.id).where(Report.store_id == second_store_id)
+            )
+        ).scalars().all()
+        if rids:
+            await db.execute(
+                delete(ReportAcknowledgement).where(
+                    ReportAcknowledgement.report_id.in_(rids)
+                )
+            )
+            await db.execute(delete(ReportComment).where(ReportComment.report_id.in_(rids)))
+            await db.execute(delete(Report).where(Report.id.in_(rids)))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_visibility_requires_manager_at_that_store(
+    client, report_perms, daily_template, peer_users, non_manager_store, test_store_id
+):
+    """배정만 된 매장에서는 아래 직급(Staff) 리포트도 보이지 않는다.
+
+    - 매장 A(test_store): testsv 가 manager → Staff 리포트 보임
+    - 매장 B(second_store): testsv 는 배정만 → Staff 리포트 **안 보임**, 자기 것은 보임
+    """
+    rd = "2030-08-01"
+    sv = await _login("testsv")
+    staff = await _login("teststaff")
+    gm = await _login("testgm")
+
+    a_staff = await _create_submitted_daily(client, staff, test_store_id, rd)
+    b_staff = await _create_submitted_daily(client, staff, non_manager_store, rd)
+    b_own = await _create_submitted_daily(client, sv, non_manager_store, rd)
+
+    r = await client.get(
+        "/api/v1/console/reports",
+        headers=_h(sv),
+        params={"type": "daily", "date_from": rd, "date_to": rd, "per_page": 100},
+    )
+    assert r.status_code == 200, r.text
+    seen = {item["id"] for item in r.json()["items"]}
+    assert a_staff in seen, "manager 인 매장의 Staff 리포트는 보여야 한다"
+    assert b_own in seen, "본인 작성분은 매장과 무관하게 보여야 한다"
+    assert b_staff not in seen, "배정만 된 매장의 남의 리포트는 보이면 안 된다"
+
+    # 단건 직접 호출도 동일하게 막힌다
+    det = await client.get(f"/api/v1/console/reports/{b_staff}", headers=_h(sv))
+    assert det.status_code == 403, det.text
+    assert det.json()["error"]["code"] == "REPORT_NOT_VISIBLE"
+
+    # 그 매장의 manager 인 GM 은 같은 리포트를 연다 (규칙이 과하게 막지 않는지)
+    ok = await client.get(f"/api/v1/console/reports/{b_staff}", headers=_h(gm))
+    assert ok.status_code == 200, ok.text

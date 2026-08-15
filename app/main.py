@@ -164,6 +164,7 @@ async def start_scheduler() -> None:
     import logging
     from app.services.attendance_cron_service import run_attendance_state_tick
     from app.services.rate_service import run_rate_change_daily_tick
+    from app.services.push_digest_service import run_digest_tick
     from app.services.schedule_report_service import run_daily_report_tick
 
     logger = logging.getLogger("uvicorn.error")
@@ -198,8 +199,18 @@ async def start_scheduler() -> None:
             max_instances=1,
             coalesce=True,
         )
+        # 미확인 알림 다이제스트 — 매시 정각에 깨어나, 조직 로컬 시각이
+        # PUSH_DIGEST_HOUR 인 조직만 처리한다(조직마다 tz 가 다르므로).
+        scheduler.add_job(
+            run_digest_tick,
+            trigger=CronTrigger(minute=0, timezone="UTC"),
+            id="push_digest_tick",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
         scheduler.start()
-        logger.info("[scheduler] APScheduler started (attendance_state_tick, schedule_daily_report tz=%s, rate_change_daily_tick)", report_tz_name)
+        logger.info("[scheduler] APScheduler started (attendance_state_tick, schedule_daily_report tz=%s, rate_change_daily_tick, push_digest_tick hour=%s)", report_tz_name, settings.PUSH_DIGEST_HOUR)
 
 
 @app.on_event("shutdown")
