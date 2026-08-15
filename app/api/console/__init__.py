@@ -51,6 +51,7 @@ from app.api.console.checklist_instances import router as checklist_instances_ro
 
 # Phase 3 — Communication 라우터 임포트
 from app.api.console.notices import router as notices_router
+from app.api.console.contacts import router as contacts_router
 from app.api.console.alerts import router as alerts_router
 from app.api.console.profile import router as profile_router
 
@@ -149,6 +150,8 @@ console_router.include_router(checklist_instances_router, prefix="/checklist-ins
 # Phase 3 라우터 등록 — Register Phase 3 (Communication) routers
 # ---------------------------------------------------------------------------
 console_router.include_router(notices_router, prefix="/notices", tags=["Notices"])
+# 연락처: /contacts 하위 (조직 전화번호부 — collection 은 trailing slash 필수)
+console_router.include_router(contacts_router, prefix="/contacts", tags=["Contacts"])
 console_router.include_router(alerts_router, prefix="/alerts", tags=["Admin Alerts"])
 console_router.include_router(profile_router, prefix="/profile", tags=["Admin Profile"])
 

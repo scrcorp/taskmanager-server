@@ -25,6 +25,17 @@
       "invalid_key",
       "store_not_found"
     ],
+    "contacts": [
+      "CONTACT_DELETED",
+      "CONTACT_NOT_FOUND",
+      "CONTACT_NOT_YOUR_REQUEST",
+      "CONTACT_PERMISSION_DENIED",
+      "CONTACT_REASON_REQUIRED",
+      "CONTACT_REQUEST_NOT_FOUND",
+      "CONTACT_REQUEST_NOT_PENDING",
+      "CONTACT_STORE_FORBIDDEN",
+      "CONTACT_VALIDATION_ERROR"
+    ],
     "hiring": [
       "already_hired",
       "application_not_found",
@@ -315,6 +326,96 @@
         "console/src/types/signup.ts",
         "console/src/components/signup/InvalidLinkScreen.tsx"
       ]
+    },
+    {
+      "code": "CONTACT_DELETED",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 409,
+      "message": "This contact was deleted while the request was pending.",
+      "hint": "Reject the request instead of approving it.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "CONTACT_NOT_FOUND",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 404,
+      "message": "This contact is not available.",
+      "hint": "It may have been deleted, or you may not have access to it.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "CONTACT_NOT_YOUR_REQUEST",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 403,
+      "message": "Only the person who submitted this request can cancel it.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "CONTACT_PERMISSION_DENIED",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 403,
+      "message": "You do not have permission to make this change to contacts.",
+      "hint": "You can submit a request instead, and someone with access will review it.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "CONTACT_REASON_REQUIRED",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 400,
+      "message": "A reason is required for this change.",
+      "hint": "Enter a reason before saving.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "CONTACT_REQUEST_NOT_FOUND",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 404,
+      "message": "This request is not available.",
+      "hint": "It may have been withdrawn, or you may not have access to it.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "CONTACT_REQUEST_NOT_PENDING",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 409,
+      "message": "This request was already handled.",
+      "hint": "Refresh to see its current status.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "CONTACT_STORE_FORBIDDEN",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 403,
+      "message": "You do not have access to that store.",
+      "hint": "Pick a store you manage, or share the contact with all stores.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "CONTACT_VALIDATION_ERROR",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 400,
+      "message": "Some contact details are not valid.",
+      "hint": "Check the highlighted fields and try again.",
+      "frozen": false,
+      "clients": []
     },
     {
       "code": "already_hired",
