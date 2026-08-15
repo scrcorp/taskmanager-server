@@ -1,0 +1,218 @@
+{# 스케줄 일일 보고서 PDF — 매장별 섹션 + 콘솔 딥링크.
+   조치는 매장 단위로 일어나므로 묶음도 매장 단위다. 매장 헤더 / 문제 있는 칸 /
+   이슈 한 줄이 전부 콘솔의 해당 화면으로 뛰는 링크다 (WeasyPrint 가 PDF 링크로 살린다). #}
+<style>
+  @page {
+    size: Letter landscape;   /* 매장 × 날짜 매트릭스는 가로가 본질 */
+    margin: 14mm 12mm 16mm 12mm;
+    @bottom-right {
+      content: "Page " counter(page) " / " counter(pages);
+      font-family: Helvetica, Arial, sans-serif;
+      font-size: 8pt;
+      color: #64748B;
+    }
+  }
+
+  body {
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 9pt;
+    color: #0F172A;
+    margin: 0;
+  }
+
+  a { color: inherit; text-decoration: none; }
+
+  h1 { font-size: 15pt; margin: 0 0 2mm 0; }
+  .meta { color: #475569; font-size: 8.5pt; margin: 0 0 1mm 0; }
+
+  .counts { margin: 3mm 0 5mm 0; font-size: 9pt; }
+  .counts span { margin-right: 6mm; }
+  .counts b { font-size: 11pt; }
+  .c-new { color: #B91C1C; }
+  .c-ongoing { color: #B45309; }
+  .c-resolved { color: #15803D; }
+
+  .hint {
+    margin: 0 0 5mm 0;
+    padding: 2mm 3mm;
+    background: #F8FAFC;
+    border: 0.5pt solid #CBD5E1;
+    font-size: 8pt;
+    color: #475569;
+  }
+
+  /* ── 매장 블록 ───────────────────────────────────── */
+  .store {
+    break-inside: avoid;          /* 매장은 가급적 한 페이지에 */
+    margin-bottom: 6mm;
+    padding-bottom: 3mm;
+    border-bottom: 0.5pt solid #E2E8F0;
+  }
+  .store-tall { break-inside: auto; }   /* 한 페이지에 안 들어가면 쪼개도록 */
+
+  .store-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 2mm;
+    break-after: avoid;
+  }
+  .store-name { font-size: 11.5pt; font-weight: bold; }
+  .store-name .arrow { color: #2563EB; font-size: 8.5pt; font-weight: normal; }
+  .store-count { font-size: 8.5pt; color: #475569; }
+  .store-count.clean { color: #15803D; }
+
+  table { width: 100%; border-collapse: collapse; margin-bottom: 2.5mm; }
+  th, td {
+    border: 0.5pt solid #CBD5E1;
+    padding: 1.2mm 1.6mm;
+    text-align: left;
+  }
+  th { background: #F1F5F9; font-weight: bold; font-size: 8.5pt; }
+  td.num { text-align: center; white-space: nowrap; }
+  td.flag { background: #FEF2F2; color: #B91C1C; font-weight: bold; }
+  td.flag a { color: #B91C1C; }
+  td.flag a::after { content: " ›"; color: #2563EB; }
+
+  /* 이슈는 주제별로 묶고 날짜를 별도 칸으로 세운다 —
+     날짜가 문장 안에 숨으면 같은 사람의 다른 날짜 항목이 중복처럼 보인다. */
+  .grp { margin: 0 0 2.5mm 3mm; break-inside: avoid; }
+  .grp-title {
+    font-size: 8.5pt;
+    font-weight: bold;
+    color: #334155;
+    margin-bottom: 0.8mm;
+    break-after: avoid;
+  }
+  .grp-n {
+    background: #E2E8F0;
+    color: #334155;
+    font-size: 7pt;
+    padding: 0.2mm 1.2mm;
+    border-radius: 1mm;
+    margin-left: 1mm;
+  }
+  table.issue-tbl { width: auto; border-collapse: collapse; margin: 0; }
+  table.issue-tbl td {
+    border: none;
+    padding: 0.5mm 2mm 0.5mm 0;
+    font-size: 8.5pt;
+    vertical-align: baseline;
+  }
+  table.issue-tbl td.d { color: #64748B; white-space: nowrap; width: 16mm; }
+  table.issue-tbl td.m { width: 11mm; }
+  table.issue-tbl tr.is-new td.d { color: #B91C1C; font-weight: bold; }
+  .marker {
+    display: inline-block;
+    background: #B91C1C;
+    color: #fff;
+    font-size: 7pt;
+    font-weight: bold;
+    padding: 0.2mm 1mm;
+    margin-right: 1.5mm;
+    border-radius: 1mm;
+  }
+  .go { color: #2563EB; font-size: 8pt; }
+
+  .empty { color: #64748B; font-style: italic; font-size: 8.5pt; }
+  .footer { margin-top: 5mm; font-size: 8pt; color: #64748B; }
+</style>
+
+<h1>Schedule Daily Report</h1>
+<p class="meta">{{ org_name }} &middot; generated {{ sent_date_label }}</p>
+<p class="meta">Schedule window: {{ period_label }}{% if yesterday_label %} &middot; Attendance reviewed: {{ yesterday_label }}{% endif %}</p>
+
+<p class="counts">
+  <span class="c-new">New <b>{{ counts.new }}</b></span>
+  <span class="c-ongoing">Ongoing <b>{{ counts.ongoing }}</b></span>
+  <span class="c-resolved">Resolved <b>{{ counts.resolved }}</b></span>
+</p>
+
+<p class="hint">
+  Store names, red cells and issue lines are links — click one to open that store and date
+  in the schedule console. Resolved items are counted above but not listed.
+</p>
+
+{% for store in store_blocks %}
+  <div class="store {% if store.rows|length + store.issue_count > 16 %}store-tall{% endif %}">
+    <div class="store-head">
+      <div class="store-name">
+        {% if store.store_href %}<a href="{{ store.store_href }}">{{ store.store_name }} <span class="arrow">open week ›</span></a>
+        {% else %}{{ store.store_name }}{% endif %}
+      </div>
+      <div class="store-count {% if store.issue_count == 0 %}clean{% endif %}">
+        {% if store.issue_count %}{{ store.issue_count }} open issue(s){% else %}no open issues{% endif %}
+      </div>
+    </div>
+
+    {% if store.rows %}
+      <table>
+        <thead>
+          <tr>
+            <th style="width:22%">Shift</th>
+            {% for h in date_headers %}<th>{{ h }}</th>{% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in store.rows %}
+            <tr>
+              <td>{{ row.shift_name }}</td>
+              {% for cell in row.cells %}
+                <td class="num {% if cell.flag %}flag{% endif %}">
+                  {%- if cell.href %}<a href="{{ cell.href }}">{{ cell.text }}</a>
+                  {%- else %}{{ cell.text }}{% endif -%}
+                </td>
+              {% endfor %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">No shifts checked for this store in the reported window.</p>
+    {% endif %}
+
+    {% for group in store.issue_groups %}
+      <div class="grp">
+        <div class="grp-title">{{ group.title }} <span class="grp-n">{{ group.count }}</span></div>
+        <table class="issue-tbl">
+          {% for item in group.entries %}
+            <tr class="{% if item.marker %}is-new{% endif %}">
+              <td class="d">{{ item.date }}</td>
+              <td class="m">{% if item.marker %}<span class="marker">{{ item.marker }}</span>{% endif %}</td>
+              <td>{% if item.href %}<a href="{{ item.href }}">{{ item.text }} <span class="go">›</span></a>{% else %}{{ item.text }}{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </table>
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="empty">No active stores.</p>
+{% endfor %}
+
+{% if orphan_issues %}
+  <div class="store">
+    <div class="store-head">
+      <div class="store-name">Not tied to a store</div>
+      <div class="store-count">{{ orphan_issues|sum(attribute="count") }} open issue(s)</div>
+    </div>
+    {% for group in orphan_issues %}
+      <div class="grp">
+        <div class="grp-title">{{ group.title }} <span class="grp-n">{{ group.count }}</span></div>
+        <table class="issue-tbl">
+          {% for item in group.entries %}
+            <tr class="{% if item.marker %}is-new{% endif %}">
+              <td class="d">{{ item.date }}</td>
+              <td class="m">{% if item.marker %}<span class="marker">{{ item.marker }}</span>{% endif %}</td>
+              <td>{% if item.href %}<a href="{{ item.href }}">{{ item.text }} <span class="go">›</span></a>{% else %}{{ item.text }}{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </table>
+      </div>
+    {% endfor %}
+  </div>
+{% endif %}
+
+<p class="footer">
+  {% if admin_base_url %}Schedule console: {{ admin_base_url }}/schedules{% endif %}
+</p>

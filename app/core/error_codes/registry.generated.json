@@ -72,7 +72,9 @@
       "PUSH_NOT_CONFIGURED"
     ],
     "reports": [
-      "REPORT_NOT_VISIBLE"
+      "REPORT_NOT_VISIBLE",
+      "SCHEDULE_REPORT_RECIPIENTS_INVALID",
+      "SCHEDULE_REPORT_TIMES_INVALID"
     ],
     "schedule": [
       "BREAK_OUTSIDE_SHIFT",
@@ -701,6 +703,26 @@
       "status": 403,
       "message": "You do not have access to this report.",
       "hint": "Only the author and higher-ranked managers can open it.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "SCHEDULE_REPORT_RECIPIENTS_INVALID",
+      "domain": "reports",
+      "kind": "http",
+      "status": 400,
+      "message": "That is not a valid email address list.",
+      "hint": "Use comma separated email addresses, or leave it empty to stop sending.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "SCHEDULE_REPORT_TIMES_INVALID",
+      "domain": "reports",
+      "kind": "http",
+      "status": 400,
+      "message": "Send times must be hours between 0 and 23.",
+      "hint": "Use comma separated hours like 7,15,22 — or leave it empty to stop sending.",
       "frozen": false,
       "clients": []
     },

@@ -132,7 +132,14 @@ class Settings(BaseSettings):
     REPORT_NOTIFICATION_EMAIL: str = ""
 
     # 스케줄 일일 리포트 — 콤마 구분 수신자 목록 (e.g. "hello@tigersplus.com,boss@tigersplus.com")
+    # ⚠ 레거시 폴백. 크론은 모든 org 를 순회하므로 전역 목록은 org 가 둘 이상이 되는 순간
+    #   크로스-org 유출이다. 수신자는 org 설정 'schedule.report_recipients' 로 옮길 것.
+    #   이 env 는 org 가 정확히 하나일 때만 쓰인다 (schedule_report_service._resolve_recipients).
     SCHEDULE_REPORT_RECIPIENTS: str = ""
+    # 스케줄 일일 리포트에 상세 PDF 를 첨부할지. 끄면 본문에 전체 섹션이 다시 들어간다
+    # (= Gmail 클리핑이 돌아온다). WeasyPrint native lib 이 없는 호스트용 ops 킬스위치이지
+    #   기능 롤아웃 게이트가 아니다.
+    SCHEDULE_REPORT_PDF: bool = True
     # 스케줄 일일 리포트 발송 시간 기준 IANA tz (e.g. "America/Los_Angeles"). 비어있으면 UTC.
     SCHEDULE_REPORT_TIMEZONE: str = ""
 

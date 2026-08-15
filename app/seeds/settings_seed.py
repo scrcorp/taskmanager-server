@@ -17,6 +17,8 @@ from typing import Any
 # 여러 모듈이 공유하는 키 문자열 — 오타 시 조용히 SettingNotRegisteredError 가 나므로 상수로 고정.
 STORE_OPERATING_HOURS_KEY = "store.operating_hours"
 SCHEDULE_RANGE_KEY = "schedule.range"
+SCHEDULE_REPORT_RECIPIENTS_KEY = "schedule.report_recipients"
+SCHEDULE_REPORT_TIMES_KEY = "schedule.report_times"
 
 
 class SettingDefinition:
@@ -211,6 +213,37 @@ SETTINGS_SEED: list[SettingDefinition] = [
             "closed": [],
         },
         category="Store Hours",
+    ),
+    # ─── Schedule Report ────────────────────────────────
+    SettingDefinition(
+        key=SCHEDULE_REPORT_RECIPIENTS_KEY,
+        label="Schedule report recipients",
+        description=(
+            "Comma-separated email addresses that receive the daily schedule report. "
+            "Leave empty to skip the report for this organization. "
+            "Set this per organization — a global list would send one organization's "
+            "store names, staff names and hours to another organization's inbox."
+        ),
+        value_type="string",
+        default_value="",
+        category="Schedule Report",
+        # org 전용. 리포트는 org 단위로 한 통 나가므로 매장별 수신자라는 개념이 없다.
+        # 기본값(["org","store"])을 그대로 두면 매장 화면에서 저장은 되는데
+        # 아무 효과가 없는 설정이 생긴다 — 조용히 무시되는 UI 는 만들지 않는다.
+        levels=["org"],
+    ),
+    SettingDefinition(
+        key=SCHEDULE_REPORT_TIMES_KEY,
+        label="Schedule report send times",
+        description=(
+            "Hours of the day (0-23, comma separated) when the daily schedule report is sent, "
+            "in this organization's timezone. Leave empty to stop sending. "
+            "Default 7,15,22 — before opening, mid afternoon, and before closing."
+        ),
+        value_type="string",
+        default_value="7,15,22",
+        category="Schedule Report",
+        levels=["org"],
     ),
     # ─── Attendance ─────────────────────────────────────
     SettingDefinition(

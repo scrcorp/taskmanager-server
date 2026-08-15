@@ -18,3 +18,22 @@ REPORT_NOT_VISIBLE = REPORTS.code(
     "You do not have access to this report.",
     hint="Only the author and higher-ranked managers can open it.",
 )
+
+
+# ── 스케줄 일일 리포트 설정 검증 ────────────────────────
+# 값이 깨진 채 저장되면 파서가 조용히 버려서 리포트가 신호 없이 멈춘다.
+# 그래서 저장 입구에서 막고, 어떤 항목이 잘못됐는지 그대로 돌려준다.
+
+SCHEDULE_REPORT_RECIPIENTS_INVALID = REPORTS.code(
+    "SCHEDULE_REPORT_RECIPIENTS_INVALID",
+    400,
+    "That is not a valid email address list.",
+    hint="Use comma separated email addresses, or leave it empty to stop sending.",
+)
+
+SCHEDULE_REPORT_TIMES_INVALID = REPORTS.code(
+    "SCHEDULE_REPORT_TIMES_INVALID",
+    400,
+    "Send times must be hours between 0 and 23.",
+    hint="Use comma separated hours like 7,15,22 — or leave it empty to stop sending.",
+)

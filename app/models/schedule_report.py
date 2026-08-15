@@ -30,6 +30,14 @@ class ScheduleReportSnapshot(Base):
     #   "store_id": str?, "store_name": str?, "shift_id": str?, "shift_name": str?,
     #   "user_id": str?, "user_name": str?, "detail": dict?}]
     issues: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # 재발송용 렌더 재료. 이게 없으면 "다시 보내기" 가 곧 "다시 만들기" 가 되는데,
+    # 그 사이 시각이 흘러 있으므로 **내용이 달라진다** — 7시에 나갔어야 할 리포트를
+    # 9시에 재생성하면 그건 다른 문서다. 그래서 만든 시점의 재료를 그대로 보관한다.
+    # {"org_name", "sent_date", "target_dates", "yesterday", "stores", "cells",
+    #  "diff": {"new": [...], "ongoing": [...], "resolved": [...]}}
+    # 완성된 HTML/PDF 바이트가 아니라 재료를 담는다 — 결과물은 동일하게 재현되면서
+    # 행당 수십 KB 로 유지되고, 나중에 디자인을 고치면 과거 건도 새 디자인으로 나온다.
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

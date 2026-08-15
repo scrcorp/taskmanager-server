@@ -31,6 +31,14 @@ from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setti
 router: APIRouter = APIRouter()
 
 
+def _looks_like_email(v: str) -> bool:
+    """발송 전 최소 형태 검사. 엄밀한 RFC 검증이 아니라 오타 방지용이다."""
+    if v.count("@") != 1 or " " in v:
+        return False
+    local, _, domain = v.partition("@")
+    return bool(local) and "." in domain and not domain.startswith(".") and not domain.endswith(".")
+
+
 def _validate_setting_value(key: str, value: object) -> None:
     """저장 전 값 형태 검증.
 
@@ -38,12 +46,47 @@ def _validate_setting_value(key: str, value: object) -> None:
     실질적으로 아무것도 막지 못한다. 시간대 형태 키만이라도 입구에서 막는다 —
     형태가 깨진 값은 파서에서 조용히 '미설정'이 되어 기능이 신호 없이 멈춘다.
     """
+    from app.seeds.settings_seed import (
+        SCHEDULE_REPORT_RECIPIENTS_KEY,
+        SCHEDULE_REPORT_TIMES_KEY,
+    )
+    from app.core.error_codes.reports import (
+        SCHEDULE_REPORT_RECIPIENTS_INVALID,
+        SCHEDULE_REPORT_TIMES_INVALID,
+    )
     from app.utils.timezone import validate_day_range_setting
 
     try:
         validate_day_range_setting(key, value)
     except ValueError as e:
         raise BadRequestError(f"Invalid value for '{key}': {e}")
+
+    if key == SCHEDULE_REPORT_RECIPIENTS_KEY:
+        # 오타 하나가 리포트를 통째로 죽인다. 저장은 성공하고 발송만 조용히 실패하면
+        # 며칠 뒤에야 알아차리게 되므로 입구에서 막는다.
+        if not isinstance(value, str):
+            raise SCHEDULE_REPORT_RECIPIENTS_INVALID()
+        bad = [
+            part.strip()
+            for part in value.split(",")
+            if part.strip() and not _looks_like_email(part.strip())
+        ]
+        if bad:
+            raise SCHEDULE_REPORT_RECIPIENTS_INVALID(invalid=bad)
+
+    if key == SCHEDULE_REPORT_TIMES_KEY:
+        # 형태가 깨진 시각은 파서가 조용히 버린다 → 그 회차가 소리 없이 사라진다.
+        if not isinstance(value, str):
+            raise SCHEDULE_REPORT_TIMES_INVALID()
+        bad_hours = []
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if not part.isdigit() or not (0 <= int(part) <= 23):
+                bad_hours.append(part)
+        if bad_hours:
+            raise SCHEDULE_REPORT_TIMES_INVALID(invalid=bad_hours)
 
 
 
