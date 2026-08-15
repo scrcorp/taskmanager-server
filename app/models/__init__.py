@@ -63,6 +63,14 @@ from app.models.availability import StaffAvailability, StaffAvailabilityHistory,
 from app.models.clockin_pin_audit import ClockinPinAudit
 from app.models.rate import HourlyRateHistory
 from app.models.payroll import PayPeriod, PayrollEntry, PayrollEvent
+from app.models.contact import (
+    Contact,
+    ContactPhone,
+    ContactTag,
+    ContactTagLink,
+    ContactChangeRequest,
+    ContactAuditLog,
+)
 
 __all__ = [
     "Organization", "Store", "ShiftPreset", "LaborLawSetting",
@@ -107,4 +115,6 @@ __all__ = [
     "StaffAvailability", "StaffAvailabilityHistory", "StaffAvailabilityPreset",
     "HourlyRateHistory",
     "PayPeriod", "PayrollEntry", "PayrollEvent",
+    "Contact", "ContactPhone", "ContactTag", "ContactTagLink",
+    "ContactChangeRequest", "ContactAuditLog",
 ]

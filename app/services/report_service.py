@@ -4,6 +4,7 @@
 새 타입 추가 시 type 분기를 늘리는 방식. 분기가 많아지면 strategy 패턴으로
 type별 클래스 분리 고려.
 """
+import logging
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -17,8 +18,13 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from sqlalchemy import and_, or_
 
-from app.core.error_codes.reports import REPORT_NOT_VISIBLE
-from app.core.permissions import STAFF_PRIORITY, is_owner
+from app.core.error_codes.reports import (
+    ISSUE_RECIPIENT_IDS_INVALID,
+    ISSUE_RECIPIENT_NOT_IN_ORG,
+    ISSUE_VISIBILITY_SCOPE_INVALID,
+    REPORT_NOT_VISIBLE,
+)
+from app.core.permissions import GM_PRIORITY, STAFF_PRIORITY, is_gm_plus, is_owner
 from app.models.organization import Store
 from app.models.report import (
     Report,
@@ -35,7 +41,11 @@ from app.repositories.report_repository import (
     report_type_repository,
 )
 from app.schemas.report import (
+    DEFAULT_ISSUE_CATEGORIES,
+    DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES,
     DEFAULT_REPORT_TYPE_DEFS,
+    ISSUE_VISIBILITY_SCOPES,
+    LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES,
     ReportCommentCreate,
     ReportCreate,
     ReportTemplateCreate,
@@ -46,6 +56,8 @@ from app.schemas.report import (
 )
 from app.utils.exceptions import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from app.utils.timezone import get_store_timezone
+
+logger = logging.getLogger(__name__)
 
 
 # ── 타입별 검증/본문 빌더 ────────────────────────────────────
@@ -167,6 +179,181 @@ async def _validate_issue_links(
             )
 
 
+async def ensure_system_issue_template(db: AsyncSession) -> bool:
+    """system default issue 템플릿(org_id=NULL, store_id=NULL) 보장 + 멱등 보정.
+
+    - row 가 없으면 기본 카테고리 + description 프리셋으로 생성.
+    - row 가 있으면 (a) 빠진 기본 카테고리를 sort_order=max+1 로 append,
+      (b) 프리셋이 정의된 카테고리인데 description_template 키가 **아예 없는** 항목을 채우고,
+      (c) 값이 **지난 버전 프리셋 원문 그대로**인 항목을 현재 원문으로 갱신한다
+      (LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES — 프리셋 문구를 고쳐도 이미 시드된
+      환경이 옛 문구에 고정되는 걸 막는다).
+      명시적으로 null 로 비웠거나 운영자가 직접 고친 문구는 덮어쓰지 않는다
+      (운영자가 지운 프리셋을 startup 이 되살리면 안 된다).
+
+    반환: 변경이 있었으면 True.
+    """
+    existing = (
+        await db.execute(
+            select(ReportTemplate).where(
+                ReportTemplate.type == "issue",
+                ReportTemplate.organization_id.is_(None),
+                ReportTemplate.store_id.is_(None),
+                ReportTemplate.is_default.is_(True),
+            )
+        )
+    ).scalars().first()
+
+    if existing is None:
+        categories = [
+            {
+                "code": code,
+                "label": code.replace("_", " ").title(),
+                "color": None,
+                "sort_order": idx + 1,
+                "is_active": True,
+                "description_template": DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code),
+            }
+            for idx, code in enumerate(DEFAULT_ISSUE_CATEGORIES)
+        ]
+        db.add(
+            ReportTemplate(
+                type="issue",
+                organization_id=None,
+                store_id=None,
+                name="Default Issue Form",
+                is_default=True,
+                is_active=True,
+                payload={"categories": categories, "custom_fields": []},
+            )
+        )
+        await db.commit()
+        logger.info("Created system default issue template")
+        return True
+
+    payload = dict(existing.payload or {})
+    categories = [dict(c) for c in (payload.get("categories") or [])]
+    present = {c.get("code") for c in categories}
+    max_sort = max((c.get("sort_order") or 0) for c in categories) if categories else 0
+    changed = False
+
+    for code in DEFAULT_ISSUE_CATEGORIES:
+        if code in present:
+            continue
+        max_sort += 1
+        categories.append({
+            "code": code,
+            "label": code.replace("_", " ").title(),
+            "color": None,
+            "sort_order": max_sort,
+            "is_active": True,
+            "description_template": DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code),
+        })
+        changed = True
+
+    for cat in categories:
+        code = cat.get("code")
+        if code not in DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES:
+            continue
+        current = DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES[code]
+        if "description_template" not in cat:
+            cat["description_template"] = current
+            changed = True
+            continue
+        # 옛 프리셋 원문 그대로면 현재 원문으로 갱신. null(운영자가 비움)이나
+        # 손댄 문구는 그대로 둔다.
+        if cat.get("description_template") in LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code, []):
+            cat["description_template"] = current
+            changed = True
+
+    if not changed:
+        return False
+
+    payload["categories"] = categories
+    payload.setdefault("custom_fields", [])
+    existing.payload = payload
+    flag_modified(existing, "payload")
+    await db.commit()
+    logger.info("Backfilled system default issue template categories")
+    return True
+
+
+async def _validate_issue_sharing(
+    db: AsyncSession,
+    organization_id: UUID,
+    payload: dict[str, Any],
+    *,
+    existing_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """issue payload 의 공유/알림 키 검증 + 정규화. 문제가 있으면 400.
+
+    - visibility_scope: ISSUE_VISIBILITY_SCOPES 중 하나.
+      모르는 값을 조용히 default 로 떨어뜨리면 작성자는 공유했다고 믿는데 공유가 안 된다.
+      **미지정이면 "default" 를 박지 않고 `_issue_visibility_scope` 로 승계한다** —
+      visibility_scope 를 모르는 구버전 클라(구 콘솔 탭 등)가 legacy
+      share_with_store_all=true 인 payload 를 그대로 PUT 하는 순간 "매장 전원 공개" 가
+      조용히 default 로 좁아지기 때문이다(하위호환 파손).
+    - extra_viewers.user_ids: 같은 조직의 활성 사용자여야 한다.
+      (조회권을 여는 키라 타 조직 id 를 넣으면 cross-tenant 열람이 열린다)
+      단, **이미 저장돼 있던 id 는 다시 검증하지 않는다**(existing_payload). 지목했던
+      사람이 나중에 퇴사·비활성화되면 그 리포트의 모든 수정이 400 으로 막혀 리포트가
+      벽돌이 되기 때문이다. 새로 추가한 id 만 크게 실패한다.
+    - notify_excluded_user_ids: **더 이상 아무 효과가 없다** (자동 수신자 = 그 매장 GM 이상은
+      해제 불가). 구버전 클라가 계속 보내므로 400 을 내지 않고 그대로 받아 무시한다.
+      효과가 없으니 값 검증도 하지 않는다 — 검증은 "이 키가 뭔가 한다"는 잘못된 신호다.
+    """
+    scope = payload.get("visibility_scope")
+    if scope is None:
+        payload["visibility_scope"] = _issue_visibility_scope(payload)
+    elif scope not in ISSUE_VISIBILITY_SCOPES:
+        raise ISSUE_VISIBILITY_SCOPE_INVALID(allowed=list(ISSUE_VISIBILITY_SCOPES))
+    # visibility_scope 가 정본이 된 이상 legacy 키는 남겨두면 안 된다. 두 키가 공존하면
+    # SQL clause(legacy OR) 와 파이썬 판정(scope 우선) 이 갈려 "목록엔 보이는데 열면 403"
+    # 이 된다. 위에서 승계까지 끝났으므로 여기서 지워도 의미 손실은 없다.
+    payload.pop("share_with_store_all", None)
+
+    def _parse(values: Any, field: str) -> list[UUID]:
+        if not values:
+            return []
+        if not isinstance(values, list):
+            raise ISSUE_RECIPIENT_IDS_INVALID(field=f"payload.{field}")
+        out: list[UUID] = []
+        for v in values:
+            try:
+                out.append(UUID(str(v)))
+            except (TypeError, ValueError):
+                raise ISSUE_RECIPIENT_IDS_INVALID(field=f"payload.{field}")
+        return out
+
+    extra_viewers = payload.get("extra_viewers") or {}
+    if extra_viewers and not isinstance(extra_viewers, dict):
+        raise ISSUE_RECIPIENT_IDS_INVALID(field="payload.extra_viewers")
+    to_check: list[tuple[str, list[UUID]]] = [
+        ("extra_viewers.user_ids", _parse(extra_viewers.get("user_ids"), "extra_viewers.user_ids")),
+    ]
+    # 이미 저장돼 있던 지목 인원은 재검증 대상이 아니다 (위 docstring 참조).
+    already = _payload_user_ids(
+        ((existing_payload or {}).get("extra_viewers") or {}).get("user_ids")
+    )
+    for field, ids in to_check:
+        new_ids = [x for x in ids if x not in already]
+        if not new_ids:
+            continue
+        rows = await db.execute(
+            select(User.id).where(
+                User.id.in_(new_ids),
+                User.organization_id == organization_id,
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+            )
+        )
+        found = {r[0] for r in rows.all()}
+        missing = [str(x) for x in new_ids if x not in found]
+        if missing:
+            raise ISSUE_RECIPIENT_NOT_IN_ORG(field=f"payload.{field}", user_ids=missing)
+    return payload
+
+
 def _build_daily_payload_from_template(template: ReportTemplate, period: str) -> dict[str, Any]:
     """daily 리포트 생성 시 템플릿 sections를 본문 sections로 변환."""
     tpl_sections = (template.payload or {}).get("sections", []) or []
@@ -213,6 +400,61 @@ def _manages_report_store_exists(user: User):
     )
 
 
+def _assigned_to_report_store_exists(user: User):
+    """이 리포트의 매장에 내가 배정돼 있는가 (is_manager 무관) — correlated EXISTS.
+
+    visibility_scope="store_all"(작성자가 매장 전원에게 공개한 경우) 전용 근거.
+    """
+    return (
+        select(UserStore.id)
+        .where(
+            UserStore.user_id == user.id,
+            UserStore.store_id == Report.store_id,
+        )
+        .correlate(Report)
+        .exists()
+    )
+
+
+def _issue_visibility_scope(payload: dict[str, Any] | None) -> str:
+    """issue payload 의 조회 범위 정규화 — 해석은 이 함수 한 곳에서만 한다.
+
+    - visibility_scope 가 있으면 그 값 (알 수 없는 값은 default 로 — 쓰기 시점에 400 으로
+      이미 막았으므로, 읽기에서는 가장 좁은 쪽으로 떨어뜨린다)
+    - 없으면 legacy share_with_store_all=true → "store_all"
+    - 그 외 "default"
+    """
+    payload = payload or {}
+    scope = payload.get("visibility_scope")
+    if isinstance(scope, str) and scope in ISSUE_VISIBILITY_SCOPES:
+        return scope
+    # SQL 쪽은 `payload->>'share_with_store_all' = 'true'` 이므로 여기서도 정확히
+    # 그 값만 인정한다. bool(...) 로 두면 문자열 "false" 같은 쓰레기 값에서 두 판정이 갈린다.
+    if payload.get("share_with_store_all") in (True, "true"):
+        return "store_all"
+    return "default"
+
+
+# ── `_issue_visibility_scope` 의 SQL 판(版) ──────────────────────────
+# 파이썬 판정과 SQL 필터가 **같은 우선순위**를 써야 한다. 어긋나면 목록/단건이 갈린다.
+
+
+def _scope_text():
+    """payload->>'visibility_scope'. 키 없음/JSON null 이면 SQL NULL."""
+    return Report.payload["visibility_scope"].astext
+
+
+def _scope_is_unset():
+    """visibility_scope 가 없거나 우리가 모르는 값 — 이때만 legacy 키를 본다."""
+    scope = _scope_text()
+    return or_(scope.is_(None), scope.notin_(ISSUE_VISIBILITY_SCOPES))
+
+
+def _legacy_store_all():
+    """legacy share_with_store_all=true (JSON boolean 도, 문자열 "true" 도 인정)."""
+    return Report.payload["share_with_store_all"].astext == "true"
+
+
 def _report_visibility_clause(user: User):
     """리포트 조회 가시성 조건 (모든 타입 공통).
 
@@ -226,6 +468,9 @@ def _report_visibility_clause(user: User):
     - Owner+ (priority <= OWNER_PRIORITY): 제한 없음 (None)
     - issue 타입은 작성자가 명시적으로 공유한 경우(extra_viewers.user_ids /
       share_with_store_all) 추가로 열어준다 — 명시 공유는 위 두 축보다 우선.
+    - **issue 타입 한정**: 그 매장에 배정된 GM 이상은 누가 썼든(동급·상급 포함) 볼 수 있다.
+      issue 알림은 그 매장 GM 이상 전원에게 무조건 가므로, 여기서 안 열어주면
+      "알림은 왔는데 누르면 403" 이 된다. daily 등 다른 타입은 건드리지 않는다.
 
     매장 범위 제한(accessible_store_ids)은 호출부에서 별도로 한 번 더 적용된다.
     """
@@ -242,8 +487,35 @@ def _report_visibility_clause(user: User):
         ),
         # 명시 공유 (issue 전용 payload 키)
         Report.payload["extra_viewers"]["user_ids"].op("?")(user_str),
-        Report.payload["share_with_store_all"].astext == "true",
+        # visibility_scope="managers" — 그 매장 manager 전원 (직급 무관)
+        and_(
+            _scope_text() == "managers",
+            _manages_report_store_exists(user),
+        ),
+        # visibility_scope="store_all" (+ legacy share_with_store_all) — 그 매장 배정 인원 전원.
+        # legacy 키도 같은 EXISTS 로 좁힌다: "매장 전원 공개" 가 타 매장 사람에게까지 열리던
+        # 현행은 유출 버그이지 의도된 범위가 아니다.
+        #
+        # legacy 는 **visibility_scope 가 없/모를 때만** 본다 — `_issue_visibility_scope`
+        # 와 같은 우선순위여야 한다. 그냥 OR 로 두면 두 키가 공존하는 row
+        # (예: scope="default" + share_with_store_all=true) 에서 목록엔 뜨는데
+        # 단건 조회는 403 이 되는, 필터가 아닌 상태가 된다.
+        and_(
+            or_(
+                _scope_text() == "store_all",
+                and_(_scope_is_unset(), _legacy_store_all()),
+            ),
+            _assigned_to_report_store_exists(user),
+        ),
     ]
+    if is_gm_plus(user):
+        # issue 전용 — 알림 대상(그 매장 GM 이상 전원)과 조회권을 일치시킨다.
+        conds.append(
+            and_(
+                Report.type == "issue",
+                _assigned_to_report_store_exists(user),
+            )
+        )
     return or_(*conds)
 
 
@@ -252,10 +524,12 @@ def can_view_report(
     report: Report,
     author_priority: int | None,
     manages_store: bool,
+    assigned_to_store: bool = False,
 ) -> bool:
     """단건 조회 가시성 — _report_visibility_clause 의 파이썬 판정 버전.
 
     manages_store: 이 리포트의 매장에서 viewer 가 manager 인가.
+    assigned_to_store: 이 리포트의 매장에 viewer 가 배정돼 있는가 (is_manager 무관).
     """
     if is_owner(user):
         return True
@@ -264,11 +538,20 @@ def can_view_report(
     priority = user.role.priority if user.role else 999
     if author_priority is not None and author_priority > priority and manages_store:
         return True
+    # issue 전용 — 그 매장에 배정된 GM 이상은 작성자 직급과 무관하게 열 수 있다
+    # (알림이 무조건 가는 사람들이라 여기서 막으면 '알림 눌렀는데 403' 이 된다).
+    if report.type == "issue" and is_gm_plus(user) and assigned_to_store:
+        return True
     payload = report.payload or {}
     extra = (payload.get("extra_viewers") or {}).get("user_ids") or []
     if str(user.id) in [str(u) for u in extra]:
         return True
-    return bool(payload.get("share_with_store_all"))
+    scope = _issue_visibility_scope(payload)
+    if scope == "managers" and manages_store:
+        return True
+    if scope == "store_all" and assigned_to_store:
+        return True
+    return False
 
 
 async def _author_priority_of(db: AsyncSession, report: Report) -> int:
@@ -288,25 +571,95 @@ async def _author_priority_of(db: AsyncSession, report: Report) -> int:
     return res.scalar() or STAFF_PRIORITY
 
 
+def _payload_user_ids(values: Any) -> set[UUID]:
+    """payload 안의 user id 문자열 리스트 → UUID 집합 (파싱 실패는 무시)."""
+    out: set[UUID] = set()
+    for uid in values or []:
+        try:
+            out.add(UUID(str(uid)))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+async def _resolve_issue_auto_recipients(
+    db: AsyncSession,
+    *,
+    store_id: UUID | None,
+) -> list[dict[str, Any]]:
+    """자동 수신자 — 그 매장에 배정된 **GM 이상 전원** (활성 사용자).
+
+    작성자 직급과 비교하지 않는다. 작성자 본인이 GM 이상이면 본인도 포함된다
+    (내가 올린 이슈도 내 매장 이슈이므로 GM 목록에서 빠질 이유가 없다).
+    is_manager 도 보지 않는다 — 배정(user_stores)만 있으면 된다.
+
+    이 집합은 **해제 불가**다. payload.notify_excluded_user_ids 는 더 이상 반영하지 않는다.
+
+    반환 항목: {user_id, full_name, role_label, role_priority}. 정렬은 호출부에서.
+    """
+    if not store_id:
+        return []
+    q = (
+        select(User.id, User.full_name, Role.name, Role.priority)
+        .join(Role, Role.id == User.role_id)
+        .join(UserStore, UserStore.user_id == User.id)
+        .where(
+            UserStore.store_id == store_id,
+            Role.priority <= GM_PRIORITY,
+            User.is_active.is_(True),
+            User.deleted_at.is_(None),
+        )
+    )
+    res = await db.execute(q)
+    seen: set[UUID] = set()
+    items: list[dict[str, Any]] = []
+    for uid, full_name, role_name, priority in res.all():
+        if uid in seen:
+            continue
+        seen.add(uid)
+        items.append({
+            "user_id": uid,
+            "full_name": full_name or "",
+            "role_label": role_name or "",
+            "role_priority": priority if priority is not None else STAFF_PRIORITY,
+        })
+    return items
+
+
 async def _resolve_issue_viewers(
     db: AsyncSession, report: Report
 ) -> set[UUID]:
-    """이슈 리포트의 조회권자 user_id 집합.
+    """이슈 리포트의 **조회권자** user_id 집합.
+
+    알림 대상이 아니다. 알림은 _resolve_issue_notify_recipients 하나만 쓴다 —
+    볼 수 있다는 것과 통지받는다는 것은 별개다. (이걸 alert fan-out 에 쓰면
+    범위를 store_all 로 넓히는 순간 매장 전원에게 알림이 쏟아진다)
 
     - 작성자
+    - 그 매장에 배정된 GM 이상 전원 (직급 비교 없음 — 알림 대상과 같은 집합)
     - 그 매장의 manager(user_stores.is_manager) 중 작성자보다 상위 직급인 사람
     - payload.extra_viewers.user_ids
+    - visibility_scope="managers" 면 그 매장 manager 전원 (직급 무관)
+    - visibility_scope="store_all"(legacy share_with_store_all 포함) 이면 그 매장 배정 인원 전원
     - payload.extra_viewers.position_ids 는 향후 (position-user 매핑 도입 후)
     """
     viewers: set[UUID] = set()
     if report.author_id:
         viewers.add(report.author_id)
 
+    payload = report.payload or {}
+    scope = _issue_visibility_scope(payload)
+
     if report.store_id:
-        # 이 매장의 **manager 이면서 작성자보다 상위 직급인 사람만** — 가시성 규칙과 동일.
-        # (배정만 된 동료 SV 는 이 리포트를 열 수 없으므로 알림도 보내지 않는다)
+        # (1) 그 매장 GM 이상 전원 — _report_visibility_clause / can_view_report 의
+        #     issue 전용 조건과 같은 집합이어야 한다. 세 곳이 어긋나면
+        #     "목록엔 있는데 열면 403" 또는 "알림은 갔는데 못 여는" 상태가 된다.
+        auto = await _resolve_issue_auto_recipients(db, store_id=report.store_id)
+        viewers.update(item["user_id"] for item in auto)
+
+        # (2) 그 매장 manager 중 작성자보다 상위 직급 (기존 default 규칙 — 유지)
         author_priority = await _author_priority_of(db, report)
-        q = (
+        res = await db.execute(
             select(User.id)
             .join(Role, Role.id == User.role_id)
             .join(UserStore, UserStore.user_id == User.id)
@@ -318,18 +671,12 @@ async def _resolve_issue_viewers(
                 User.deleted_at.is_(None),
             )
         )
-        res = await db.execute(q)
         viewers.update(row[0] for row in res)
 
-    extra = (report.payload or {}).get("extra_viewers", {}) or {}
-    for uid in extra.get("user_ids", []) or []:
-        try:
-            viewers.add(UUID(uid))
-        except (ValueError, TypeError):
-            continue
-    # share_with_store_all=True면 매장 전체 staff 추가
-    if (report.payload or {}).get("share_with_store_all") and report.store_id:
-        all_q = (
+    viewers.update(_payload_user_ids((payload.get("extra_viewers") or {}).get("user_ids")))
+
+    if report.store_id and scope in ("managers", "store_all"):
+        q = (
             select(User.id)
             .join(UserStore, UserStore.user_id == User.id)
             .where(
@@ -338,39 +685,66 @@ async def _resolve_issue_viewers(
                 User.deleted_at.is_(None),
             )
         )
-        all_res = await db.execute(all_q)
-        viewers.update(row[0] for row in all_res)
+        if scope == "managers":
+            q = q.where(UserStore.is_manager.is_(True))
+        res = await db.execute(q)
+        viewers.update(row[0] for row in res)
     return viewers
+
+
+async def _resolve_issue_notify_recipients(
+    db: AsyncSession, report: Report, *, event: str | None = None
+) -> set[UUID]:
+    """이 리포트의 실제 알림 수신자 = (그 매장 GM 이상 전원) ∪ (콕 집어 추가한 사람) ∪ (작성자).
+
+    - 자동 수신자(GM+)는 **해제 불가**. payload.notify_excluded_user_ids 는 하위호환으로
+      받기만 하고 무시한다 (구버전 클라가 보낸 제외 목록이 GM 알림을 끄면 안 된다).
+    - 작성자 본인도 GM 이상이면 포함된다.
+    - **작성자는 GM 미만이어도 자기 리포트에 달린 후속(댓글/상태 변경) 알림을 받는다.**
+      GM+ 집합만 쓰면 이슈를 올린 staff 가 "닫혔다/답이 달렸다"를 영영 못 듣는다
+      (dev 에서는 조회권자 알림으로 받고 있던 동작이라, 안 넣으면 회귀다).
+      event="created" 는 작성자 = 액터이므로 제외한다 — 자기가 방금 쓴 걸 통지받을 이유가 없다.
+      작성자는 항상 조회권이 있으므로 "알림은 왔는데 못 여는" 불일치는 생기지 않는다.
+    - 조회 범위(visibility_scope)는 이 집합에 영향을 주지 않는다 — 범위 확대는
+      "열어볼 수 있게" 이지 "통지" 가 아니다.
+    - **비활성/삭제된 사용자에게는 보내지 않는다.** extra_viewers 는 payload 에 박힌
+      과거 id 라, 필터 없이 쓰면 퇴사자에게 이슈 메일이 계속 나간다
+      (dev 에서 메일 대상이던 _resolve_issue_managers 는 active 를 걸고 있었다).
+
+    스냅샷을 저장하지 않고 매번 재계산한다 — 나중에 부임한 GM 도 자동으로 받는다.
+    """
+    payload = report.payload or {}
+    auto = await _resolve_issue_auto_recipients(db, store_id=report.store_id)
+    recipients = {item["user_id"] for item in auto}
+
+    # payload/컬럼에서 온 id 는 활성 여부를 보장하지 않으므로 한 번 걸러서 합친다.
+    unverified = _payload_user_ids((payload.get("extra_viewers") or {}).get("user_ids"))
+    if event != "created" and report.author_id:
+        unverified.add(report.author_id)
+    unverified -= recipients  # auto 는 이미 active 필터를 통과했다
+    if unverified:
+        rows = await db.execute(
+            select(User.id).where(
+                User.id.in_(unverified),
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+            )
+        )
+        recipients |= {row[0] for row in rows.all()}
+    return recipients
 
 
 async def _resolve_issue_managers(
     db: AsyncSession, report: Report
 ) -> set[UUID]:
-    """이슈 리포트의 매장 관리자(GM+) user_id 집합. 사용자 표현 '관리자는 무조건 받음' 대상.
+    """이슈 리포트의 자동 수신자 user_id 집합 (추가 지목 인원 반영 전).
 
-    그 매장의 manager(user_stores.is_manager) 중 작성자보다 상위 직급인 사람.
-    (가시성 규칙과 같은 조건 — 못 여는 사람에게 메일을 보내지 않는다)
+    그 매장에 배정된 GM 이상 전원.
     """
-    managers: set[UUID] = set()
     if not report.store_id:
-        return managers
-    author_priority = await _author_priority_of(db, report)
-    q = (
-        select(User.id)
-        .join(Role, Role.id == User.role_id)
-        .join(UserStore, UserStore.user_id == User.id)
-        .where(
-            UserStore.store_id == report.store_id,
-            UserStore.is_manager.is_(True),
-            # 동급·하위에게는 보이지 않으므로 알림도 보내지 않는다.
-            Role.priority < author_priority,
-            User.is_active.is_(True),
-            User.deleted_at.is_(None),
-        )
-    )
-    res = await db.execute(q)
-    managers.update(row[0] for row in res)
-    return managers
+        return set()
+    auto = await _resolve_issue_auto_recipients(db, store_id=report.store_id)
+    return {item["user_id"] for item in auto}
 
 
 def _apply_section_updates(report: Report, updates: list) -> None:
@@ -812,17 +1186,243 @@ class ReportService:
             )
             author_priority = res.scalar()
         manages_store = False
+        assigned_to_store = False
         if report.store_id:
             mres = await db.execute(
-                select(UserStore.id).where(
+                select(UserStore.is_manager).where(
                     UserStore.user_id == viewer.id,
                     UserStore.store_id == report.store_id,
-                    UserStore.is_manager.is_(True),
                 )
             )
-            manages_store = mres.first() is not None
-        if not can_view_report(viewer, report, author_priority, manages_store):
+            rows = mres.all()
+            assigned_to_store = bool(rows)
+            manages_store = any(bool(row[0]) for row in rows)
+        if not can_view_report(
+            viewer, report, author_priority, manages_store, assigned_to_store
+        ):
             raise REPORT_NOT_VISIBLE()
+
+    async def list_issue_recipients(
+        self,
+        db: AsyncSession,
+        *,
+        viewer: User,
+        store_id: UUID,
+        report: Report | None = None,
+    ) -> list[dict[str, Any]]:
+        """이슈 알림 수신자 목록. 작성 화면과 상세 화면이 같이 쓴다.
+
+        - 자동 수신자(source="auto") = 그 매장 GM 이상 전원. **항상 수신, 해제 불가**
+          (is_recipient=True, can_remove=False).
+        - 추가 지목(source="added") = payload.extra_viewers.user_ids. 제거 가능.
+
+        스냅샷이 아니라 매번 재계산이므로, 부임/퇴사가 즉시 반영된다.
+        """
+        payload = (report.payload or {}) if report is not None else {}
+
+        auto = await _resolve_issue_auto_recipients(db, store_id=store_id)
+        added = _payload_user_ids((payload.get("extra_viewers") or {}).get("user_ids"))
+
+        items: list[dict[str, Any]] = []
+        auto_ids = set()
+        for item in auto:
+            auto_ids.add(item["user_id"])
+            items.append({
+                "user_id": str(item["user_id"]),
+                "full_name": item["full_name"],
+                "role_label": item["role_label"],
+                "role_priority": item["role_priority"],
+                "source": "auto",
+                "is_recipient": True,
+                "can_remove": False,
+            })
+
+        added_only = [uid for uid in added if uid not in auto_ids]
+        if added_only:
+            rows = await db.execute(
+                select(User.id, User.full_name, Role.name, Role.priority, User.is_active)
+                .join(Role, Role.id == User.role_id, isouter=True)
+                .where(
+                    User.id.in_(added_only),
+                    User.organization_id == viewer.organization_id,
+                    User.deleted_at.is_(None),
+                )
+            )
+            for uid, full_name, role_name, priority, is_active in rows.all():
+                items.append({
+                    "user_id": str(uid),
+                    "full_name": full_name or "",
+                    "role_label": role_name or "",
+                    "role_priority": priority if priority is not None else STAFF_PRIORITY,
+                    "source": "added",
+                    # 비활성 사용자에게는 실제로 발송하지 않는다
+                    # (_resolve_issue_notify_recipients 와 같은 판정). 목록에서 숨기지는
+                    # 않는다 — 지목이 payload 에 남아 있는 걸 작성자가 보고 지울 수 있어야 한다.
+                    "is_recipient": bool(is_active),
+                    "can_remove": True,
+                })
+
+        items.sort(key=lambda i: (i["role_priority"], i["full_name"]))
+        return items
+
+    async def list_issue_expected_viewers(
+        self,
+        db: AsyncSession,
+        *,
+        viewer: User,
+        store_id: UUID,
+        scope: str,
+        report: Report | None = None,
+        extra_user_ids: list[UUID] | None = None,
+    ) -> dict[str, Any]:
+        """선택한 조회 범위에서 **실제로 누가 보게 되는지** 미리보기.
+
+        작성 화면에서 범위를 고를 때 쓴다. 범위 문구만으로는 누가 보는지 알 수 없어
+        작성자가 "이 사람도 보나?" 를 못 판단한다.
+
+        - store_all 은 인원이 많아 목록을 만들지 않는다 (mode="summary", 개수만).
+        - default / managers 는 사람 목록 (mode="list").
+        - extra_user_ids 를 주면 아직 저장 전인 추가 지목까지 반영해서 계산한다.
+          (안 주면 report.payload.extra_viewers.user_ids 를 쓴다)
+
+        판정은 _report_visibility_clause / can_view_report 와 같은 규칙이어야 한다.
+        """
+        if scope not in ISSUE_VISIBILITY_SCOPES:
+            raise ISSUE_VISIBILITY_SCOPE_INVALID(allowed=list(ISSUE_VISIBILITY_SCOPES))
+
+        payload = (report.payload or {}) if report is not None else {}
+        if extra_user_ids is None:
+            extras = _payload_user_ids((payload.get("extra_viewers") or {}).get("user_ids"))
+        else:
+            extras = set(extra_user_ids)
+
+        author_id = report.author_id if report is not None else viewer.id
+        if report is not None:
+            author_priority = await _author_priority_of(db, report)
+        else:
+            author_priority = (
+                viewer.role.priority
+                if viewer.role and viewer.role.priority is not None
+                else STAFF_PRIORITY
+            )
+
+        # 매장 배정 인원 전원 (GM+ / manager 판정을 여기서 한 번에 한다)
+        rows = (
+            await db.execute(
+                select(
+                    User.id, User.full_name, Role.name, Role.priority, UserStore.is_manager
+                )
+                .join(Role, Role.id == User.role_id, isouter=True)
+                .join(UserStore, UserStore.user_id == User.id)
+                .where(
+                    UserStore.store_id == store_id,
+                    User.is_active.is_(True),
+                    User.deleted_at.is_(None),
+                )
+            )
+        ).all()
+
+        assigned: dict[UUID, dict[str, Any]] = {}
+        for uid, full_name, role_name, priority, is_manager in rows:
+            cur = assigned.setdefault(uid, {
+                "user_id": str(uid),
+                "full_name": full_name or "",
+                "role_label": role_name or "",
+                "role_priority": priority if priority is not None else STAFF_PRIORITY,
+                "is_manager": False,
+            })
+            cur["is_manager"] = cur["is_manager"] or bool(is_manager)
+
+        # 알림 대상 = _resolve_issue_notify_recipients 와 같은 집합이어야 미리보기가
+        # 거짓말을 하지 않는다: 그 매장 GM+ ∪ 지목 ∪ 작성자(후속 알림).
+        notified = {
+            uid for uid, info in assigned.items()
+            if info["role_priority"] <= GM_PRIORITY
+        } | extras
+        if author_id:
+            notified.add(author_id)
+
+        if scope == "store_all":
+            count = len(set(assigned) | extras | ({author_id} if author_id else set()))
+            return {
+                "store_id": str(store_id),
+                "report_id": str(report.id) if report is not None else None,
+                "scope": scope,
+                "mode": "summary",
+                "summary": {
+                    "label": "Everyone assigned to this store",
+                    "count": count,
+                },
+                "items": [],
+            }
+
+        items: list[dict[str, Any]] = []
+        seen: set[UUID] = set()
+
+        def _add(uid: UUID, info: dict[str, Any], reason: str, reason_label: str) -> None:
+            if uid in seen:
+                return
+            seen.add(uid)
+            items.append({
+                "user_id": str(uid),
+                "full_name": info["full_name"],
+                "role_label": info["role_label"],
+                "role_priority": info["role_priority"],
+                "reason": reason,
+                "reason_label": reason_label,
+                "is_notified": uid in notified,
+            })
+
+        for uid, info in assigned.items():
+            if uid == author_id:
+                _add(uid, info, "author", "Author")
+            elif info["role_priority"] <= GM_PRIORITY:
+                _add(uid, info, "gm_or_above", "GM or above at this store")
+            elif info["is_manager"] and (
+                scope == "managers" or info["role_priority"] < author_priority
+            ):
+                _add(uid, info, "store_manager", "Manager of this store")
+
+        # 매장에 배정돼 있지 않은 작성자(권한 이관/타 매장 작성 등)도 자기 글은 본다
+        missing = [uid for uid in ([author_id] if author_id else []) if uid not in seen]
+        missing += [uid for uid in extras if uid not in seen]
+        if missing:
+            extra_rows = (
+                await db.execute(
+                    select(User.id, User.full_name, Role.name, Role.priority)
+                    .join(Role, Role.id == User.role_id, isouter=True)
+                    .where(
+                        User.id.in_(missing),
+                        User.organization_id == viewer.organization_id,
+                        User.deleted_at.is_(None),
+                    )
+                )
+            ).all()
+            for uid, full_name, role_name, priority in extra_rows:
+                info = {
+                    "full_name": full_name or "",
+                    "role_label": role_name or "",
+                    "role_priority": priority if priority is not None else STAFF_PRIORITY,
+                }
+                if uid == author_id:
+                    _add(uid, info, "author", "Author")
+                else:
+                    _add(uid, info, "added", "Added by the author")
+
+        items.sort(key=lambda i: (i["role_priority"], i["full_name"]))
+        label = (
+            "Author, managers above the author, and GM or above at this store"
+            if scope == "default"
+            else "All managers at this store, plus GM or above"
+        )
+        return {
+            "store_id": str(store_id),
+            "report_id": str(report.id) if report is not None else None,
+            "scope": scope,
+            "mode": "list",
+            "summary": {"label": label, "count": len(items)},
+            "items": items,
+        }
 
     async def create_report(
         self,
@@ -982,6 +1582,8 @@ class ReportService:
             await _validate_issue_links(
                 db, organization_id, store_id, raw_payload.get("links")
             )
+            # 공유 범위 + 수신자 지정 검증 (조회권을 여는 키라 조직 검증 필수)
+            raw_payload = await _validate_issue_sharing(db, organization_id, raw_payload)
 
             # issue 는 report_date 가 명시 안 됐으면 today 로 자동 set
             # (date range 필터에서 매칭되도록).
@@ -1068,6 +1670,13 @@ class ReportService:
                         r.store_id,
                         data.payload.get("links") if isinstance(data.payload, dict) else None,
                     )
+                    if isinstance(data.payload, dict):
+                        data.payload = await _validate_issue_sharing(
+                            db,
+                            organization_id,
+                            dict(data.payload),
+                            existing_payload=r.payload,
+                        )
                 r.payload = data.payload
                 flag_modified(r, "payload")
             if data.sections is not None:
@@ -1365,9 +1974,19 @@ class ReportService:
         """이슈 리포트 이벤트 알림.
 
         event: "created" | "status:open" | "status:in_progress" | "status:closed" | "comment"
-        - 조회권자 전원에게 in-app alert
-        - 매장 관리자(GM+)는 무조건 이메일도 (alert preference 무시 가능 옵션)
-        - 본인이 친 액션은 본인 제외
+        **알림 대상 = 수신자 하나뿐이다**
+        ((그 매장 GM 이상 전원) ∪ (콕 집어 추가한 사람) ∪ (작성자, created 제외)).
+        in-app alert 과 email 이 같은 집합을 쓴다. 작성자/액션 actor 도 GM 이상이면 포함된다.
+        작성자는 GM 미만이어도 자기 리포트의 후속(댓글/상태 변경)은 받는다 — 이슈를 올린
+        사람이 결과를 모르면 리포트 기능 자체가 성립하지 않는다.
+
+        조회권과 알림은 별개다 — **볼 수 있다고 알림을 받지 않는다.**
+        조회 범위(visibility_scope)를 넓히는 것은 "필요하면 열어볼 수 있게" 한다는 뜻이지
+        "전원에게 통지한다"는 뜻이 아니다. 예전엔 alert 을 조회권자 전원에게 보내서,
+        범위를 store_all 로 넓히는 순간 매장 전원에게 알림이 쏟아졌다.
+
+        알림 실패는 리포트 작성을 깨뜨리면 안 되므로 계속 삼키되, **반드시 로그를 남긴다**
+        (예전엔 except: pass 로 완전 무음이라 안 간 알림을 아무도 몰랐다).
         """
         try:
             from app.services.alert_service import alert_service
@@ -1375,11 +1994,9 @@ class ReportService:
             from app.utils.email_templates import build_reply_email
             import asyncio
 
-            viewers = await _resolve_issue_viewers(db, report)
-            managers = await _resolve_issue_managers(db, report)
-            # 본인 제외
-            viewers.discard(actor_id)
-            managers.discard(actor_id)
+            recipients = await _resolve_issue_notify_recipients(db, report, event=event)
+            # actor 를 빼지 않는다 — 그 매장 GM 이상은 자기가 올린/건드린 이슈여도
+            # "그 매장 이슈 알림" 을 받는 게 확정 규칙이다 (2026-08-14).
 
             # 액션 actor 이름
             actor_r = await db.execute(select(User.full_name).where(User.id == actor_id))
@@ -1405,8 +2022,8 @@ class ReportService:
                 context_label = "issue report"
                 excerpt_text = excerpt
 
-            # 1) viewers 전원에게 in-app alert
-            for uid in viewers:
+            # 1) 수신자에게 in-app alert (email 과 같은 집합 — 조회권자 전원이 아니다)
+            for uid in recipients:
                 try:
                     await alert_service.create_for_reply(
                         db,
@@ -1418,28 +2035,44 @@ class ReportService:
                         reference_id=report.id,
                     )
                 except Exception:
-                    pass
+                    logger.warning(
+                        "issue notify: in-app alert failed (report_id=%s event=%s recipient=%s)",
+                        report.id, event, uid, exc_info=True,
+                    )
             await db.commit()
 
-            # 2) 매장 관리자(GM+)에게 이메일 (alert pref 무시 = 무조건)
-            for uid in managers:
-                recipient = await db.execute(
-                    select(User.full_name, User.email).where(User.id == uid)
-                )
-                row = recipient.first()
-                if not row or not row.email:
-                    continue
-                subject, html = build_reply_email(
-                    recipient_name=row.full_name or "there",
-                    author_name=actor_name,
-                    context_label=context_label.title(),
-                    context_subtitle=f"{subtitle} · {report.title or ''}".strip(" ·"),
-                    excerpt=(excerpt_text[:160] if excerpt_text else None),
-                    cta_url=None,
-                )
-                asyncio.create_task(send_email(to=row.email, subject=subject, html=html))
+            # 2) 수신자(자동 후보 − 제외 + 지목 추가) 전원에게 이메일
+            for uid in recipients:
+                try:
+                    recipient = await db.execute(
+                        select(User.full_name, User.email).where(User.id == uid)
+                    )
+                    row = recipient.first()
+                    if not row or not row.email:
+                        logger.warning(
+                            "issue notify: no email for recipient (report_id=%s event=%s recipient=%s)",
+                            report.id, event, uid,
+                        )
+                        continue
+                    subject, html = build_reply_email(
+                        recipient_name=row.full_name or "there",
+                        author_name=actor_name,
+                        context_label=context_label.title(),
+                        context_subtitle=f"{subtitle} · {report.title or ''}".strip(" ·"),
+                        excerpt=(excerpt_text[:160] if excerpt_text else None),
+                        cta_url=None,
+                    )
+                    asyncio.create_task(send_email(to=row.email, subject=subject, html=html))
+                except Exception:
+                    logger.warning(
+                        "issue notify: email dispatch failed (report_id=%s event=%s recipient=%s)",
+                        report.id, event, uid, exc_info=True,
+                    )
         except Exception:
-            pass
+            logger.exception(
+                "issue notify: failed entirely (report_id=%s event=%s actor=%s)",
+                getattr(report, "id", None), event, actor_id,
+            )
 
     async def _notify_reply(
         self,

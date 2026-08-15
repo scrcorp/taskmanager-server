@@ -1752,6 +1752,7 @@ class AttendanceDeviceService:
                 db,
                 attendance_id=attendance.id,
                 organization_id=device.organization_id,
+                store_id=attendance.store_id,
                 staff_user_id=user.id,
                 staff_name=display_name(user),
                 work_date=attendance.work_date,
@@ -1807,25 +1808,20 @@ class AttendanceDeviceService:
             import asyncio
 
             from app.models.organization import Store as _Store
-            from app.models.permission import Permission, RolePermission
-            from app.models.user import Role
             from app.utils.email import send_email
             from app.utils.email_templates import build_early_clock_in_email
 
             store_name = await db.scalar(
                 select(_Store.name).where(_Store.id == attendance.store_id)
             )
+            # 수신자 산출은 in-app 과 **같은 쿼리**를 쓴다. 따로 짜면 두 채널이
+            # 조용히 갈린다 (실제로 갈려 있었다 — 둘 다 org 전체로 새어나갔다).
             recipients = await db.execute(
-                select(User.id, User.email)
-                .join(Role, User.role_id == Role.id)
-                .join(RolePermission, Role.id == RolePermission.role_id)
-                .join(Permission, RolePermission.permission_id == Permission.id)
-                .where(User.organization_id == device.organization_id)
-                .where(User.is_active.is_(True))
-                .where(Permission.code == "schedules:update")
-                .where(User.id != user.id)
-                .where(User.email.is_not(None))
-                .distinct()
+                alert_service.attendance_recipient_query(
+                    organization_id=device.organization_id,
+                    store_id=attendance.store_id,
+                    exclude_user_id=user.id,
+                ).where(User.email.is_not(None))
             )
             tz = _Zone(store_tz)
             subject, html = build_early_clock_in_email(

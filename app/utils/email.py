@@ -26,8 +26,14 @@ async def send_email(
     html: str,
     text: str | None = None,
     attachments: list[tuple[str, bytes]] | None = None,
-) -> None:
+) -> bool:
     """이메일 발송.
+
+    Returns:
+        실제로 SMTP 로 내보냈으면 True, 가드가 막았으면 False.
+        **반환값을 무시하지 말 것** — 가드는 조용히 return 하므로, 호출부가 예외만
+        보고 성공을 판단하면 "보냈다고 기록됐는데 실제로는 안 나간" 상태가 된다.
+        (실제로 schedule 일일 보고서에서 그 일이 있었다.)
 
     Args:
         to: 수신자 이메일 주소
@@ -59,7 +65,7 @@ async def send_email(
             )
         else:
             logger.warning("email not sent (%s): %r", route.reason, subject)
-        return
+        return False
 
     if route.redirected:
         logger.info("email redirected to %s (original: %s)", route.to, to)
@@ -88,3 +94,4 @@ async def send_email(
         password=settings.SMTP_PASSWORD,
         start_tls=True,
     )
+    return True
