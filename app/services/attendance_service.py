@@ -27,17 +27,24 @@ from app.models.organization import Store
 from app.models.schedule import Schedule
 from app.models.user import User
 from app.repositories.attendance_repository import attendance_repository, qr_code_repository
+from app.utils.attendance_judgement import (
+    ClockOutKind,
+    is_late_arrival,
+    judge_clock_out,
+)
 from app.utils.exceptions import BadRequestError, NotFoundError
-from app.utils.timezone import minutes_between, resolve_schedule_instants
+from app.utils.timezone import floor_to_minute, minutes_between, resolve_schedule_instants
 
 
-# 지각/조퇴/휴식 anomaly 임계치 (분 단위) — defaults
-# late: clock_in > scheduled_start + LATE_BUFFER_MINUTES 이면 late 로 기록
-# no_show: cron 이 scheduled_end 이 지났는데 attendance 없으면 생성
-LATE_BUFFER_MINUTES = 0  # 0 = 1분이라도 늦으면 late
-EARLY_LEAVE_THRESHOLD_MINUTES = 5
+# 지각/조퇴 임계값은 **매장 설정**에서 온다 (attendance_threshold_service).
+# 예전엔 여기 LATE_BUFFER_MINUTES=0 / EARLY_LEAVE_THRESHOLD_MINUTES=5 라는 모듈 상수가
+# 있었고, 화면 표시는 설정(5분)을, 실제 기록은 상수(0분)를 써서 "화면엔 정상인데 DB엔
+# 지각" 이 났다. 상수를 지운 이유가 그것이니 되살리지 말 것 — 임계값은 주입받는다.
+#
+# no_show: cron 이 scheduled_end 이 지났는데 clock-in 이 없으면 승격 (임계값 없음).
 
 # attendance dashboard 의 "soon" 그룹 진입 임계값 (분 단위).
+# 이건 판정이 아니라 순수 표시용 그룹핑이라 설정 키가 없다.
 SOON_THRESHOLD_MINUTES = 5
 
 
@@ -85,12 +92,12 @@ def compute_effective_status(
     if sched_start is None:
         return att_status
     # 판정은 분 단위로만 (초 버림) — 정시가 초 차이로 late 로 보이지 않게.
-    now_min = now.replace(second=0, microsecond=0)
+    now_min = floor_to_minute(now)
     if sched_end is not None and now_min >= sched_end:
         return "no_show"
     if att_status == "late":
         return "late"
-    if now_min > sched_start + timedelta(minutes=late_buffer):
+    if is_late_arrival(now_min, sched_start, late_buffer=late_buffer):
         return "late"
     if now_min >= sched_start - timedelta(minutes=soon_threshold_minutes):
         return "soon"
@@ -100,8 +107,19 @@ def compute_effective_status(
 # 조기 clock-in override — 예정보다 이른 출근을 사유와 함께 강제로 찍은 기록.
 ANOMALY_EARLY_CLOCK_IN_OVERRIDE = "early_clock_in_override"
 
+# 겹쳐 출근 — 다른 근무와 시간이 겹치는 기록 (D15 로 허용된 상태).
+# **파생 라벨이다.** 이 값이 있고 없고로 급여를 막지 않는다 — 이중 지급 차단은
+# payroll 확정 게이트(`overlapping_attendance`)의 시간 구간 판정이 한다. 라벨은
+# 화면에 드러내기 위한 것이라 낡아도 돈이 새지 않는다.
+# (컬럼이 ARRAY(String(30)) 이므로 anomaly 코드는 30자 이하여야 한다.)
+ANOMALY_OVERLAPPING_CLOCK_IN = "overlapping_clock_in"
+
 # manage UI 재설계(Issue 10) 가 쓰는 anomaly 표시 후보 — server 판정 예외만.
 # (soon 은 anomaly 아님 → 앱이 start_time 으로 자체 계산, 여기서 안 냄)
+#
+# ⚠️ 여기 등록하지 않은 코드는 HTMA today-staff/manage 응답에서 **조용히 사라진다**.
+# 콘솔은 raw anomalies 를 그대로 내려서 보이므로 "콘솔엔 있는데 앱엔 없다" 는
+# 재현하기 가장 어려운 불일치가 된다.
 DISPLAY_ANOMALIES = (
     "late",
     "no_show",
@@ -110,6 +128,7 @@ DISPLAY_ANOMALIES = (
     "no_break",
     "early_clock_out",
     ANOMALY_EARLY_CLOCK_IN_OVERRIDE,
+    ANOMALY_OVERLAPPING_CLOCK_IN,
 )
 
 
@@ -183,6 +202,8 @@ def compute_state_and_anomalies(
             continue  # 출근 안 했으면 overtime 불가
         if a == ANOMALY_EARLY_CLOCK_IN_OVERRIDE and not has_clock_in:
             continue  # 출근 안 했으면 조기출근 강행 불가
+        if a == ANOMALY_OVERLAPPING_CLOCK_IN and not has_clock_in:
+            continue  # 출근 기록이 없으면 겹칠 구간 자체가 없다
         if a in ("no_break", "early_leave", "early_clock_out") and not has_clock_out:
             continue  # 퇴근 안 했으면 판정 불가
         if a not in anomalies:
@@ -219,6 +240,77 @@ def _add_anomaly(attendance: Attendance, code: str) -> None:
     if code not in current:
         current.append(code)
     attendance.anomalies = current
+
+
+# 겹침 재계산 시 함께 훑는 날짜 폭(일). 근무는 하루를 넘지 않으므로 앞뒤 하루면
+# 자정을 넘는 야간조까지 짝을 찾을 수 있고, 판정 자체는 ±2일을 읽어 경계에서
+# 짝이 잘려 라벨이 잘못 걷히는 일을 막는다.
+_OVERLAP_REFRESH_DAYS = 1
+_OVERLAP_SCAN_DAYS = 2
+
+
+async def refresh_overlap_anomaly(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    work_date: date,
+    now: datetime | None = None,
+) -> None:
+    """`overlapping_clock_in` 라벨을 그 사람의 그 근처 날짜에 대해 다시 계산한다.
+
+    **sticky flag 가 아니라 파생 라벨**이다 — 한쪽을 정정/취소해서 겹침이 사라지면
+    라벨도 사라져야 하고, 콘솔 경로처럼 라벨을 붙이지 않는 곳에서 생긴 겹침도
+    드러나야 한다. 그래서 "붙이기" 가 아니라 "다시 계산" 이다.
+
+    커밋하지 않는다 — 호출자의 트랜잭션에 얹힌다(라벨 때문에 출퇴근이 롤백되면 안 된다).
+
+    한계: 스캔 창(±2일) 밖의 짝은 보지 못한다. 근무 한 건이 이틀을 넘지 않는다는
+    전제이며, 그 전제가 깨져도 급여는 확정 게이트가 막는다(라벨은 표시용).
+    """
+    if work_date is None:
+        return
+    now = now or datetime.now(timezone.utc)
+    scan_start = work_date - timedelta(days=_OVERLAP_SCAN_DAYS)
+    scan_end = work_date + timedelta(days=_OVERLAP_SCAN_DAYS)
+    rows = list(
+        (
+            await db.execute(
+                select(Attendance).where(
+                    Attendance.user_id == user_id,
+                    Attendance.work_date >= scan_start,
+                    Attendance.work_date <= scan_end,
+                    Attendance.status != "cancelled",
+                    Attendance.clock_in.is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return
+
+    from app.utils.attendance_overlap import overlapping_keys_from_rows
+
+    flagged = overlapping_keys_from_rows(
+        [(a.id, a.clock_in, a.clock_out) for a in rows], now=now
+    )
+    write_start = work_date - timedelta(days=_OVERLAP_REFRESH_DAYS)
+    write_end = work_date + timedelta(days=_OVERLAP_REFRESH_DAYS)
+    for att in rows:
+        # 스캔 창 가장자리 row 는 짝이 잘렸을 수 있으므로 **읽기만** 하고 쓰지 않는다.
+        if not (write_start <= att.work_date <= write_end):
+            continue
+        current = list(att.anomalies or [])
+        has = ANOMALY_OVERLAPPING_CLOCK_IN in current
+        should = att.id in flagged
+        if has == should:
+            continue
+        if should:
+            current.append(ANOMALY_OVERLAPPING_CLOCK_IN)
+        else:
+            current = [a for a in current if a != ANOMALY_OVERLAPPING_CLOCK_IN]
+        att.anomalies = current or None
 
 
 # paid break 세션당 유급 인정 시간(분) — 초과분은 순 근무시간에서 차감 (결정 C1).
@@ -478,14 +570,18 @@ class AttendanceService:
             anomalies: list[str] = []
             if schedule and (schedule.start_at is not None or schedule.start_time is not None):
                 # store timezone 기준 schedule 시작 순간 (start_at 우선, 없으면 combine 폴백)
-                from datetime import timedelta as _td
                 scheduled_start, _ = resolve_schedule_instants(
                     start_at=schedule.start_at, end_at=schedule.end_at,
                     work_date=schedule.work_date, start_time=schedule.start_time,
                     end_time=schedule.end_time, tz_name=effective_tz,
                 )
-                # late 판정은 분 단위 (clock_in 은 초까지 저장하되 초로 late 찍지 않음)
-                if scheduled_start is not None and now.replace(second=0, microsecond=0) > scheduled_start + _td(minutes=LATE_BUFFER_MINUTES):
+                # late 판정은 분 단위 (clock_in 은 초까지 저장하되 초로 late 찍지 않음).
+                # 임계값은 매장 설정 — QR 경로만 상수를 쓰면 키오스크와 판정이 갈린다.
+                from app.services.attendance_threshold_service import resolve_late_buffer
+                late_buffer = await resolve_late_buffer(
+                    db, organization_id=organization_id, store_id=store_id
+                )
+                if is_late_arrival(now, scheduled_start, late_buffer=late_buffer):
                     new_status = "late"
                     anomalies.append("late")
             attendance = await attendance_repository.create(
@@ -574,15 +670,24 @@ class AttendanceService:
                 schedule = schedule_result.scalar_one_or_none()
 
             if schedule and (schedule.end_at is not None or schedule.end_time is not None):
-                from datetime import timedelta as _td
                 scheduled_start, scheduled_end = resolve_schedule_instants(
                     start_at=schedule.start_at, end_at=schedule.end_at,
                     work_date=schedule.work_date, start_time=schedule.start_time,
                     end_time=schedule.end_time, tz_name=effective_tz,
                 )
                 if scheduled_end is not None:
-                    # 조퇴 (분 단위 판정)
-                    if now.replace(second=0, microsecond=0) < scheduled_end - _td(minutes=EARLY_LEAVE_THRESHOLD_MINUTES):
+                    # 조퇴 (분 단위 판정). 임계값은 매장 설정.
+                    from app.services.attendance_threshold_service import (
+                        resolve_early_leave_threshold,
+                    )
+                    early_leave_threshold = await resolve_early_leave_threshold(
+                        db, organization_id=organization_id, store_id=store_id
+                    )
+                    verdict = judge_clock_out(
+                        now, scheduled_end,
+                        early_leave_threshold=early_leave_threshold,
+                    )
+                    if verdict.kind is ClockOutKind.EARLY:
                         _add_anomaly(attendance, "early_leave")
                     # 초과근무
                     if attendance.total_work_minutes is not None and scheduled_start is not None:
@@ -859,6 +964,13 @@ class AttendanceService:
 
         await db.flush()
 
+        # 시각을 고치면 겹침이 새로 생기거나 사라진다 — 라벨을 다시 계산한다.
+        # (라벨은 표시용이고, 이중 지급 차단은 payroll 확정 게이트가 한다.)
+        await refresh_overlap_anomaly(
+            db, user_id=attendance.user_id, work_date=attendance.work_date
+        )
+        await db.flush()
+
         # 근태 수정 알림 — Notify GM+ about attendance correction
         from app.services.alert_service import alert_service
         await alert_service.create_for_attendance_correction(
@@ -1087,6 +1199,7 @@ class AttendanceService:
         db: AsyncSession,
         attendance: Attendance,
         breaks: list[AttendanceBreak] | None = None,
+        late_buffer: int | None = None,
     ) -> dict:
         """근태 응답 딕셔너리를 구성합니다 (관련 엔티티 이름 포함).
 
@@ -1096,11 +1209,21 @@ class AttendanceService:
             db: 비동기 데이터베이스 세션 (Async database session)
             attendance: 근태 ORM 객체 (Attendance ORM object)
             breaks: 미리 로드된 break 목록, 선택 (Preloaded attendance_breaks for batching)
+            late_buffer: 지각 유예 분. None 이면 여기서 매장 설정을 조회한다.
+                **목록 루프에서는 반드시 주입할 것** — resolve_setting 은 호출마다
+                registry+org(+store) 를 조회하므로 레코드마다 부르면 N+1 이 된다.
 
         Returns:
             dict: 매장/사용자 이름이 포함된 응답 딕셔너리
                   (Response dict with store/user names)
         """
+        if late_buffer is None:
+            from app.services.attendance_threshold_service import resolve_late_buffer
+            late_buffer = await resolve_late_buffer(
+                db,
+                organization_id=attendance.organization_id,
+                store_id=attendance.store_id,
+            )
         # 매장 이름 + 타임존 조회 — Fetch store name & timezone
         store_result = await db.execute(
             select(Store.name, Store.timezone).where(Store.id == attendance.store_id)
@@ -1234,7 +1357,7 @@ class AttendanceService:
                 schedule_work_date=s_operating_day,
                 now=datetime.now(timezone.utc),
                 store_tz=display_tz,
-                late_buffer=LATE_BUFFER_MINUTES,
+                late_buffer=late_buffer,
                 schedule_start_at=s_start_at,
                 schedule_end_at=s_end_at,
             ),
@@ -1258,6 +1381,12 @@ class AttendanceService:
             "early_clock_in_confirmed_by": (
                 str(attendance.early_clock_in_confirmed_by)
                 if attendance.early_clock_in_confirmed_by is not None else None
+            ),
+            # 조기 출근 요청자(D9) — **표시용이 아니다.** 화면 문구는 사유 문자열이
+            # 담당하고, 이 값은 이름 해석·집계를 나중에 할 수 있게 남겨두는 식별자다.
+            "early_clock_in_requested_by": (
+                str(attendance.early_clock_in_requested_by)
+                if attendance.early_clock_in_requested_by is not None else None
             ),
             "created_at": attendance.created_at,
         }

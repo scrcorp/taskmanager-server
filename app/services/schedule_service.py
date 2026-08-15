@@ -971,7 +971,13 @@ class ScheduleService:
         organization_id: UUID,
         data: ScheduleCreate,
         created_by: UUID,
+        warnings_sink: list[dict] | None = None,
     ) -> ScheduleResponse:
+        """단건 생성.
+
+        warnings_sink — 넘기면 "확인하고 넘어간 경고"를 여기에 담는다. 벌크 경로가
+        항목별 경고를 결과에 실어 보내기 위해 쓴다(응답 스키마는 그대로 둔다).
+        """
         store_id = UUID(data.store_id)
         # 폐점(closed) 매장엔 새 스케줄 생성 차단 (조회/수정/삭제는 허용)
         from app.services.store_service import store_service
@@ -1024,6 +1030,8 @@ class ScheduleService:
             cand_start_at=norm["start_at"], cand_end_at=norm["end_at"],
         )
         acknowledged_warnings = self._enforce_validation(validation, data.force)
+        if warnings_sink is not None:
+            warnings_sink.extend(acknowledged_warnings)
 
         net = net_minutes_from_datetimes(
             norm["start_at"], norm["end_at"], norm["break_start_at"], norm["break_end_at"]
@@ -1232,19 +1240,37 @@ class ScheduleService:
         """벌크 스케줄 생성. skip_on_conflict=True면 겹치는 건은 건너뛰고 나머지 생성."""
         from app.schemas.schedule import ScheduleBulkResult
 
+        from app.schemas.schedule import BulkEntryWarnings
+
         created = 0
         skipped = 0
         failed = 0
         errors: list[str] = []
         items: list = []
+        warnings: list[BulkEntryWarnings] = []
 
         from app.services.payroll_lock_service import PayPeriodLockedError
 
         for i, data in enumerate(entries_data):
             try:
-                result = await self.create_entry(db, organization_id, data, created_by)
+                # S1-c — 다건 경로는 409 확인 흐름을 쓰지 않는다(bulk_update 와 동일 원칙).
+                # 한 항목의 경고(겹침·초과근무·영업일 경계 등) 때문에 배치 전체가
+                # 멈추면 부분 성공의 의미가 사라진다. 게다가 create_entry 는 건별로
+                # commit 하므로, 중간에 409 로 튕기면 앞 항목은 이미 저장된 채
+                # 클라이언트는 "0건 저장"으로 알게 되어 재시도 시 중복이 생긴다.
+                # 저장은 진행하고, 경고는 항목별로 결과에 담아 사용자에게 보고한다.
+                # (에러(400)는 그대로 항목별 실패 처리 — force 는 에러를 뚫지 않는다)
+                sink: list[dict] = []
+                result = await self.create_entry(
+                    db, organization_id,
+                    data.model_copy(update={"force": True}),
+                    created_by,
+                    warnings_sink=sink,
+                )
                 items.append(result)
                 created += 1
+                if sink:
+                    warnings.append(BulkEntryWarnings(index=i, warnings=sink))
             except PayPeriodLockedError as e:
                 # (L3) locked 날짜는 conflict-skip 대상이 아니라 항상 실패로 집계 —
                 # 소급 생성이 조용히 사라지면 안 된다.
@@ -1257,10 +1283,23 @@ class ScheduleService:
                 else:
                     failed += 1
                     errors.append(f"[{i}] failed: {e.detail}")
+            except HTTPException as e:
+                # 검증 실패(400 SCHEDULE_INVALID)는 **그 항목만** 실패다.
+                # 여기서 그냥 튀어나가면 이미 commit 된 앞 항목들이 있는데도
+                # 클라이언트는 배치 전체가 실패한 줄 알고 재시도 → 중복 생성.
+                # (400 이 아닌 것은 진짜 예외 상황이니 그대로 올린다)
+                if e.status_code != 400:
+                    raise
+                failed += 1
+                detail = e.detail if isinstance(e.detail, dict) else {}
+                codes_txt = ", ".join(
+                    it.get("code", "?") for it in detail.get("errors", [])
+                ) or str(e.detail)
+                errors.append(f"[{i}] failed: {codes_txt}")
 
         return ScheduleBulkResult(
             created=created, skipped=skipped, failed=failed,
-            errors=errors, items=items,
+            errors=errors, items=items, warnings=warnings,
         )
 
     async def bulk_preview(
@@ -1965,12 +2004,16 @@ class ScheduleService:
             updated = await schedule_repository.update(db, entry_id, update_data, organization_id)
             if updated is None:
                 raise NotFoundError("Schedule not found")
-            # Eager attendance: schedule 시간/상태 변경 후 attendance.status 재계산.
-            # clock_in 있는 row 는 손대지 않음 (출근 기록 보존).
+            # Eager attendance: schedule 시간/상태 변경 후 attendance 라벨 재판정.
+            # clock_in 이 있는 row 도 대상이다 — 보존해야 하는 건 시각이지 라벨이 아니다
+            # (D11). 시각(clock_in/clock_out)은 건드리지 않고 status/anomalies 만 다시
+            # 매기며, 전/후는 attendance timeline 에 actor 이름으로 남는다.
             from app.services.attendance_lifecycle_service import (
                 recompute_attendance_for_schedule_change,
             )
-            await recompute_attendance_for_schedule_change(db, updated)
+            await recompute_attendance_for_schedule_change(
+                db, updated, actor_id=actor.id if actor else None
+            )
             # Audit log: build diff from modification_entries
             audit_diff: dict[str, Any] = {
                 m["field"]: {"old": m.get("old_value"), "new": m.get("new_value")}

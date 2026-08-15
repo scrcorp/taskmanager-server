@@ -15,6 +15,7 @@ from app.api.deps import get_current_attendance_device
 from app.database import get_db
 from app.models.attendance_device import AttendanceDevice
 from app.schemas.attendance_device import (
+    ClockInPreview,
     IdentifyByPinAttendanceItem,
     IdentifyByPinCurrentBreak,
     IdentifyByPinRequest,
@@ -49,12 +50,19 @@ async def identify_by_pin(
             break_type=b["break_type"], started_at=b["started_at"]
         )
 
+    def _preview(p: dict | None) -> ClockInPreview | None:
+        if p is None:
+            return None
+        return ClockInPreview(**p)
+
     return IdentifyByPinResponse(
         user_id=ctx.user.id,
         user_name=ctx.user.full_name or ctx.user.username,
         today_status=ctx.today_status,
         current_break=_break(ctx.current_break),
         scheduled_end=ctx.scheduled_end,
+        default_schedule_id=ctx.default_schedule_id,
+        server_time=ctx.server_time,
         today_attendances=[
             IdentifyByPinAttendanceItem(
                 schedule_id=it["schedule_id"],
@@ -64,6 +72,15 @@ async def identify_by_pin(
                 scheduled_start_display=it["scheduled_start_display"],
                 scheduled_end_display=it["scheduled_end_display"],
                 current_break=_break(it["current_break"]),
+                attendance_id=it["attendance_id"],
+                operating_day=it["operating_day"],
+                clock_in=it["clock_in"],
+                clock_in_display=it["clock_in_display"],
+                clock_in_eligible=it["clock_in_eligible"],
+                ineligible_reason=it["ineligible_reason"],
+                is_default=it["is_default"],
+                overlapping=it["overlapping"],
+                clock_in_preview=_preview(it["clock_in_preview"]),
             )
             for it in ctx.today_attendances
         ],

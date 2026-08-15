@@ -88,6 +88,19 @@ class ClockActionRequest(BaseModel):
     # 워크인 의도 (clock-in 에만 의미). true 이고 오늘 confirmed 스케줄이 없으며
     # store 의 walk_in_allowed 설정이 켜져 있으면 서버가 워크인 스케줄을 자동 생성.
     walk_in: bool = False
+    # (D15) "다른 shift 가 열려 있는 걸 알면서 또 찍는다" 는 직원의 확인.
+    # 서버는 **명시 `schedule_id` 가 열린 row 와 다른 shift 를 가리킬 때만** 이 값을 본다.
+    # 자동 선택(schedule_id 미전송)으로는 절대 겹침이 열리지 않는다 — 키오스크 더블탭과
+    # 네트워크 재시도가 조용히 두 row 를 만드는 것을 기존 가드가 막고 있기 때문이다.
+    # 구버전 HTMA 는 이 필드를 보내지 않으므로 기존과 똑같이 400 으로 막힌다.
+    allow_overlap: bool = False
+    # (D9) 조기 출근을 **요청한 사람**의 user_id. 표시용 문자열은 계속 `reason` 에 담기고,
+    # 이 값은 식별 전용이다(동명이인 구분·개명 후 추적·요청자별 집계).
+    # - "직접 입력(Someone else)" 이면 보내지 않는다 — 명단 밖 사람이라 id 자체가 없다.
+    # - 구버전 HTMA 도 보내지 않는다. 비어 있는 게 정상인 필드다(additive).
+    # - 서버는 **clock_in 이고 early override 가 성립할 때만** 소비하고, 그 외엔 조용히
+    #   무시한다(오용 내성). 값이 있는데 매장 매니저 명단 밖이면 400 invalid_reason_user.
+    early_clock_in_requested_by: UUID | None = None
 
 
 class ManageBreakEntry(BaseModel):
@@ -270,11 +283,32 @@ class IdentifyByPinCurrentBreak(BaseModel):
     started_at: datetime
 
 
+class ClockInPreview(BaseModel):
+    """"지금 이 shift 로 찍으면 어떻게 기록되는가" — 판정 프리뷰 (D3).
+
+    **숫자만 내린다.** "3h 12m late" 같은 표시 문자열은 앱이 l10n(en/es)으로 조립한다 —
+    서버가 표시 문구를 소유하면 로케일마다 화면이 갈린다.
+
+    값의 출처는 clock-in 실기록과 **같은** `judge_clock_in` + 매장 임계값이다. 앱이
+    자체 계산하면 초 버림 지점이 하나 더 생기고 화면과 기록이 어긋난다(D16). 앱은
+    어떤 임계값도 알지 못하고 어떤 판정도 하지 않는다.
+
+    kind == "unknown" 은 스케줄 시각 미상 → 앱은 프리뷰 줄을 숨긴다.
+    """
+    kind: str  # early | on_time | late | unknown
+    minutes_early: int = 0
+    minutes_late: int = 0
+    # early 라서 사유 입력이 뜰 것인가 — 400 왕복 전에 "Reason required" 배지를 미리 띄운다.
+    reason_required: bool = False
+
+
 class IdentifyByPinAttendanceItem(BaseModel):
     """한 직원의 오늘 attendance(=schedule) 1건 — 다중 schedule 시 picker 표시용.
 
     (Issue 8) 한 직원이 같은 날 2개 이상 schedule 을 가질 때, client 가
     각 shift 를 카드로 보여주고 직원이 명시적으로 선택할 수 있게 한다.
+
+    신규 필드는 전부 optional + default — 구버전 HTMA 는 모르는 필드를 무시한다.
     """
     schedule_id: UUID | None
     status: str
@@ -283,6 +317,24 @@ class IdentifyByPinAttendanceItem(BaseModel):
     scheduled_start_display: str | None = None
     scheduled_end_display: str | None = None
     current_break: IdentifyByPinCurrentBreak | None = None
+    # attendance row 가 아직 없을 수 있다(eager 훅 누락 / 미생성) — 그때는 null.
+    attendance_id: UUID | None = None
+    # 영업일 라벨. today 와 다르면 앱이 "Yesterday" 배지를 붙인다(D4 야간조).
+    operating_day: date | None = None
+    clock_in: datetime | None = None
+    clock_in_display: str | None = None  # store tz "HH:mm"
+    # 지금 이 shift 로 clock-in 할 수 있는가. false 면 목록에 회색으로 두되 선택은 막는다.
+    clock_in_eligible: bool = True
+    # already_completed | already_clocked_in | cancelled | null — 표시 문구는 앱 l10n.
+    ineligible_reason: str | None = None
+    # 응답 최상위 default_schedule_id 와 같은 항목. 앱이 id 비교 로직을 자체 구현하면
+    # 그게 또 하나의 규칙이 되므로 서버가 표시까지 정해서 내려준다.
+    is_default: bool = False
+    # 다른 근무와 시간이 겹친 기록 — 해소될 때까지 매 PIN 화면에 배너를 띄우는 근거.
+    overlapping: bool = False
+    # clock_in_eligible=false 인 항목은 항상 null — 고를 수 없는 항목에 프리뷰를 주면
+    # "고를 수 있나?" 로 읽힌다.
+    clock_in_preview: ClockInPreview | None = None
 
 
 class StaleAttendanceItem(BaseModel):
@@ -314,6 +366,37 @@ class IdentifyByPinResponse(BaseModel):
     scheduled_end: datetime | None = None
     today_attendances: list[IdentifyByPinAttendanceItem] = []
     stale_attendances: list[StaleAttendanceItem] = []
+    # 앱이 초기 선택으로 그대로 쓰는 shift. null 이면 후보 없음(워크인 경로).
+    default_schedule_id: UUID | None = None
+    # **판정용이 아니라 신선도용.** picker 를 열어둔 채 시간이 흐르면 clock_in_preview 가
+    # 낡는다 — 앱은 이 값이 오래됐으면 identify 를 다시 부른 뒤 제출한다.
+    # 앱이 이 시각으로 직접 판정하면 R0-1(모든 시간 판정은 서버만)이 깨진다.
+    server_time: datetime | None = None
+
+
+# ── 매장 Manager/SV 명단 (조기 출근 사유의 "누가 불렀나") ──────────────
+
+
+class StoreManagerListRequest(BaseModel):
+    """POST /attendance/store-managers — PIN 게이트.
+
+    GET 이 아니라 POST + PIN 인 이유: 매니저 명단은 사회공학 표적 정보라
+    "식별된 직원" 에게만 연다(`tip-entry/eligible-receivers` 선례).
+    """
+    user_id: UUID
+    pin: str = Field(..., pattern=r"^\d{4,6}$")
+
+
+class StoreManagerOption(BaseModel):
+    """조기 출근을 요청했을 법한 사람 1명 (해당 매장의 Manager/SV).
+
+    응답 필드는 이 넷뿐이다 — 연락처·PIN·시급은 절대 싣지 않는다.
+    `role_name` 은 장식이 아니라 **동명이인 구분용**이다(앱이 이름 옆에 함께 표시).
+    """
+    user_id: UUID
+    full_name: str
+    role_name: str
+    role_priority: int
 
 
 # ── Kiosk 관리자 모드 ──────────────────────────────────────
@@ -553,4 +636,8 @@ class AdminClockActionRequest(BaseModel):
     action: str
     break_type: str | None = None
     reason: str | None = None
+    # (D15) 겹침 상태에서 **어느 shift 를 처리하는지** 지목. 미지정이면 기존처럼
+    # 첫 번째 열린 row 가 대상 — 열린 row 가 둘일 때 그 규칙만 남기면 매니저가
+    # 어느 shift 를 퇴근시켰는지 알 수 없다. 구버전 HTMA 는 보내지 않는다(additive).
+    schedule_id: UUID | None = None
 

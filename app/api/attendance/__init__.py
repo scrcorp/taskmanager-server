@@ -8,12 +8,13 @@
     - dashboard:   /today-staff, /notices
     - admin:       /manage/* (관리자 모드 — schedule 편집, attendance 상태 변경 등)
     - tip:         /tip-entry, /tip-entry/eligible-receivers
+    - directory:   /store-managers  (조기 출근 사유의 "누가 불렀나" 대상자 명단)
     - app_version: /app-version
 """
 
 from fastapi import APIRouter
 
-from . import manage, app_version, clock, dashboard, device, identify, tip
+from . import manage, app_version, clock, dashboard, device, directory, identify, tip
 
 
 router: APIRouter = APIRouter()
@@ -23,4 +24,5 @@ router.include_router(identify.router)
 router.include_router(dashboard.router)
 router.include_router(manage.router)
 router.include_router(tip.router)
+router.include_router(directory.router)
 router.include_router(app_version.router)

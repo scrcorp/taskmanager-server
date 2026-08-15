@@ -203,7 +203,7 @@ async def test_clock_in_within_threshold_needs_no_reason(
     test_store_id: UUID,
     make_schedule,
 ) -> None:
-    """threshold(기본 5분) 안쪽의 이른 출근은 기존대로 사유 없이 통과 + 라벨 없음."""
+    """threshold(기본 10분) 안쪽의 이른 출근은 기존대로 사유 없이 통과 + 라벨 없음."""
     await _ensure_user_store(test_user["id"], test_store_id)
     await _schedule_starting_in(make_schedule, test_user, test_store_id, minutes=3)
 
@@ -269,3 +269,255 @@ async def test_blank_reason_is_not_accepted(
 
     assert res.status_code == 400, res.text
     assert res.json()["detail"]["code"] == "early_clock_in_reason_required"
+
+# ---------------------------------------------------------------------------
+# 조기 출근 **요청자** (D9) — 문자열 + user_id 이중 기록
+# ---------------------------------------------------------------------------
+#
+# 문자열만 남기면 동명이인 구분·개명 후 추적·요청자별 집계가 전부 불가능하고,
+# **나중에 소급해서 채울 수 없다.** 그래서 표시용 문자열(타임라인)과 식별용
+# user_id(컬럼)를 함께 남긴다. 아래는 그 두 경로가 어긋나지 않는지 본다.
+
+
+@pytest_asyncio.fixture
+async def sv_in_store(test_users: dict, test_store_id: UUID) -> dict:
+    """이 매장 소속 SV — 명단에 뜨는 "요청자" 후보."""
+    async with async_session() as db:
+        existing = await db.scalar(
+            select(UserStore).where(
+                UserStore.user_id == test_users["testsv"]["id"],
+                UserStore.store_id == test_store_id,
+            )
+        )
+        if existing is None:
+            db.add(
+                UserStore(
+                    user_id=test_users["testsv"]["id"],
+                    store_id=test_store_id,
+                    is_manager=False,
+                )
+            )
+            await db.commit()
+    return test_users["testsv"]
+
+
+async def test_requester_user_id_is_stored_alongside_the_reason_text(
+    async_client: AsyncClient,
+    device_auth_headers: dict,
+    test_user: dict,
+    test_store_id: UUID,
+    sv_in_store: dict,
+    make_schedule,
+) -> None:
+    """명단에서 고른 사람 → 컬럼에 user_id, 이력에는 지금처럼 문자열."""
+    await _ensure_user_store(test_user["id"], test_store_id)
+    await _schedule_starting_in(make_schedule, test_user, test_store_id, minutes=90)
+
+    res = await async_client.post(
+        "/api/v1/attendance/clock-in",
+        headers=device_auth_headers,
+        json={
+            "user_id": str(test_user["id"]),
+            "pin": test_user["clockin_pin"],
+            "reason": "Asked to come in early (Test SV)",
+            "early_clock_in_requested_by": str(sv_in_store["id"]),
+        },
+    )
+
+    assert res.status_code == 200, res.text
+    assert res.json()["early_clock_in_requested_by"] == str(sv_in_store["id"])
+
+    att = await _latest_attendance(test_user["id"])
+    assert att.early_clock_in_requested_by == sv_in_store["id"]
+    # 표시용 문자열은 여전히 타임라인이 소유한다 — 컬럼이 문자열을 대체하지 않는다.
+    async with async_session() as db:
+        reasons = (
+            await db.execute(
+                select(AttendanceCorrection.reason).where(
+                    AttendanceCorrection.attendance_id == att.id
+                )
+            )
+        ).scalars().all()
+    assert "Asked to come in early (Test SV)" in [r for r in reasons if r]
+
+
+async def test_direct_entry_leaves_requester_null(
+    async_client: AsyncClient,
+    device_auth_headers: dict,
+    test_user: dict,
+    test_store_id: UUID,
+    make_schedule,
+) -> None:
+    """"직접 입력(Someone else)" 은 명단 밖 사람이라 id 자체가 없다 → NULL 이 정상.
+
+    구버전 HTMA 가 문자열만 보내는 경로와 **완전히 같다**(additive 계약).
+    """
+    await _ensure_user_store(test_user["id"], test_store_id)
+    await _schedule_starting_in(make_schedule, test_user, test_store_id, minutes=90)
+
+    res = await async_client.post(
+        "/api/v1/attendance/clock-in",
+        headers=device_auth_headers,
+        json={
+            "user_id": str(test_user["id"]),
+            "pin": test_user["clockin_pin"],
+            "reason": "Asked to come in early (Sam from HQ)",
+        },
+    )
+
+    assert res.status_code == 200, res.text
+    assert res.json()["early_clock_in_requested_by"] is None
+
+    att = await _latest_attendance(test_user["id"])
+    assert att.clock_in is not None
+    assert ANOMALY_EARLY_CLOCK_IN_OVERRIDE in (att.anomalies or [])
+    assert att.early_clock_in_requested_by is None
+
+
+async def test_requester_outside_the_manager_list_is_rejected_with_code(
+    async_client: AsyncClient,
+    device_auth_headers: dict,
+    test_user: dict,
+    test_users: dict,
+    test_store_id: UUID,
+    make_schedule,
+) -> None:
+    """명단 밖 id(여기선 staff 동료) → 400 invalid_reason_user, 출근은 기록되지 않는다.
+
+    조용히 null 로 저장하면 이 컬럼을 만든 이유가 그대로 사라진다("조용한 실패 금지").
+    앱은 이 코드를 받으면 id 를 떼고 같은 사유로 1회 재시도하므로 현장은 막히지 않는다
+    (바로 아래 테스트가 그 재시도를 재현한다).
+    """
+    await _ensure_user_store(test_user["id"], test_store_id)
+    await _schedule_starting_in(make_schedule, test_user, test_store_id, minutes=90)
+
+    res = await async_client.post(
+        "/api/v1/attendance/clock-in",
+        headers=device_auth_headers,
+        json={
+            "user_id": str(test_user["id"]),
+            "pin": test_user["clockin_pin"],
+            "reason": "Asked to come in early (Someone)",
+            # staff 는 명단에 없다 — 부를 수 있는 사람이 아니다.
+            "early_clock_in_requested_by": str(test_users["teststaff"]["id"]),
+        },
+    )
+
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"]["code"] == "invalid_reason_user"
+
+    att = await _latest_attendance(test_user["id"])
+    assert att is None or att.clock_in is None
+
+
+async def test_app_retry_without_requester_succeeds(
+    async_client: AsyncClient,
+    device_auth_headers: dict,
+    test_user: dict,
+    test_users: dict,
+    test_store_id: UUID,
+    make_schedule,
+) -> None:
+    """거부 직후 id 만 떼고 같은 사유로 재전송 → 통과. 키오스크 앞에서 막히지 않는다."""
+    await _ensure_user_store(test_user["id"], test_store_id)
+    await _schedule_starting_in(make_schedule, test_user, test_store_id, minutes=90)
+
+    body = {
+        "user_id": str(test_user["id"]),
+        "pin": test_user["clockin_pin"],
+        "reason": "Asked to come in early (Someone)",
+        "early_clock_in_requested_by": str(test_users["teststaff"]["id"]),
+    }
+    first = await async_client.post(
+        "/api/v1/attendance/clock-in", headers=device_auth_headers, json=body
+    )
+    assert first.status_code == 400
+
+    body.pop("early_clock_in_requested_by")
+    second = await async_client.post(
+        "/api/v1/attendance/clock-in", headers=device_auth_headers, json=body
+    )
+
+    assert second.status_code == 200, second.text
+    att = await _latest_attendance(test_user["id"])
+    assert att.clock_in is not None
+    assert att.early_clock_in_requested_by is None
+
+
+async def test_requester_is_ignored_when_not_an_early_clock_in(
+    async_client: AsyncClient,
+    device_auth_headers: dict,
+    test_user: dict,
+    test_store_id: UUID,
+    sv_in_store: dict,
+    make_schedule,
+) -> None:
+    """정시 출근에 딸려온 요청자 값은 조용히 버린다 — 오용/구버전 내성.
+
+    여기서 400 을 던지면 아무 해도 없는 요청이 현장에서 막힌다.
+    """
+    await _ensure_user_store(test_user["id"], test_store_id)
+    await _schedule_starting_in(make_schedule, test_user, test_store_id, minutes=3)
+
+    res = await async_client.post(
+        "/api/v1/attendance/clock-in",
+        headers=device_auth_headers,
+        json={
+            "user_id": str(test_user["id"]),
+            "pin": test_user["clockin_pin"],
+            "early_clock_in_requested_by": str(sv_in_store["id"]),
+        },
+    )
+
+    assert res.status_code == 200, res.text
+    att = await _latest_attendance(test_user["id"])
+    assert ANOMALY_EARLY_CLOCK_IN_OVERRIDE not in (att.anomalies or [])
+    assert att.early_clock_in_requested_by is None
+
+
+async def test_clear_times_wipes_the_requester(
+    async_client: AsyncClient,
+    device_auth_headers: dict,
+    test_user: dict,
+    test_store_id: UUID,
+    sv_in_store: dict,
+    make_schedule,
+) -> None:
+    """시각을 지우면 요청자도 지운다 — 지워진 출근의 "누가 불렀나" 는 유령이다.
+
+    남겨두면 나중에 다시 clock-in 했을 때 **다른 사유에 그대로 붙는다.**
+    """
+    from app.services.attendance_action_service import attendance_action_service
+
+    await _ensure_user_store(test_user["id"], test_store_id)
+    await _schedule_starting_in(make_schedule, test_user, test_store_id, minutes=90)
+
+    res = await async_client.post(
+        "/api/v1/attendance/clock-in",
+        headers=device_auth_headers,
+        json={
+            "user_id": str(test_user["id"]),
+            "pin": test_user["clockin_pin"],
+            "reason": "Asked to come in early (Test SV)",
+            "early_clock_in_requested_by": str(sv_in_store["id"]),
+        },
+    )
+    assert res.status_code == 200, res.text
+    att = await _latest_attendance(test_user["id"])
+    assert att.early_clock_in_requested_by is not None
+
+    async with async_session() as db:
+        await attendance_action_service.clear_times(
+            db,
+            attendance_id=att.id,
+            organization_id=test_user["organization_id"],
+            reason="wrong entry",
+            by_user_id=sv_in_store["id"],
+        )
+        await db.commit()
+
+    async with async_session() as db:
+        row = await db.get(Attendance, att.id)
+        assert row.clock_in is None
+        assert row.early_clock_in_requested_by is None
+        assert row.early_clock_in_confirmed_at is None

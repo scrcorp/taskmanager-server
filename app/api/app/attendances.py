@@ -126,9 +126,19 @@ async def list_my_attendances(
         per_page=per_page,
     )
 
+    # late_buffer 는 (org, store) 별로 한 번만 해석해 주입한다 — 레코드마다 설정을
+    # 조회하면 목록 하나가 그대로 N+1 이 된다.
+    from app.services.attendance_threshold_service import resolve_late_buffer_cached
+
+    lb_cache: dict = {}
     items: list[dict] = []
     for a in attendances:
-        response: dict = await attendance_service.build_response(db, a)
+        late_buffer = await resolve_late_buffer_cached(
+            db, lb_cache, organization_id=a.organization_id, store_id=a.store_id
+        )
+        response: dict = await attendance_service.build_response(
+            db, a, late_buffer=late_buffer
+        )
         items.append(response)
 
     return {

@@ -790,6 +790,10 @@ class AttendanceResponse(BaseModel):
     # None 이면 콘솔이 "needs confirmation" 배지를 표시하고 payroll 마감이 막힌다.
     early_clock_in_confirmed_at: datetime | None = None
     early_clock_in_confirmed_by: str | None = None  # 확인자 UUID 문자열 (Confirmer UUID)
+    # 조기 출근 **요청자** UUID 문자열 (D9). 표시에는 쓰지 않는다 — 화면에 보이는 건
+    # 사유 문자열("Asked to come in early (John Kim)")이다. 이 값은 동명이인 구분·
+    # 개명 후 추적·요청자별 집계용 식별자이며, "직접 입력" 과 구버전 HTMA 는 null.
+    early_clock_in_requested_by: str | None = None
     # 수정 이력 — 상세 조회 시 함께 반환. 목록 응답에선 빈 리스트.
     # Correction history attached on detail responses; empty in list endpoints.
     corrections: list[dict] = []

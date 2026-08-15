@@ -61,7 +61,13 @@ CATEGORIES: list[dict[str, Any]] = [
         "description": "Clock-in/out corrections and early clock-ins",
         # early_clock_in_override: 스케줄보다 일찍 강행 출근한 건 — 매니저가 현장에
         # 없을 때 벌어지므로 in-app 만으로는 놓치기 쉽다. 그래서 email 도 연다.
-        "types": ["attendance_corrected", "early_clock_in_override"],
+        # overlapping_clock_in: 두 shift 에 겹쳐 출근한 건(D15) — 직원은 스스로 정리할
+        # 수 없고(취소·정정은 매니저 권한) 방치하면 급여가 두 번 나간다.
+        "types": [
+            "attendance_corrected",
+            "early_clock_in_override",
+            "overlapping_clock_in",
+        ],
         "email_available": True,
     },
     {

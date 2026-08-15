@@ -54,6 +54,11 @@ FIELD_NOTE = "note"
 FIELD_BREAK_START_AT = "break_start_at"
 FIELD_BREAK_END_AT = "break_end_at"
 FIELD_BREAK_TYPE = "break_type"
+# 판정 라벨(anomalies) 전이 — 콤마로 이어 붙인 정렬된 코드 목록을 before/after 로 남긴다.
+# status 는 그대로인데 라벨만 뒤집히는 경우(working 유지 + early → late)가 흔해서,
+# status 행 하나로는 "무엇이 바뀌었는지" 가 이력에 전혀 남지 않는다.
+# 콘솔은 field_name 을 라벨 표에서 찾으므로, 새 코드를 쓸 땐 콘솔 FIELD_LABELS 도 함께 채울 것.
+FIELD_ANOMALIES = "anomalies"
 
 NO_REASON = "(no reason)"
 

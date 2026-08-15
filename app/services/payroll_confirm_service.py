@@ -11,6 +11,10 @@ payroll-v1-스키마-스펙.md §4/§5 + 설계방향 L1~L6, 계산 규칙 1~5.
        (판정은 rate_at 기준 — 계산 규칙 5, C8)
     ④ 대응 tip_period(같은 store+범위) status == 'confirmed' (계산 규칙 4)
     ⑤ 멀티스토어 주간 정합 (계산 규칙 2) — 아래 참조
+    ⑦ 겹친 근무 0건 — 같은 사람의 두 근무가 시간상 겹치면 같은 시간이 두 번 지급된다.
+       anomaly 가 아니라 **시간 구간**으로 판정하고(콘솔 경로는 라벨을 안 붙인다),
+       org 전역 · **닫힌 건만**(열린 건은 지급되지 않으므로 ② 가 담당) ·
+       짝 찾기 창은 기간보다 넓다(경계를 걸친 쌍) · 확인 도장 없음(정정/취소만이 해소).
     ⑥ 미확인 조기 출근 강행 0건 — anomaly 'early_clock_in_override' 이면서
        early_clock_in_confirmed_at IS NULL 인 attendance. 실제 clock-in 시각을
        그대로 인정하므로 예정 밖 시간이 급여에 들어간다 — 확정 전 사람이 본다.
@@ -47,7 +51,7 @@ unconfirm 없음 (v1):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -71,6 +75,7 @@ from app.schemas.payroll import (
     GATE_MULTI_STORE_WEEK,
     VALIDATION_BELOW_MINIMUM_WAGE,
     VALIDATION_OPEN_SHIFT,
+    VALIDATION_OVERLAPPING_ATTENDANCE,
     VALIDATION_RATE_MISSING,
     VALIDATION_TIP_PERIOD_NOT_CONFIRMED,
     VALIDATION_UNCONFIRMED_AUTO_CLOCKOUT,
@@ -93,6 +98,15 @@ from app.utils.names import display_name
 _ANOMALY_AUTO_CLOCKED_OUT = "auto_clocked_out"
 # 조기 출근 강행 anomaly 코드 (attendance_device_service 가 기록)
 _ANOMALY_EARLY_CLOCK_IN_OVERRIDE = ANOMALY_EARLY_CLOCK_IN_OVERRIDE
+
+# 겹침 게이트(⑦) 가 짝을 찾을 때 기간 앞뒤로 더 읽는 일수.
+#
+# work_date 는 "영업일 라벨" 이고 실제 clock_in/out 은 그 라벨에서 하루 안쪽으로
+# 벗어난다(야간조·D4 어제 shift). 그래서 겹치는 두 row 의 work_date 가 하루 차이로
+# 갈릴 수 있고, 그 하루가 급여 기간 경계면 양쪽 기간 모두 짝을 못 본다.
+# 2일이면 "라벨 하루 + 근무 하루" 를 모두 덮는다 — 창을 넓히는 비용은 몇 row 뿐이고,
+# 못 보는 비용은 그 시간만큼의 이중 지급이다.
+_OVERLAP_SCAN_MARGIN_DAYS = 2
 
 _DAILY_OT_MIN = CA_DAILY_OT_HOURS * 60  # 480
 _WEEKLY_OT_MIN = WEEKLY_OT_HOURS * 60  # 2400
@@ -356,7 +370,11 @@ class PayrollConfirmService:
         open_map = await self._open_shift_dates(db, period)
         # ⑥ 미확인 조기 출근 강행
         early_map = await self._early_clock_in_dates(db, period)
-        missing = (set(auto_map) | set(open_map) | set(early_map)) - set(names)
+        # ⑦ 겹친 근무 (D15) — 이중 지급의 최후 방어선
+        overlap_map = await self._overlapping_attendance_dates(db, period)
+        missing = (
+            set(auto_map) | set(open_map) | set(early_map) | set(overlap_map)
+        ) - set(names)
         if missing:
             names.update(await self._load_names(db, missing))
 
@@ -433,6 +451,32 @@ class PayrollConfirmService:
                         )
                         for user_id, dates in sorted(
                             early_map.items(), key=lambda kv: str(kv[0])
+                        )
+                    ],
+                )
+            )
+
+        if overlap_map:
+            failures.append(
+                ConfirmGateFailure(
+                    gate=VALIDATION_OVERLAPPING_ATTENDANCE,
+                    message=(
+                        "Two shifts overlap in time for the same person, so the "
+                        "same hours would be paid twice. Cancel or correct one of "
+                        "them in Attendance, then confirm again."
+                    ),
+                    items=[
+                        ConfirmGateItem(
+                            user_id=user_id,
+                            member_name=names.get(user_id),
+                            dates=dates,
+                            message=(
+                                "Overlapping shifts on: "
+                                + ", ".join(str(d) for d in dates)
+                            ),
+                        )
+                        for user_id, dates in sorted(
+                            overlap_map.items(), key=lambda kv: str(kv[0])
                         )
                     ],
                 )
@@ -574,6 +618,95 @@ class PayrollConfirmService:
             .distinct()
         )
         return self._group_dates(result.all())
+
+    async def _overlapping_attendance_dates(
+        self, db: AsyncSession, period: PayPeriod
+    ) -> dict[UUID, list[date]]:
+        """게이트 ⑦ — 시간이 겹친 근무 (user → 날짜 목록, 정렬).
+
+        **anomaly 플래그가 아니라 시간 구간으로 판정한다.** 콘솔 clock-in 경로에는
+        겹침 가드가 아예 없어 라벨 없이 겹침이 만들어질 수 있고, 플래그 기반이면
+        그 경로에서 생긴 겹침을 못 잡는다. 판정 규칙 자체는
+        `app/utils/attendance_overlap.py` 하나뿐이다(경로마다 다른 답이 나오지 않게).
+
+        - **둘 다 닫힌 건만 본다** — 아래 "열린 근무" 참조.
+        - 스코프는 **org 전역**(매장 아님). 두 매장에서 겹쳐 찍은 시간도 똑같이
+          두 번 지급된다. 대상자는 이 매장 기간에 근무 기록이 있는 사람으로 한정한다
+          (다른 매장 전용 근무자는 그 매장 confirm 몫 — `_multi_store_items` 와 동일 원칙).
+        - 확인 도장(escape hatch)이 없다. 해소는 정정/취소뿐이다.
+
+        **기간 경계를 걸친 짝** — 짝 찾기 창은 기간보다 넓다
+        (`_OVERLAP_SCAN_MARGIN_DAYS` 만큼 앞뒤로). 다른 게이트처럼 `work_date
+        BETWEEN start AND end` 로만 훑으면, 겹치는 두 row 의 work_date 가 기간
+        경계를 사이에 두고 갈릴 때 **어느 기간의 게이트도 그 쌍을 보지 못한다**.
+        D4(어제 영업일 shift 로 clock-in)와 야간조 겹침이 정확히 (어제, 오늘) 쌍을
+        만들기 때문에 반월 급여의 15/16일 경계에서 그대로 성립했다. 이 게이트는
+        이중 지급의 최후 방어선이라 '알려진 한계' 로 남기면 돈이 샌다.
+        **보고(=차단)는 기간 안의 row 만** 한다 — 기간 밖 row 로 이 기간을 막으면
+        해소할 화면이 없고, 그 row 가 속한 기간은 자기 confirm 때 같은 규칙으로 막힌다.
+
+        **열린 근무(clock_out IS NULL)는 대상이 아니다.** 열린 row 는
+        `compute_net_work_minutes` 가 None 을 돌려 **애초에 지급되지 않으므로**
+        여기서 막아 봐야 이중 지급을 막는 게 아니라 확정만 막는다. 게다가 이
+        게이트는 org 전역이라 **다른 매장의 잊힌 clock-out 하나가 이 매장 급여를
+        영구히 막고**, 그 매장 row 는 이 콘솔 스코프 밖이라 매니저가 고칠 수도 없다.
+        같은 매장의 열린 근무는 게이트 ②(store 스코프, 날짜가 실려 해소 가능)가 잡고,
+        다른 매장 것은 그 매장이 닫아 confirm 할 때 같은 게이트가 잡는다.
+        """
+        store_user_ids = (
+            select(Attendance.user_id)
+            .where(
+                Attendance.store_id == period.store_id,
+                Attendance.work_date >= period.start_date,
+                Attendance.work_date <= period.end_date,
+                Attendance.status != "cancelled",
+                Attendance.user_id.is_not(None),
+                Attendance.clock_in.is_not(None),
+            )
+            .distinct()
+        )
+        scan_start = period.start_date - timedelta(days=_OVERLAP_SCAN_MARGIN_DAYS)
+        scan_end = period.end_date + timedelta(days=_OVERLAP_SCAN_MARGIN_DAYS)
+        rows = (
+            await db.execute(
+                select(
+                    Attendance.id,
+                    Attendance.user_id,
+                    Attendance.work_date,
+                    Attendance.clock_in,
+                    Attendance.clock_out,
+                ).where(
+                    Attendance.organization_id == period.organization_id,
+                    Attendance.user_id.in_(store_user_ids),
+                    Attendance.work_date >= scan_start,
+                    Attendance.work_date <= scan_end,
+                    Attendance.status != "cancelled",
+                    Attendance.clock_in.is_not(None),
+                    Attendance.clock_out.is_not(None),
+                )
+            )
+        ).all()
+        if not rows:
+            return {}
+
+        from app.utils.attendance_overlap import overlapping_keys_from_rows
+
+        now = datetime.now(timezone.utc)
+        by_user: dict[UUID, list[tuple]] = {}
+        dates_by_id: dict[UUID, tuple[UUID, date]] = {}
+        for att_id, user_id, work_date, clock_in, clock_out in rows:
+            by_user.setdefault(user_id, []).append((att_id, clock_in, clock_out))
+            dates_by_id[att_id] = (user_id, work_date)
+
+        pairs: list[tuple[UUID, date]] = []
+        for user_id, user_rows in by_user.items():
+            for att_id in overlapping_keys_from_rows(user_rows, now=now):
+                _uid, work_date = dates_by_id[att_id]
+                # 창 밖(경계 너머) row 는 짝을 찾기 위해서만 읽었다 — 보고는 안 한다.
+                if period.start_date <= work_date <= period.end_date:
+                    pairs.append((_uid, work_date))
+        # 같은 (user, date) 가 두 row 에서 나오므로 중복 제거
+        return self._group_dates(sorted(set(pairs), key=lambda p: (str(p[0]), p[1])))
 
     async def _open_shift_dates(
         self, db: AsyncSession, period: PayPeriod

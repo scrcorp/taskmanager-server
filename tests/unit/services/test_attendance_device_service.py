@@ -242,3 +242,59 @@ async def test_identify_manager_by_pin_accepts_4_to_6_digits() -> None:
         out = await attendance_device_service.identify_manager_by_pin(db, uuid.uuid4(), pin)
         assert out is user
         assert db.execute.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 매장 Manager/SV 명단 — 조기 출근 사유의 "누가 불렀나" (D8/D9)
+# ---------------------------------------------------------------------------
+#
+# 산출 규칙이 **한 곳**(`_store_manager_query`)에만 있어야 하는 이유:
+# 목록 API 와 clock-in 의 `early_clock_in_requested_by` 검증이 같은 규칙을 써야
+# "앱이 방금 받은 명단에서 골랐는데 서버가 거부" 가 안 난다. 아래 테스트는 그 규칙의
+# 각 조건이 쿼리에서 조용히 빠지지 않게 고정한다 — 하나라도 빠지면 개인정보 노출
+# (전 직원 명단 / 퇴사자 이름) 이거나 명단 불일치다.
+
+
+def _compiled_manager_sql(**kwargs) -> str:
+    query = attendance_device_service._store_manager_query(
+        organization_id=uuid.uuid4(),
+        store_id=uuid.uuid4(),
+        **kwargs,
+    )
+    return str(query.compile(compile_kwargs={"literal_binds": False}))
+
+
+def test_store_manager_query_limits_role_priority_band() -> None:
+    """Super Owner 제외(>) + SV 까지만(<=). 전 직원 명단이 새어나가지 않는 유일한 조건."""
+    sql = _compiled_manager_sql()
+    assert "roles.priority >" in sql
+    assert "roles.priority <=" in sql
+
+
+def test_store_manager_query_excludes_inactive_and_deleted() -> None:
+    """비활성/퇴사자는 부를 수 없는 사람이다 — 이름도 내려가면 안 된다."""
+    sql = _compiled_manager_sql()
+    assert "users.is_active" in sql
+    assert "users.deleted_at IS NULL" in sql
+
+
+def test_store_manager_query_scopes_to_store_but_lets_owner_through() -> None:
+    """이 매장 소속(user_stores)만. Owner 는 행이 없어도 전 매장 관리라 통과."""
+    sql = _compiled_manager_sql()
+    assert "user_stores" in sql
+    assert "EXISTS" in sql.upper()
+    # or_(Owner 이하 priority, 이 매장 소속) — 둘 중 하나
+    assert " OR " in sql.upper()
+
+
+def test_store_manager_query_excludes_the_asking_user() -> None:
+    """'누가 불렀나' 에 자기 자신은 답이 아니다."""
+    sql = _compiled_manager_sql(exclude_user_id=uuid.uuid4())
+    assert "users.id !=" in sql
+
+
+def test_store_manager_query_orders_by_role_then_name() -> None:
+    """동명이인 구분을 위해 role 을 함께 보여주므로 role 순이 자연스럽다."""
+    sql = _compiled_manager_sql()
+    order = sql.split("ORDER BY")[-1]
+    assert order.index("roles.priority") < order.index("users.full_name")

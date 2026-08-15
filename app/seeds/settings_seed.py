@@ -237,10 +237,13 @@ SETTINGS_SEED: list[SettingDefinition] = [
         default_value=True,
         category="Attendance",
     ),
+    # ⚠️ 아래 세 임계값의 default_value 는 app/utils/attendance_judgement.py 의
+    # DEFAULT_* 상수(코드 fallback)와 **항상 같은 값**이어야 한다. 갈리면 설정이
+    # 등록된 매장과 아닌 매장이 조용히 다르게 동작한다.
     SettingDefinition(
         key="attendance.late_buffer_minutes",
         label="Late buffer (minutes)",
-        description="Grace period after schedule start before clock-in is marked as 'late'.",
+        description="Grace period after schedule start before clock-in is marked as 'late'. Judged to the minute — with a 5 minute buffer, a 17:00 shift is still on time at 17:05 and late from 17:06.",
         value_type="number",
         default_value=5,
         category="Attendance",
@@ -248,9 +251,9 @@ SETTINGS_SEED: list[SettingDefinition] = [
     SettingDefinition(
         key="attendance.early_leave_threshold_minutes",
         label="Early leave threshold (minutes)",
-        description="Clock-out before this many minutes prior to schedule end is marked as 'early leave'.",
+        description="Staff may clock out this many minutes before their schedule ends without a reason. Clocking out earlier asks for a reason and is flagged as 'early leave' — it is never blocked.",
         value_type="number",
-        default_value=5,
+        default_value=10,
         category="Attendance",
     ),
     SettingDefinition(
@@ -272,9 +275,9 @@ SETTINGS_SEED: list[SettingDefinition] = [
     SettingDefinition(
         key="attendance.early_clock_in_threshold_minutes",
         label="Early clock-in threshold (minutes)",
-        description="How many minutes before a scheduled shift starts staff are allowed to clock in. Earlier attempts are rejected.",
+        description="Staff may clock in this many minutes before their shift starts without a reason. Clocking in earlier asks for a reason and is flagged for the manager to review — it is never blocked, and there is no limit on how early.",
         value_type="number",
-        default_value=5,
+        default_value=10,
         category="Attendance",
     ),
 ]

@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import uuid as uuid_mod
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
 from typing import AsyncIterator
@@ -50,6 +50,7 @@ from app.schemas.payroll import (
     GATE_MULTI_STORE_WEEK,
     VALIDATION_BELOW_MINIMUM_WAGE,
     VALIDATION_OPEN_SHIFT,
+    VALIDATION_OVERLAPPING_ATTENDANCE,
     VALIDATION_RATE_MISSING,
     VALIDATION_TIP_PERIOD_NOT_CONFIRMED,
     VALIDATION_UNCONFIRMED_AUTO_CLOCKOUT,
@@ -218,12 +219,14 @@ async def _mk_attendance(
     clock_in: datetime | None = None,
     clock_out: datetime | None = None,
     anomalies: list[str] | None = None,
+    schedule_id: UUID | None = None,
 ) -> UUID:
     async with async_session() as db:
         att = Attendance(
             organization_id=ctx["org_id"],
             store_id=store_id or ctx["store_id"],
             user_id=user_id or ctx["user_id"],
+            schedule_id=schedule_id,
             work_date=work_date,
             status=status,
             total_work_minutes=total_work_minutes,
@@ -235,6 +238,28 @@ async def _mk_attendance(
         await db.commit()
         await db.refresh(att)
         return att.id
+
+
+async def _mk_schedule(ctx: dict, *, work_date: date, start: time, end: time) -> UUID:
+    """confirmed 스케줄 1건 → id.
+
+    같은 날 attendance 를 둘 이상 만들려면 필요하다 — `uq_attendance_walkin` 이
+    `schedule_id IS NULL` 인 행에 대해 (user, work_date) 를 하루 1건으로 막는다.
+    """
+    async with async_session() as db:
+        sched = Schedule(
+            organization_id=ctx["org_id"],
+            user_id=ctx["user_id"],
+            store_id=ctx["store_id"],
+            operating_day=work_date,
+            start_at=datetime.combine(work_date, start),
+            end_at=datetime.combine(work_date, end),
+            status="confirmed",
+        )
+        db.add(sched)
+        await db.commit()
+        await db.refresh(sched)
+        return sched.id
 
 
 async def _mk_tip_period(
@@ -511,6 +536,186 @@ async def test_gate_open_shift(
     item = gates[VALIDATION_OPEN_SHIFT]["items"][0]
     assert item["dates"] == ["2026-07-07"]
     assert "clock-out" in gates[VALIDATION_OPEN_SHIFT]["message"]
+
+
+async def test_gate_overlapping_attendance_then_resolve(
+    async_client: AsyncClient, admin_headers: dict, api_ctx: dict
+) -> None:
+    """게이트 ⑦ — 시간이 겹친 두 근무는 같은 시간을 두 번 지급한다 (D15).
+
+    겹침 clock-in 을 허용한 대가로 반드시 있어야 하는 **최후 방어선**이다. 확인
+    도장(escape hatch)은 두지 않는다 — "승인된 겹침" 은 정의상 이중 지급이라, 해소
+    경로는 한쪽을 정정/취소하는 것뿐이다.
+
+    판정은 anomaly 플래그가 아니라 **시간 구간**이다. 콘솔 clock-in 경로에는 겹침
+    가드가 아예 없어 라벨 없이 겹침이 만들어질 수 있고, 플래그 기반이면 그 경로에서
+    생긴 겹침을 영영 못 잡는다 — 그래서 아래 두 row 에도 anomaly 를 붙이지 않는다.
+    """
+    # 09:00–14:00 / 13:00–17:00 — **둘 다 닫혀 있다.** 이중 지급은 퇴근 후에 일어난다.
+    await _mk_attendance(
+        api_ctx, work_date=_MON, total_work_minutes=300,
+        schedule_id=await _mk_schedule(
+            api_ctx, work_date=_MON, start=time(9, 0), end=time(14, 0)
+        ),
+        clock_in=datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc),
+        clock_out=datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc),
+    )
+    second = await _mk_attendance(
+        api_ctx, work_date=_MON, total_work_minutes=240,
+        schedule_id=await _mk_schedule(
+            api_ctx, work_date=_MON, start=time(13, 0), end=time(17, 0)
+        ),
+        clock_in=datetime(2026, 7, 6, 13, 0, tzinfo=timezone.utc),
+        clock_out=datetime(2026, 7, 6, 17, 0, tzinfo=timezone.utc),
+    )
+    await _mk_tip_period(api_ctx)
+    period_id = await _ensure_period(api_ctx)
+
+    resp = await _confirm(async_client, admin_headers, period_id)
+    assert resp.status_code == 409, resp.text
+    gates = _gate_map(resp.json())
+    assert set(gates) == {VALIDATION_OVERLAPPING_ATTENDANCE}
+    item = gates[VALIDATION_OVERLAPPING_ATTENDANCE]["items"][0]
+    assert item["user_id"] == str(api_ctx["user_id"])
+    assert item["dates"] == ["2026-07-06"]
+    assert "2026-07-06" in item["message"]
+    assert "twice" in gates[VALIDATION_OVERLAPPING_ATTENDANCE]["message"]
+
+    # 한쪽을 정정해 겹침을 없애면 통과 — 게이트가 sticky 하지 않다는 확인.
+    async with async_session() as db:
+        att = await db.get(Attendance, second)
+        att.clock_in = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+        await db.commit()
+
+    resp2 = await _confirm(async_client, admin_headers, period_id)
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["period"]["status"] == "confirmed"
+
+
+async def test_back_to_back_shifts_do_not_trip_the_overlap_gate(
+    async_client: AsyncClient, admin_headers: dict, api_ctx: dict
+) -> None:
+    """맞닿은 근무(한쪽 종료 == 다른 쪽 시작)는 겹침이 아니다.
+
+    여기서 오탐이 나면 **멀쩡한 급여 확정이 매번 막힌다** — 이중 지급만큼이나 나쁜
+    고장이라 경계를 따로 못 박는다.
+    """
+    await _mk_attendance(
+        api_ctx, work_date=_MON, total_work_minutes=240,
+        schedule_id=await _mk_schedule(
+            api_ctx, work_date=_MON, start=time(9, 0), end=time(13, 0)
+        ),
+        clock_in=datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc),
+        clock_out=datetime(2026, 7, 6, 13, 0, tzinfo=timezone.utc),
+    )
+    await _mk_attendance(
+        api_ctx, work_date=_MON, total_work_minutes=240,
+        schedule_id=await _mk_schedule(
+            api_ctx, work_date=_MON, start=time(13, 0), end=time(17, 0)
+        ),
+        clock_in=datetime(2026, 7, 6, 13, 0, tzinfo=timezone.utc),
+        clock_out=datetime(2026, 7, 6, 17, 0, tzinfo=timezone.utc),
+    )
+    await _mk_tip_period(api_ctx)
+    period_id = await _ensure_period(api_ctx)
+
+    resp = await _confirm(async_client, admin_headers, period_id)
+    assert resp.status_code == 200, resp.text
+
+
+async def test_overlap_gate_sees_pairs_across_the_period_boundary(
+    async_client: AsyncClient, admin_headers: dict, api_ctx: dict
+) -> None:
+    """★ 기간 경계를 사이에 둔 겹침 쌍도 **양쪽 기간 모두** 막는다.
+
+    짝 찾기 창이 `work_date BETWEEN start AND end` 뿐이면, 겹치는 두 row 의 work_date
+    가 경계를 사이에 두고 갈릴 때 **어느 기간의 게이트도 그 쌍을 보지 못한다** —
+    두 기간이 각각 confirm 되면서 겹친 시간이 두 번 지급된다. 이번 트랙이 연 D4
+    (어제 영업일 shift 로 clock-in)와 야간조가 정확히 (어제, 오늘) 쌍을 만들기 때문에
+    반월 급여의 15/16일 경계에서 그대로 성립했다.
+    """
+    # 07-15 22:00 ~ 07-16 06:00 (앞 기간 라벨) / 07-16 05:00 ~ 09:00 (뒤 기간 라벨)
+    # → 05:00~06:00 한 시간이 겹친다.
+    await _mk_attendance(
+        api_ctx, work_date=date(2026, 7, 15), total_work_minutes=480,
+        clock_in=datetime(2026, 7, 15, 22, 0, tzinfo=timezone.utc),
+        clock_out=datetime(2026, 7, 16, 6, 0, tzinfo=timezone.utc),
+    )
+    second = await _mk_attendance(
+        api_ctx, work_date=date(2026, 7, 16), total_work_minutes=240,
+        clock_in=datetime(2026, 7, 16, 5, 0, tzinfo=timezone.utc),
+        clock_out=datetime(2026, 7, 16, 9, 0, tzinfo=timezone.utc),
+    )
+    await _mk_tip_period(api_ctx)
+    await _mk_tip_period(api_ctx, start=date(2026, 7, 16), end=date(2026, 7, 31))
+    first_period = await _ensure_period(api_ctx)
+    second_period = await _ensure_period(api_ctx, date_in_period=date(2026, 7, 20))
+    assert first_period != second_period
+
+    # 앞 기간 — 짝이 뒤 기간에 있어도 잡는다.
+    resp = await _confirm(async_client, admin_headers, first_period)
+    assert resp.status_code == 409, resp.text
+    gates = _gate_map(resp.json())
+    assert VALIDATION_OVERLAPPING_ATTENDANCE in gates
+    # 보고는 **이 기간 안의 날짜만** — 기간 밖 날짜를 내밀면 매니저가 열 화면이 없다.
+    assert gates[VALIDATION_OVERLAPPING_ATTENDANCE]["items"][0]["dates"] == [
+        "2026-07-15"
+    ]
+
+    # 뒤 기간 — 반대 방향도 똑같이 잡는다.
+    resp2 = await _confirm(async_client, admin_headers, second_period)
+    assert resp2.status_code == 409, resp2.text
+    gates2 = _gate_map(resp2.json())
+    assert VALIDATION_OVERLAPPING_ATTENDANCE in gates2
+    assert gates2[VALIDATION_OVERLAPPING_ATTENDANCE]["items"][0]["dates"] == [
+        "2026-07-16"
+    ]
+
+    # 겹침을 없애면 양쪽 다 통과 — sticky 하지 않다.
+    async with async_session() as db:
+        att = await db.get(Attendance, second)
+        att.clock_in = datetime(2026, 7, 16, 6, 0, tzinfo=timezone.utc)
+        await db.commit()
+
+    assert (
+        await _confirm(async_client, admin_headers, first_period)
+    ).status_code == 200
+    assert (
+        await _confirm(async_client, admin_headers, second_period)
+    ).status_code == 200
+
+
+async def test_open_shift_at_another_store_does_not_block_this_store(
+    async_client: AsyncClient, admin_headers: dict, api_ctx: dict
+) -> None:
+    """열린 근무는 겹침 게이트(⑦) 대상이 아니다 — 지급되지 않기 때문.
+
+    `compute_net_work_minutes` 는 clock_out 이 없으면 None 을 돌려 **애초에 지급하지
+    않는다.** 그런 row 를 겹침으로 세면 이중 지급을 막는 게 아니라 확정만 막는데,
+    이 게이트는 org 전역이라 **다른 매장의 잊힌 clock-out 하나가 이 매장 급여를
+    영구히 막고** 그 row 는 이 콘솔 스코프 밖이라 고칠 수도 없다(게이트 item 에는
+    날짜만 실린다). 같은 매장 것은 게이트 ②(store 스코프)가 잡는다.
+    """
+    await _mk_attendance(
+        api_ctx, work_date=_MON, total_work_minutes=300,
+        schedule_id=await _mk_schedule(
+            api_ctx, work_date=_MON, start=time(9, 0), end=time(14, 0)
+        ),
+        clock_in=datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc),
+        clock_out=datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc),
+    )
+    # 매장 B 의 열린 근무 — 시간상 위 근무와 겹친다.
+    await _mk_attendance(
+        api_ctx, work_date=_MON, total_work_minutes=None, status="working",
+        store_id=api_ctx["store_b_id"],
+        clock_in=datetime(2026, 7, 6, 8, 0, tzinfo=timezone.utc),
+    )
+    await _mk_tip_period(api_ctx)
+    period_id = await _ensure_period(api_ctx)
+
+    resp = await _confirm(async_client, admin_headers, period_id)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["period"]["status"] == "confirmed"
 
 
 async def test_gate_rate_missing(

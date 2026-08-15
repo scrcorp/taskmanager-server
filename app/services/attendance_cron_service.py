@@ -21,8 +21,11 @@ from app.database import async_session
 from app.models.attendance import Attendance
 from app.models.organization import Store
 from app.models.schedule import Schedule
+from app.services.attendance_threshold_service import resolve_late_buffer
+from app.utils.attendance_judgement import is_late_arrival
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 from app.utils.timezone import (
+    floor_to_minute,
     get_store_day_config,
     minutes_between,
     resolve_schedule_instants,
@@ -31,7 +34,6 @@ from app.utils.timezone import (
 
 logger = logging.getLogger("uvicorn.error")
 
-DEFAULT_LATE_BUFFER_MINUTES = 5
 DEFAULT_AUTO_CLOCK_OUT_AFTER_MINUTES = 30
 
 
@@ -84,20 +86,13 @@ async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
             start_time=sch.start_time, end_time=sch.end_time, tz_name=tz.key,
         )
 
-        # late_buffer setting per org/store
-        try:
-            raw = await resolve_setting(
-                db,
-                key="attendance.late_buffer_minutes",
-                organization_id=att.organization_id,
-                store_id=att.store_id,
-            )
-            late_buffer = int(raw) if raw is not None else DEFAULT_LATE_BUFFER_MINUTES
-        except (SettingNotRegisteredError, TypeError, ValueError):
-            late_buffer = DEFAULT_LATE_BUFFER_MINUTES
+        # late_buffer setting per org/store (해석기 하나 — fallback 기본값도 거기 하나)
+        late_buffer = await resolve_late_buffer(
+            db, organization_id=att.organization_id, store_id=att.store_id
+        )
 
         # no_show/late 판정은 분 단위로만 (초 버림) — 정시가 초 차이로 late 가 되지 않게.
-        now_min = now_utc.replace(second=0, microsecond=0)
+        now_min = floor_to_minute(now_utc)
         # 1) sched_end 가 지났으면 no_show 로 강등.
         #    단 clock_in 이 이미 있으면(출근 완료) "late" 그대로 유지 — 출근한 직원을
         #    no_show 로 표시하면 키오스크 "Clocked In" 섹션에서 사라진다.
@@ -116,7 +111,9 @@ async def _persist_late_and_no_show(db: AsyncSession) -> tuple[int, int]:
             continue
 
         # 2) 아직 sched_end 전이면 late_buffer 지났을 때 upcoming → late
-        if att.status == "upcoming" and now_min > sched_start + timedelta(minutes=late_buffer):
+        if att.status == "upcoming" and is_late_arrival(
+            now_min, sched_start, late_buffer=late_buffer
+        ):
             att.status = "late"
             anoms = list(att.anomalies or [])
             if "late" not in anoms:
@@ -164,6 +161,39 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
     rows_list = list(rows.all())
     auto_count = 0
 
+    # (D15) 겹쳐 열린 근무는 자동 마감하지 않는다.
+    # 자동으로 닫으면 두 shift 모두 "그럴듯하게 완결된 기록" 이 되어 **이중 지급이
+    # 자동화**된다. skip 하면 open_shift 게이트가 대신 걸리고 미퇴근 알림이 매니저를
+    # 계속 찌른다 — 의도한 압박이다.
+    # 대상 row 의 짝이 여기 쿼리(Schedule.end_at 필수) 밖에 있을 수 있으므로 그 사람의
+    # **열린 근무 전부**를 한 번에 모아 겹침을 계산한다(루프 안 추가 쿼리 없음).
+    overlapping_att_ids: set = set()
+    candidate_user_ids = {att.user_id for att, _s, _st in rows_list if att.user_id}
+    if candidate_user_ids:
+        from app.utils.attendance_overlap import overlapping_keys_from_rows
+
+        open_rows = (
+            await db.execute(
+                select(
+                    Attendance.id,
+                    Attendance.user_id,
+                    Attendance.clock_in,
+                    Attendance.clock_out,
+                ).where(
+                    Attendance.user_id.in_(candidate_user_ids),
+                    Attendance.work_date >= two_days_ago - timedelta(days=1),
+                    Attendance.work_date <= today_utc,
+                    Attendance.status != "cancelled",
+                    Attendance.clock_in.is_not(None),
+                )
+            )
+        ).all()
+        by_user: dict = {}
+        for att_id, user_id, clock_in, clock_out in open_rows:
+            by_user.setdefault(user_id, []).append((att_id, clock_in, clock_out))
+        for user_rows in by_user.values():
+            overlapping_att_ids |= overlapping_keys_from_rows(user_rows, now=now_utc)
+
     # F9: 틱마다 행 수만큼 resolve 하지 않도록 매장당 1회 resolve 후 캐시.
     auto_enabled_cache: dict = {}
 
@@ -175,6 +205,13 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
         if await is_locked_cached(
             db, lock_cache, store_id=att.store_id, work_date=att.work_date
         ):
+            continue
+        if att.id in overlapping_att_ids:
+            # 겹친 근무 — 사람이 한쪽을 정정/취소해야 한다. 자동 마감 금지(위 주석).
+            logger.info(
+                f"[attendance_cron] skip auto clock-out for {att.id}: "
+                "overlaps another open shift"
+            )
             continue
         # N2: 매장의 auto_clock_out_enabled 토글 가드. OFF 매장은 자동 퇴근 skip
         # (미퇴근 관리자 알림은 별도 경로에서 유지 — D11).
@@ -227,6 +264,24 @@ async def _auto_clock_out_overdue(db: AsyncSession) -> int:
 
         # 자동 clock-out 시점은 sched_end (UTC로 저장)
         cutoff = sched_end.astimezone(timezone.utc)
+
+        # AL-5 가드: cutoff 가 clock_in 보다 이르면 자동 마감하지 않는다.
+        #
+        # 종료시각이 지난 shift 에 지각 출근하면(shift 선택으로 정상 경로가 됐다)
+        # 곧바로 이 크론의 대상이 되는데, 그때 clock_out=sched_end 로 찍으면
+        # **clock_out < clock_in** 인 음수 근무가 만들어진다. break 는 이미
+        # `max(cutoff, started_at)` 로 같은 사고를 막고 있었지만 clock_out 에는
+        # 그 보호가 없었다.
+        #
+        # 0분으로 마감하지도 않는다 — 실제로는 일하고 있는 사람이라 근무를 지워버리는
+        # 셈이 된다. 열어 둔 채 미퇴근 알림에 맡기고 사람이 정리하게 한다.
+        if att.clock_in is not None and cutoff <= att.clock_in:
+            logger.info(
+                f"[attendance_cron] skip auto clock-out for {att.id}: "
+                f"cutoff {cutoff.isoformat()} <= clock_in {att.clock_in.isoformat()} "
+                "(late clock-in after scheduled end)"
+            )
+            continue
 
         # AL-4 가드 2 (write-time, 원자적): fetch 이후 per-row await 동안 직원이
         # 실제로 clock-out 했을 수 있다 (race window). WHERE clock_out IS NULL
