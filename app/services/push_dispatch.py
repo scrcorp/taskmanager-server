@@ -44,21 +44,38 @@ logger = logging.getLogger(__name__)
 _COMMIT_POLL_DELAYS = (0.2, 0.4, 0.8)
 
 # reference_type → 앱 내 이동 경로. 없으면 홈으로.
+# reference_type → staff 앱 라우트.
+#
+# ⚠️ 여기 값은 **staff 앱 라우터(app/apps/staff/lib/config/router.dart)에 실제로
+#    존재하는 경로여야 한다.** 없는 경로를 보내면 앱에 errorBuilder 가 없어서
+#    go_router 기본 에러 화면이 뜬다. 알림을 눌렀는데 에러가 나므로 반드시 대조할 것.
+#    (실제로 '/mytask' 와 '/my/attendance' 가 존재하지 않아 깨져 있었다.)
+#
+# 대응 화면이 없는 종류는 알림함(/alerts)으로 보낸다 — 홈보다 낫다.
+# 사용자가 방금 누른 그 알림을 거기서 다시 읽을 수 있기 때문이다.
+_ALERTS_ROUTE = "/alerts"
+
 _REFERENCE_ROUTES: dict[str, str] = {
     "schedule": "/schedule",
-    "checklist_instance": "/mytask",
+    "checklist_instance": "/work",   # 체크리스트 = work 화면
     "daily_report": "/daily-reports",
     "notice": "/notices",
-    "task": "/mytask",
+    "task": "/tasks",                # 추가 업무 = tasks 화면
     "warning": "/my/warnings",
-    "attendance": "/my/attendance",
+    # staff 앱에는 근태 화면이 없다 — 알림함으로 보낸다.
+    "attendance": _ALERTS_ROUTE,
 }
 
 
 def _route_for(alert: Alert) -> str:
+    """알림이 가리킬 앱 경로. 모르는 종류는 알림함으로.
+
+    홈('/')으로 보내면 사용자가 방금 받은 알림을 다시 찾을 방법이 없다.
+    알림함이면 최소한 그 알림이 거기 있다.
+    """
     if not alert.reference_type:
-        return "/"
-    return _REFERENCE_ROUTES.get(alert.reference_type, "/")
+        return _ALERTS_ROUTE
+    return _REFERENCE_ROUTES.get(alert.reference_type, _ALERTS_ROUTE)
 
 
 async def _send_for_alert(alert_id: UUID) -> None:
