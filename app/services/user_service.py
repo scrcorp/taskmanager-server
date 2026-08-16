@@ -37,7 +37,13 @@ from app.schemas.user import (
     UserUpdate,
     _normalize_employee_no,
 )
-from app.utils.exceptions import BadRequestError, DuplicateError, ForbiddenError, NotFoundError
+from app.utils.exceptions import (
+    BadRequestError,
+    ConflictError,
+    DuplicateError,
+    ForbiddenError,
+    NotFoundError,
+)
 from app.utils.names import compose_full_name
 from app.utils.password import hash_password, verify_password
 
@@ -1323,6 +1329,77 @@ class UserService:
         except Exception:
             await db.rollback()
             raise
+
+    async def verify_email_manually(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        organization_id: UUID,
+    ) -> UserResponse:
+        """관리자 수동 이메일 인증 — 코드 검증 없이 인증을 확정합니다.
+
+        인증 메일 수신이 어려운 직원을 위한 관리자 대행 경로.
+        이메일 소유 확인이 없으므로 UI 에서 확인 모달을 거친 뒤 호출된다.
+        finalize 는 email_verified=True + PIN 미보유 시 자동 배정까지 수행
+        (email_verification_service._finalize_email_verified 재사용).
+
+        Raises:
+            NotFoundError: 사용자를 찾을 수 없을 때
+            HTTPException(400): 유령 계정 / 비활성 계정 / 이미 인증됨 / 이메일 없음
+            ConflictError(409): 같은 이메일이 이미 다른 인증 계정에서 사용 중
+        """
+        user: User | None = await user_repository.get_detail(
+            db, user_id, organization_id
+        )
+        if user is None:
+            raise NotFoundError("User not found")
+
+        # 유령은 자격증명(이메일 인증/PIN)을 가질 수 없다 — claim 으로만 활성화
+        if user.is_provisional:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "provisional_account",
+                    "message": (
+                        "This account has not been claimed yet. "
+                        "Email verification applies after the employee signs up."
+                    ),
+                },
+            )
+
+        # 비활성 계정은 자격증명이 회수된 상태 — 재활성화가 먼저다
+        if not user.is_active:
+            raise BadRequestError(
+                "Account is deactivated. Activate the account before verifying email"
+            )
+
+        if user.email_verified:
+            raise BadRequestError("Email is already verified")
+
+        if not user.email:
+            raise BadRequestError(
+                "User has no email address. Add an email first, then verify"
+            )
+
+        # 인증 완료된 이메일은 유일해야 한다 — confirm_email 과 동일 가드
+        email: str = user.email.strip().lower()
+        dup = await db.execute(
+            select(User).where(
+                User.email == email,
+                User.email_verified == True,  # noqa: E712
+                User.id != user.id,
+            )
+        )
+        if dup.scalars().first() is not None:
+            raise ConflictError("This email is already used by another account")
+
+        from app.services.email_verification_service import (
+            email_verification_service,
+        )
+
+        # commit 은 finalize 내부의 commit_pin_or_409 가 수행 (PIN 충돌 → 409)
+        await email_verification_service.mark_email_verified(db, user, email)
+        return await self.get_user(db, user_id, organization_id)
 
     async def delete_user(
         self,

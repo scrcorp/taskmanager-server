@@ -23,6 +23,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.database import async_session
 from app.main import app
@@ -241,8 +242,34 @@ async def issue_people(
 
 @pytest_asyncio.fixture
 async def system_issue_template():
-    """system default issue 템플릿 보장 (review 카테고리 포함)."""
+    """system default issue 템플릿 보장 + **깨끗한 시드 상태로 리셋**.
+
+    이 테스트들은 전역 템플릿 하나(org_id=NULL)를 공유한다. 보정 로직을 검증하려면
+    운영자 편집을 흉내내야 하는데, 그 흔적이 남으면 뒤 테스트가 엉뚱한 상태를 본다.
+    각 테스트 끝에서 원복하는 대신 **시작할 때 리셋**한다 — 원복을 깜빡하면
+    실패가 엉뚱한 테스트에서 터져 원인을 찾기 어렵다.
+    """
     async with async_session() as db:
+        tpl = (
+            await db.execute(
+                select(ReportTemplate).where(
+                    ReportTemplate.type == "issue",
+                    ReportTemplate.organization_id.is_(None),
+                    ReportTemplate.store_id.is_(None),
+                    ReportTemplate.is_default.is_(True),
+                )
+            )
+        ).scalars().first()
+        if tpl is not None:
+            payload = dict(tpl.payload or {})
+            payload["categories"] = [
+                {k: v for k, v in c.items()
+                 if k not in ("description_template", "fields")}
+                for c in (payload.get("categories") or [])
+            ]
+            tpl.payload = payload
+            flag_modified(tpl, "payload")
+            await db.commit()
         await ensure_system_issue_template(db)
 
 
@@ -907,8 +934,12 @@ async def test_issue_expected_viewers_report_mode(
 
 @pytest.mark.asyncio
 async def test_ensure_system_issue_template_idempotent(system_issue_template):
-    """두 번 돌려도 review 가 중복 append 되지 않고 프리셋이 붙는다."""
-    from app.schemas.report import DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES
+    """두 번 돌려도 review 가 중복 append 되지 않고, 기본 필드가 시드돼 있다.
+
+    2026-08-15: 프리셋 텍스트가 블록 필드로 승격되면서 검증 대상이 바뀌었다 —
+    review 는 이제 description_template 이 아니라 fields 를 갖는다.
+    """
+    from app.schemas.report import DEFAULT_ISSUE_CATEGORY_FIELDS
 
     async with async_session() as db:
         changed = await ensure_system_issue_template(db)
@@ -928,15 +959,19 @@ async def test_ensure_system_issue_template_idempotent(system_issue_template):
         codes = [c["code"] for c in cats]
         assert codes.count("review") == 1
         review = next(c for c in cats if c["code"] == "review")
-        assert (
-            review["description_template"]
-            == DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES["review"]
+        assert review.get("description_template") is None, (
+            "필드로 승격했으므로 프리셋은 비어 있어야 한다(두 번 묻지 않기)"
         )
+        seeded = [f["id"] for f in (review.get("fields") or [])]
+        assert seeded == [f["id"] for f in DEFAULT_ISSUE_CATEGORY_FIELDS["review"]]
 
 
 @pytest.mark.asyncio
 async def test_ensure_system_issue_template_keeps_operator_edits(system_issue_template):
-    """운영자가 비운(null) 프리셋은 startup 보정이 되살리지 않는다."""
+    """운영자가 손댄 것은 startup 보정이 되돌리지 않는다.
+
+    비운 프리셋을 되살리지 않고, 운영자가 만든 필드도 시드로 덮지 않는다.
+    """
     async with async_session() as db:
         tpl = (
             await db.execute(
@@ -961,31 +996,44 @@ async def test_ensure_system_issue_template_keeps_operator_edits(system_issue_te
         review = next(c for c in tpl.payload["categories"] if c["code"] == "review")
         assert review["description_template"] is None
 
-        # 원복 (다른 테스트가 review 프리셋을 기대한다)
+        # 운영자가 만든 필드도 시드가 덮지 않는다 — 비어 있을 때만 채운다.
         payload = dict(tpl.payload)
         payload["categories"] = [
-            {k: v for k, v in c.items() if k != "description_template"}
+            {**c, "fields": [{"id": "op_only", "type": "short_text", "label": "Operator"}]}
             if c["code"] == "review" else c
             for c in payload["categories"]
         ]
         tpl.payload = payload
+        flag_modified(tpl, "payload")
+        await db.commit()
+
+        assert await ensure_system_issue_template(db) is False
+        await db.refresh(tpl)
+        review = next(c for c in tpl.payload["categories"] if c["code"] == "review")
+        assert [f["id"] for f in review["fields"]] == ["op_only"], (
+            "운영자가 만든 필드를 시드가 덮으면 안 된다"
+        )
+
+        # 원복 — 다음 테스트가 시드된 상태를 본다(테스트 간 상태 오염 방지).
+        payload = dict(tpl.payload)
+        payload["categories"] = [
+            {**c, "fields": []} if c["code"] == "review" else c
+            for c in payload["categories"]
+        ]
+        tpl.payload = payload
+        flag_modified(tpl, "payload")
         await db.commit()
         assert await ensure_system_issue_template(db) is True
 
 
 @pytest.mark.asyncio
 async def test_ensure_system_issue_template_upgrades_legacy_preset(system_issue_template):
-    """이미 시드된 옛 프리셋 원문은 startup 보정에서 현재 원문(빈 줄 포함)으로 갱신된다."""
-    from app.schemas.report import (
-        DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES,
-        LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES,
-    )
+    """이미 시드된 옛 프리셋 원문은 startup 보정에서 **비워진다**.
 
-    # 현재 원문은 항목 사이가 빈 줄로 떨어져 있어야 한다 (읽기 어렵다는 피드백)
-    assert DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES["review"] == (
-        "Platform:\n\nRating:\n\nWhat was said:\n\n"
-        "How we responded:\n\nFollow-up needed:\n\nPlan:"
-    )
+    2026-08-15: 그 항목들이 블록 필드로 승격됐다. 프리셋을 안 비우면 같은 항목을
+    필드와 프리셋이 두 번 묻는다(실제로 검증에서 그렇게 보였다).
+    """
+    from app.schemas.report import LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES
 
     async with async_session() as db:
         tpl = (
@@ -1011,10 +1059,7 @@ async def test_ensure_system_issue_template_upgrades_legacy_preset(system_issue_
         assert await ensure_system_issue_template(db) is True
         await db.refresh(tpl)
         review = next(c for c in tpl.payload["categories"] if c["code"] == "review")
-        assert (
-            review["description_template"]
-            == DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES["review"]
-        )
+        assert review["description_template"] is None, "옛 프리셋은 은퇴한다"
 
         # 운영자가 직접 고친 문구는 그대로 둔다 (옛 원문일 때만 갈아끼운다)
         payload = dict(tpl.payload)
@@ -1029,16 +1074,6 @@ async def test_ensure_system_issue_template_upgrades_legacy_preset(system_issue_
         await db.refresh(tpl)
         review = next(c for c in tpl.payload["categories"] if c["code"] == "review")
         assert review["description_template"] == "Custom by operator"
-
-        # 원복 (다른 테스트가 현재 프리셋을 기대한다)
-        payload = dict(tpl.payload)
-        payload["categories"] = [
-            {**c, "description_template": DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES["review"]}
-            if c["code"] == "review" else c
-            for c in payload["categories"]
-        ]
-        tpl.payload = payload
-        await db.commit()
 
 
 @pytest.mark.asyncio
@@ -1066,7 +1101,7 @@ async def test_review_category_accepted(
     assert r.status_code == 201, r.text
     assert r.json()["payload"]["description"] == desc
 
-    # 템플릿 응답에 프리셋이 실려 온다
+    # 템플릿 응답에 review 카테고리가 fields 블록으로 실려 온다 (옛 description_template 프리셋은 은퇴)
     t = await client.get(
         "/api/v1/app/my/reports/template",
         headers=_h(sv),
@@ -1074,7 +1109,8 @@ async def test_review_category_accepted(
     )
     assert t.status_code == 200, t.text
     cats = {c["code"]: c for c in t.json()["payload"]["categories"]}
-    assert cats["review"]["description_template"].startswith("Platform:")
+    assert cats["review"].get("fields"), "review 카테고리는 구조화된 fields 를 갖는다"
+    assert cats["review"].get("description_template") is None
 
 
 @pytest.mark.asyncio
@@ -1269,3 +1305,119 @@ async def test_inactive_extra_viewer_not_notified_and_update_not_bricked(
             u = await db.get(UserModel, staff_id)
             u.is_active = True
             await db.commit()
+
+
+# ===================================================================
+# 알림 이메일 내용 — 이벤트별 문구 / 본문 / CTA 링크
+# ===================================================================
+
+
+@pytest_asyncio.fixture
+async def gm_email(issue_people):
+    """testgm 에 이메일 부여(원래 None) — 이메일 발송 경로를 타게 하려면 필요."""
+    gm_id = issue_people["testgm"]
+    async with async_session() as db:
+        u = await db.get(UserModel, gm_id)
+        before = u.email
+        u.email = "gm-notify-test@example.com"
+        await db.commit()
+    yield gm_id
+    async with async_session() as db:
+        u = await db.get(UserModel, gm_id)
+        u.email = before
+        await db.commit()
+
+
+@pytest_asyncio.fixture
+async def captured_emails(monkeypatch):
+    """build_reply_email 호출 인자를 가로챈다 + 실제 발송은 막는다."""
+    import app.utils.email as email_mod
+    import app.utils.email_templates as tpl_mod
+
+    calls: list[dict] = []
+    original = tpl_mod.build_reply_email
+
+    def _spy(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    async def _noop_send(**kwargs):
+        return None
+
+    monkeypatch.setattr(tpl_mod, "build_reply_email", _spy)
+    monkeypatch.setattr(email_mod, "send_email", _noop_send)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_created_email_has_description_not_title(
+    client, issue_perms, issue_people, gm_email, captured_emails, test_store_id
+):
+    """신규 등록 메일: 인용 블록에 **제목이 아니라 description** 이 들어간다.
+
+    예전엔 excerpt=report.title 이라 제목이 subtitle 과 중복되고 정작 내용이 없었다.
+    문구도 답글 템플릿을 타서 "New reply on your issue report" 로 나갔다.
+    """
+    sv = await _login("testsv")
+    body_text = "Walk-in freezer at 12C since 8am. Vendor called."
+    code, body = await _create_issue(
+        client,
+        sv,
+        test_store_id,
+        {"description": body_text},
+        title="Freezer warm",
+    )
+    assert code == 201, body
+
+    assert captured_emails, "GM 수신자에게 메일이 만들어져야 한다"
+    kw = captured_emails[0]
+    assert kw["excerpt"] == body_text, "본문이 인용 블록에 들어가야 한다"
+    assert kw["headline"] == "New issue report"
+    assert "reported a new issue" in kw["lead"]
+    assert "left a reply" not in kw["lead"], "신규 등록이 답글로 나가면 안 된다"
+    assert kw["subject"].startswith("[Issue] New")
+    assert kw["cta_url"], "이슈로 가는 링크가 있어야 한다"
+    assert "/reports/issues/" in kw["cta_url"], "GM 은 콘솔 링크"
+
+
+@pytest.mark.asyncio
+async def test_created_email_without_description_uses_fallback(
+    client, issue_perms, issue_people, gm_email, captured_emails, test_store_id
+):
+    """description 이 없으면 '사진 첨부' 가 아니라 '설명 없음' 으로 말해야 한다."""
+    sv = await _login("testsv")
+    code, body = await _create_issue(
+        client, sv, test_store_id, {}, title="No details"
+    )
+    assert code == 201, body
+    assert captured_emails
+    kw = captured_emails[0]
+    assert kw["excerpt"] is None
+    assert kw["excerpt_fallback"] == "(No description provided)"
+
+
+@pytest.mark.asyncio
+async def test_status_change_email_says_status_not_reply(
+    client, issue_perms, issue_people, gm_email, captured_emails, test_store_id
+):
+    """상태 변경 메일이 'New reply on your issue closed' 로 나가던 것을 고쳤는지."""
+    sv = await _login("testsv")
+    code, body = await _create_issue(
+        client, sv, test_store_id, {"description": "door seal torn"}, title="Freezer"
+    )
+    assert code == 201, body
+    captured_emails.clear()
+
+    r = await client.post(
+        f"/api/v1/app/my/reports/{body['id']}/transition",
+        headers=_h(sv),
+        json={"status": "closed"},
+    )
+    assert r.status_code in (200, 204), r.text
+
+    assert captured_emails, "상태 변경도 알림이 나가야 한다"
+    kw = captured_emails[0]
+    assert kw["headline"] == "Issue closed"
+    assert "New reply" not in kw["headline"]
+    assert kw["subject"].startswith("[Issue] Closed")
+    assert kw["cta_url"]

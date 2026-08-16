@@ -20,12 +20,19 @@ from __future__ import annotations
 import io
 import re
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.client_surface import current_channel
+from app.models.empid_change import (
+    EMPID_SOURCE_COMMIT,
+    EMPID_SOURCE_RENUMBER,
+    EmpidChange,
+)
 from app.models.org_member import OrgMember, OrgMemberStore
 from app.models.organization import Store
 from app.repositories.store_repository import store_repository
@@ -49,6 +56,36 @@ ACTION_NEW_ASSIGNMENT = "new_assignment"  # 매장 배정 행 없음 → 배정 
 ACTION_UNMATCHED_STORE = "unmatched_store"  # COMPANY 를 org 매장으로 못 찾음 → 생략(리포트)
 ACTION_INVALID = "invalid"                # emp_id 정수화 실패 / org_member 없음 등
 ACTION_NEEDS_USER = "needs_user"          # 매장·번호 유효하나 유저 미확정 → 운영자가 직접 선택해 등록
+ACTION_NEEDS_STORE = "needs_store"        # 그룹 스코프 매칭 — 사람은 확정, 그룹 내 배정 매장이 없어 운영자가 매장 선택
+
+
+def _row_name_tokens(r: EmpRow) -> set[str]:
+    """파일 행의 이름 토큰 — name 컬럼 + FIRST/LAST 분리 컬럼 합집합."""
+    toks = _name_tokens(r.name)
+    toks |= _name_tokens(getattr(r, "first_name", None))
+    toks |= _name_tokens(getattr(r, "last_name", None))
+    return toks
+
+
+def _fuzzy_cover(a: set[str], b: set[str], thresh: float = 0.78) -> float:
+    """a 의 토큰이 b 의 어떤 토큰과든 유사(비율≥thresh)한 비율 — 철자 흔들림 흡수.
+
+    0.78 은 "deigo↔diego"(0.80) 같은 실제 급여 마스터 오탈자를 잡는 하한.
+    퍼지 결과는 **제안 전용**(자동 등록 없음)이라 임계를 보수보다 회수율 쪽에 둔다.
+    """
+    if not a or not b:
+        return 0.0
+    hit = 0
+    for t in a:
+        best = max((SequenceMatcher(None, t, o).ratio() for o in b), default=0.0)
+        if best >= thresh:
+            hit += 1
+    return hit / len(a)
+
+
+def _fuzzy_score(a: set[str], b: set[str]) -> float:
+    """양방향 커버리지의 최솟값 — 한쪽만 부분집합이어도 과신하지 않는다."""
+    return min(_fuzzy_cover(a, b), _fuzzy_cover(b, a))
 
 
 def _norm_key(value: str | None) -> str:
@@ -78,8 +115,13 @@ def build_store_index(stores: list[Store]) -> dict[str, list[Store]]:
 
 
 def match_store(index: dict[str, list[Store]], company: str, corp_abr: str | None) -> Store | None:
-    """COMPANY/CORP_ABR_3 → Store. 유일 매칭만 인정 (모호하면 None)."""
-    for key in (_norm_key(company), _norm_key(corp_abr)):
+    """CORP_ABR_3/COMPANY → Store. 유일 매칭만 인정 (모호하면 None).
+
+    corp_abr(매장 코드)를 company(법인명)보다 먼저 본다 — 법인 하나가 여러 매장을
+    거느리는 파일(M KOREAN BBQ = MKB+MSK)에서 company 키 오버라이드가 이미 코드로
+    매칭된 형제 매장 행까지 삼키는 사고를 막는다.
+    """
+    for key in (_norm_key(corp_abr), _norm_key(company)):
         if not key:
             continue
         candidates = index.get(key, [])
@@ -88,6 +130,27 @@ def match_store(index: dict[str, list[Store]], company: str, corp_abr: str | Non
         if len(unique) == 1:
             return next(iter(unique.values()))
     return None
+
+
+@dataclass
+class GroupScope:
+    """운영자가 라벨을 **그룹**에 매핑했을 때의 매칭 스코프.
+
+    행의 매장은 파일이 아니라 **그 사람의 그룹 내 기존 배정**이 결정한다 —
+    "M KOREAN BBQ" 아래 Gloria 가 MSK 소속이면 번호는 MSK 배정 행에 적힌다.
+    겸업자(그룹 내 2개 매장 배정)는 전 배정에 같은 번호가 가도록 매장별 엔트리를
+    만든다 (numbering_mode=group 의 1인 1번호 의미).
+
+    라벨이 **매장**으로 풀렸어도 그 매장이 shared-numbering(mode=group) 그룹
+    소속이면 이 스코프로 승격된다 — 번호가 그룹 단위인데 매장 하나만 갱신하면
+    겸업자의 다른 배정에 옛 번호가 남는 모순이 생기기 때문 (2026-08-16 Jiho 건).
+    그때 원래 매장은 hint_store_id 로 보존해 needs_store 의 기본 후보로 쓴다.
+    """
+
+    id: str
+    name: str
+    stores: list  # list[Store]
+    hint_store_id: str | None = None  # 라벨이 지목했던 매장 (needs_store 프리필)
 
 
 @dataclass
@@ -105,6 +168,12 @@ class ImportEntry:
     warning: str | None = None  # 그룹 스코프 충돌 등 경고 (블록 아님)
     dormant: bool = False      # 휴면 배정(is_work_assignment=False) 여부 — 번호만 쓰고 재활성화 안 함
     person_name: str | None = None  # 파일 행의 인물 이름 — placeholder(공유 이메일)에서 행별 picker 라벨
+    corp_abr: str | None = None  # 파일 매장 코드 원문 (unmatched 매핑 키·표시용)
+    # 그룹 스코프 매칭 정보 — needs_store/needs_user 에서 매장 picker 옵션으로 쓴다
+    group_id: str | None = None
+    group_name: str | None = None
+    group_stores: list[dict] | None = None  # [{store_id, store_name}]
+    hint_store_id: str | None = None  # 파일 corp 가 지목했던 매장 — picker 프리필
 
 
 @dataclass
@@ -133,6 +202,14 @@ class ImportPreview:
     deferred: list[PersonRow] = field(default_factory=list)     # DB 미매칭 (리포트)
     excluded_rows: int = 0
     total_rows: int = 0
+    # 매장 미매칭 원문 집계 — 콘솔이 "이 코드는 어느 매장?" 매핑 UI 를 그리는 재료.
+    # [{key(정규화, store_overrides 의 키로 재사용), company, corp_abr, rows}]
+    unmatched_stores: list[dict] = field(default_factory=list)
+    # 자동 적용된 저장 별칭 — [{key, target_id, store_name(매장 확정 시) | group_name}]
+    saved_aliases: list[dict] = field(default_factory=list)
+    # 양측 대조 — 스코프(그룹/매장)별 empid diff.
+    # [{scope, id, name, matched, htm_only:[{empid,user,store}], file_only:[{empid,name}]}]
+    reconciliation: list[dict] = field(default_factory=list)
 
     def counts(self) -> dict[str, int]:
         entry_actions = [e.action for p in self.people for e in p.entries]
@@ -160,6 +237,12 @@ class ImportPreview:
             ),
             "excluded_rows": self.excluded_rows,
             "total_rows": self.total_rows,
+            # 이름으로 자동 매칭된 사람 수 — 운영자가 우선 검토할 대상
+            "matched_by_name": sum(1 for p in self.people if p.matched_by == "name"),
+            "needs_store": all_actions.count(ACTION_NEEDS_STORE),
+            # 양측 대조 합계 (사람 단위) — HTM 미매칭 배정 / 파일 미매칭 행
+            "htm_unmatched": sum(len(r["htm_unmatched"]) for r in self.reconciliation),
+            "file_unmatched": sum(len(r["file_unmatched"]) for r in self.reconciliation),
         }
 
 
@@ -199,9 +282,30 @@ async def _current_empid_map(
 
 
 async def preview(
-    db: AsyncSession, organization_id: UUID, content: bytes, filename: str = ""
+    db: AsyncSession, organization_id: UUID, content: bytes, filename: str = "",
+    store_overrides: dict[str, str] | None = None,
+    actor_id: UUID | None = None,
 ) -> ImportPreview:
-    """업로드 파일 → 사람×매장 버킷 분류 (DB 기록 없음)."""
+    """업로드 파일 → 사람×매장 버킷 분류 + 스코프별 양측 대조.
+
+    스코프 해석 — 운영자의 그루핑이 기준이다 (코드가 임의로 정하지 않는다):
+    1. 당회 store_overrides (매장 또는 그룹 — **다매장 그룹 허용**)
+    2. 저장 별칭(import_label_aliases — 이전 업로드에서 학습)
+    3. 매장 name/code 자연 매칭 (유일할 때만)
+    4. 그룹 name 자연 매칭 — 운영자가 그룹 이름을 파일 회사명과 같게 지었다면
+       별칭 없이도 그 그룹으로 (매장 키와 겹치면 매장이 우선 — 기존 동작 보존)
+
+    그룹 스코프의 매장 결정은 파일이 아니라 **그 사람의 그룹 내 기존 배정**이다.
+    겸업자(그룹 내 복수 배정)는 전 배정 매장에 같은 번호가 가도록 엔트리를 만든다.
+    배정이 없으면 needs_store — 운영자가 그룹 매장 중에서 고른다.
+
+    reconciliation: 스코프별 양측 diff — HTM 에만 있는 번호(그룹 매장들의 현재
+    empid 중 파일에 없는 것) / 파일에만 있는 번호. 그룹 스코프는 멤버 매장으로
+    직접 매칭된 행(코드 MSK 등)도 접어 넣어 그룹 단위 그림을 만든다.
+
+    store_overrides 는 org 별칭으로 upsert 된다 (한 번 가르치면 다음부터 자동).
+    당회 명시 매핑 > 저장 별칭. preview 의 유일한 DB 기록은 이 upsert 뿐이다.
+    """
     emp_rows, excluded = parse_emplist(content, filename)
     result = ImportPreview(excluded_rows=excluded, total_rows=len(emp_rows))
 
@@ -211,12 +315,164 @@ async def preview(
         e = _norm_email(u.email)
         if e:
             users_by_email.setdefault(e, []).append(u)
+    user_name_by_id = {u.id: getattr(u, "full_name", "") for u in users}
 
     stores = await store_repository.get_by_org(db, organization_id, include_closed=True)
     store_index = build_store_index(stores)
     member_by_user, empid_map, work_map = await _current_empid_map(db, organization_id)
+    member_user: dict[UUID, UUID] = {m: u for u, m in member_by_user.items()}
 
-    # 그룹 공유 스코프 경고용 — store_id → 스코프 내 사용 중 empid 집합 (자기 매장 제외)
+    # ── 스코프 해석 준비 ──────────────────────────────────────────────
+    from app.models.import_label_alias import ImportLabelAlias
+    from app.models.organization import StoreGroup
+
+    store_by_id = {str(st.id): st for st in stores}
+    groups = (
+        await db.execute(
+            select(StoreGroup).where(StoreGroup.organization_id == organization_id)
+        )
+    ).scalars().all()
+    group_by_id = {str(g.id): g for g in groups}
+    stores_by_group: dict[str, list[Store]] = {}
+    for st in stores:
+        if st.group_id is not None:
+            stores_by_group.setdefault(str(st.group_id), []).append(st)
+
+    def _promote_store(st: Store):
+        """매장 → 그 매장이 shared-numbering(mode=group) 그룹 소속이면 그룹 스코프로 승격.
+
+        번호가 그룹 단위인데 매장 하나만 갱신하면 겸업자의 다른 배정에 옛 번호가
+        남는다 (파일 corp 가 "MSK" 처럼 매장 코드를 쓰는 행에서 실제로 발생).
+        자연 매칭·저장 별칭·당회 오버라이드 어느 경로로 풀렸든 동일하게 적용해야
+        스코프 해석이 채번 정책과 어긋나지 않는다. mode=store 그룹은 매장별 독립
+        번호가 정책이므로 승격하지 않는다. 원래 매장은 hint 로 보존한다.
+        """
+        gid = str(st.group_id) if st.group_id is not None else None
+        g = group_by_id.get(gid) if gid else None
+        if g is None or getattr(g, "numbering_mode", None) != "group":
+            return st
+        members = stores_by_group.get(gid, [])
+        if len(members) < 2:
+            return st
+        return GroupScope(
+            id=gid, name=g.name, stores=members, hint_store_id=str(st.id)
+        )
+
+    def _make_scope(sid: str):
+        """매장/그룹 id → Store | GroupScope | None.
+
+        단일 매장 그룹은 Store 로 축약(지름길) — 매장 스코프와 동작 동일.
+        """
+        st = store_by_id.get(sid)
+        if st is not None:
+            return _promote_store(st)
+        g = group_by_id.get(sid)
+        if g is not None:
+            members = stores_by_group.get(str(g.id), [])
+            if len(members) == 1:
+                return members[0]
+            if members:
+                return GroupScope(id=str(g.id), name=g.name, stores=members)
+        return None
+
+    # scope_map: 정규화 키 → Store | GroupScope. 낮은 우선순위부터 쌓아 덮어쓴다.
+    scope_map: dict[str, object] = {}
+    # (4) 그룹 이름/코드 자연 매칭 — 매장 키가 뒤에서 덮으므로 여기가 최하위.
+    # 그룹 code(예: "ODG")는 급여 생태계가 이 법인을 부르는 표기 — 운영자가 그룹에
+    # 코드를 넣어두면 파일의 그 표기가 별칭 없이 그룹으로 붙는다.
+    for g in groups:
+        members = stores_by_group.get(str(g.id), [])
+        if not members:
+            continue
+        scope = (
+            members[0] if len(members) == 1
+            else GroupScope(id=str(g.id), name=g.name, stores=members)
+        )
+        for k in {_norm_key(g.name), _norm_key(getattr(g, "code", None))}:
+            if k:
+                scope_map[k] = scope
+    # (3) 매장 자연 매칭 (유일 키만) — shared 그룹 소속 매장은 그룹으로 승격
+    for key, lst in store_index.items():
+        uniq = {st.id: st for st in lst}
+        if len(uniq) == 1:
+            scope_map[key] = _promote_store(next(iter(uniq.values())))
+    # (2) 저장 별칭
+    saved_rows = (
+        await db.execute(
+            select(ImportLabelAlias).where(
+                ImportLabelAlias.organization_id == organization_id
+            )
+        )
+    ).scalars().all()
+    for alias in saved_rows:
+        target_id = str(alias.store_id or alias.group_id or "")
+        scope = _make_scope(target_id) if target_id else None
+        if scope is not None and alias.key:
+            scope_map[alias.key] = scope
+            result.saved_aliases.append({
+                "key": alias.key,
+                "target_id": target_id,
+                "store_id": str(scope.id) if isinstance(scope, Store) else None,
+                "store_name": scope.name,
+            })
+    # (1) 당회 명시 매핑 — 최우선 + 별칭 upsert (학습)
+    if store_overrides:
+        upserts: list[tuple[str, str]] = []
+        for raw_key, sid in store_overrides.items():
+            k = _norm_key(raw_key)
+            if not k:
+                continue
+            scope = _make_scope(str(sid))
+            if scope is None:
+                continue
+            scope_map[k] = scope
+            upserts.append((k, str(sid)))
+        if upserts:
+            existing = {a.key: a for a in saved_rows}
+            for k, sid in upserts:
+                sid_uuid = UUID(sid)
+                is_store = sid in store_by_id
+                row = existing.get(k)
+                if row is None:
+                    db.add(ImportLabelAlias(
+                        organization_id=organization_id, key=k,
+                        store_id=sid_uuid if is_store else None,
+                        group_id=None if is_store else sid_uuid,
+                        created_by=actor_id,
+                    ))
+                else:
+                    row.store_id = sid_uuid if is_store else None
+                    row.group_id = None if is_store else sid_uuid
+            await db.commit()
+
+    def _resolve_scope(r: EmpRow):
+        """행 → Store | GroupScope | None. corp_abr(매장 코드) 키 우선."""
+        for key in (_norm_key(r.corp_abr), _norm_key(r.company)):
+            if key and key in scope_map:
+                return scope_map[key]
+        return None
+
+    # ── 양측 대조 수집기 ──────────────────────────────────────────────
+    # 파일 쪽: 스코프 정체성별 {emp_int: set(이름)}. 그룹은 멤버 매장 행도 접는다.
+    recon_file: dict[tuple[str, str], dict[int, set[str]]] = {}
+    engaged_groups: dict[str, GroupScope] = {}
+    store_group_of: dict[str, str] = {}
+    for gid, members in stores_by_group.items():
+        for st in members:
+            store_group_of[str(st.id)] = gid
+
+    def _record_file_row(scope, r: EmpRow) -> None:
+        emp_int = _emp_id_int(r.emp_id)
+        if emp_int is None or scope is None:
+            return
+        if isinstance(scope, GroupScope):
+            ident = ("group", scope.id)
+            engaged_groups[scope.id] = scope
+        else:
+            ident = ("store", str(scope.id))
+        recon_file.setdefault(ident, {}).setdefault(emp_int, set()).add(r.name)
+
+    # 그룹 스코프 경고용 — store_id → 스코프 내 타 매장 사용 empid
     scope_cache: dict[UUID, set[int]] = {}
 
     async def _scope_other_empids(store_id: UUID) -> set[int]:
@@ -229,6 +485,125 @@ async def preview(
                         used.add(emp)
             scope_cache[store_id] = used
         return scope_cache[store_id]
+
+    # ── 엔트리 빌더 (스코프 인식) ─────────────────────────────────────
+    def _group_meta(scope: GroupScope) -> dict:
+        return {
+            "group_id": scope.id,
+            "group_name": scope.name,
+            "group_stores": [
+                {"store_id": str(st.id), "store_name": st.name}
+                for st in scope.stores
+            ],
+            # 매장→그룹 승격 행이면 파일 corp 가 지목했던 매장 — picker 프리필
+            "hint_store_id": scope.hint_store_id,
+        }
+
+    async def build_entries(
+        r: EmpRow, member_id: UUID | None, user: object | None,
+    ) -> list[ImportEntry]:
+        """EmpRow 1건 → 엔트리 목록 (그룹 스코프는 사람의 배정 매장 수만큼)."""
+        scope = _resolve_scope(r)
+        _record_file_row(scope, r)
+        emp_int = _emp_id_int(r.emp_id)
+
+        if scope is None:
+            return [ImportEntry(
+                store_id=None, store_name=None, company=r.company,
+                emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=None,
+                has_assignment=False, action=ACTION_UNMATCHED_STORE,
+                warning="no matching store in this org", person_name=r.name,
+                corp_abr=r.corp_abr,
+            )]
+
+        if emp_int is None:
+            name = scope.name
+            return [ImportEntry(
+                store_id=(None if isinstance(scope, GroupScope) else str(scope.id)),
+                store_name=name, company=r.company,
+                emp_id_raw=r.emp_id, emp_id=None, current_empid=None,
+                has_assignment=False, action=ACTION_INVALID,
+                warning="emp_id is not a positive integer", person_name=r.name,
+                corp_abr=r.corp_abr,
+                **(_group_meta(scope) if isinstance(scope, GroupScope) else {}),
+            )]
+
+        if isinstance(scope, GroupScope):
+            if member_id is None:
+                # 사람 미확정 — 유저와 매장 둘 다 운영자 선택 (그룹 매장 옵션 제공)
+                return [ImportEntry(
+                    store_id=None, store_name=scope.name, company=r.company,
+                    emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=None,
+                    has_assignment=False, action=ACTION_NEEDS_USER,
+                    person_name=r.name, corp_abr=r.corp_abr, **_group_meta(scope),
+                )]
+            assigned = [
+                st for st in scope.stores if (member_id, st.id) in empid_map
+            ]
+            if not assigned:
+                # 그룹 매핑은 맞지만 이 사람의 배정 매장이 없다 — 일부 일치, 경고 매핑
+                return [ImportEntry(
+                    store_id=None, store_name=scope.name, company=r.company,
+                    emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=None,
+                    has_assignment=False, action=ACTION_NEEDS_STORE,
+                    warning="matched in this group but not assigned to any of its stores — pick one",
+                    person_name=r.name, corp_abr=r.corp_abr, **_group_meta(scope),
+                )]
+            entries: list[ImportEntry] = []
+            for st in assigned:
+                key = (member_id, st.id)
+                current = empid_map.get(key)
+                action = ACTION_SAME if current == emp_int else ACTION_REBIND
+                dormant = not (work_map or {}).get(key, True)
+                warning = (
+                    "assignment is dormant (not in work assignment) — number is written but the person stays inactive"
+                    if dormant else None
+                )
+                if action == ACTION_REBIND and len(assigned) > 1:
+                    note = "unifying to one number across this group"
+                    warning = f"{warning}; {note}" if warning else note
+                entries.append(ImportEntry(
+                    store_id=str(st.id), store_name=st.name, company=r.company,
+                    emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=current,
+                    has_assignment=True, action=action, dormant=dormant,
+                    warning=warning, corp_abr=r.corp_abr, **_group_meta(scope),
+                ))
+            return entries
+
+        # 매장 스코프 — 기존 단일 매장 로직
+        store = scope
+        if member_id is None:
+            return [ImportEntry(
+                store_id=str(store.id), store_name=store.name, company=r.company,
+                emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=None,
+                has_assignment=False, action=ACTION_NEEDS_USER,
+                person_name=r.name, corp_abr=r.corp_abr,
+            )]
+        key = (member_id, store.id)
+        has_row = key in empid_map
+        current = empid_map.get(key)
+        if not has_row:
+            action = ACTION_NEW_ASSIGNMENT
+        elif current == emp_int:
+            action = ACTION_SAME
+        else:
+            action = ACTION_REBIND
+        dormant = has_row and not (work_map or {}).get(key, True)
+        entry = ImportEntry(
+            store_id=str(store.id), store_name=store.name, company=r.company,
+            emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=current,
+            has_assignment=has_row, action=action, dormant=dormant,
+            warning=(
+                "assignment is dormant (not in work assignment) — number is written but the person stays inactive"
+                if dormant else None
+            ),
+            corp_abr=r.corp_abr,
+        )
+        others = await _scope_other_empids(store.id)
+        if entry.emp_id in others:
+            note = "same number already used by another store in this group"
+            entry.warning = f"{entry.warning}; {note}" if entry.warning else note
+        return [entry]
 
     # 이름 유사도 인덱스 (deferred 힌트)
     name_index: list[tuple[set[str], object]] = []
@@ -261,8 +636,6 @@ async def preview(
         ]
 
     # ── CREWID 정확 매칭 (optional 컬럼) ────────────────────────────────
-    # 개별 가입이라 email/이름이 레거시와 다를 수 있음 — 파일에 CREWID(org 번호)가 있으면
-    # 그걸로 확정 매칭한다 (공유 이메일도 구분됨). 없거나 미매칭이면 email 파이프라인 폴백.
     users_by_id = {u.id: u for u in users}
     crew_rows = (
         await db.execute(
@@ -282,7 +655,6 @@ async def preview(
         return int(r.crewid)
 
     def _crewid_warn(r: EmpRow) -> str | None:
-        """email 폴백 행에 붙일 CREWID 미해결 경고 (해결된 행은 이 파이프라인에 없음)."""
         if r.crewid is None:
             return None
         v = _crewid_int(r)
@@ -290,8 +662,8 @@ async def preview(
             return f"CREWID '{r.crewid}' is not a number — matched by email instead"
         return f"CREWID {v} not found in this org — matched by email instead"
 
-    crewid_persons: dict[str, PersonRow] = {}   # user_id(str) → PersonRow
-    person_seen: dict[str, set[tuple[str, str]]] = {}  # (company, emp_id) 중복 행 제거
+    crewid_persons: dict[str, PersonRow] = {}   # user_id(str) → PersonRow (사전 매칭 병합용)
+    person_seen: dict[str, set[tuple[str, str]]] = {}
     leftover: list[EmpRow] = []
     for r in emp_rows:
         cid = _crewid_int(r)
@@ -316,24 +688,109 @@ async def preview(
         if pair in person_seen[key]:
             continue
         person_seen[key].add(pair)
-        entry = _build_entry(r, store_index, member_id, user, empid_map, work_map)
-        if entry.store_id and entry.emp_id is not None:
-            others = await _scope_other_empids(UUID(entry.store_id))
-            if entry.emp_id in others:
-                entry.warning = "same number already used by another store in this group"
-        # 파일 email 이 계정과 다르면 표기 — CREWID 가 이겼음을 명시
+        new_entries = await build_entries(r, member_id, user)
         if r.email and r.email != _norm_email(getattr(user, "email", None)):
             note = "file email differs from account — matched by CREWID"
-            entry.warning = f"{entry.warning}; {note}" if entry.warning else note
-        person.entries.append(entry)
+            for e in new_entries:
+                e.warning = f"{e.warning}; {note}" if e.warning else note
+        person.entries.extend(new_entries)
 
-    # 이메일 없는 행 → deferred (유저 선택으로 등록 가능 — needs_user)
+    # ── 이름 매칭 티어 — 이메일 없는 행 ──────────────────────────────
+    name_index_full: list[tuple[set[str], object]] = []
+    for u in users:
+        toks = _name_tokens(getattr(u, "full_name", None))
+        toks |= _name_tokens(getattr(u, "first_name", None))
+        toks |= _name_tokens(getattr(u, "last_name", None))
+        if toks:
+            name_index_full.append((toks, u))
+
+    def _rank_structured(cands: list) -> list[dict]:
+        return [
+            {
+                "user_id": str(u.id),
+                "full_name": getattr(u, "full_name", ""),
+                "email": getattr(u, "email", None),
+            }
+            for u in cands[:5]
+        ]
+
     for r in (row for row in leftover if not row.email):
+        row_toks = _row_name_tokens(r)
+        exact = [
+            u for u_toks, u in name_index_full
+            if row_toks and (row_toks <= u_toks or u_toks <= row_toks)
+        ]
+        exact_unique = {u.id: u for u in exact}
+
+        if len(exact_unique) == 1:
+            user = next(iter(exact_unique.values()))
+            member_id = member_by_user.get(user.id)
+            key = str(user.id)
+            person = crewid_persons.get(key)
+            if person is None:
+                person = PersonRow(
+                    email=_norm_email(getattr(user, "email", None)), name=r.name,
+                    user_id=key, user_full_name=user.full_name,
+                    matched_by="name",
+                    note="matched by name — verify before commit",
+                )
+                crewid_persons[key] = person
+                person_seen[key] = set()
+                result.people.append(person)
+            pair = (r.company, r.emp_id)
+            if pair in person_seen[key]:
+                continue
+            person_seen[key].add(pair)
+            if member_id is None:
+                for e in await build_entries(r, None, None):
+                    e.action = ACTION_INVALID
+                    e.warning = "no org_member row"
+                    person.entries.append(e)
+                continue
+            person.entries.extend(await build_entries(r, member_id, user))
+            continue
+
+        if len(exact_unique) > 1:
+            cands = list(exact_unique.values())
+            result.deferred.append(PersonRow(
+                email=None, name=r.name, user_id=None, user_full_name=None,
+                note="multiple accounts match this name — pick one",
+                similar=[
+                    f"{getattr(u, 'full_name', '')} <{getattr(u, 'email', None) or '-'}>"
+                    for u in cands[:5]
+                ],
+                similar_users=_rank_structured(cands),
+                entries=await build_entries(r, None, None),
+            ))
+            continue
+
+        scored = sorted(
+            (
+                (score, u)
+                for u_toks, u in name_index_full
+                if (score := _fuzzy_score(row_toks, u_toks)) >= 0.66
+            ),
+            key=lambda x: -x[0],
+        )
+        if scored and (len(scored) == 1 or scored[0][0] - scored[1][0] > 0.15):
+            cands = [u for _, u in scored]
+            result.deferred.append(PersonRow(
+                email=None, name=r.name, user_id=None, user_full_name=None,
+                note="close name match — confirm the suggested account",
+                similar=[
+                    f"{getattr(u, 'full_name', '')} <{getattr(u, 'email', None) or '-'}>"
+                    for u in cands[:5]
+                ],
+                similar_users=_rank_structured(cands),
+                entries=await build_entries(r, None, None),
+            ))
+            continue
+
         pr = PersonRow(
             email=None, name=r.name, user_id=None, user_full_name=None,
             note="no email", similar=_similar(r.name),
             similar_users=_similar_structured(r.name),
-            entries=[_build_entry(r, store_index, None, None, {})],
+            entries=await build_entries(r, None, None),
         )
         warn = _crewid_warn(r)
         if warn:
@@ -341,18 +798,17 @@ async def preview(
                 e.warning = f"{e.warning}; {warn}" if e.warning else warn
         result.deferred.append(pr)
 
-    groups: dict[str, list[EmpRow]] = {}
+    groups_by_email: dict[str, list[EmpRow]] = {}
     for r in leftover:
         if r.email:
-            groups.setdefault(r.email, []).append(r)
+            groups_by_email.setdefault(r.email, []).append(r)
 
-    for email, rows in groups.items():
+    for email, rows in groups_by_email.items():
         first_names = {_first_name_token(r.name) for r in rows}
         same_person = len(first_names) == 1
         rep_name = rows[0].name
         db_users = users_by_email.get(email, [])
 
-        # 더미/공유 이메일 → 행별로 유저를 골라 등록 가능 (needs_user). members 는 표시용 유지.
         if _is_placeholder_email(email) or not same_person:
             reason = ("internal email — shared placeholder" if _is_placeholder_email(email)
                       else "shared email — multiple people")
@@ -360,11 +816,11 @@ async def preview(
             members = [f"{r.name} = {r.emp_id} ({r.company})" for r in unique_rows]
             ph_entries = []
             for r in unique_rows:
-                e = _build_entry(r, store_index, None, None, {})
-                warn = _crewid_warn(r)
-                if warn:
-                    e.warning = f"{e.warning}; {warn}" if e.warning else warn
-                ph_entries.append(e)
+                for e in await build_entries(r, None, None):
+                    warn = _crewid_warn(r)
+                    if warn:
+                        e.warning = f"{e.warning}; {warn}" if e.warning else warn
+                    ph_entries.append(e)
             result.placeholder.append(PersonRow(
                 email=email, name=rep_name, user_id=None, user_full_name=None,
                 note=reason, members=members, entries=ph_entries,
@@ -374,11 +830,11 @@ async def preview(
         if not db_users:
             df_entries = []
             for r in rows:
-                e = _build_entry(r, store_index, None, None, {})
-                warn = _crewid_warn(r)
-                if warn:
-                    e.warning = f"{e.warning}; {warn}" if e.warning else warn
-                df_entries.append(e)
+                for e in await build_entries(r, None, None):
+                    warn = _crewid_warn(r)
+                    if warn:
+                        e.warning = f"{e.warning}; {warn}" if e.warning else warn
+                    df_entries.append(e)
             result.deferred.append(PersonRow(
                 email=email, name=rep_name, user_id=None, user_full_name=None,
                 note="email present, no DB user", similar=_similar(rep_name),
@@ -389,7 +845,6 @@ async def preview(
 
         user = db_users[0]
         member_id = member_by_user.get(user.id)
-        # 같은 유저가 CREWID 로 이미 매칭되어 있으면 그 PersonRow 에 병합 (사람 카드 1개 유지)
         merged = crewid_persons.get(str(user.id))
         person = merged if merged is not None else PersonRow(
             email=email, name=rep_name,
@@ -397,44 +852,36 @@ async def preview(
         )
         if member_id is None:
             person.note = "no org membership (legacy account) — cannot assign"
-            person.entries = [_build_entry(r, store_index, None, None, {}) for r in rows]
-            for e in person.entries:
-                e.action = ACTION_INVALID
-                e.warning = "no org_member row"
+            person.entries = []
+            for r in rows:
+                for e in await build_entries(r, None, None):
+                    e.action = ACTION_INVALID
+                    e.warning = "no org_member row"
+                    person.entries.append(e)
             if merged is None:
                 result.people.append(person)
             continue
 
-        # 같은 (매장, 사람) 중복 행 제거 후 매장별 엔트리 구성
-        # (CREWID 병합 시 이미 추가된 (company, emp_id) 쌍은 person_seen 으로 건너뜀)
         seen_pairs: set[tuple[str, str]] = person_seen.get(str(user.id), set())
-        confirm_rows: list[EmpRow] = []  # CREWID 미해결 행 — 자동 등록 금지, 확인 대기
+        confirm_rows: list[EmpRow] = []
         for r in rows:
             pair = (r.company, r.emp_id)
             if pair in seen_pairs:
                 continue
             seen_pairs.add(pair)
-            # CREWID 가 주어졌는데 해석 불가(오타 가능성) → email 이 맞아도 자동 매칭하지 않고
-            # 확인 대기로 분리 — email 유저를 picker 프리필 후보로 제시, 운영자가 명시 체크.
             if _crewid_warn(r):
                 confirm_rows.append(r)
                 continue
-            entry = _build_entry(r, store_index, member_id, user, empid_map, work_map)
-            # 그룹 공유 스코프 내 타 매장 번호와 충돌 경고 (막지 않음 — D2 결정)
-            if entry.store_id and entry.emp_id is not None:
-                others = await _scope_other_empids(UUID(entry.store_id))
-                if entry.emp_id in others:
-                    entry.warning = "same number already used by another store in this group"
-            person.entries.append(entry)
+            person.entries.extend(await build_entries(r, member_id, user))
 
         if confirm_rows:
             cf_entries = []
             for r in confirm_rows:
-                e = _build_entry(r, store_index, None, None, {})  # member 미확정 → needs_user
-                warn = _crewid_warn(r)
-                if warn:
-                    e.warning = f"{e.warning}; {warn}" if e.warning else warn
-                cf_entries.append(e)
+                for e in await build_entries(r, None, None):
+                    warn = _crewid_warn(r)
+                    if warn:
+                        e.warning = f"{e.warning}; {warn}" if e.warning else warn
+                    cf_entries.append(e)
             result.deferred.append(PersonRow(
                 email=email, name=rep_name, user_id=None, user_full_name=None,
                 note="CREWID mismatch — email matches an account, confirm before registering",
@@ -456,9 +903,131 @@ async def preview(
                     e.warning = "conflicting numbers for the same store in file"
                 else:
                     by_store[e.store_id] = e.emp_id
-        # 전 행이 확인 대기로 빠졌으면 빈 카드를 만들지 않는다
         if merged is None and person.entries:
             result.people.append(person)
+
+    # ── 매장 미매칭 원문 집계 ────────────────────────────────────────
+    agg: dict[str, dict] = {}
+    for p in list(result.people) + list(result.placeholder) + list(result.deferred):
+        for e in p.entries:
+            if e.action != ACTION_UNMATCHED_STORE:
+                continue
+            key = _norm_key(e.corp_abr) or _norm_key(e.company) or "(blank)"
+            row = agg.setdefault(key, {"key": key, "company": e.company,
+                                       "corp_abr": e.corp_abr, "rows": 0})
+            row["rows"] += 1
+    result.unmatched_stores = sorted(agg.values(), key=lambda x: -x["rows"])
+
+    # ── 양측 대조 (reconciliation) — 사람 단위 ───────────────────────
+    # 번호 단위로 비교하면 "8→1001 rebind 대기" 인 사람이 htm_only(#8)와
+    # file_only(#1001) 양쪽에 다 찍혀 모순처럼 보인다. 사람 기준 3분류:
+    #   matched        — 파일↔HTM 매칭된 사람 (매장별 current→new 전이 요약)
+    #   htm_unmatched  — HTM 에 등록돼 있는데 파일이 못 덮은 사람 (번호 직접 지정 대상)
+    #   file_unmatched — 파일에만 있는 행 (deferred/placeholder 에서 사람 해결)
+    def _scope_ident_of_entry(e: ImportEntry):
+        if e.group_id:
+            return ("group", e.group_id)
+        if e.store_id:
+            gid = store_group_of.get(e.store_id)
+            if gid in engaged_groups:
+                return ("group", gid)
+            return ("store", e.store_id)
+        return None
+
+    matched_by_scope: dict[tuple[str, str], dict[str, dict]] = {}
+    for person in result.people:
+        if not person.user_id:
+            continue
+        for e in person.entries:
+            if e.emp_id is None or e.action == ACTION_UNMATCHED_STORE:
+                continue
+            ident = _scope_ident_of_entry(e)
+            if ident is None:
+                continue
+            bucket = matched_by_scope.setdefault(ident, {})
+            row = bucket.setdefault(person.user_id, {
+                "user_id": person.user_id,
+                "name": person.user_full_name or person.name,
+                "changes": [],
+            })
+            row["changes"].append({
+                "store_id": e.store_id,
+                "store_name": e.store_name,
+                "current": e.current_empid,
+                "new": e.emp_id,
+                "pending_store": e.action == ACTION_NEEDS_STORE,
+            })
+
+    file_unmatched_by_scope: dict[tuple[str, str], list[dict]] = {}
+    for p in list(result.placeholder) + list(result.deferred):
+        for e in p.entries:
+            if e.emp_id is None:
+                continue
+            ident = _scope_ident_of_entry(e)
+            if ident is None:
+                continue
+            file_unmatched_by_scope.setdefault(ident, []).append({
+                "empid": e.emp_id,
+                "name": e.person_name or p.name,
+            })
+
+    def _htm_unmatched(ident: tuple[str, str], scope_store_ids: set, store_names: dict) -> list[dict]:
+        """스코프 매장에 배정돼 있는데 매칭 안 된 사람 — 번호 지정 대상.
+
+        번호가 없는 배정자도 포함한다 (그들이야말로 번호 지정이 필요한 사람).
+        """
+        matched_users = set(matched_by_scope.get(ident, {}))
+        out: list[dict] = []
+        for (m_id, s_id), emp in empid_map.items():
+            if s_id not in scope_store_ids:
+                continue
+            uid = member_user.get(m_id)
+            if uid is None or str(uid) in matched_users:
+                continue
+            out.append({
+                "user_id": str(uid),
+                "name": user_name_by_id.get(uid, "?"),
+                "store_id": str(s_id),
+                "store_name": store_names.get(s_id, "?"),
+                "current_empid": emp,
+            })
+        out.sort(key=lambda x: (x["store_name"], x["name"].lower()))
+        return out
+
+    def _emit(ident: tuple[str, str], name: str, scope_store_ids: set, store_names: dict) -> None:
+        matched = sorted(
+            matched_by_scope.get(ident, {}).values(),
+            key=lambda x: x["name"].lower(),
+        )
+        file_rows = sorted(
+            file_unmatched_by_scope.get(ident, []), key=lambda x: x["empid"],
+        )
+        result.reconciliation.append({
+            "scope": ident[0], "id": ident[1], "name": name,
+            "matched": matched,
+            "htm_unmatched": _htm_unmatched(ident, scope_store_ids, store_names),
+            "file_unmatched": file_rows,
+        })
+
+    emitted_store_ids: set[str] = set()
+    for gid, gscope in engaged_groups.items():
+        sids = {st.id for st in gscope.stores}
+        emitted_store_ids.update(str(st.id) for st in gscope.stores)
+        _emit(("group", gid), gscope.name, sids,
+              {st.id: st.name for st in gscope.stores})
+    store_idents = (
+        {i for i in matched_by_scope if i[0] == "store"}
+        | {i for i in file_unmatched_by_scope if i[0] == "store"}
+    )
+    for ident in store_idents:
+        sid = ident[1]
+        if sid in emitted_store_ids:
+            continue
+        st = store_by_id.get(sid)
+        if st is None:
+            continue
+        _emit(ident, st.name, {st.id}, {st.id: st.name})
+    result.reconciliation.sort(key=lambda x: (x["scope"], x["name"]))
 
     return result
 
@@ -480,6 +1049,7 @@ def _build_entry(
             emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=None,
             has_assignment=False, action=ACTION_UNMATCHED_STORE,
             warning="no matching store in this org", person_name=r.name,
+            corp_abr=r.corp_abr,
         )
     if emp_int is None:
         return ImportEntry(
@@ -487,6 +1057,7 @@ def _build_entry(
             emp_id_raw=r.emp_id, emp_id=None, current_empid=None,
             has_assignment=False, action=ACTION_INVALID,
             warning="emp_id is not a positive integer", person_name=r.name,
+            corp_abr=r.corp_abr,
         )
     if member_id is None:
         # 매장·번호는 유효, 유저만 미확정 — 운영자가 picker 로 유저를 골라 등록 가능.
@@ -494,6 +1065,7 @@ def _build_entry(
             store_id=str(store.id), store_name=store.name, company=r.company,
             emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=None,
             has_assignment=False, action=ACTION_NEEDS_USER, person_name=r.name,
+            corp_abr=r.corp_abr,
         )
     key = (member_id, store.id)
     has_row = key in empid_map
@@ -510,7 +1082,7 @@ def _build_entry(
         store_id=str(store.id), store_name=store.name, company=r.company,
         emp_id_raw=r.emp_id, emp_id=emp_int, current_empid=current,
         has_assignment=has_row, action=action,
-        dormant=dormant,
+        dormant=dormant, corp_abr=r.corp_abr,
         warning=(
             "assignment is dormant (not in work assignment) — number is written but the person stays inactive"
             if dormant else None
@@ -790,11 +1362,13 @@ async def commit(
     db: AsyncSession,
     organization_id: UUID,
     assignments: list[tuple[UUID, UUID, int | None]],  # (user_id, store_id, empid|None=번호 삭제)
+    actor_id: UUID | None = None,
 ) -> CommitResult:
     """확정 — 매장 단위 3-phase 로 empid 재기입. 단일 트랜잭션, 멱등.
 
     empid=None 은 번호 삭제(비우기) — 배정 행은 유지, 번호만 해제되어 재사용 가능.
     users.employee_no 는 기록하지 않는다 (폐기 방향).
+    변경 1건마다 empid_changes 이력을 남긴다 (actor_id = 실행 운영자).
     """
     result = CommitResult()
 
@@ -814,6 +1388,26 @@ async def commit(
             user_names.get(user_id, str(user_id)) if user_id else str(member_id),
             store_by_id[store_id].name,
         )
+
+    channel = current_channel()
+
+    def _log_change(
+        member_id: UUID, store_id: UUID,
+        old: int | None, new: int | None, source: str,
+    ) -> None:
+        """empid 변경 이력 1건 — 같은 트랜잭션에 적재 (commit 실패 시 함께 롤백)."""
+        if old == new:
+            return
+        user_id = member_user.get(member_id)
+        db.add(EmpidChange(
+            organization_id=organization_id,
+            store_id=store_id,
+            store_name=store_by_id[store_id].name,
+            user_id=user_id,
+            person_name=user_names.get(user_id) if user_id else None,
+            old_empid=old, new_empid=new,
+            source=source, channel=channel, changed_by=actor_id,
+        ))
 
     # 매장별 mapping 구성 — {store_id: {org_member_id: empid}}.
     # claims 는 매장별 역맵(empid→member) — 같은 매장에 같은 번호를 두 사람이 요청하면
@@ -916,10 +1510,16 @@ async def commit(
                     ))
                     result.applied.append({"user": name, "store": store_name,
                                            "empid": value, "created": True})
+                    _log_change(member_id, store_id, None, value, EMPID_SOURCE_COMMIT)
                 else:
                     row.empid = value
                     result.applied.append({"user": name, "store": store_name,
                                            "empid": value, "created": False})
+                    _log_change(
+                        member_id, store_id,
+                        empid_map.get((member_id, store_id)), value,
+                        EMPID_SOURCE_COMMIT,
+                    )
             await db.flush()
             deferred.append((store_id, mapping, cleared))
 
@@ -935,6 +1535,8 @@ async def commit(
                 name, store_name = _label(row.org_member_id, store_id)
                 result.renumbered.append({"user": name, "store": store_name,
                                           "old": old, "new": row.empid})
+                _log_change(row.org_member_id, store_id, old, row.empid,
+                            EMPID_SOURCE_RENUMBER)
             await db.flush()
 
         await db.commit()

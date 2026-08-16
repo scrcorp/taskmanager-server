@@ -17,6 +17,8 @@ from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.organization import (
+    GroupAssignPreviewRequest,
+    GroupAssignPreviewResponse,
     StoreGroupCreate,
     StoreGroupReorderRequest,
     StoreGroupResponse,
@@ -36,6 +38,22 @@ async def reorder_store_groups(
     """그룹 표시 순서를 일괄 변경합니다 (드래그 정렬). /{group_id} 보다 먼저 선언."""
     org_id: UUID = current_user.organization_id
     await store_group_service.reorder_groups(db, org_id, data.group_ids)
+
+
+@router.post("/assign-preview", response_model=GroupAssignPreviewResponse)
+async def preview_group_assign(
+    data: GroupAssignPreviewRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+) -> GroupAssignPreviewResponse:
+    """편입 미리보기 — 매장을 그룹에 넣으면 생길 EMPID 충돌을 조회만 합니다 (읽기 전용).
+
+    편입 자체는 번호를 절대 바꾸지 않으므로(정책 A) 저장 전 경고 용도.
+    group_id null(이탈) 또는 mode="store" 그룹은 충돌 개념이 없어 빈 배열.
+    """
+    return await store_group_service.assign_preview(
+        db, current_user.organization_id, data.store_id, data.group_id
+    )
 
 
 @router.get("", response_model=list[StoreGroupResponse])

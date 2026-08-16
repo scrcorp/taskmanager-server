@@ -99,6 +99,9 @@ def can_warn(issuer: User, subject: User) -> bool:
 # 서버 시작 시 DB permissions 테이블과 자동 동기화됨.
 # (code, resource, action, description, require_priority_check)
 
+# 콘솔 진입 권한 코드 — 문자열을 여기저기 흩뿌리지 않기 위한 단일 상수 (D12).
+CONSOLE_ACCESS = "console:access"
+
 PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     # ── Stores ──
     ("stores:read",    "stores", "read",   "View store list and details", False),
@@ -216,6 +219,9 @@ PERMISSION_REGISTRY: list[tuple[str, str, str, str, bool]] = [
     ("cost:update", "cost", "update", "Modify hourly rates", False),
 
     # ── Organization ──
+    # 콘솔 진입 자체 — D12. 카탈로그에 두면 "staff 에게는 없다"가 눈에 보이고,
+    # 노드 정책(§18)의 조정 대상이 될 수 있다. 기본은 SV 이상 role 에 자동 부여.
+    ("console:access", "console", "access", "Sign in to the admin console", False),
     ("org:read",   "org", "read",   "View organization info and settings", False),
     ("org:update", "org", "update", "Modify organization settings", False),
     ("org:delete", "org", "delete", "Delete organization (Super Owner only)", False),
@@ -302,6 +308,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
         "contacts:create", "contacts:update", "contacts:delete",
     },
     "sv": {
+        # 콘솔 진입 (D12) — SV 이상 기본 부여. staff 는 제외.
+        "console:access",
         "stores:read", "users:read",
         "schedules:read", "schedules:create", "schedules:update",
         "notices:read",

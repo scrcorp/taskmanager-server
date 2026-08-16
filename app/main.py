@@ -12,6 +12,7 @@ from app.config import settings
 from app.core.error_envelope import REQUEST_ID_HEADER, register_error_handlers
 from app.middleware.app_version_broadcast import AppVersionBroadcastMiddleware
 from app.middleware.axiom_logging import AxiomLoggingMiddleware
+from app.middleware.client_surface import ClientSurfaceMiddleware
 from app.middleware.trace_id import TraceIdMiddleware
 from app.middleware.uncaught_exception import UncaughtExceptionMiddleware
 from app.utils.email_guard import PRODUCTION_ENVS
@@ -36,6 +37,9 @@ app.add_middleware(AxiomLoggingMiddleware)
 
 # Attendance 응답에 X-App-Latest-Version 등 piggyback 헤더 추가
 app.add_middleware(AppVersionBroadcastMiddleware)
+
+# 클라이언트 표면(채널) contextvar — 감사 기록(attendance_corrections.channel 등)용
+app.add_middleware(ClientSurfaceMiddleware)
 
 # CORS 미들웨어 — Cross-Origin Resource Sharing middleware
 app.add_middleware(
