@@ -162,6 +162,40 @@ async def _org_member_id_for_store(db: AsyncSession, user_id: UUID, store_id: UU
     ).scalar_one_or_none()
 
 
+async def _log_auto_assign(
+    db: AsyncSession, member_id: UUID, store_id: UUID, empid: int
+) -> None:
+    """매장 배정 자동 채번의 empid_changes 이력 — actor 없음(시스템 부수효과).
+
+    가입/유령 claim/매장 sync 등 여러 경로가 이 채번을 타므로, 채널(contextvar)이
+    실제 진입 경로(console/staff_app/...)를 대신 말해준다.
+    """
+    from app.core.client_surface import current_channel
+    from app.models.empid_change import EMPID_SOURCE_AUTO, EmpidChange
+    from app.models.organization import Store
+    from app.models.user import User as UserModel
+
+    row = (
+        await db.execute(
+            select(OrgMember.user_id, UserModel.full_name, Store.name)
+            .join(UserModel, UserModel.id == OrgMember.user_id)
+            .join(Store, Store.id == store_id)
+            .where(OrgMember.id == member_id)
+        )
+    ).first()
+    db.add(EmpidChange(
+        organization_id=(
+            await db.scalar(select(Store.organization_id).where(Store.id == store_id))
+        ),
+        store_id=store_id,
+        store_name=row.name if row else None,
+        user_id=row.user_id if row else None,
+        person_name=row.full_name if row else None,
+        old_empid=None, new_empid=empid,
+        source=EMPID_SOURCE_AUTO, channel=current_channel(), changed_by=None,
+    ))
+
+
 async def ensure_member_store(
     db: AsyncSession,
     user_id: UUID,
@@ -189,15 +223,17 @@ async def ensure_member_store(
         existing.is_manager = is_manager
         existing.is_work_assignment = is_work_assignment
         return
+    assigned = await next_empid(db, store_id)
     db.add(
         OrgMemberStore(
             org_member_id=member_id,
             store_id=store_id,
             is_manager=is_manager,
             is_work_assignment=is_work_assignment,
-            empid=await next_empid(db, store_id),
+            empid=assigned,
         )
     )
+    await _log_auto_assign(db, member_id, store_id, assigned)
 
 
 async def remove_member_store(db: AsyncSession, user_id: UUID, store_id: UUID) -> None:

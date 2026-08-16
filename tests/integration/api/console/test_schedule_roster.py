@@ -317,3 +317,84 @@ async def test_roster_day_plus1d_within_range_dawn_half_hour(
     cols = {c["key"]: c for c in resp.json()["columns"]}
     assert cols["h24"]["team_confirmed"] == 0.5
     assert cols["h25"]["team_confirmed"] == 1
+
+
+# ── 퇴사자 fail-open (조직 계층 트랙 §5) ────────────────────────────────
+# 규칙: 표시 대상 = 소속기간 ∩ 조회기간 ≠ ∅  OR  그 기간에 실제 기록이 있음
+#       → 과거는 fail-open(기록이 있으면 반드시 보인다), 미래는 fail-closed.
+
+
+@pytest_asyncio.fixture
+async def deactivated_staff(staff_in_test_store, test_store_id) -> AsyncIterator[dict]:
+    """teststaff 를 비활성 + 매장 배정 해제 → '퇴사자' 상태. 테스트 후 복원."""
+    from app.models.user import User
+
+    uid = staff_in_test_store["id"]
+    async with async_session() as db:
+        user = await db.get(User, uid)
+        user.is_active = False
+        await db.execute(delete(UserStore).where(
+            UserStore.user_id == uid, UserStore.store_id == test_store_id,
+        ))
+        await db.commit()
+    try:
+        yield staff_in_test_store
+    finally:
+        async with async_session() as db:
+            user = await db.get(User, uid)
+            user.is_active = True
+            await db.commit()
+
+
+async def test_roster_keeps_inactive_staff_with_records(
+    async_client, admin_headers, deactivated_staff, test_store_id, _clear_future
+):
+    """퇴사(비활성 + 매장배정 해제)해도 그 기간 근무 기록이 있으면 행이 남는다."""
+    await _insert(test_store_id, deactivated_staff)
+
+    resp = await async_client.get(ROSTER_URL, headers=admin_headers, params={
+        "date_from": FUTURE.isoformat(), "date_to": FUTURE.isoformat(),
+        "granularity": "week", "store_ids": str(test_store_id),
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    row = next(
+        (r for r in body["roster"] if r["user_id"] == str(deactivated_staff["id"])), None
+    )
+    assert row is not None, "퇴사자라도 그 기간 기록이 있으면 로스터에서 사라지면 안 된다"
+    assert row["is_inactive"] is True
+    assert row["has_schedule_in_period"] is True
+    # 집계에도 포함된다 (행만 보이고 숫자가 빠지면 안 됨)
+    assert body["totals"]["team_confirmed"] == 1
+    assert body["totals"]["staff_count"] == 1
+
+
+async def test_roster_excludes_inactive_staff_without_records(
+    async_client, admin_headers, deactivated_staff, test_store_id, _clear_future
+):
+    """기록이 없는 기간에는 퇴사자가 후보로 뜨지 않는다 (미래 = fail-closed)."""
+    resp = await async_client.get(ROSTER_URL, headers=admin_headers, params={
+        "date_from": FUTURE.isoformat(), "date_to": FUTURE.isoformat(),
+        "granularity": "week", "store_ids": str(test_store_id),
+    })
+    assert resp.status_code == 200, resp.text
+    ids = {r["user_id"] for r in resp.json()["roster"]}
+    assert str(deactivated_staff["id"]) not in ids
+
+
+async def test_roster_active_staff_not_marked_inactive(
+    async_client, admin_headers, staff_in_test_store, test_store_id, _clear_future
+):
+    """활성 직원은 is_inactive=False 로 나온다 (퇴사자와 구분)."""
+    await _insert(test_store_id, staff_in_test_store)
+
+    resp = await async_client.get(ROSTER_URL, headers=admin_headers, params={
+        "date_from": FUTURE.isoformat(), "date_to": FUTURE.isoformat(),
+        "granularity": "week", "store_ids": str(test_store_id),
+    })
+    assert resp.status_code == 200, resp.text
+    row = next(
+        r for r in resp.json()["roster"] if r["user_id"] == str(staff_in_test_store["id"])
+    )
+    assert row["is_inactive"] is False

@@ -20,6 +20,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.client_surface import current_channel
 from app.models.attendance import AttendanceCorrection
 
 # ── 센티널 ────────────────────────────────────────────────────────────────
@@ -119,6 +120,9 @@ def record(
             corrected_value=after,
             reason=(reason or "").strip() or NO_REASON,
             corrected_by=by_user_id,
+            # 채널 — contextvar 로 읽어서 호출부 시그니처를 건드리지 않는다.
+            # 요청 밖(cron)이면 "system". (모델 default 와 중복이지만 명시가 낫다.)
+            channel=current_channel(),
         )
     )
     return True

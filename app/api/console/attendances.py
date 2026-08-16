@@ -5,15 +5,21 @@ Provides list, detail, and correction endpoints for attendance records.
 """
 
 from datetime import date
+from io import BytesIO
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.error_codes.common import INVALID_DATE_RANGE
 from app.api.deps import check_store_access, get_accessible_store_ids, require_permission
 from app.database import get_db
 from app.models.user import User
+from app.services.attendance_export_service import attendance_export_service
+from app.utils.download import content_disposition, safe_filename
+from app.utils.exceptions import BadRequestError
 from app.schemas.common import (
     AttendanceCorrectionRequest,
     AttendanceCorrectionResponse,
@@ -167,6 +173,43 @@ async def get_overtime_alerts(
         store_id=store_uuid,
         week_date=week_date,
         store_ids=accessible,
+    )
+
+
+@router.get("/export")
+async def export_attendances(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:read"))],
+    date_from: Annotated[date, Query()],
+    date_to: Annotated[date, Query()],
+    store_id: Annotated[str | None, Query()] = None,
+) -> StreamingResponse:
+    """근태 기록을 xlsx 로 내보냅니다 — 기간 필수, 매장 선택.
+
+    Export attendance records to xlsx (time records only — no pay columns).
+    권한/스코프는 목록 GET 과 동일: schedules:read + 접근 가능 매장 제한.
+    """
+    if date_from > date_to:
+        raise INVALID_DATE_RANGE()
+
+    store_uuid: UUID | None = UUID(store_id) if store_id else None
+    accessible = await get_accessible_store_ids(db, current_user)
+    if store_uuid is not None:
+        await check_store_access(db, current_user, store_uuid)
+
+    excel_bytes: bytes = await attendance_export_service.build_export(
+        db,
+        organization_id=current_user.organization_id,
+        date_from=date_from,
+        date_to=date_to,
+        store_id=store_uuid,
+        store_ids=accessible,
+    )
+    filename: str = safe_filename(f"attendance_{date_from}_{date_to}.xlsx")
+    return StreamingResponse(
+        BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": content_disposition(filename)},
     )
 
 

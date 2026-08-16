@@ -57,7 +57,9 @@ def _name_tokens(name: object) -> set[str]:
     if not name:
         return set()
     s = re.sub(r"\(.*?\)", "", str(name)).strip().lower()
-    return {t for t in re.sub(r"[^a-z\s]", "", s).split() if len(t) > 1}
+    # 비알파벳은 삭제가 아니라 **공백 치환** — "Diego-Saavedra" 가 한 덩어리로 붙으면
+    # {diego, saavedra} 토큰이 사라져 이름 매칭(퍼지 포함)이 통째로 빗나간다.
+    return {t for t in re.sub(r"[^a-z\s]", " ", s).split() if len(t) > 1}
 
 
 def _first_name_token(name: object) -> str:
@@ -65,7 +67,7 @@ def _first_name_token(name: object) -> str:
     if not name:
         return ""
     s = re.sub(r"\(.*?\)", "", str(name)).strip().lower()
-    parts = re.sub(r"[^a-z\s]", "", s).split()
+    parts = re.sub(r"[^a-z\s]", " ", s).split()
     return parts[0] if parts else ""
 
 
@@ -96,6 +98,10 @@ class EmpRow:
     # 신규 empid 임포트(empid_import_service)의 정확 매칭 키 — org 번호(CREWID). optional.
     # 레거시 employee_no 도구(이 모듈)는 사용하지 않음.
     crewid: str | None = None
+    # 이름 매칭 티어용 분리 이름 컬럼 (optional) — 급여 마스터류 파일의
+    # FIRST_NAME/LAST_NAME. name 컬럼의 별칭 표기("JOHN (J)")보다 품질이 좋다.
+    first_name: str | None = None
+    last_name: str | None = None
 
 
 @dataclass
@@ -156,6 +162,12 @@ _HEADER_ALIASES = {
     "company": "company", "corp_abr_3": "corp_abr", "corpabr3": "corp_abr",
     "name": "name", "emp_id": "emp_id", "empid": "emp_id",
     "email": "email", "crewid": "crewid", "crew_id": "crewid",
+    # 급여 마스터(Labor_master) 계열 별칭 — 같은 의미의 다른 표기
+    "#company": "company",          # "# company"
+    "worknote": "corp_abr",         # 매장 코드 컬럼 (MKB/MSK/...)
+    "first_name": "first_name", "firstname": "first_name",
+    "last_name": "last_name", "lastname": "last_name",
+    "middle_name": "middle_name", "middlename": "middle_name",
 }
 
 
@@ -181,6 +193,12 @@ def _build_row(cells: dict[str, object]) -> EmpRow | None:
         emp_id=emp_id,
         email=_norm_email(cells.get("email")),
         crewid=_emp_id_str(cells.get("crewid")),  # 숫자 문자열 정규화 재사용 (float→int, 공백→None)
+        # middle 은 first 에 붙인다 — 매칭은 토큰 단위라 위치가 중요하지 않다
+        first_name=(" ".join(
+            str(cells.get(k)).strip() for k in ("first_name", "middle_name")
+            if cells.get(k) and str(cells.get(k)).strip()
+        ) or None),
+        last_name=(str(cells.get("last_name")).strip() if cells.get("last_name") else None),
     )
 
 
@@ -203,9 +221,35 @@ def _rows_from_records(records) -> tuple[list[EmpRow], int]:
     return out, excluded
 
 
+def _sheet_header(ws) -> list[str | None]:
+    """시트 1행 → 별칭 매핑된 헤더. 빈 시트는 []."""
+    for row in ws.iter_rows(values_only=True, max_row=1):
+        return [_HEADER_ALIASES.get(_hkey(c)) for c in row]
+    return []
+
+
+def _pick_sheet(wb):
+    """임포트 대상 시트 선택 — emp_id + (name|company) 가 매핑되는 시트 중 매핑 수 최다.
+
+    급여 마스터류 파일은 첫 시트가 Payroll 이고 명부(Labor_master)가 뒤에 있는 경우가
+    실제로 있다(2026.08.11-payroll_data.xlsx). 첫 시트 고정이면 그런 파일이 통째로
+    빈 결과가 되므로, 헤더가 형식에 맞는 시트를 찾는다. 동점이면 앞 시트(기존 동작 보존).
+    """
+    best = wb.worksheets[0]
+    best_score = -1
+    for ws in wb.worksheets:
+        header = _sheet_header(ws)
+        keys = {k for k in header if k}
+        if "emp_id" not in keys or not ({"name", "company"} & keys):
+            continue
+        if len(keys) > best_score:
+            best, best_score = ws, len(keys)
+    return best
+
+
 def _parse_xlsx(content: bytes) -> tuple[list[EmpRow], int]:
     wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
-    ws = wb.worksheets[0]
+    ws = _pick_sheet(wb)
     rows_iter = ws.iter_rows(values_only=True)
     header = [_HEADER_ALIASES.get(_hkey(c)) for c in next(rows_iter)]
 

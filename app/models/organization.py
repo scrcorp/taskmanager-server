@@ -127,6 +127,11 @@ class StoreGroup(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
     # 그룹 이름 — Group display name
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 그룹 코드 — 급여/외부 시스템에서 이 법인을 부르는 짧은 표기 (예: "ODG").
+    # 매장 code 와 같은 역할의 그룹판. EMPID 임포트의 자연 매칭 키로도 쓰인다.
+    # ⚠️ 미머지 payroll 브랜치의 StoreGroup.payroll_code 와 같은 개념 — 그쪽 머지 시
+    # 이 필드로 통합할 것 (인수인계 문서 §2-1 이 지목한 중복 후보).
+    code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # 정렬 순서 — Manual display order within org (lower first). Drag-reorder.
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     # 채번 모드 — empid sequence scope: "group"(그룹 공유, 기본) | "store"(매장별 독립)

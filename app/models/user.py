@@ -40,7 +40,7 @@ class Role(Base):
 
     Constraints:
         uq_role_org_name: 조직 내 역할 이름 고유 (Unique role name per org)
-        uq_role_org_priority: 조직 내 역할 우선순위 고유 (Unique role priority per org)
+        (priority 동률은 허용 — D13)
     """
 
     __tablename__ = "roles"
@@ -60,7 +60,10 @@ class Role(Base):
 
     __table_args__ = (
         UniqueConstraint("organization_id", "name", name="uq_role_org_name"),
-        UniqueConstraint("organization_id", "priority", name="uq_role_org_priority"),
+        # priority 동률 허용 (D13) — "같은 단계, 다른 권한"을 표현하려면 필수다.
+        # 금지하면 같은 급의 role 을 26/27 로 벌려야 하고, 없는 서열이 권한으로 굳는다
+        # (26 이 27 을 평가·관리하게 된다). 동률의 의미는 "서로를 건드릴 수 없다" —
+        # 기존 `caller.priority < target.priority` 규칙이 그대로 성립한다.
     )
 
     # 관계 — Relationships

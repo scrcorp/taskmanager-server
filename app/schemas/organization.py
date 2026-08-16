@@ -126,6 +126,8 @@ class StoreGroupCreate(BaseModel):
     """
 
     name: str  # 그룹 이름 (Group name)
+    # 그룹 코드 — 급여/외부 시스템 표기 (예: "ODG"). 임포트 자연 매칭 키
+    code: str | None = Field(default=None, max_length=20)
     numbering_mode: str = NUMBERING_MODE_GROUP  # 채번 모드 (group=공유 시퀀스, store=매장별)
     number_range_start: int | None = Field(default=None, ge=1)  # 번호대 시작값 (예: 1000)
 
@@ -139,6 +141,7 @@ class StoreGroupUpdate(BaseModel):
     """
 
     name: str | None = None  # 변경할 그룹 이름 (New name, optional)
+    code: str | None = Field(default=None, max_length=20)  # 그룹 코드 (예: "ODG")
     numbering_mode: str | None = None  # 채번 모드 변경 (group|store, optional)
     number_range_start: int | None = Field(default=None, ge=1)  # 번호대 시작값 (optional)
 
@@ -155,6 +158,7 @@ class StoreGroupResponse(BaseModel):
     id: str  # 그룹 UUID 문자열 (Group UUID as string)
     organization_id: str  # 소속 조직 UUID 문자열 (Organization UUID as string)
     name: str  # 그룹 이름 (Group name)
+    code: str | None = None  # 그룹 코드 (예: "ODG")
     sort_order: int = 0  # 정렬 순서 (Manual display order)
     numbering_mode: str = NUMBERING_MODE_GROUP  # 채번 모드 (group|store)
     number_range_start: int | None = None  # 번호대 시작값 (Range start)
@@ -171,6 +175,86 @@ class StoreGroupReorderRequest(BaseModel):
 
     # Pydantic 이 UUID 파싱까지 검증 (잘못된 값은 422 — 라우터에서 UUID() 수동 변환 금지)
     group_ids: list[UUID]  # 새 순서의 그룹 UUID 목록 (Group UUIDs in desired order)
+
+
+# === 그룹 편입 미리보기 (Assign preview) 스키마 ===
+# 편입(store.group_id 변경) 전에 공유 채번 스코프의 EMPID 충돌을 미리 보여주는
+# 읽기 전용 미리보기. 서버는 편입 시 empid 를 절대 바꾸지 않으므로(정책 A)
+# 여기서 경고만 하고, 해소는 Users → Bulk Edit → EMPID 에서 한다.
+
+
+class GroupAssignPreviewRequest(BaseModel):
+    """편입 미리보기 요청 — 매장을 그룹에 넣으면 어떻게 되는지 조회만.
+
+    Assign-preview request: what would happen if store_id joined group_id.
+    group_id null = 그룹 이탈 미리보기 (충돌 개념 없음 — 빈 결과).
+    """
+
+    store_id: UUID  # 편입할 매장 (Store being assigned — 잘못된 값은 422)
+    group_id: UUID | None = None  # 대상 그룹 (null = 이탈 — Leaving a group)
+
+
+class AssignPreviewMember(BaseModel):
+    """미리보기 속 사람 한 명 (편입 매장 쪽) / One person on the incoming side."""
+
+    user_id: str  # 사용자 UUID 문자열 (User UUID as string)
+    name: str  # 표시 이름 (Display name)
+
+
+class AssignPreviewHolder(BaseModel):
+    """그룹 내 다른 매장에서 그 번호를 이미 쓰는 사람 / Existing holder of the number."""
+
+    user_id: str  # 사용자 UUID 문자열 (User UUID as string)
+    name: str  # 표시 이름 (Display name)
+    store_id: str  # 보유 매장 UUID 문자열 (Store where the number is held)
+    store_name: str  # 보유 매장 이름 (Store name)
+
+
+class AssignPreviewConflict(BaseModel):
+    """번호 충돌 한 건 — 편입 멤버의 empid 를 그룹 내 다른 사람이 이미 사용 중.
+
+    One conflict: an incoming member's empid is already held by someone else
+    in another store of the target group (dormant rows included — numbers
+    stay occupied under policy A).
+    """
+
+    empid: int  # 충돌 번호 (The colliding EMPID)
+    incoming: AssignPreviewMember  # 편입 매장 쪽 보유자 (Incoming member)
+    holders: list[AssignPreviewHolder] = []  # 그룹 내 기존 보유자들 (Existing holders)
+
+
+class AssignPreviewSplitStore(BaseModel):
+    """같은 사람이 그룹 내 다른 매장에서 갖는 다른 번호 / The person's other number elsewhere."""
+
+    store_id: str  # 매장 UUID 문자열 (Store UUID as string)
+    store_name: str  # 매장 이름 (Store name)
+    empid: int  # 그 매장에서의 번호 (EMPID at that store)
+
+
+class AssignPreviewPersonSplit(BaseModel):
+    """같은 사람이 편입 매장과 그룹 내 다른 매장에서 서로 다른 번호를 갖는 케이스.
+
+    Same person, different numbers across the shared scope (same number is
+    normal and excluded).
+    """
+
+    user_id: str  # 사용자 UUID 문자열 (User UUID as string)
+    name: str  # 표시 이름 (Display name)
+    incoming_empid: int  # 편입 매장에서의 번호 (EMPID at the incoming store)
+    elsewhere: list[AssignPreviewSplitStore] = []  # 그룹 내 다른 매장의 번호들 (Other numbers)
+
+
+class GroupAssignPreviewResponse(BaseModel):
+    """편입 미리보기 응답 — 아무것도 변경하지 않는 조회 결과.
+
+    Assign-preview response (read-only). conflicts/person_splits 는 대상 그룹이
+    numbering_mode="group" 일 때만 채워진다 (이탈/독립채번은 충돌 개념 없음).
+    """
+
+    numbering_mode: str | None = None  # 대상 그룹 채번 모드 (null = 그룹 이탈)
+    conflicts: list[AssignPreviewConflict] = []  # 번호 충돌 목록 (Number conflicts)
+    person_splits: list[AssignPreviewPersonSplit] = []  # 인물 분열 목록 (Person splits)
+    incoming_with_empid: int = 0  # 편입 매장의 empid 보유 멤버 수 (Members with a number)
 
 
 # === 매장 (Store) 스키마 ===

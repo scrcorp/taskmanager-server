@@ -869,8 +869,30 @@ class ScheduleService:
             "store_ids": store_ids,
             "is_active": True,
             "include_provisional": True,
+            # 휴직자는 새 배정 후보가 아니다 (D5). 다만 아래 fail-open 으로
+            # 그 기간에 이미 근무 기록이 있으면 행은 남는다.
+            "exclude_member_statuses": ["on_leave"],
         }
         users = await user_service.list_users(db, organization_id, user_filters)
+
+        # 2) 기간 스케줄 — user 제한 없이 조회한다.
+        #    후보(활성자)로 먼저 좁히면 퇴사·매장배정 해제된 사람의 과거 근무가 통째로
+        #    사라진다. 스코프 제한은 store_ids/accessible_store_ids 가 이미 담당한다.
+        all_scheds = list(await schedule_repository.get_all_in_period(
+            db, organization_id, date_from, date_to,
+            store_ids=store_ids, accessible_store_ids=accessible_store_ids,
+        ))
+
+        # 2-1) fail-open — 그 기간에 실제 기록이 있으면 지금 비활성이거나 매장 배정이
+        #      풀렸어도 행을 남긴다. 과거는 fail-open, 미래는 fail-closed(스케줄이 없으니
+        #      자연히 후보에서 빠진다). 조회 권한은 위 스케줄 스코프가 이미 보장한다.
+        known_ids = {u.id for u in users}
+        extra_ids = {str(s.user_id) for s in all_scheds if s.user_id} - known_ids
+        if extra_ids:
+            users = users + await user_service.list_users(
+                db, organization_id, {"user_ids": [UUID(i) for i in extra_ids]}
+            )
+
         if staff_ids:
             sset = {str(u) for u in staff_ids}
             users = [u for u in users if u.id in sset]
@@ -881,14 +903,10 @@ class ScheduleService:
             dset = set(departments)
             users = [u for u in users if (u.department or "unassigned") in dset]
 
-        candidate_ids = [UUID(u.id) for u in users]
+        candidate_set = {u.id for u in users}
 
-        # 2) 기간 스케줄 (confirmed+requested, 후보 user 한정)
-        scheds = list(await schedule_repository.get_all_in_period(
-            db, organization_id, date_from, date_to,
-            store_ids=store_ids, user_ids=candidate_ids,
-            accessible_store_ids=accessible_store_ids,
-        ))
+        # 2-2) 최종 후보로 스케줄 좁히기 (미배정 행은 기존과 동일하게 제외)
+        scheds = [s for s in all_scheds if s.user_id and str(s.user_id) in candidate_set]
 
         # 3) filter_domain — 칩 필터 적용 전 도메인 (FilterBar 옵션)
         pos_domain = sorted({s.position_snapshot for s in scheds if s.position_snapshot})
@@ -937,6 +955,8 @@ class ScheduleService:
                 role_priority=u.role_priority,
                 effective_hourly_rate=None if hide_cost else u.effective_hourly_rate,
                 has_schedule_in_period=has,
+                # 유령(미가입)은 is_active=False 지만 '앞으로 일할 사람'이라 퇴사자가 아니다.
+                is_inactive=(not u.is_active) and (not u.is_provisional),
                 confirmed_hours=round(agg["ch"], 2) if agg else 0.0,
                 pending_hours=round(agg["ph"], 2) if agg else 0.0,
                 confirmed_cost=None if hide_cost else (round(agg["cc"], 2) if agg else 0.0),

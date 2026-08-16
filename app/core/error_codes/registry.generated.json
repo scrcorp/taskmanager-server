@@ -17,6 +17,10 @@
       "shift_not_available"
     ],
     "common": [
+      "GROUP_NOT_FOUND",
+      "INVALID_DATE_RANGE",
+      "INVALID_STORE_IDS",
+      "INVALID_STORE_OVERRIDES",
       "file_not_found",
       "file_too_large",
       "forbidden",
@@ -37,6 +41,16 @@
       "CONTACT_VALIDATION_ERROR",
       "CONTACT_VISIBILITY_CONFLICT",
       "CONTACT_VISIBILITY_REQUIRED"
+    ],
+    "employment": [
+      "ALREADY_TERMINATED",
+      "EMPLOYEE_NOT_FOUND",
+      "LAST_ADMIN",
+      "LEAVE_END_BEFORE_START",
+      "MEMBERSHIP_NOT_FOUND",
+      "NOT_ON_LEAVE",
+      "OFFBOARD_PROVISIONAL",
+      "RETENTION_NOT_ELAPSED"
     ],
     "hiring": [
       "already_hired",
@@ -266,6 +280,46 @@
       ]
     },
     {
+      "code": "GROUP_NOT_FOUND",
+      "domain": "common",
+      "kind": "http",
+      "status": 404,
+      "message": "This store group no longer exists.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "INVALID_DATE_RANGE",
+      "domain": "common",
+      "kind": "http",
+      "status": 400,
+      "message": "date_from must be on or before date_to.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "INVALID_STORE_IDS",
+      "domain": "common",
+      "kind": "http",
+      "status": 400,
+      "message": "store_ids must be comma-separated UUIDs.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "INVALID_STORE_OVERRIDES",
+      "domain": "common",
+      "kind": "http",
+      "status": 400,
+      "message": "store_overrides must be a JSON object of {label: store id}.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
       "code": "file_not_found",
       "domain": "common",
       "kind": "http",
@@ -445,6 +499,86 @@
       "status": 400,
       "message": "Pick who can see this contact.",
       "hint": "Select at least one store, or share it with the whole organization.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "ALREADY_TERMINATED",
+      "domain": "employment",
+      "kind": "http",
+      "status": 400,
+      "message": "This employee has already been offboarded.",
+      "hint": "Rehire them before putting them on leave.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "EMPLOYEE_NOT_FOUND",
+      "domain": "employment",
+      "kind": "http",
+      "status": 404,
+      "message": "This employee no longer exists.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "LAST_ADMIN",
+      "domain": "employment",
+      "kind": "http",
+      "status": 400,
+      "message": "This is the last person who can administer this organization.",
+      "hint": "Give someone else the same level of access first.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "LEAVE_END_BEFORE_START",
+      "domain": "employment",
+      "kind": "http",
+      "status": 400,
+      "message": "The return date can't be earlier than the leave start date.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "MEMBERSHIP_NOT_FOUND",
+      "domain": "employment",
+      "kind": "http",
+      "status": 404,
+      "message": "This person isn't a member of your organization.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "NOT_ON_LEAVE",
+      "domain": "employment",
+      "kind": "http",
+      "status": 400,
+      "message": "This employee isn't on leave.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "OFFBOARD_PROVISIONAL",
+      "domain": "employment",
+      "kind": "http",
+      "status": 400,
+      "message": "This employee hasn't signed up yet, so there's nothing to offboard.",
+      "hint": "Remove the placeholder instead.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "RETENTION_NOT_ELAPSED",
+      "domain": "employment",
+      "kind": "http",
+      "status": 400,
+      "message": "This record is still within the retention period.",
+      "hint": "Only offboarded employees past the retention window can be anonymized.",
       "frozen": false,
       "clients": []
     },

@@ -5,13 +5,17 @@ Provides user listing with filters, detail retrieval, creation, update,
 activation toggle, and user-store association management.
 """
 
+from datetime import date
+from io import BytesIO
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import hide_cost_for, require_permission, scrub_cost_fields
+from app.core.error_codes.common import INVALID_STORE_IDS
 from app.database import get_db
 from app.models.user import User
 from app.schemas.common import MessageResponse
@@ -19,8 +23,15 @@ from app.schemas.rate import RateChangeCreate, RateChangeEntry, RateChangeResult
 from app.schemas.user import (
     AbsorbPlanResponse,
     AbsorbRequest,
+    AnonymizeResponse,
     ClaimCodeResponse,
+    LeaveEndResponse,
+    LeaveStartRequest,
+    LeaveStartResponse,
+    OffboardRequest,
+    OffboardResponse,
     ProvisionalUserBulkCreate,
+    PurgeCandidatesResponse,
     ProvisionalUserCreate,
     SyncUserStoresRequest,
     UserBulkUpdate,
@@ -31,7 +42,13 @@ from app.schemas.user import (
     UserStoreResponse,
     UserUpdate,
 )
+from app.services.leave_service import leave_service
+from app.services.records_retention_service import records_retention_service
+from app.services.offboarding_service import offboarding_service
+from app.services.user_export_service import user_export_service
 from app.services.user_service import user_service
+from app.utils.download import content_disposition
+from app.utils.exceptions import BadRequestError
 
 router: APIRouter = APIRouter()
 
@@ -73,6 +90,55 @@ async def list_users(
         for u in users:
             scrub_cost_fields(u)
     return users
+
+
+@router.get("/purge-candidates", response_model=PurgeCandidatesResponse)
+async def list_purge_candidates(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:delete"))],
+) -> dict[str, object]:
+    """보존 기간이 지난 퇴사자 목록 (D4).
+
+    **아무것도 삭제하지 않는다.** 자동 삭제를 하지 않기로 했으므로(§6) 기간이 지난 기록은
+    이 목록에만 나타나고, 실제 익명화는 관리자가 건별로 실행한다.
+    보존 기간은 Organization 설정 `employment.record_retention_years` (기본 7년).
+    """
+    org_id: UUID = current_user.organization_id
+    return await records_retention_service.purge_candidates(
+        db, org_id, today=date.today()
+    )
+
+
+# 주의: GET /{user_id} 보다 반드시 앞에 둘 것 — 뒤에 있으면 "export" 가
+# user_id 로 매칭되어 422 가 난다 (위 /purge-candidates 와 같은 이유).
+@router.get("/export")
+async def export_users(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:read"))],
+    store_ids: Annotated[str | None, Query(description="매장 ID 필터 (복수, 콤마 구분)")] = None,
+) -> StreamingResponse:
+    """Staff 목록을 xlsx 로 내려받습니다 — 행 = 사람 × 매장배정.
+
+    store_ids 를 주면 그 매장(들)에 배정된 행만 (사람도 배정 기준으로 포함/제외).
+    시급/급여 컬럼은 정책상 포함하지 않는다 (cost 마스킹 — 권한 분기 없이 전면 제외).
+    """
+    parsed_store_ids: list[UUID] | None = None
+    if store_ids:
+        try:
+            parsed_store_ids = [
+                UUID(s.strip()) for s in store_ids.split(",") if s.strip()
+            ]
+        except ValueError as exc:
+            raise INVALID_STORE_IDS() from exc
+    excel_bytes: bytes = await user_export_service.export_staff_xlsx(
+        db, current_user.organization_id, parsed_store_ids
+    )
+    filename: str = f"staff_{date.today().isoformat()}.xlsx"
+    return StreamingResponse(
+        BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": content_disposition(filename)},
+    )
 
 
 @router.get("/{user_id}", response_model=UserResponse)
@@ -322,6 +388,93 @@ async def delete_user(
     org_id: UUID = current_user.organization_id
     await user_service.delete_user(db, user_id, org_id)
     return {"message": "User deleted successfully"}
+
+
+@router.post("/{user_id}/anonymize", response_model=AnonymizeResponse)
+async def anonymize_user(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:delete"))],
+) -> dict[str, str]:
+    """개인 식별 정보를 제거합니다 (되돌릴 수 없음).
+
+    이름은 `Former Employee #<crewid>` 로 바뀌고 이메일·PIN·서명이 지워진다.
+    **근무·급여 집계는 그대로 유지된다** — 지우는 것은 사람을 특정하는 정보뿐이다.
+
+    보존 기간이 지난 퇴사자만 대상이다. 재직자나 기간 미도래자는 400.
+    완전 삭제(행 제거)는 급여·세무 기록과 얽혀 있어 v1 에 없다.
+    """
+    org_id: UUID = current_user.organization_id
+    return await records_retention_service.anonymize(
+        db, user_id, org_id, today=date.today()
+    )
+
+
+@router.post("/{user_id}/offboard", response_model=OffboardResponse)
+async def offboard_user(
+    user_id: UUID,
+    data: OffboardRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:delete"))],
+) -> dict[str, int | str]:
+    """직원을 퇴사 처리합니다 (Offboard).
+
+    기존 delete(단순 비활성화)를 대체하는 경로. 흩어져 있던 부수효과를 한 번에 처리한다 —
+    재직 상태(terminated) + 퇴사일/사유/재고용 가능 여부 기록, 계정 비활성 + 자격증명 회수,
+    그리고 **퇴사일 이후 스케줄 처리**.
+
+    `future_schedule_action` 은 기본값이 없다. "그대로 유지"도 선택지에 없다 —
+    퇴사자가 근태 대상·알림·급여 예측에 계속 남기 때문이다.
+
+    - `unassign`: 시간대·포지션은 남기고 사람만 비운다 (그리드에 빈 칸 → 대체자 배정)
+    - `delete`: 소프트 삭제
+
+    설계: docs/99_inbox/2026-08-13-조직계층-재정의.md §6 · D3
+    """
+    org_id: UUID = current_user.organization_id
+    return await offboarding_service.offboard(
+        db, user_id, org_id,
+        termination_date=data.termination_date,
+        future_schedule_action=data.future_schedule_action,
+        reason=data.reason,
+        rehire_eligible=data.rehire_eligible,
+    )
+
+
+@router.post("/{user_id}/leave", response_model=LeaveStartResponse)
+async def start_leave(
+    user_id: UUID,
+    data: LeaveStartRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> dict[str, int | str | None]:
+    """휴직을 시작합니다 (D5).
+
+    계정은 살려둔다 — 휴직자도 앱으로 자기 기록을 보고 복귀 안내를 받아야 한다.
+    스케줄 배정 후보에서는 `org_members.status='on_leave'` 로 자동 제외된다.
+    **근무가능시간(availability)은 지우지 않는다** — 복귀 시 재입력을 강요하지 않기 위함.
+    """
+    org_id: UUID = current_user.organization_id
+    return await leave_service.start_leave(
+        db, user_id, org_id,
+        start_date=data.start_date,
+        schedule_action=data.schedule_action,
+        end_date=data.end_date,
+        leave_type=data.leave_type,
+        is_paid=data.is_paid,
+        note=data.note,
+    )
+
+
+@router.post("/{user_id}/leave/return", response_model=LeaveEndResponse)
+async def end_leave(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> dict[str, str]:
+    """휴직을 종료하고 복귀시킵니다. 휴직 이력(시작일·분류)은 남는다."""
+    org_id: UUID = current_user.organization_id
+    return await leave_service.end_leave(db, user_id, org_id)
 
 
 @router.get("/{user_id}/stores", response_model=list[UserStoreResponse])

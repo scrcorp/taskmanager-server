@@ -6,7 +6,7 @@ within an organization, and self-service profile management.
 """
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -308,6 +308,86 @@ class UserStoreAssignment(BaseModel):
     store_id: str
     is_manager: bool = False
     is_work_assignment: bool = True
+
+
+class OffboardRequest(BaseModel):
+    """퇴사 처리 요청 — Offboard (§6 · D3).
+
+    Attributes:
+        termination_date: 퇴사일. 이 날짜까지는 근무한 것으로 본다
+        future_schedule_action: 퇴사일 **이후** 스케줄 처리. 기본값 없음 — 매번 명시한다.
+            "그대로 유지"는 선택지에 없다 (퇴사자가 근태·알림·급여 예측에 계속 남는다)
+        reason: 퇴사 사유 (자유 텍스트, 선택)
+        rehire_eligible: 재고용 가능 여부. None = 미판단
+    """
+
+    termination_date: date
+    future_schedule_action: Literal["unassign", "delete"]
+    reason: str | None = Field(default=None, max_length=500)
+    rehire_eligible: bool | None = None
+
+
+class OffboardResponse(BaseModel):
+    """퇴사 처리 결과 요약."""
+
+    termination_date: str
+    future_schedule_action: str
+    future_schedules_affected: int
+
+
+class LeaveStartRequest(BaseModel):
+    """휴직 시작 요청 (D5).
+
+    Attributes:
+        start_date: 휴직 시작일
+        schedule_action: 휴직 기간과 겹치는 스케줄 처리. 기본값 없음 — 매번 명시한다.
+            퇴사(D3)와 달리 "keep"이 정당한 선택지다 (짧은 휴직은 복귀 후 그대로 근무)
+        end_date: 복귀 예정일. None = 미정
+        leave_type: 휴직 분류 코드. 목록은 Organization 설정 `employment.leave_types`
+        is_paid: 유급 여부. None = 미지정
+    """
+
+    start_date: date
+    schedule_action: Literal["unassign", "delete", "keep"]
+    end_date: date | None = None
+    leave_type: str | None = Field(default=None, max_length=50)
+    is_paid: bool | None = None
+    note: str | None = Field(default=None, max_length=500)
+
+
+class LeaveStartResponse(BaseModel):
+    status: str
+    leave_start_date: str
+    leave_end_date: str | None = None
+    schedule_action: str
+    schedules_affected: int
+
+
+class LeaveEndResponse(BaseModel):
+    status: str
+
+
+class PurgeCandidate(BaseModel):
+    """보존 기간이 지난 퇴사자 1건 (D4)."""
+
+    user_id: str
+    full_name: str
+    crewid: int | None = None
+    termination_date: str
+    eligible_on: str
+
+
+class PurgeCandidatesResponse(BaseModel):
+    """purge 후보 목록. 조회만 하며 아무것도 삭제하지 않는다."""
+
+    retention_years: int
+    as_of: str
+    candidates: list[PurgeCandidate]
+
+
+class AnonymizeResponse(BaseModel):
+    user_id: str
+    full_name: str
 
 
 class SyncUserStoresRequest(BaseModel):

@@ -8,7 +8,7 @@ users.employee_no(폐기 방향)는 건드리지 않는다.
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_permission
@@ -16,6 +16,9 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.empid_import import (
     EmpidExportRequest,
+    EmpidReconciliationScope,
+    EmpidSavedAlias,
+    EmpidUnmatchedStore,
     EmpidImportCommitRequest,
     EmpidImportCommitResponse,
     EmpidImportEntry,
@@ -24,6 +27,7 @@ from app.schemas.empid_import import (
     EmpidRosterStore,
 )
 from app.services import empid_import_service as svc
+from app.core.error_codes.common import INVALID_STORE_OVERRIDES
 from app.utils.exceptions import BadRequestError
 
 router: APIRouter = APIRouter()
@@ -53,10 +57,16 @@ async def preview_empid_import(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("users:update"))],
     file: UploadFile = File(...),
+    store_overrides: Annotated[str | None, Form()] = None,
 ) -> EmpidImportPreviewResponse:
     """업로드 파일(xlsx/csv)을 파싱해 사람×매장 버킷을 반환합니다 (DB 기록 없음).
 
-    컬럼: COMPANY, CORP_ABR_3, Name, emp_id, Email. PURADAK 행 제외.
+    컬럼: COMPANY, CORP_ABR_3(또는 WORKNOTE), Name(또는 FIRST/LAST), emp_id,
+    Email(선택), CREWID(선택). PURADAK 행 제외. Email/CREWID 없는 행은 이름으로
+    자동 매칭을 시도한다(유일 후보만 — 동명이인은 운영자 선택).
+
+    store_overrides: JSON 오브젝트 문자열 {정규화키: store UUID}. 응답
+    unmatched_stores[].key 를 그대로 키로 쓰면 된다 (오탈자 매장 코드 수동 매핑).
     """
     if not file.filename:
         raise BadRequestError("File required")
@@ -70,7 +80,21 @@ async def preview_empid_import(
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise BadRequestError("File too large (max 10 MB)")
-    result = await svc.preview(db, current_user.organization_id, content, file.filename)
+    overrides: dict[str, str] | None = None
+    if store_overrides:
+        import json
+
+        try:
+            parsed = json.loads(store_overrides)
+        except ValueError:
+            raise INVALID_STORE_OVERRIDES()
+        if not isinstance(parsed, dict):
+            raise INVALID_STORE_OVERRIDES()
+        overrides = {str(k): str(v) for k, v in parsed.items() if k and v}
+    result = await svc.preview(
+        db, current_user.organization_id, content, file.filename,
+        store_overrides=overrides, actor_id=current_user.id,
+    )
     return EmpidImportPreviewResponse(
         people=[_person_out(p) for p in result.people],
         placeholder=[_person_out(p) for p in result.placeholder],
@@ -78,6 +102,11 @@ async def preview_empid_import(
         counts=result.counts(),
         excluded_rows=result.excluded_rows,
         total_rows=result.total_rows,
+        unmatched_stores=[EmpidUnmatchedStore(**u) for u in result.unmatched_stores],
+        saved_aliases=[EmpidSavedAlias(**a) for a in result.saved_aliases],
+        reconciliation=[
+            EmpidReconciliationScope(**r) for r in result.reconciliation
+        ],
     )
 
 
@@ -181,7 +210,9 @@ async def commit_empid_import(
             assignments.append((UUID(item.user_id), UUID(item.store_id), item.empid))
         except ValueError:
             continue  # 잘못된 UUID 는 무시 (프론트 방어)
-    result = await svc.commit(db, current_user.organization_id, assignments)
+    result = await svc.commit(
+        db, current_user.organization_id, assignments, actor_id=current_user.id,
+    )
     return EmpidImportCommitResponse(
         applied=result.applied,
         renumbered=result.renumbered,
