@@ -1101,7 +1101,7 @@ async def test_review_category_accepted(
     assert r.status_code == 201, r.text
     assert r.json()["payload"]["description"] == desc
 
-    # 템플릿 응답에 프리셋이 실려 온다
+    # 템플릿 응답에 review 카테고리가 fields 블록으로 실려 온다 (옛 description_template 프리셋은 은퇴)
     t = await client.get(
         "/api/v1/app/my/reports/template",
         headers=_h(sv),
@@ -1109,7 +1109,8 @@ async def test_review_category_accepted(
     )
     assert t.status_code == 200, t.text
     cats = {c["code"]: c for c in t.json()["payload"]["categories"]}
-    assert cats["review"]["description_template"].startswith("Platform:")
+    assert cats["review"].get("fields"), "review 카테고리는 구조화된 fields 를 갖는다"
+    assert cats["review"].get("description_template") is None
 
 
 @pytest.mark.asyncio
