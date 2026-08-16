@@ -12,7 +12,7 @@ from app.models.daily_report import (
     DailyReportTemplateSection,
 )
 from app.models.organization import Store
-from app.models.user import User
+from app.models.user import Role, User
 from app.repositories.daily_report_repository import (
     daily_report_repository,
     daily_report_template_repository,
@@ -410,6 +410,7 @@ class DailyReportService:
             return
         try:
             from app.services.alert_service import alert_service
+            from app.utils.deep_links import build_cta_url
             from app.utils.email import send_email
             from app.utils.email_templates import build_reply_email
             import asyncio
@@ -417,11 +418,14 @@ class DailyReportService:
             author_r = await db.execute(select(User.full_name).where(User.id == author_id))
             author_name = author_r.scalar() or "Manager"
             recipient_r = await db.execute(
-                select(User.full_name, User.email).where(User.id == recipient_id)
+                select(User.full_name, User.email, Role.priority)
+                .join(Role, Role.id == User.role_id, isouter=True)
+                .where(User.id == recipient_id)
             )
             row = recipient_r.first()
             recipient_name = (row.full_name if row else None) or "there"
             recipient_email = row.email if row else None
+            recipient_priority = row.priority if row else None
 
             period_label = "Lunch" if report.period == "lunch" else "Dinner" if report.period == "dinner" else str(report.period)
             subtitle = f"{report.report_date} · {period_label}"
@@ -445,8 +449,10 @@ class DailyReportService:
                     author_name=author_name,
                     context_label="Daily Report",
                     context_subtitle=subtitle,
-                    excerpt=(excerpt[:160] if excerpt else None),
-                    cta_url=None,
+                    excerpt=(excerpt[:600].rstrip() if excerpt else None),
+                    cta_url=build_cta_url(
+                        "daily_report", report.id, recipient_priority
+                    ),
                 )
                 asyncio.create_task(send_email(to=recipient_email, subject=subject, html=html))
         except Exception:

@@ -1269,3 +1269,119 @@ async def test_inactive_extra_viewer_not_notified_and_update_not_bricked(
             u = await db.get(UserModel, staff_id)
             u.is_active = True
             await db.commit()
+
+
+# ===================================================================
+# 알림 이메일 내용 — 이벤트별 문구 / 본문 / CTA 링크
+# ===================================================================
+
+
+@pytest_asyncio.fixture
+async def gm_email(issue_people):
+    """testgm 에 이메일 부여(원래 None) — 이메일 발송 경로를 타게 하려면 필요."""
+    gm_id = issue_people["testgm"]
+    async with async_session() as db:
+        u = await db.get(UserModel, gm_id)
+        before = u.email
+        u.email = "gm-notify-test@example.com"
+        await db.commit()
+    yield gm_id
+    async with async_session() as db:
+        u = await db.get(UserModel, gm_id)
+        u.email = before
+        await db.commit()
+
+
+@pytest_asyncio.fixture
+async def captured_emails(monkeypatch):
+    """build_reply_email 호출 인자를 가로챈다 + 실제 발송은 막는다."""
+    import app.utils.email as email_mod
+    import app.utils.email_templates as tpl_mod
+
+    calls: list[dict] = []
+    original = tpl_mod.build_reply_email
+
+    def _spy(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    async def _noop_send(**kwargs):
+        return None
+
+    monkeypatch.setattr(tpl_mod, "build_reply_email", _spy)
+    monkeypatch.setattr(email_mod, "send_email", _noop_send)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_created_email_has_description_not_title(
+    client, issue_perms, issue_people, gm_email, captured_emails, test_store_id
+):
+    """신규 등록 메일: 인용 블록에 **제목이 아니라 description** 이 들어간다.
+
+    예전엔 excerpt=report.title 이라 제목이 subtitle 과 중복되고 정작 내용이 없었다.
+    문구도 답글 템플릿을 타서 "New reply on your issue report" 로 나갔다.
+    """
+    sv = await _login("testsv")
+    body_text = "Walk-in freezer at 12C since 8am. Vendor called."
+    code, body = await _create_issue(
+        client,
+        sv,
+        test_store_id,
+        {"description": body_text},
+        title="Freezer warm",
+    )
+    assert code == 201, body
+
+    assert captured_emails, "GM 수신자에게 메일이 만들어져야 한다"
+    kw = captured_emails[0]
+    assert kw["excerpt"] == body_text, "본문이 인용 블록에 들어가야 한다"
+    assert kw["headline"] == "New issue report"
+    assert "reported a new issue" in kw["lead"]
+    assert "left a reply" not in kw["lead"], "신규 등록이 답글로 나가면 안 된다"
+    assert kw["subject"].startswith("[Issue] New")
+    assert kw["cta_url"], "이슈로 가는 링크가 있어야 한다"
+    assert "/reports/issues/" in kw["cta_url"], "GM 은 콘솔 링크"
+
+
+@pytest.mark.asyncio
+async def test_created_email_without_description_uses_fallback(
+    client, issue_perms, issue_people, gm_email, captured_emails, test_store_id
+):
+    """description 이 없으면 '사진 첨부' 가 아니라 '설명 없음' 으로 말해야 한다."""
+    sv = await _login("testsv")
+    code, body = await _create_issue(
+        client, sv, test_store_id, {}, title="No details"
+    )
+    assert code == 201, body
+    assert captured_emails
+    kw = captured_emails[0]
+    assert kw["excerpt"] is None
+    assert kw["excerpt_fallback"] == "(No description provided)"
+
+
+@pytest.mark.asyncio
+async def test_status_change_email_says_status_not_reply(
+    client, issue_perms, issue_people, gm_email, captured_emails, test_store_id
+):
+    """상태 변경 메일이 'New reply on your issue closed' 로 나가던 것을 고쳤는지."""
+    sv = await _login("testsv")
+    code, body = await _create_issue(
+        client, sv, test_store_id, {"description": "door seal torn"}, title="Freezer"
+    )
+    assert code == 201, body
+    captured_emails.clear()
+
+    r = await client.post(
+        f"/api/v1/app/my/reports/{body['id']}/transition",
+        headers=_h(sv),
+        json={"status": "closed"},
+    )
+    assert r.status_code in (200, 204), r.text
+
+    assert captured_emails, "상태 변경도 알림이 나가야 한다"
+    kw = captured_emails[0]
+    assert kw["headline"] == "Issue closed"
+    assert "New reply" not in kw["headline"]
+    assert kw["subject"].startswith("[Issue] Closed")
+    assert kw["cta_url"]

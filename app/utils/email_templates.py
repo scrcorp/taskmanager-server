@@ -11,6 +11,40 @@ if TYPE_CHECKING:
 _DOW_LABEL = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
+def brand_header_style() -> tuple[str, str, str]:
+    """이메일 헤더 밴드의 (배경색, 글자색, 환경 라벨).
+
+    브랜드 규칙(temp/brand/README.md): DEV #E4791B / STG #6C5CE7 / PROD 는 베이지 배경 +
+    로고 원본색. 주황·보라는 비-prod 전용 신호이므로 prod 메일에 나가면 안 된다.
+    받은 편지함에서 운영 메일과 테스트 메일을 색으로 즉시 구분하는 게 목적이다.
+    """
+    from app.config import settings
+
+    env = (settings.APP_ENV or "local").lower()
+    if env == "production":
+        return "#FBF7F0", "#343C47", ""
+    if env == "staging":
+        return "#6C5CE7", "#FFFFFF", "STG"
+    return "#E4791B", "#FFFFFF", "DEV"
+
+
+def _brand_header_row() -> str:
+    """공통 헤더 밴드 <tr>. 비-prod 는 환경 라벨 배지를 붙인다."""
+    bg, fg, env_label = brand_header_style()
+    badge = (
+        f'<span style="margin-left:10px;padding:2px 8px;border:1px solid {fg};'
+        f'border-radius:4px;font-size:12px;font-weight:600;color:{fg};'
+        f'vertical-align:middle;">{env_label}</span>'
+        if env_label
+        else ""
+    )
+    return (
+        f'<tr><td style="background-color:{bg};padding:24px 28px;">'
+        f'<span style="font-size:22px;font-weight:700;color:{fg};'
+        f'vertical-align:middle;">HTM</span>{badge}</td></tr>'
+    )
+
+
 def build_verification_code_email(code: str) -> tuple[str, str]:
     """Build email verification code email.
 
@@ -213,25 +247,37 @@ def build_reply_email(
     context_subtitle: str,
     excerpt: str | None,
     cta_url: str | None = None,
+    *,
+    subject: str | None = None,
+    headline: str | None = None,
+    lead: str | None = None,
+    cta_label: str = "Open in HTM",
+    excerpt_fallback: str = "(Photo or video attachment)",
 ) -> tuple[str, str]:
-    """Build a generic alert email for a reply on a checklist item or daily report.
+    """Build a generic alert email for an event on a report or checklist item.
 
     Args:
         recipient_name: 받는 사람 이름 (예: "Alice")
-        author_name: 답변을 단 사람 이름 (관리자)
+        author_name: 액션을 한 사람 이름
         context_label: "Checklist Item" 또는 "Daily Report"
         context_subtitle: 추가 식별자 (예: 항목 제목, 보고서 날짜)
-        excerpt: 답변 내용 일부 (50~120자), None 가능 (사진/영상만 첨부된 경우)
+        excerpt: 본문 일부 (댓글 내용, 이슈 description 등). None 가능
         cta_url: 보러 갈 링크 (옵션)
+        subject/headline/lead: 답글이 아닌 이벤트(신규 등록, 상태 변경)용 문구 override.
+            생략하면 기존 답글 문구를 그대로 쓴다 — 기존 호출부 동작 보존.
+        excerpt_fallback: excerpt 가 비었을 때 인용 블록 자리에 넣을 회색 안내문
     """
-    subject = f"[Reply] {author_name} on {context_label.lower()}"
+    subject = subject or f"[Reply] {author_name} on {context_label.lower()}"
+    headline = headline or f"New reply on your {context_label.lower()}"
+    lead = lead or f"<strong>{escape(author_name)}</strong> left a reply on:"
+    # white-space:pre-wrap — description 처럼 여러 줄인 본문의 개행을 살린다.
     excerpt_html = (
-        f'<div style="margin-top:12px;padding:12px 16px;background-color:#F1F5F9;border-left:3px solid #6C5CE7;border-radius:4px;font-size:14px;color:#334155;line-height:1.6;">{escape(excerpt)}</div>'
+        f'<div style="margin-top:12px;padding:12px 16px;background-color:#F1F5F9;border-left:3px solid #6C5CE7;border-radius:4px;font-size:14px;color:#334155;line-height:1.6;white-space:pre-wrap;">{escape(excerpt)}</div>'
         if excerpt and excerpt.strip()
-        else '<div style="margin-top:12px;font-size:13px;color:#94A3B8;font-style:italic;">(Photo or video attachment)</div>'
+        else f'<div style="margin-top:12px;font-size:13px;color:#94A3B8;font-style:italic;">{escape(excerpt_fallback)}</div>'
     )
     cta_html = (
-        f'<tr><td style="padding:8px 24px 28px;"><a href="{escape(cta_url)}" style="display:inline-block;padding:12px 32px;background-color:#6C5CE7;color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:6px;">Open in HTM</a></td></tr>'
+        f'<tr><td style="padding:8px 24px 28px;"><a href="{escape(cta_url)}" style="display:inline-block;padding:12px 32px;background-color:#6C5CE7;color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:6px;">{escape(cta_label)}</a></td></tr>'
         if cta_url
         else ""
     )
@@ -243,11 +289,11 @@ def build_reply_email(
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F8FAFC;">
     <tr><td align="center" style="padding:32px 16px;">
       <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-        <tr><td style="background-color:#6C5CE7;padding:24px 28px;"><div style="font-size:22px;font-weight:700;color:#FFFFFF;">HTM</div></td></tr>
+        {_brand_header_row()}
         <tr>
           <td style="padding:28px 24px 8px;">
-            <div style="font-size:20px;font-weight:700;color:#1E293B;margin-bottom:6px;">New reply on your {escape(context_label.lower())}</div>
-            <div style="font-size:14px;color:#64748B;line-height:1.6;">Hi {escape(recipient_name)},<br><strong>{escape(author_name)}</strong> left a reply on:</div>
+            <div style="font-size:20px;font-weight:700;color:#1E293B;margin-bottom:6px;">{escape(headline)}</div>
+            <div style="font-size:14px;color:#64748B;line-height:1.6;">Hi {escape(recipient_name)},<br>{lead}</div>
             <div style="margin-top:10px;font-size:15px;font-weight:600;color:#1E293B;">{escape(context_label)} · <span style="color:#6C5CE7;">{escape(context_subtitle)}</span></div>
             {excerpt_html}
           </td>

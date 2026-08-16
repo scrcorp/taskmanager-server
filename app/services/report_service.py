@@ -6,6 +6,7 @@ type별 클래스 분리 고려.
 """
 import logging
 import uuid
+from html import escape
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -24,7 +25,14 @@ from app.core.error_codes.reports import (
     ISSUE_VISIBILITY_SCOPE_INVALID,
     REPORT_NOT_VISIBLE,
 )
-from app.core.permissions import GM_PRIORITY, STAFF_PRIORITY, is_gm_plus, is_owner
+from app.config import settings
+from app.core.permissions import (
+    GM_PRIORITY,
+    STAFF_PRIORITY,
+    SV_PRIORITY,
+    is_gm_plus,
+    is_owner,
+)
 from app.models.organization import Store
 from app.models.report import (
     Report,
@@ -745,6 +753,21 @@ async def _resolve_issue_managers(
         return set()
     auto = await _resolve_issue_auto_recipients(db, store_id=report.store_id)
     return {item["user_id"] for item in auto}
+
+
+_EMAIL_EXCERPT_LIMIT = 600
+
+
+def _email_excerpt(text: str | None) -> str | None:
+    """알림 메일 인용 블록에 넣을 본문. 너무 길면 자르고 말줄임을 붙인다.
+
+    예전 160자는 '어떤 이슈인지 알 수 없다'는 문제의 일부였다 — 템플릿 프리셋
+    (Platform:/Rating:/... 같은 여러 줄)은 앞부분이 라벨뿐이라 내용이 안 보인다.
+    """
+    if not text or not text.strip():
+        return None
+    t = text.strip()
+    return t if len(t) <= _EMAIL_EXCERPT_LIMIT else t[:_EMAIL_EXCERPT_LIMIT].rstrip() + "…"
 
 
 def _apply_section_updates(report: Report, updates: list) -> None:
@@ -1990,6 +2013,7 @@ class ReportService:
         """
         try:
             from app.services.alert_service import alert_service
+            from app.utils.deep_links import build_cta_url
             from app.utils.email import send_email
             from app.utils.email_templates import build_reply_email
             import asyncio
@@ -2011,16 +2035,42 @@ class ReportService:
                 subtitle_parts.append(severity)
             subtitle = " · ".join(subtitle_parts) or "issue"
 
+            # 이벤트별 문구/본문.
+            # 예전엔 세 이벤트가 전부 답글 템플릿 기본문구("New reply on your ...")를 타서
+            # 신규 등록도 "누가 답글을 달았다"로 나갔고, 인용 블록에 본문 대신 제목이 들어가
+            # subtitle 의 제목과 중복되면서 정작 내용은 메일에 없었다.
+            description = (report.payload or {}).get("description") or None
+            status_label_map = {
+                "open": "reopened",
+                "in_progress": "marked in progress",
+                "closed": "closed",
+            }
+            title_txt = report.title or "(untitled)"
             if event == "created":
                 context_label = "issue report"
-                excerpt_text = report.title or excerpt
+                excerpt_text = description
+                excerpt_fallback = "(No description provided)"
+                email_subject = f"[Issue] New · {title_txt}"
+                headline = "New issue report"
+                lead = f"<strong>{escape(actor_name)}</strong> reported a new issue:"
             elif event.startswith("status:"):
                 new_status = event.split(":", 1)[1]
                 context_label = f"issue {new_status}"
-                excerpt_text = report.title
+                excerpt_text = description
+                excerpt_fallback = "(No description provided)"
+                status_txt = status_label_map.get(new_status, new_status)
+                email_subject = f"[Issue] {new_status.replace('_', ' ').title()} · {title_txt}"
+                headline = f"Issue {status_txt}"
+                lead = (
+                    f"<strong>{escape(actor_name)}</strong> {escape(status_txt)} this issue:"
+                )
             else:
                 context_label = "issue report"
                 excerpt_text = excerpt
+                excerpt_fallback = "(Photo or video attachment)"
+                email_subject = f"[Issue] Reply · {title_txt}"
+                headline = "New reply on an issue report"
+                lead = f"<strong>{escape(actor_name)}</strong> left a reply on:"
 
             # 1) 수신자에게 in-app alert (email 과 같은 집합 — 조회권자 전원이 아니다)
             for uid in recipients:
@@ -2045,7 +2095,9 @@ class ReportService:
             for uid in recipients:
                 try:
                     recipient = await db.execute(
-                        select(User.full_name, User.email).where(User.id == uid)
+                        select(User.full_name, User.email, Role.priority)
+                        .join(Role, Role.id == User.role_id, isouter=True)
+                        .where(User.id == uid)
                     )
                     row = recipient.first()
                     if not row or not row.email:
@@ -2054,13 +2106,20 @@ class ReportService:
                             report.id, event, uid,
                         )
                         continue
+                    if not await alert_service.should_send_email(db, uid, "reply"):
+                        continue
                     subject, html = build_reply_email(
                         recipient_name=row.full_name or "there",
                         author_name=actor_name,
                         context_label=context_label.title(),
                         context_subtitle=f"{subtitle} · {report.title or ''}".strip(" ·"),
-                        excerpt=(excerpt_text[:160] if excerpt_text else None),
-                        cta_url=None,
+                        excerpt=_email_excerpt(excerpt_text),
+                        cta_url=build_cta_url("issue_report", report.id, row.priority),
+                        subject=email_subject,
+                        headline=headline,
+                        lead=lead,
+                        cta_label="Open issue",
+                        excerpt_fallback=excerpt_fallback,
                     )
                     asyncio.create_task(send_email(to=row.email, subject=subject, html=html))
                 except Exception:
@@ -2088,6 +2147,7 @@ class ReportService:
             return
         try:
             from app.services.alert_service import alert_service
+            from app.utils.deep_links import build_cta_url
             from app.utils.email import send_email
             from app.utils.email_templates import build_reply_email
             import asyncio
@@ -2095,11 +2155,14 @@ class ReportService:
             author_r = await db.execute(select(User.full_name).where(User.id == author_id))
             author_name = author_r.scalar() or "Manager"
             recipient_r = await db.execute(
-                select(User.full_name, User.email).where(User.id == recipient_id)
+                select(User.full_name, User.email, Role.priority)
+                .join(Role, Role.id == User.role_id, isouter=True)
+                .where(User.id == recipient_id)
             )
             row = recipient_r.first()
             recipient_name = (row.full_name if row else None) or "there"
             recipient_email = row.email if row else None
+            recipient_priority = row.priority if row else None
 
             # context label/subtitle: type별
             context_label = "report"
@@ -2135,8 +2198,10 @@ class ReportService:
                     author_name=author_name,
                     context_label=context_label.title(),
                     context_subtitle=subtitle,
-                    excerpt=(excerpt[:160] if excerpt else None),
-                    cta_url=None,
+                    excerpt=_email_excerpt(excerpt),
+                    cta_url=build_cta_url(
+                        f"{report.type}_report", report.id, recipient_priority
+                    ),
                 )
                 asyncio.create_task(send_email(to=recipient_email, subject=subject, html=html))
         except Exception:

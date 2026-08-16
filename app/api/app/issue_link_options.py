@@ -170,12 +170,17 @@ async def get_link_options(
     # role_name (User.role) lookup — User has role_id
     role_user_ids = {u.role_id for _us, u in us_data if u.role_id}
     user_role_map: dict[UUID, str] = {}
+    # role_priority 는 클라(앱/콘솔)의 "related role" 칩이 Owner/GM/SV/Staff 인원수를
+    # 세는 데 쓴다. 빠지면 전부 count=0 이 되어 All 칩만 활성화된다.
+    user_priority_map: dict[UUID, int] = {}
     if role_user_ids:
         from app.models.user import Role
         rows = await db.execute(
-            select(Role.id, Role.name).where(Role.id.in_(role_user_ids))
+            select(Role.id, Role.name, Role.priority).where(Role.id.in_(role_user_ids))
         )
-        user_role_map = {r.id: r.name for r in rows.all()}
+        for r in rows.all():
+            user_role_map[r.id] = r.name
+            user_priority_map[r.id] = r.priority
 
     users_out = [
         {
@@ -183,6 +188,7 @@ async def get_link_options(
             "username": u.username,
             "full_name": u.full_name,
             "role_name": user_role_map.get(u.role_id, ""),
+            "role_priority": user_priority_map.get(u.role_id),
         }
         for _us, u in us_data
     ]
