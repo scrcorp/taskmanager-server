@@ -304,6 +304,19 @@ class EmailVerificationService:
         record.is_used = True
         return await self._finalize_email_verified(db, user, email)
 
+    async def mark_email_verified(
+        self,
+        db: AsyncSession,
+        user: User,
+        email: str,
+    ) -> dict:
+        """코드 검증 없이 인증을 확정하는 공개 진입점 (관리자 수동 인증).
+
+        이메일 소유 확인이 없는 경로 — 상태/중복 가드는 호출자 책임
+        (user_service.verify_email_manually 참조).
+        """
+        return await self._finalize_email_verified(db, user, email)
+
     async def _finalize_email_verified(
         self,
         db: AsyncSession,

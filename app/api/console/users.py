@@ -281,6 +281,25 @@ async def toggle_user_active(
     return user
 
 
+@router.post("/{user_id}/verify-email", response_model=UserResponse)
+async def verify_user_email(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> UserResponse:
+    """관리자가 이메일 인증을 수동으로 확정합니다.
+
+    Manually mark a user's email as verified (admin action for staff
+    who cannot receive the verification email). Also assigns a clock-in
+    PIN if the user does not have one yet.
+    """
+    org_id: UUID = current_user.organization_id
+    user = await user_service.verify_email_manually(db, user_id, org_id)
+    if hide_cost_for(current_user):
+        scrub_cost_fields(user)
+    return user
+
+
 @router.delete("/{user_id}", response_model=MessageResponse)
 async def delete_user(
     user_id: UUID,
