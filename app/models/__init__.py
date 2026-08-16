@@ -65,6 +65,7 @@ from app.models.rate import HourlyRateHistory
 from app.models.payroll import PayPeriod, PayrollEntry, PayrollEvent
 from app.models.contact import (
     Contact,
+    ContactVisibilityTarget,
     ContactPhone,
     ContactTag,
     ContactTagLink,
@@ -115,6 +116,6 @@ __all__ = [
     "StaffAvailability", "StaffAvailabilityHistory", "StaffAvailabilityPreset",
     "HourlyRateHistory",
     "PayPeriod", "PayrollEntry", "PayrollEvent",
-    "Contact", "ContactPhone", "ContactTag", "ContactTagLink",
+    "Contact", "ContactVisibilityTarget", "ContactPhone", "ContactTag", "ContactTagLink",
     "ContactChangeRequest", "ContactAuditLog",
 ]

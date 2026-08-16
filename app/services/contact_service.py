@@ -16,10 +16,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import Select, ColumnElement, and_, exists, func, or_, select
+from sqlalchemy import Select, ColumnElement, String, and_, exists, func, or_, select
+from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,15 +33,27 @@ from app.core.error_codes.contacts import (
     CONTACT_REQUEST_NOT_PENDING,
     CONTACT_STORE_FORBIDDEN,
     CONTACT_VALIDATION_ERROR,
+    CONTACT_VISIBILITY_CONFLICT,
+    CONTACT_VISIBILITY_REQUIRED,
 )
 from app.core.permissions import is_gm_plus
 from app.models.contact import (
     CONTACT_REQUEST_TYPES,
+    CONTACT_SOURCE_BATCH,
+    CONTACT_SOURCE_DIRECT,
+    CONTACT_TARGET_ROLE,
+    CONTACT_TARGET_STORE,
+    CONTACT_TARGET_TYPES,
+    CONTACT_TARGET_USER,
+    CONTACT_VISIBILITIES,
+    CONTACT_VISIBILITY_ORGANIZATION,
+    CONTACT_VISIBILITY_RESTRICTED,
     Contact,
     ContactChangeRequest,
     ContactPhone,
     ContactTag,
     ContactTagLink,
+    ContactVisibilityTarget,
 )
 from app.models.organization import Store
 from app.models.user import User
@@ -55,6 +68,7 @@ from app.schemas.contact import (
     ContactPhoneResponse,
     ContactRequestApprove,
     ContactResponse,
+    ContactTargetRef,
     ContactTagRef,
     ContactTagResponse,
     ContactUpdate,
@@ -88,6 +102,37 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _normalize_request_payload(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """신청 payload 를 **읽을 때만** 현행 가시성 형태로 해석한다 (계약 개정 §0-A).
+
+    복수 매장 개정 이전에 저장된 pending 신청은 단일 `store_id` 키를 갖는다. 그대로
+    `ContactPayload` 에 넣으면 그 키는 무시되고 visibility 가 기본값(전체 공유)이 되어
+    **승인 순간 조용히 전 조직 공개로 넓어진다.** 그래서 폴백이 필요하다.
+
+    원문(`req.payload`)은 절대 덮어쓰지 않는다 — 신청 원문 영구 보존 (D4).
+
+    삭제 조건: 개정 배포 이전에 생성된 pending 신청이 0건이 되면 이 함수와 호출부를 제거.
+    """
+    if raw is None:
+        return None
+    if "visibility" in raw:
+        return raw
+    if "store_id" not in raw:
+        return raw
+    legacy_store_id = raw.get("store_id")
+    converted = {k: v for k, v in raw.items() if k != "store_id"}
+    if legacy_store_id:
+        converted["visibility"] = CONTACT_VISIBILITY_RESTRICTED
+        converted["targets"] = [
+            {"type": CONTACT_TARGET_STORE, "id": str(legacy_store_id)}
+        ]
+    else:
+        converted["visibility"] = CONTACT_VISIBILITY_ORGANIZATION
+        converted["targets"] = []
+    converted["excluded_user_ids"] = []
+    return converted
+
+
 def _parse_uuid(value: str, field: str) -> UUID:
     """문자열 → UUID. 형식이 틀리면 400 (500 으로 새지 않게)."""
     try:
@@ -108,20 +153,78 @@ class ContactService:
     def _visibility_clause(
         self, user: User, accessible: list[UUID] | None
     ) -> ColumnElement[bool] | None:
-        """store 가시 조건. None = 조건 없음(전 매장).
+        """가시 조건. None = 조건 없음(전부 보임).
 
-        Owner/Super Owner: accessible is None → 전부.
-        **GM: 전 매장 예외 (D1 표)** — `get_accessible_store_ids` 는 GM 에게 "관리 매장"만
-        주지만, 연락처 가시성에서 GM 은 전 매장이므로 store 조건 자체를 붙이지 않는다.
-        warnings 와 다른 지점이니 복붙하지 말 것.
-        SV/기타 read 보유자: store_id IS NULL(전체 공유) 또는 배정 매장.
+        **규칙은 한 줄이다: 대상에 없으면 안 보인다. 예외는 Owner 뿐** (V3).
+        원설계 D1 의 "GM 은 전 매장" 예외는 폐기됐다 — `is_gm_plus` 로 조건을 건너뛰던
+        코드가 여기 있었는데, 그게 있으면 "개인 지정" 이 GM 에게 뚫린다.
+
+        Owner 아닌 사람이 보는 조건 (OR):
+            - 전 조직 공유 모드이거나
+            - **작성자 본인**이거나 (V6 — 자기가 만든 게 저장하자마자 사라지면 안 된다)
+            - 포함 대상(매장/직급/개인) 중 하나라도 자신에게 걸리고, **제외되지 않았으면**
+
+        `accessible` 은 매장 축 판정에만 쓴다. None(전 매장 접근)이면 매장 축은 항상 참.
         """
-        if accessible is None or is_gm_plus(user):
+        from app.core.permissions import is_owner
+
+        if is_owner(user):
             return None
-        if not accessible:
-            # 배정 매장이 없으면 전체 공유 연락처만 보인다.
-            return Contact.store_id.is_(None)
-        return or_(Contact.store_id.is_(None), Contact.store_id.in_(accessible))
+
+        org_wide = Contact.visibility == CONTACT_VISIBILITY_ORGANIZATION
+        mine = Contact.created_by == user.id
+        return or_(org_wide, mine, self._target_match_clause(user, accessible))
+
+    @staticmethod
+    def _excluded_clause(user: User) -> ColumnElement[bool]:
+        """이 사람이 명시적으로 **제외**된 연락처인가 (V4)."""
+        return exists(
+            select(ContactVisibilityTarget.id).where(
+                ContactVisibilityTarget.contact_id == Contact.id,
+                ContactVisibilityTarget.target_type == CONTACT_TARGET_USER,
+                ContactVisibilityTarget.target_id == user.id,
+                ContactVisibilityTarget.is_excluded.is_(True),
+            )
+        )
+
+    def _target_match_clause(
+        self, user: User, accessible: list[UUID] | None
+    ) -> ColumnElement[bool]:
+        """포함 대상 중 하나라도 이 사람에게 걸리는가 (OR) — 그리고 제외되지 않았는가.
+
+        EXISTS 로 쓴다 — JOIN 하면 대상 수만큼 행이 불어나 페이지네이션 total 이 틀어진다.
+        """
+        # 개인 지정
+        matches: list[ColumnElement[bool]] = [
+            and_(
+                ContactVisibilityTarget.target_type == CONTACT_TARGET_USER,
+                ContactVisibilityTarget.target_id == user.id,
+            ),
+            # 직급 지정 — 동적(V5). 승진하면 그 순간부터 보인다.
+            and_(
+                ContactVisibilityTarget.target_type == CONTACT_TARGET_ROLE,
+                ContactVisibilityTarget.target_id == user.role_id,
+            ),
+        ]
+        # 매장 지정 — accessible None 이면 전 매장 접근이므로 매장 축은 무조건 참.
+        if accessible is None:
+            matches.append(ContactVisibilityTarget.target_type == CONTACT_TARGET_STORE)
+        elif accessible:
+            matches.append(
+                and_(
+                    ContactVisibilityTarget.target_type == CONTACT_TARGET_STORE,
+                    ContactVisibilityTarget.target_id.in_(list(accessible)),
+                )
+            )
+
+        included = exists(
+            select(ContactVisibilityTarget.id).where(
+                ContactVisibilityTarget.contact_id == Contact.id,
+                ContactVisibilityTarget.is_excluded.is_(False),
+                or_(*matches),
+            )
+        )
+        return and_(included, ~self._excluded_clause(user))
 
     def _base_select(
         self, user: User, accessible: list[UUID] | None
@@ -158,9 +261,180 @@ class ContactService:
                 raise CONTACT_STORE_FORBIDDEN(store_id=str(store_id))
             raise
 
+    async def _guard_targets(
+        self, db: AsyncSession, user: User, targets: Sequence[Any]
+    ) -> list[tuple[str, UUID]]:
+        """공개 대상이 **이 org 의 것인지** 검증하고 (type, id) 목록으로 정규화한다.
+
+        - store : 기존 store 가드 그대로 (타 org 404 / 접근 불가 403)
+        - role  : 같은 org 의 role 인지
+        - user  : 같은 org 의 user 인지
+
+        하나라도 어긋나면 그 자리에서 막는다 — 통과한 것만 저장되는 일이 없게.
+        """
+        from app.models.user import Role
+
+        resolved: list[tuple[str, UUID]] = []
+        seen: set[tuple[str, UUID]] = set()
+        for raw in targets:
+            t_type = getattr(raw, "type", None) or (raw or {}).get("type")
+            t_id_raw = getattr(raw, "id", None) or (raw or {}).get("id")
+            if t_type not in CONTACT_TARGET_TYPES:
+                raise CONTACT_VALIDATION_ERROR(
+                    message="That visibility target type is not valid.", field="targets"
+                )
+            t_id = _parse_uuid(str(t_id_raw), "targets")
+            key = (t_type, t_id)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if t_type == CONTACT_TARGET_STORE:
+                await self._guard_store(db, user, t_id)
+            elif t_type == CONTACT_TARGET_ROLE:
+                found = (
+                    await db.execute(
+                        select(Role.id).where(
+                            Role.id == t_id,
+                            Role.organization_id == user.organization_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if found is None:
+                    raise CONTACT_VALIDATION_ERROR(
+                        message="That role is not in your organization.", field="targets"
+                    )
+            else:  # user
+                found = (
+                    await db.execute(
+                        select(User.id).where(
+                            User.id == t_id,
+                            User.organization_id == user.organization_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if found is None:
+                    raise CONTACT_VALIDATION_ERROR(
+                        message="That person is not in your organization.", field="targets"
+                    )
+            resolved.append(key)
+        return resolved
+
+    async def _guard_excluded_users(
+        self, db: AsyncSession, user: User, user_ids: Sequence[Any]
+    ) -> list[UUID]:
+        """제외 대상(사람) 검증 — 같은 org 인지만 본다 (V4)."""
+        resolved: list[UUID] = []
+        seen: set[UUID] = set()
+        for raw in user_ids:
+            uid = _parse_uuid(str(raw), "excluded_user_ids")
+            if uid in seen:
+                continue
+            seen.add(uid)
+            found = (
+                await db.execute(
+                    select(User.id).where(
+                        User.id == uid, User.organization_id == user.organization_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if found is None:
+                raise CONTACT_VALIDATION_ERROR(
+                    message="That person is not in your organization.",
+                    field="excluded_user_ids",
+                )
+            resolved.append(uid)
+        return resolved
+
+    @staticmethod
+    def _validate_visibility_state(visibility: str, targets: Sequence[Any]) -> None:
+        """가시성 모드 ↔ 대상 목록 정합성 (V1).
+
+        **병합 후 최종 상태**에 대해 부른다 — PATCH 로 한쪽만 보내 모순 상태가 되는 것도
+        여기서 걸린다. 대상 0개인 restricted 를 허용하면 실수가 공개 방향으로 난다.
+        """
+        if visibility not in CONTACT_VISIBILITIES:
+            raise CONTACT_VALIDATION_ERROR(
+                message="That visibility setting is not valid.", field="visibility"
+            )
+        if visibility == CONTACT_VISIBILITY_RESTRICTED and not targets:
+            raise CONTACT_VISIBILITY_REQUIRED()
+        if visibility == CONTACT_VISIBILITY_ORGANIZATION and targets:
+            raise CONTACT_VISIBILITY_CONFLICT()
+
     # ====================================================================
     # 응답 조립 (bulk 로딩 — relationship 을 선언하지 않았으므로 명시 쿼리)
     # ====================================================================
+
+    async def _load_targets(
+        self, db: AsyncSession, contact_ids: Sequence[UUID]
+    ) -> tuple[dict[UUID, list[Any]], dict[UUID, list[Any]]]:
+        """연락처별 공개 대상 + 제외자를 **이름까지 붙여** 돌려준다.
+
+        타입마다 참조 테이블이 달라(FK 없는 다형 참조) 타입별로 한 번씩 이름을 긁는다.
+        정렬은 (타입, 이름) 고정 — 요청마다 순서가 흔들리면 콘솔 표시가 깜빡인다.
+        """
+        from app.models.user import Role
+
+        rows = (
+            await db.execute(
+                select(ContactVisibilityTarget).where(
+                    ContactVisibilityTarget.contact_id.in_(list(contact_ids))
+                )
+            )
+        ).scalars().all()
+        if not rows:
+            return {}, {}
+
+        by_type: dict[str, set[UUID]] = {}
+        for r in rows:
+            by_type.setdefault(r.target_type, set()).add(r.target_id)
+
+        names: dict[tuple[str, UUID], str] = {}
+        if by_type.get(CONTACT_TARGET_STORE):
+            for sid, nm in (
+                await db.execute(
+                    select(Store.id, Store.name).where(
+                        Store.id.in_(list(by_type[CONTACT_TARGET_STORE]))
+                    )
+                )
+            ).all():
+                names[(CONTACT_TARGET_STORE, sid)] = nm
+        if by_type.get(CONTACT_TARGET_ROLE):
+            for rid, nm in (
+                await db.execute(
+                    select(Role.id, Role.name).where(
+                        Role.id.in_(list(by_type[CONTACT_TARGET_ROLE]))
+                    )
+                )
+            ).all():
+                names[(CONTACT_TARGET_ROLE, rid)] = nm
+        if by_type.get(CONTACT_TARGET_USER):
+            for uid, nm in (
+                await db.execute(
+                    select(User.id, User.full_name).where(
+                        User.id.in_(list(by_type[CONTACT_TARGET_USER]))
+                    )
+                )
+            ).all():
+                names[(CONTACT_TARGET_USER, uid)] = nm
+
+        includes: dict[UUID, list[ContactTargetRef]] = {}
+        excludes: dict[UUID, list[ContactTargetRef]] = {}
+        for r in rows:
+            ref = ContactTargetRef(
+                type=r.target_type,
+                id=str(r.target_id),
+                # 대상이 지워졌으면 이름이 없다 — 조용히 빈칸으로 두지 않는다.
+                name=names.get((r.target_type, r.target_id)) or "(deleted)",
+            )
+            bucket = excludes if r.is_excluded else includes
+            bucket.setdefault(r.contact_id, []).append(ref)
+
+        for bucket in (includes, excludes):
+            for k in bucket:
+                bucket[k].sort(key=lambda x: (x.type, x.name))
+        return includes, excludes
 
     async def _build_responses(
         self,
@@ -210,16 +484,11 @@ class ContactService:
                 ContactTagRef(id=str(tag.id), name=tag.name, key=tag.key)
             )
 
-        # 매장명 / 작성자명 스냅샷 조인
-        store_ids = {c.store_id for c in contacts if c.store_id is not None}
-        store_names: dict[UUID, str] = {}
-        if store_ids:
-            rows = (
-                await db.execute(
-                    select(Store.id, Store.name).where(Store.id.in_(store_ids))
-                )
-            ).all()
-            store_names = {sid: name for sid, name in rows}
+        # 공개 대상 — 타입별로 이름을 해석해 붙인다 (표시·이력 모두 이름이 필요하다)
+        targets_by_contact, excluded_by_contact = await self._load_targets(db, ids)
+
+        # 작성자명 스냅샷 조인
+
 
         user_ids = {c.created_by for c in contacts if c.created_by is not None}
         user_names: dict[UUID, str] = {}
@@ -255,8 +524,9 @@ class ContactService:
                 company=c.company,
                 email=c.email,
                 memo=c.memo,
-                store_id=str(c.store_id) if c.store_id else None,
-                store_name=store_names.get(c.store_id) if c.store_id else None,
+                visibility=c.visibility,
+                targets=targets_by_contact.get(c.id, []),
+                excluded_users=excluded_by_contact.get(c.id, []),
                 phones=phones_by_contact.get(c.id, []),
                 tags=tags_by_contact.get(c.id, []),
                 created_by=str(c.created_by) if c.created_by else None,
@@ -281,13 +551,119 @@ class ContactService:
             company=resp.company,
             email=resp.email,
             memo=resp.memo,
-            store_id=resp.store_id,
-            store_name=resp.store_name,
+            visibility=resp.visibility,
+            targets=[
+                {"type": t.type, "id": t.id, "name": t.name} for t in resp.targets
+            ],
+            excluded_users=[
+                {"id": t.id, "name": t.name} for t in resp.excluded_users
+            ],
             phones=[
                 {"label": p.label, "number": p.number, "is_primary": p.is_primary}
                 for p in resp.phones
             ],
             tags=[t.name for t in resp.tags],
+        )
+
+    # ====================================================================
+    # 열람자 미리보기 (V4/V5) — 저장 전에 "지금 누가 보는가"를 명단으로 보여준다
+    # ====================================================================
+
+    async def preview_viewers(
+        self,
+        db: AsyncSession,
+        user: User,
+        visibility: str,
+        targets: Sequence[Any],
+        excluded_user_ids: Sequence[Any],
+    ) -> dict[str, Any]:
+        """이 가시성 설정이면 **실제로 누가 보는지** 사람 명단으로 풀어 준다.
+
+        role/position 대상이 동적(V5)이라 "지금 몇 명"이 조용히 바뀐다 — 그 변화를
+        숫자와 명단으로 드러내는 게 이 API 의 목적이다.
+
+        Owner 는 항상 포함되고 **제외할 수 없다** (V1). 응답의 `can_exclude=False` 로 표시.
+        """
+        from app.core.permissions import OWNER_PRIORITY
+        from app.models.user import Role
+        from app.models.user_store import UserStore
+
+        org_id = user.organization_id
+        resolved = await self._guard_targets(db, user, targets)
+        excluded = set(await self._guard_excluded_users(db, user, excluded_user_ids))
+        self._validate_visibility_state(visibility, resolved)
+
+        # Owner 는 무조건 본다 (제외 불가)
+        owner_rows = (
+            await db.execute(
+                select(User.id, User.full_name, Role.priority)
+                .join(Role, Role.id == User.role_id)
+                .where(User.organization_id == org_id, Role.priority <= OWNER_PRIORITY)
+            )
+        ).all()
+        viewers: dict[UUID, dict[str, Any]] = {
+            uid: {"id": str(uid), "name": nm, "reason": "Owner", "can_exclude": False}
+            for uid, nm, _ in owner_rows
+        }
+
+        if visibility == CONTACT_VISIBILITY_ORGANIZATION:
+            rows = (
+                await db.execute(
+                    select(User.id, User.full_name).where(User.organization_id == org_id)
+                )
+            ).all()
+            for uid, nm in rows:
+                viewers.setdefault(
+                    uid,
+                    {"id": str(uid), "name": nm, "reason": "Everyone", "can_exclude": False},
+                )
+            return {"viewers": self._sorted_viewers(viewers), "total": len(viewers)}
+
+        store_ids = [i for t, i in resolved if t == CONTACT_TARGET_STORE]
+        role_ids = [i for t, i in resolved if t == CONTACT_TARGET_ROLE]
+        user_ids = [i for t, i in resolved if t == CONTACT_TARGET_USER]
+
+        async def _add(stmt, reason: str) -> None:
+            for uid, nm in (await db.execute(stmt)).all():
+                if uid in excluded or uid in viewers:
+                    continue
+                viewers[uid] = {
+                    "id": str(uid),
+                    "name": nm,
+                    "reason": reason,
+                    "can_exclude": True,
+                }
+
+        if store_ids:
+            await _add(
+                select(User.id, User.full_name)
+                .join(UserStore, UserStore.user_id == User.id)
+                .where(User.organization_id == org_id, UserStore.store_id.in_(store_ids))
+                .distinct(),
+                "Store",
+            )
+        if role_ids:
+            await _add(
+                select(User.id, User.full_name).where(
+                    User.organization_id == org_id, User.role_id.in_(role_ids)
+                ),
+                "Role",
+            )
+        if user_ids:
+            await _add(
+                select(User.id, User.full_name).where(
+                    User.organization_id == org_id, User.id.in_(user_ids)
+                ),
+                "Named",
+            )
+        return {"viewers": self._sorted_viewers(viewers), "total": len(viewers)}
+
+    @staticmethod
+    def _sorted_viewers(viewers: dict[UUID, dict[str, Any]]) -> list[dict[str, Any]]:
+        """Owner 먼저, 그 다음 이름순 — 순서가 흔들리면 명단을 눈으로 대조하기 어렵다."""
+        return sorted(
+            viewers.values(),
+            key=lambda v: (0 if v["reason"] == "Owner" else 1, v["name"] or ""),
         )
 
     # ====================================================================
@@ -319,12 +695,21 @@ class ContactService:
         # --- store 필터 ---
         if store_id:
             if store_id == "none":
-                stmt = stmt.where(Contact.store_id.is_(None))
+                stmt = stmt.where(Contact.visibility == CONTACT_VISIBILITY_ORGANIZATION)
             else:
                 store_uuid = _parse_uuid(store_id, "store_id")
                 # 타 org → 404, 접근 불가 → 403 (드롭다운에는 접근 가능한 매장만 담긴다)
                 await self._guard_store(db, user, store_uuid)
-                stmt = stmt.where(Contact.store_id == store_uuid)
+                stmt = stmt.where(
+                    exists(
+                        select(ContactVisibilityTarget.id).where(
+                            ContactVisibilityTarget.contact_id == Contact.id,
+                            ContactVisibilityTarget.target_type == CONTACT_TARGET_STORE,
+                            ContactVisibilityTarget.target_id == store_uuid,
+                            ContactVisibilityTarget.is_excluded.is_(False),
+                        )
+                    )
+                )
 
         # --- 태그 필터 (정규화 키 비교) ---
         if tag and tag.strip():
@@ -555,6 +940,76 @@ class ContactService:
             )
         await db.flush()
 
+    async def _write_targets(
+        self,
+        db: AsyncSession,
+        contact: Contact,
+        targets: Sequence[tuple[str, UUID]],
+        excluded_user_ids: Sequence[UUID],
+    ) -> None:
+        """공개 대상 + 제외자 전량 교체 — delete-all + re-insert (링크 행 id 는 의미 없음)."""
+        existing = (
+            await db.execute(
+                select(ContactVisibilityTarget).where(
+                    ContactVisibilityTarget.contact_id == contact.id
+                )
+            )
+        ).scalars().all()
+        for row in existing:
+            await db.delete(row)
+        await db.flush()
+
+        for t_type, t_id in targets:
+            db.add(
+                ContactVisibilityTarget(
+                    contact_id=contact.id, target_type=t_type, target_id=t_id
+                )
+            )
+        for uid in excluded_user_ids:
+            # 포함 대상으로도 같은 사람이 들어와 있으면 UNIQUE 가 걸린다 — 제외가 이긴다.
+            if (CONTACT_TARGET_USER, uid) in set(targets):
+                continue
+            db.add(
+                ContactVisibilityTarget(
+                    contact_id=contact.id,
+                    target_type=CONTACT_TARGET_USER,
+                    target_id=uid,
+                    is_excluded=True,
+                )
+            )
+        await db.flush()
+
+    async def _current_targets(
+        self, db: AsyncSession, contact: Contact
+    ) -> list[tuple[str, UUID]]:
+        """이 연락처의 현재 **포함** 대상 목록 (제외는 뺀다)."""
+        rows = (
+            await db.execute(
+                select(
+                    ContactVisibilityTarget.target_type,
+                    ContactVisibilityTarget.target_id,
+                ).where(
+                    ContactVisibilityTarget.contact_id == contact.id,
+                    ContactVisibilityTarget.is_excluded.is_(False),
+                )
+            )
+        ).all()
+        return [(t, i) for t, i in rows]
+
+    async def _current_excluded_user_ids(
+        self, db: AsyncSession, contact: Contact
+    ) -> list[UUID]:
+        """이 연락처의 현재 제외자 목록."""
+        rows = (
+            await db.execute(
+                select(ContactVisibilityTarget.target_id).where(
+                    ContactVisibilityTarget.contact_id == contact.id,
+                    ContactVisibilityTarget.is_excluded.is_(True),
+                )
+            )
+        ).scalars().all()
+        return list(rows)
+
     async def _write_tags(
         self, db: AsyncSession, user: User, contact: Contact, names: list[str]
     ) -> None:
@@ -589,14 +1044,25 @@ class ContactService:
         for key in ("company", "email", "memo"):
             if key in fields:
                 setattr(contact, key, fields[key])
-        if "store_id" in fields:
-            raw = fields["store_id"]
-            if raw is None:
-                contact.store_id = None
+        # 가시성 — 모드/대상/제외는 각각 독립한 키지만, **검증은 병합 후 최종 상태**로
+        # 한다 (V1). 한쪽만 보내 모순 상태가 되는 것도 여기서 걸린다.
+        if "visibility" in fields or "targets" in fields or "excluded_user_ids" in fields:
+            visibility = fields.get("visibility", contact.visibility)
+            if "targets" in fields:
+                resolved = await self._guard_targets(db, user, fields["targets"] or [])
             else:
-                store_uuid = _parse_uuid(str(raw), "store_id")
-                await self._guard_store(db, user, store_uuid)
-                contact.store_id = store_uuid
+                resolved = await self._current_targets(db, contact)
+            self._validate_visibility_state(visibility, resolved)
+
+            if "excluded_user_ids" in fields:
+                excluded = await self._guard_excluded_users(
+                    db, user, fields["excluded_user_ids"] or []
+                )
+            else:
+                excluded = await self._current_excluded_user_ids(db, contact)
+
+            await self._write_targets(db, contact, resolved, excluded)
+            contact.visibility = visibility
         if fields.get("phones") is not None:
             await self._write_phones(db, contact, fields["phones"])
         if fields.get("tags") is not None:
@@ -669,13 +1135,18 @@ class ContactService:
         reason: str | None = None,
         created_by: UUID | None = None,
         change_request_id: UUID | None = None,
+        source: str = CONTACT_SOURCE_DIRECT,
+        batch_id: UUID | None = None,
     ) -> ContactResponse:
         """연락처 생성. 신청 승인 경로도 이 메서드를 쓴다(created_by = 신청자).
 
         commit 은 하지 않는다 — 호출부(라우터 진입 서비스 메서드)가 커밋한다.
         """
+        # 가시성 검증은 _apply_content 가 최종 상태로 한다. 여기서는 컬럼이 NOT NULL 이라
+        # 유효한 초기값이 필요할 뿐이며, 곧바로 payload 값으로 덮인다.
         contact = Contact(
             organization_id=user.organization_id,
+            visibility=CONTACT_VISIBILITY_ORGANIZATION,
             name=payload.name,
             company=payload.company,
             email=payload.email,
@@ -689,6 +1160,9 @@ class ContactService:
         fields = payload.model_dump(exclude_unset=False)
         fields["phones"] = payload.phones or []
         fields["tags"] = payload.tags or []
+        # 생성은 전체 치환이므로 가시성 두 키가 항상 함께 간다(부분 수정과 다르다).
+        fields["targets"] = [t.model_dump() for t in (payload.targets or [])]
+        fields["excluded_user_ids"] = payload.excluded_user_ids or []
         await self._apply_content(db, user, contact, fields)
         await db.flush()
 
@@ -702,6 +1176,8 @@ class ContactService:
             contact_name=contact.name,
             change_request_id=change_request_id,
             reason=reason,
+            source=source,
+            batch_id=batch_id,
             before=None,
             after=self._snapshot(resp),
         )
@@ -723,7 +1199,9 @@ class ContactService:
             company=data.company,
             email=data.email,
             memo=data.memo,
-            store_id=data.store_id,
+            visibility=data.visibility,
+            targets=data.targets,
+            excluded_user_ids=data.excluded_user_ids,
             phones=data.phones,
             tags=data.tags,
         )
@@ -796,6 +1274,10 @@ class ContactService:
             fields["phones"] = data.phones if data.phones is not None else []
         if "tags" in fields:
             fields["tags"] = data.tags if data.tags is not None else []
+        if "targets" in fields:
+            fields["targets"] = [t.model_dump() for t in (data.targets or [])]
+        if "excluded_user_ids" in fields:
+            fields["excluded_user_ids"] = data.excluded_user_ids or []
         resp = await self.update_contact(
             db, user, accessible, contact, fields, reason=reason
         )
@@ -915,8 +1397,8 @@ class ContactService:
             status=req.status,
             contact_id=str(req.contact_id) if req.contact_id else None,
             contact_name=req.contact_name_snapshot,
-            payload=req.payload,
-            applied_payload=req.applied_payload,
+            payload=_normalize_request_payload(req.payload),
+            applied_payload=_normalize_request_payload(req.applied_payload),
             reason=req.reason,
             requested_by=str(req.requested_by) if req.requested_by else None,
             requested_by_name=req.requested_by_name,
@@ -1033,9 +1515,10 @@ class ContactService:
             contact_uuid = _parse_uuid(data.contact_id, "contact_id")
             contact = await self._load_visible(db, user, accessible, contact_uuid)
 
-        if data.payload is not None and data.payload.store_id:
-            store_uuid = _parse_uuid(data.payload.store_id, "store_id")
-            await self._guard_store(db, user, store_uuid)
+        if data.payload is not None:
+            requested = await self._guard_targets(db, user, data.payload.targets or [])
+            self._validate_visibility_state(data.payload.visibility, requested)
+            await self._guard_excluded_users(db, user, data.payload.excluded_user_ids or [])
 
         req = ContactChangeRequest(
             organization_id=user.organization_id,
@@ -1123,11 +1606,38 @@ class ContactService:
         clause = self._visibility_clause(user, accessible)
         if clause is not None:
             visible = self._visible_contact_ids_subquery(user, accessible)
-            store_values = [str(s) for s in (accessible or [])]
-            payload_store = ContactChangeRequest.payload["store_id"].astext
-            create_visible: ColumnElement[bool] = payload_store.is_(None)
+            # 신규 등록 신청은 아직 대상 연락처가 없다 — payload 안의 가시성으로 판정한다.
+            payload_visibility = ContactChangeRequest.payload["visibility"].astext
+            create_visible: ColumnElement[bool] = or_(
+                payload_visibility == CONTACT_VISIBILITY_ORGANIZATION,
+                # 내가 낸 신청은 언제나 보인다 (내용이 나에게 안 보이는 대상이어도).
+                ContactChangeRequest.requested_by == user.id,
+            )
+
+            # 포함 대상에 내가 걸리는가 — JSONB containment(`@>`) 로 대상 하나씩 확인.
+            candidates: list[dict[str, str]] = [
+                {"type": CONTACT_TARGET_USER, "id": str(user.id)},
+                {"type": CONTACT_TARGET_ROLE, "id": str(user.role_id)},
+            ]
+            for sid in accessible or []:
+                candidates.append({"type": CONTACT_TARGET_STORE, "id": str(sid)})
+            for cand in candidates:
+                create_visible = or_(
+                    create_visible,
+                    ContactChangeRequest.payload["targets"].contains([cand]),
+                )
+
+            # 구형식(store_id) 신청 폴백 — visibility 키가 아예 없는 행 (계약 개정 §0-A).
+            # 삭제 조건은 `_normalize_request_payload` 주석과 동일.
+            store_values = [str(x) for x in (accessible or [])]
+            legacy_store = ContactChangeRequest.payload["store_id"].astext
+            legacy_visible: ColumnElement[bool] = legacy_store.is_(None)
             if store_values:
-                create_visible = or_(create_visible, payload_store.in_(store_values))
+                legacy_visible = or_(legacy_visible, legacy_store.in_(store_values))
+            create_visible = or_(
+                create_visible,
+                and_(payload_visibility.is_(None), legacy_visible),
+            )
             stmt = stmt.where(
                 or_(
                     and_(
@@ -1243,7 +1753,8 @@ class ContactService:
         """
         effective = payload
         if effective is None and req.payload is not None:
-            effective = ContactPayload(**req.payload)
+            # 구형식(store_id) 폴백을 거쳐 읽는다 — 안 거치면 승인 시 가시성이 조용히 넓어진다.
+            effective = ContactPayload(**(_normalize_request_payload(req.payload) or {}))
 
         contact_resp: ContactResponse | None = None
         target: Contact | None = None
@@ -1339,9 +1850,10 @@ class ContactService:
         if req.status != "pending":
             raise CONTACT_REQUEST_NOT_PENDING(status=req.status)
 
-        if body.payload is not None and body.payload.store_id:
-            store_uuid = _parse_uuid(body.payload.store_id, "store_id")
-            await self._guard_store(db, user, store_uuid)
+        if body.payload is not None:
+            approved = await self._guard_targets(db, user, body.payload.targets or [])
+            self._validate_visibility_state(body.payload.visibility, approved)
+            await self._guard_excluded_users(db, user, body.payload.excluded_user_ids or [])
 
         contact_resp = await self._apply_request(
             db, user, accessible, req, payload=body.payload, note=body.note
@@ -1399,6 +1911,191 @@ class ContactService:
         await db.commit()
         await db.refresh(req)
         return self._build_request_response(req)
+
+    # ====================================================================
+    # 대량 등록 / 일괄 수정 (D1~D6)
+    # ====================================================================
+
+    async def bulk_create(
+        self,
+        db: AsyncSession,
+        user: User,
+        accessible: list[UUID] | None,
+        data: Any,
+    ) -> dict[str, Any]:
+        """대량 등록 — **전부 되거나 전부 안 된다** (D4).
+
+        `dry_run` 이면 검증만 하고 롤백한다. 화면은 항상 먼저 dry_run 으로 미리보기를
+        받고, 사람이 확인한 뒤 실제 저장을 부른다. 부분 저장을 허용하지 않는 이유는
+        "무엇이 들어갔는지" 사용자가 추적해야 하는 상태를 만들지 않기 위해서다.
+
+        실패한 행은 index 와 사유를 함께 돌려준다 — 어느 줄이 문제인지 화면이 짚어야 한다.
+        """
+        from app.utils.exceptions import AppError
+
+        batch_id = uuid4()
+        rows: list[dict[str, Any]] = []
+        created: list[ContactResponse] = []
+        failed = 0
+
+        for index, payload in enumerate(data.rows):
+            try:
+                # savepoint — 한 행이 터져도 세션이 죽지 않게 감싼다.
+                async with db.begin_nested():
+                    resp = await self.create_contact(
+                        db,
+                        user,
+                        accessible,
+                        payload,
+                        reason=data.reason,
+                        source=CONTACT_SOURCE_BATCH,
+                        batch_id=batch_id,
+                    )
+                created.append(resp)
+                rows.append(
+                    {
+                        "index": index,
+                        "name": payload.name,
+                        "valid": True,
+                        "error": None,
+                        "duplicate_phone_warnings": resp.duplicate_phone_warnings,
+                    }
+                )
+            except AppError as exc:
+                failed += 1
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                rows.append(
+                    {
+                        "index": index,
+                        "name": payload.name,
+                        "valid": False,
+                        "error": detail.get("message") or "This row could not be saved.",
+                        "duplicate_phone_warnings": [],
+                    }
+                )
+
+        valid_count = len(data.rows) - failed
+        # 미리보기이거나 한 행이라도 실패면 아무것도 남기지 않는다 (D4).
+        if data.dry_run or failed > 0:
+            await db.rollback()
+            return {
+                "dry_run": True,
+                "total": len(data.rows),
+                "valid_count": valid_count,
+                "failed_count": failed,
+                "created": 0,
+                "batch_id": None,
+                "rows": rows,
+            }
+
+        await db.commit()
+        return {
+            "dry_run": False,
+            "total": len(data.rows),
+            "valid_count": valid_count,
+            "failed_count": 0,
+            "created": len(created),
+            "batch_id": str(batch_id),
+            "rows": rows,
+        }
+
+    async def bulk_update(
+        self,
+        db: AsyncSession,
+        user: User,
+        accessible: list[UUID] | None,
+        data: Any,
+    ) -> dict[str, Any]:
+        """일괄 수정 — 태그 추가/제거, 회사명, 가시성 (D2).
+
+        **memo 는 일부러 없다.** 일괄 덮어쓰기는 기존 메모를 전부 날리는데 그 사고 위험이
+        얻는 편의보다 크다. 필요하면 한 건씩 고친다.
+
+        이력은 **연락처마다 한 행**을 남기고 batch_id 로 묶는다 (D1). 배치 1행만 남기면
+        개별 연락처 이력을 볼 때 변경이 안 보여 이 도메인의 원칙이 깨진다.
+        """
+        if not data.reason or not data.reason.strip():
+            raise CONTACT_REASON_REQUIRED(message="Enter a reason for this change.")
+
+        batch_id = uuid4()
+        changed = 0
+
+        # 가시성은 한 번만 검증·해석하고 모든 대상에 같은 값을 쓴다.
+        resolved_targets: list[tuple[str, UUID]] | None = None
+        resolved_excluded: list[UUID] | None = None
+        if data.visibility is not None:
+            resolved_targets = await self._guard_targets(db, user, data.targets or [])
+            self._validate_visibility_state(data.visibility, resolved_targets)
+            resolved_excluded = await self._guard_excluded_users(
+                db, user, data.excluded_user_ids or []
+            )
+
+        for raw_id in data.contact_ids:
+            contact_uuid = _parse_uuid(raw_id, "contact_ids")
+            # 안 보이는 연락처는 손댈 수 없다 — 404 로 존재를 숨긴다.
+            contact = await self._load_visible(db, user, accessible, contact_uuid)
+
+            before_resp = await self._build_response(db, contact)
+            before_snapshot = self._snapshot(before_resp)
+
+            if data.company is not None:
+                contact.company = data.company
+
+            if data.add_tags or data.remove_tags:
+                current = [t.name for t in before_resp.tags]
+                keys = {t.lower() for t in current}
+                for t in data.add_tags or []:
+                    if t.lower() not in keys:
+                        current.append(t)
+                        keys.add(t.lower())
+                remove_keys = {t.lower() for t in (data.remove_tags or [])}
+                current = [t for t in current if t.lower() not in remove_keys]
+                await self._write_tags(db, user, contact, current)
+
+            if data.visibility is not None:
+                assert resolved_targets is not None and resolved_excluded is not None
+                await self._write_targets(db, contact, resolved_targets, resolved_excluded)
+                contact.visibility = data.visibility
+
+            contact.updated_by = user.id
+            await db.flush()
+
+            after_resp = await self._build_response(db, contact)
+            after_snapshot = self._snapshot(after_resp)
+            changed_before, changed_after = diff_snapshots(before_snapshot, after_snapshot)
+            # 이미 그 상태였던 건은 이력을 남기지 않는다 (계약 §4.6 no-op).
+            if changed_after:
+                changed += 1
+                await contact_audit_service.record(
+                    db,
+                    organization_id=user.organization_id,
+                    action="update",
+                    actor=user,
+                    contact_id=contact.id,
+                    contact_name=contact.name,
+                    reason=data.reason,
+                    source=CONTACT_SOURCE_BATCH,
+                    batch_id=batch_id,
+                    before=changed_before,
+                    after=changed_after,
+                )
+
+        if data.dry_run:
+            await db.rollback()
+            return {
+                "dry_run": True,
+                "selected": len(data.contact_ids),
+                "changed": changed,
+                "batch_id": None,
+            }
+
+        await db.commit()
+        return {
+            "dry_run": False,
+            "selected": len(data.contact_ids),
+            "changed": changed,
+            "batch_id": str(batch_id),
+        }
 
     # ====================================================================
     # 권한 헬퍼

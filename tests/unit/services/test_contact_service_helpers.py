@@ -5,6 +5,8 @@
     - `_escape_like`: 사용자가 친 LIKE 와일드카드가 와일드카드로 새지 않는지
     - `_parse_uuid`: 잘못된 식별자는 500 이 아니라 400 도메인 에러
     - `_visibility_clause` (D1): Owner/GM 은 store 조건 없음, SV 는 조건 있음
+    - `_validate_visibility_state` (확장 D1): 모드 ↔ 대상 목록 정합성
+    - `_normalize_request_payload` (계약 개정 §0-A): 구형식 신청 폴백
     - `diff_snapshots` / `contact_snapshot`: 변경된 키만, 배열은 통째로
     - Pydantic 스키마 검증: 사유 필수 / 태그 대소문자 흡수 / 대표번호 1개 / 신청 모양
     - `contact_audit_service.record`: 오타 action 은 조용히 넘기지 않고 즉시 ValueError
@@ -32,7 +34,12 @@ from app.services.contact_audit_service import (
     contact_snapshot,
     diff_snapshots,
 )
-from app.services.contact_service import _escape_like, _parse_uuid, contact_service
+from app.services.contact_service import (
+    _escape_like,
+    _normalize_request_payload,
+    _parse_uuid,
+    contact_service,
+)
 from app.utils.exceptions import AppError
 from app.utils.phone import normalize_phone
 
@@ -98,32 +105,113 @@ def _user(priority: int) -> User:
     return u
 
 
-def test_visibility_owner_has_no_store_clause() -> None:
-    # Owner 는 accessible=None (전 매장)
+def test_visibility_owner_has_no_clause() -> None:
+    # Owner 만 예외 — 조건 자체가 안 붙는다 (V1/V3)
     assert contact_service._visibility_clause(_user(10), None) is None
 
 
-def test_visibility_gm_sees_every_store_even_with_limited_accessible() -> None:
-    # GM 은 관리 매장만 accessible 로 받지만 연락처 가시성은 전 매장 (D1 예외)
+def test_visibility_gm_no_longer_bypasses() -> None:
+    """GM 의 전 매장 예외는 폐기됐다 (V3).
+
+    이게 되살아나면 '개인 지정' 연락처가 GM 에게 뚫린다 — 이 트랙의 핵심 회귀 지점.
+    """
     gm = _user(20)
-    assert contact_service._visibility_clause(gm, [uuid.uuid4()]) is None
+    clause = contact_service._visibility_clause(gm, [uuid.uuid4()])
+    assert clause is not None
 
 
-def test_visibility_sv_is_restricted_to_all_store_or_assigned() -> None:
+def test_visibility_sv_clause_covers_org_wide_creator_and_targets() -> None:
     sv = _user(30)
-    store_id = uuid.uuid4()
-    clause = contact_service._visibility_clause(sv, [store_id])
+    clause = contact_service._visibility_clause(sv, [uuid.uuid4()])
     assert clause is not None
     sql = str(clause)
-    assert "IS NULL" in sql and "IN " in sql
+    # 전체 공유 OR 작성자 본인 OR 대상 매칭(EXISTS)
+    assert "visibility" in sql
+    assert "created_by" in sql
+    assert "EXISTS" in sql and "contact_visibility_targets" in sql
 
 
-def test_visibility_sv_without_stores_sees_only_all_store_contacts() -> None:
+def test_visibility_without_stores_still_matches_role_and_user_targets() -> None:
+    """배정 매장이 0개여도 직급·개인 지정으로는 보여야 한다.
+
+    예전엔 매장이 유일한 축이라 '매장 없으면 전체공유만'이었다. 3축이 된 뒤로는
+    그 지름길이 틀렸다 — 매장 없는 사람도 직급/개인 지정으로 볼 수 있다.
+    """
     sv = _user(30)
     clause = contact_service._visibility_clause(sv, [])
     assert clause is not None
-    # Contact.store_id IS NULL 단일 조건
-    assert str(clause) == str(Contact.store_id.is_(None))
+    sql = str(clause)
+    assert "contact_visibility_targets" in sql
+
+
+# ---------------------------------------------------------------------------
+# 가시성 모드 ↔ 대상 목록 정합성 (확장 D1)
+# ---------------------------------------------------------------------------
+
+
+def test_visibility_state_organization_with_no_stores_is_valid() -> None:
+    contact_service._validate_visibility_state("organization", [])
+
+
+def test_visibility_state_restricted_with_targets_is_valid() -> None:
+    contact_service._validate_visibility_state("restricted", [("store", uuid.uuid4())])
+
+
+def test_visibility_state_restricted_without_targets_is_rejected() -> None:
+    """대상 0개인데 전체 공유도 아니면 거부 — 이게 이 결정의 핵심이다 (V1)."""
+    with pytest.raises(AppError) as exc:
+        contact_service._validate_visibility_state("restricted", [])
+    assert exc.value.detail["code"] == "CONTACT_VISIBILITY_REQUIRED"
+
+
+def test_visibility_state_organization_with_targets_is_rejected() -> None:
+    with pytest.raises(AppError) as exc:
+        contact_service._validate_visibility_state("organization", [("store", uuid.uuid4())])
+    assert exc.value.detail["code"] == "CONTACT_VISIBILITY_CONFLICT"
+
+
+def test_visibility_state_unknown_mode_is_rejected() -> None:
+    with pytest.raises(AppError) as exc:
+        contact_service._validate_visibility_state("nonsense", [])
+    assert exc.value.detail["code"] == "CONTACT_VALIDATION_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# 구형식 신청 payload 폴백 (계약 개정 §0-A)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_payload_passes_through_new_format() -> None:
+    raw = {"name": "A", "visibility": "restricted", "targets": [{"type": "store", "id": "x"}]}
+    assert _normalize_request_payload(raw) is raw
+
+
+def test_normalize_payload_legacy_null_store_becomes_organization() -> None:
+    out = _normalize_request_payload({"name": "A", "store_id": None})
+    assert out == {
+        "name": "A",
+        "visibility": "organization",
+        "targets": [],
+        "excluded_user_ids": [],
+    }
+
+
+def test_normalize_payload_legacy_store_becomes_stores_mode() -> None:
+    """폴백이 없으면 승인 순간 가시성이 조용히 전 조직으로 넓어진다 — 그걸 막는 테스트."""
+    store_id = str(uuid.uuid4())
+    out = _normalize_request_payload({"name": "A", "store_id": store_id})
+    assert out["visibility"] == "restricted"
+    assert out["targets"] == [{"type": "store", "id": store_id}]
+    assert "store_id" not in out
+
+
+def test_normalize_payload_handles_none() -> None:
+    assert _normalize_request_payload(None) is None
+
+
+def test_normalize_payload_leaves_payload_without_either_key_alone() -> None:
+    raw = {"name": "A"}
+    assert _normalize_request_payload(raw) is raw
 
 
 # ---------------------------------------------------------------------------
@@ -137,8 +225,9 @@ def _snap(**over) -> dict:
         company="Acme",
         email="a@acme.com",
         memo="24h",
-        store_id=None,
-        store_name=None,
+        visibility="organization",
+        targets=[],
+        excluded_users=[],
         phones=[{"label": "office", "number": "213-555-0142", "is_primary": True}],
         tags=["vendor"],
     )

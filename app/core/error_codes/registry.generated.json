@@ -34,7 +34,9 @@
       "CONTACT_REQUEST_NOT_FOUND",
       "CONTACT_REQUEST_NOT_PENDING",
       "CONTACT_STORE_FORBIDDEN",
-      "CONTACT_VALIDATION_ERROR"
+      "CONTACT_VALIDATION_ERROR",
+      "CONTACT_VISIBILITY_CONFLICT",
+      "CONTACT_VISIBILITY_REQUIRED"
     ],
     "hiring": [
       "already_hired",
@@ -420,6 +422,26 @@
       "status": 400,
       "message": "Some contact details are not valid.",
       "hint": "Check the highlighted fields and try again.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "CONTACT_VISIBILITY_CONFLICT",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 400,
+      "message": "This contact is already shared with the whole organization.",
+      "hint": "Remove the store selection, or switch to sharing with specific stores.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "CONTACT_VISIBILITY_REQUIRED",
+      "domain": "contacts",
+      "kind": "http",
+      "status": 400,
+      "message": "Pick who can see this contact.",
+      "hint": "Select at least one store, or share it with the whole organization.",
       "frozen": false,
       "clients": []
     },

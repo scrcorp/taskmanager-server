@@ -9,6 +9,10 @@
     validation_error     → CONTACT_VALIDATION_ERROR
     reason_required      → CONTACT_REASON_REQUIRED
     store_forbidden      → CONTACT_STORE_FORBIDDEN
+    visibility_required  → CONTACT_VISIBILITY_REQUIRED
+    visibility_conflict  → CONTACT_VISIBILITY_CONFLICT
+        (계약 개정본은 422 로 적었으나, 이 도메인의 검증 실패는 전부 400 이다 —
+         CONTACT_VALIDATION_ERROR 와 같은 줄에 세운다. 콘솔은 code 로 분기한다.)
     permission_denied    → (공통 require_permission 403 — 문자열 detail 그대로)
     not_your_request     → CONTACT_NOT_YOUR_REQUEST
     request_not_pending  → CONTACT_REQUEST_NOT_PENDING
@@ -55,6 +59,20 @@ CONTACT_STORE_FORBIDDEN = CONTACTS.code(
     403,
     "You do not have access to that store.",
     hint="Pick a store you manage, or share the contact with all stores.",
+)
+
+CONTACT_VISIBILITY_REQUIRED = CONTACTS.code(
+    "CONTACT_VISIBILITY_REQUIRED",
+    400,
+    "Pick who can see this contact.",
+    hint="Select at least one store, or share it with the whole organization.",
+)
+
+CONTACT_VISIBILITY_CONFLICT = CONTACTS.code(
+    "CONTACT_VISIBILITY_CONFLICT",
+    400,
+    "This contact is already shared with the whole organization.",
+    hint="Remove the store selection, or switch to sharing with specific stores.",
 )
 
 CONTACT_PERMISSION_DENIED = CONTACTS.code(

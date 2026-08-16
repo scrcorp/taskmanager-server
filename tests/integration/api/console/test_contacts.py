@@ -20,7 +20,7 @@ idempotent 하게 보장한다 (reports/evaluations 테스트 패턴).
 
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -173,6 +173,43 @@ async def contact_stores(
 
 
 # ---------------------------------------------------------------------------
+# SV 에게 contacts:create 를 개인 배정한 상태 — 신청 **대기열**의 가시성 분기용.
+#
+# 왜 따로 필요한가: 대기열 가시성에서 "아직 대상 연락처가 없는 create 신청"은
+# payload 안의 가시성으로 판정한다(JSONB). 그런데 GM/Owner 는 전 매장이라 그 분기를
+# **아예 타지 않는다.** 매장이 제한된 사람이 대기열을 봐야만 그 SQL 이 실행된다.
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def sv_can_create(contact_perms, seed_roles: dict[str, UUID]):
+    """supervisor role 에 contacts:create 부여 후 원상복구.
+
+    이 프로젝트의 권한 판정은 role 기준(`get_user_permissions(db, user.role_id)`)이라
+    개인 배정 테이블이 없다. 그래서 role 에 붙였다가 되돌린다.
+    """
+    async with async_session() as db:
+        perm_id = (
+            await db.execute(
+                select(Permission.id).where(Permission.code == "contacts:create")
+            )
+        ).scalar_one()
+        db.add(
+            RolePermission(role_id=seed_roles["supervisor"], permission_id=perm_id)
+        )
+        await db.commit()
+    yield
+    async with async_session() as db:
+        await db.execute(
+            delete(RolePermission).where(
+                RolePermission.role_id == seed_roles["supervisor"],
+                RolePermission.permission_id == perm_id,
+            )
+        )
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
 # 데이터 정리 — 테스트 전후로 이 조직의 연락처 도메인 전부 하드 삭제
 # ---------------------------------------------------------------------------
 
@@ -315,7 +352,9 @@ async def test_writer_creates_directly(
         phones=[{"label": "office", "number": "213-555-0142"}],
         tags=["Vendor"],
     )
-    assert body["store_id"] is None  # 미지정 = 전 매장 공유 (D1)
+    # 기본값 = 전 조직 공유 (확장 D1 — 명시 모드)
+    assert body["visibility"] == "organization"
+    assert body["targets"] == []
     assert body["phones"][0]["number_normalized"] == "2135550142"
     assert body["phones"][0]["is_primary"] is True  # 첫 번호 자동 승격
     assert [t["key"] for t in body["tags"]] == ["vendor"]
@@ -350,13 +389,14 @@ async def test_assigned_store_contact_is_visible_to_sv(
     contact_stores,
 ) -> None:
     contact = await _create(
-        async_client, admin_h, name="Store A Vendor", store_id=str(test_store_id)
+        async_client, admin_h, name="Store A Vendor", visibility="restricted", targets=[{"type": "store", "id": str(test_store_id)}]
     )
     listing = (await async_client.get(f"{BASE}/", headers=sv_h)).json()
     assert [c["name"] for c in listing["items"]] == ["Store A Vendor"]
     detail = await async_client.get(f"{BASE}/{contact['id']}", headers=sv_h)
     assert detail.status_code == 200
-    assert detail.json()["store_name"] == "__attendance_test_store__"
+    stores = detail.json()["targets"]
+    assert [x["name"] for x in stores] == ["__attendance_test_store__"]
 
 
 @pytest.mark.asyncio
@@ -370,7 +410,7 @@ async def test_other_store_contact_is_hidden_from_sv_list_and_detail(
 ) -> None:
     """미배정 매장 연락처는 SV 목록에 없고, 상세 직접 조회도 404 (IDOR)."""
     contact = await _create(
-        async_client, admin_h, name="Store B Vendor", store_id=str(second_store_id)
+        async_client, admin_h, name="Store B Vendor", visibility="restricted", targets=[{"type": "store", "id": str(second_store_id)}]
     )
 
     listing = (await async_client.get(f"{BASE}/", headers=sv_h)).json()
@@ -380,12 +420,770 @@ async def test_other_store_contact_is_hidden_from_sv_list_and_detail(
     assert resp.status_code == 404  # 403 이 아니라 404 — 존재를 숨긴다
     assert _err(resp) == "CONTACT_NOT_FOUND"
 
-    # GM / Owner 는 전 매장
-    for headers in (gm_h, admin_h):
-        assert (
-            await async_client.get(f"{BASE}/{contact['id']}", headers=headers)
-        ).status_code == 200
-        assert (await async_client.get(f"{BASE}/", headers=headers)).json()["total"] == 1
+    # **GM 도 못 본다** — 전 매장 예외는 폐기됐다 (V3).
+    # 이 단언이 되살아나 200 을 기대하면 '개인 지정'이 GM 에게 뚫린 것이다.
+    gm_detail = await async_client.get(f"{BASE}/{contact['id']}", headers=gm_h)
+    assert gm_detail.status_code == 404
+    assert (await async_client.get(f"{BASE}/", headers=gm_h)).json()["total"] == 0
+
+    # Owner 만 예외 (V1)
+    assert (
+        await async_client.get(f"{BASE}/{contact['id']}", headers=admin_h)
+    ).status_code == 200
+    assert (await async_client.get(f"{BASE}/", headers=admin_h)).json()["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_contact_can_be_shared_with_multiple_stores(
+    async_client: AsyncClient,
+    admin_h: dict,
+    test_store_id: UUID,
+    second_store_id: UUID,
+    contact_stores,
+) -> None:
+    """복수 지정 — 두 매장 모두 응답에 담기고 순서는 이름순으로 안정적이다 (확장 D1)."""
+    contact = await _create(
+        async_client,
+        admin_h,
+        name="Two Store Vendor",
+        visibility="restricted",
+        targets=[{"type": "store", "id": str(second_store_id)}, {"type": "store", "id": str(test_store_id)}],
+    )
+    assert contact["visibility"] == "restricted"
+    assert {x["id"] for x in contact["targets"]} == {
+        str(test_store_id),
+        str(second_store_id),
+    }
+    # 순서는 매장 이름순 — 요청마다 흔들리면 콘솔 표시가 깜빡인다.
+    # (정렬 기준은 DB collation 이므로 파이썬 sorted 와 바이트 순서까지 같지는 않다.
+    #  여기서 확인할 것은 "같은 데이터면 같은 순서"라는 안정성이다.)
+    detail = await async_client.get(f"{BASE}/{contact['id']}", headers=admin_h)
+    assert [x["id"] for x in detail.json()["targets"]] == [
+        x["id"] for x in contact["targets"]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sv_sees_contact_when_one_of_its_stores_overlaps(
+    async_client: AsyncClient,
+    admin_h: dict,
+    sv_h: dict,
+    test_store_id: UUID,
+    second_store_id: UUID,
+    contact_stores,
+) -> None:
+    """교집합이 비어있지 않으면 보인다 (확장 D2) — SV 는 store A 만 배정돼 있다."""
+    await _create(
+        async_client,
+        admin_h,
+        name="A And B",
+        visibility="restricted",
+        targets=[{"type": "store", "id": str(test_store_id)}, {"type": "store", "id": str(second_store_id)}],
+    )
+    await _create(
+        async_client,
+        admin_h,
+        name="B Only",
+        visibility="restricted",
+        targets=[{"type": "store", "id": str(second_store_id)}],
+    )
+
+    listing = (await async_client.get(f"{BASE}/", headers=sv_h)).json()
+    assert [c["name"] for c in listing["items"]] == ["A And B"]
+
+
+@pytest.mark.asyncio
+async def test_stores_mode_without_any_store_is_rejected(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """매장 0개 + 전체공유 아님 = 거부. 조용히 전 조직 공개로 떨어지면 안 된다 (확장 D1)."""
+    resp = await async_client.post(
+        f"{BASE}/",
+        json={"name": "Nowhere", "visibility": "restricted", "targets": []},
+        headers=admin_h,
+    )
+    assert resp.status_code == 400
+    assert _err(resp) == "CONTACT_VISIBILITY_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_organization_mode_with_stores_is_rejected(
+    async_client: AsyncClient, admin_h: dict, test_store_id: UUID, contact_stores
+) -> None:
+    resp = await async_client.post(
+        f"{BASE}/",
+        json={
+            "name": "Contradiction",
+            "visibility": "organization",
+            "targets": [{"type": "store", "id": str(test_store_id)}],
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 400
+    assert _err(resp) == "CONTACT_VISIBILITY_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_switching_to_stores_mode_without_stores_is_rejected(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """모드만 바꿔 보내도 **병합 후 최종 상태**로 판정한다 (확장 D1)."""
+    contact = await _create(async_client, admin_h, name="Org Wide")
+    resp = await async_client.put(
+        f"{BASE}/{contact['id']}",
+        json={"visibility": "restricted", "reason": "narrowing"},
+        headers=admin_h,
+    )
+    assert resp.status_code == 400
+    assert _err(resp) == "CONTACT_VISIBILITY_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_narrowing_and_widening_visibility_round_trip(
+    async_client: AsyncClient,
+    admin_h: dict,
+    test_store_id: UUID,
+    second_store_id: UUID,
+    contact_stores,
+) -> None:
+    """전체공유 → 2매장 → 1매장 → 전체공유. 각 단계에서 링크가 정확히 교체된다."""
+    contact = await _create(async_client, admin_h, name="Mover")
+
+    narrowed = await async_client.put(
+        f"{BASE}/{contact['id']}",
+        json={
+            "visibility": "restricted",
+            "targets": [{"type": "store", "id": str(test_store_id)}, {"type": "store", "id": str(second_store_id)}],
+            "reason": "limit to two",
+        },
+        headers=admin_h,
+    )
+    assert narrowed.status_code == 200, narrowed.text
+    assert len(narrowed.json()["targets"]) == 2
+
+    single = await async_client.put(
+        f"{BASE}/{contact['id']}",
+        json={"targets": [{"type": "store", "id": str(test_store_id)}], "reason": "drop one"},
+        headers=admin_h,
+    )
+    assert single.status_code == 200, single.text
+    assert [x["id"] for x in single.json()["targets"]] == [str(test_store_id)]
+
+    widened = await async_client.put(
+        f"{BASE}/{contact['id']}",
+        json={"visibility": "organization", "targets": [], "reason": "share all"},
+        headers=admin_h,
+    )
+    assert widened.status_code == 200, widened.text
+    assert widened.json()["visibility"] == "organization"
+    assert widened.json()["targets"] == []
+
+
+@pytest.mark.asyncio
+async def test_sv_cannot_include_an_inaccessible_store_among_several(
+    async_client: AsyncClient,
+    sv_h: dict,
+    test_store_id: UUID,
+    second_store_id: UUID,
+    contact_stores,
+) -> None:
+    """여러 매장 중 **하나라도** 접근 불가면 403 — 통과한 것만 저장되지 않는다."""
+    resp = await async_client.post(
+        f"{BASE}/requests",
+        json={
+            "request_type": "create",
+            "payload": {
+                "name": "Mixed",
+                "visibility": "restricted",
+                "targets": [{"type": "store", "id": str(test_store_id)}, {"type": "store", "id": str(second_store_id)}],
+            },
+        },
+        headers=sv_h,
+    )
+    assert resp.status_code == 403
+    assert _err(resp) == "CONTACT_STORE_FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_store_filter_matches_contacts_that_include_that_store(
+    async_client: AsyncClient,
+    admin_h: dict,
+    test_store_id: UUID,
+    second_store_id: UUID,
+    contact_stores,
+) -> None:
+    """필터는 '지정 매장에 포함된' 연락처를 고른다 — 단독 지정이 아니어도 잡혀야 한다."""
+    await _create(
+        async_client,
+        admin_h,
+        name="A And B",
+        visibility="restricted",
+        targets=[{"type": "store", "id": str(test_store_id)}, {"type": "store", "id": str(second_store_id)}],
+    )
+    await _create(
+        async_client,
+        admin_h,
+        name="B Only",
+        visibility="restricted",
+        targets=[{"type": "store", "id": str(second_store_id)}],
+    )
+
+    filtered = (
+        await async_client.get(f"{BASE}/?store_id={test_store_id}", headers=admin_h)
+    ).json()
+    assert [c["name"] for c in filtered["items"]] == ["A And B"]
+    assert filtered["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_visibility_change_is_recorded_with_store_names(
+    async_client: AsyncClient,
+    admin_h: dict,
+    seed_organization: dict,
+    test_store_id: UUID,
+    contact_stores,
+) -> None:
+    """이력은 조회 UI 가 없다 — id 만이 아니라 매장 **이름 스냅샷**이 남아야 읽힌다."""
+    contact = await _create(async_client, admin_h, name="Audited")
+    await async_client.put(
+        f"{BASE}/{contact['id']}",
+        json={
+            "visibility": "restricted",
+            "targets": [{"type": "store", "id": str(test_store_id)}],
+            "reason": "restrict",
+        },
+        headers=admin_h,
+    )
+
+    rows = await _audit_rows(seed_organization["id"], action="update")
+    assert rows, "update 이력이 남아야 한다"
+    after = rows[-1].after
+    assert after["visibility"] == "restricted"
+    assert after["targets"] == [
+        {"type": "store", "id": str(test_store_id), "name": "__attendance_test_store__"}
+    ]
+    assert rows[-1].before["visibility"] == "organization"
+    assert rows[-1].before["targets"] == []
+
+
+@pytest.mark.asyncio
+async def test_pending_create_request_queue_is_filtered_by_payload_stores(
+    async_client: AsyncClient,
+    admin_h: dict,
+    sv_h: dict,
+    test_store_id: UUID,
+    second_store_id: UUID,
+    contact_stores,
+    sv_can_create,
+) -> None:
+    """신규 등록 신청 대기열은 payload 안의 가시성으로 걸러진다 (JSONB 배열 매칭).
+
+    **이 경로는 매장이 제한된 사람만 탄다** — GM/Owner 는 전 매장이라 조건 자체가
+    안 붙는다. 여기서 안 돌리면 JSONB 쿼리의 SQL 오류가 운영에서야 드러난다.
+    """
+    # store A 를 포함한 신청 — SV 에게 보여야 한다.
+    visible = await async_client.post(
+        f"{BASE}/requests",
+        json={
+            "request_type": "create",
+            "payload": {
+                "name": "Wanted",
+                "visibility": "restricted",
+                "targets": [{"type": "store", "id": str(test_store_id)}],
+            },
+        },
+        headers=admin_h,
+    )
+    assert visible.status_code in (200, 201), visible.text
+
+    # store B 만 지정한 신청 — SV 에게 보이면 안 된다.
+    hidden = await async_client.post(
+        f"{BASE}/requests",
+        json={
+            "request_type": "create",
+            "payload": {
+                "name": "Hidden",
+                "visibility": "restricted",
+                "targets": [{"type": "store", "id": str(second_store_id)}],
+            },
+        },
+        headers=admin_h,
+    )
+    assert hidden.status_code in (200, 201), hidden.text
+
+    # 전 조직 공유 신청 — 누구에게나 보인다.
+    shared = await async_client.post(
+        f"{BASE}/requests",
+        json={
+            "request_type": "create",
+            "payload": {"name": "Shared", "visibility": "organization"},
+        },
+        headers=admin_h,
+    )
+    assert shared.status_code in (200, 201), shared.text
+
+    queue = await async_client.get(f"{BASE}/requests?status=all", headers=sv_h)
+    assert queue.status_code == 200, queue.text
+    names = {r["contact_name"] for r in queue.json()["items"]}
+    assert "Wanted" in names
+    assert "Shared" in names
+    assert "Hidden" not in names
+
+
+@pytest.mark.asyncio
+async def test_legacy_single_store_request_payload_still_reads_correctly(
+    async_client: AsyncClient,
+    admin_h: dict,
+    sv_h: dict,
+    seed_organization: dict,
+    test_store_id: UUID,
+    second_store_id: UUID,
+    contact_stores,
+    sv_can_create,
+) -> None:
+    """개정 이전 형식(store_id 단일 키)으로 저장된 신청도 그대로 읽힌다 (계약 §0-A).
+
+    폴백이 없으면 payload 의 매장 지정이 무시되어 **승인 순간 전 조직 공개로 넓어진다.**
+    실제 prod 에 남아 있을 수 있는 상태라 DB 에 직접 구형식을 심어 재현한다.
+    """
+    from app.models.contact import ContactChangeRequest as CCR
+
+    org_id: UUID = seed_organization["id"]
+    async with async_session() as db:
+        db.add_all(
+            [
+                CCR(
+                    organization_id=org_id,
+                    request_type="create",
+                    contact_name_snapshot="Legacy A",
+                    # 구형식: visibility 키가 없고 store_id 하나만 있다
+                    payload={"name": "Legacy A", "store_id": str(test_store_id)},
+                    status="pending",
+                ),
+                CCR(
+                    organization_id=org_id,
+                    request_type="create",
+                    contact_name_snapshot="Legacy B",
+                    payload={"name": "Legacy B", "store_id": str(second_store_id)},
+                    status="pending",
+                ),
+                CCR(
+                    organization_id=org_id,
+                    request_type="create",
+                    contact_name_snapshot="Legacy Shared",
+                    payload={"name": "Legacy Shared", "store_id": None},
+                    status="pending",
+                ),
+            ]
+        )
+        await db.commit()
+
+    # 대기열 가시성 — 구형식도 매장 기준으로 걸러진다
+    queue = await async_client.get(f"{BASE}/requests?status=all", headers=sv_h)
+    assert queue.status_code == 200, queue.text
+    names = {r["contact_name"] for r in queue.json()["items"]}
+    assert "Legacy A" in names
+    assert "Legacy Shared" in names
+    assert "Legacy B" not in names
+
+    # 응답 payload 는 현행 형태로 해석돼 나온다 (원문은 DB 에 그대로 남는다)
+    legacy_a = next(
+        r for r in queue.json()["items"] if r["contact_name"] == "Legacy A"
+    )
+    assert legacy_a["payload"]["visibility"] == "restricted"
+    assert legacy_a["payload"]["targets"] == [
+        {"type": "store", "id": str(test_store_id)}
+    ]
+    assert "store_id" not in legacy_a["payload"]
+
+
+@pytest.mark.asyncio
+async def test_approving_a_legacy_request_keeps_its_store_scope(
+    async_client: AsyncClient,
+    admin_h: dict,
+    seed_organization: dict,
+    test_store_id: UUID,
+    contact_stores,
+) -> None:
+    """구형식 신청을 승인해도 매장 지정이 유지된다 — 조용히 전 조직 공개가 되면 안 된다."""
+    from app.models.contact import ContactChangeRequest as CCR
+
+    org_id: UUID = seed_organization["id"]
+    async with async_session() as db:
+        req = CCR(
+            organization_id=org_id,
+            request_type="create",
+            contact_name_snapshot="Legacy Approve",
+            payload={"name": "Legacy Approve", "store_id": str(test_store_id)},
+            status="pending",
+        )
+        db.add(req)
+        await db.commit()
+        req_id = req.id
+
+    resp = await async_client.post(
+        f"{BASE}/requests/{req_id}/approve", json={}, headers=admin_h
+    )
+    assert resp.status_code == 200, resp.text
+    contact = resp.json()["contact"]
+    assert contact["visibility"] == "restricted"
+    assert [x["id"] for x in contact["targets"]] == [str(test_store_id)]
+
+
+@pytest.mark.asyncio
+async def test_role_target_makes_it_visible_to_everyone_with_that_role(
+    async_client: AsyncClient,
+    admin_h: dict,
+    sv_h: dict,
+    seed_roles: dict,
+    contact_stores,
+) -> None:
+    """직급 지정 — 매장 배정이 없어도 그 직급이면 보인다 (V5, 동적).
+
+    옛 모델은 매장이 유일한 축이라 '매장 없으면 전체공유만'이었다. 그 지름길이
+    남아 있으면 이 테스트가 깨진다.
+    """
+    await _create(
+        async_client,
+        admin_h,
+        name="SV Only Vendor",
+        visibility="restricted",
+        targets=[{"type": "role", "id": str(seed_roles["supervisor"])}],
+    )
+    listing = (await async_client.get(f"{BASE}/", headers=sv_h)).json()
+    assert [c["name"] for c in listing["items"]] == ["SV Only Vendor"]
+
+
+@pytest.mark.asyncio
+async def test_role_target_hides_it_from_other_roles(
+    async_client: AsyncClient,
+    admin_h: dict,
+    gm_h: dict,
+    seed_roles: dict,
+    contact_stores,
+) -> None:
+    """SV 지정 연락처는 GM 에게 보이지 않는다 — 상급자 자동 열람은 없다 (V2/V3)."""
+    contact = await _create(
+        async_client,
+        admin_h,
+        name="SV Only Vendor",
+        visibility="restricted",
+        targets=[{"type": "role", "id": str(seed_roles["supervisor"])}],
+    )
+    assert (await async_client.get(f"{BASE}/", headers=gm_h)).json()["total"] == 0
+    resp = await async_client.get(f"{BASE}/{contact['id']}", headers=gm_h)
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_user_target_makes_it_visible_to_just_that_person(
+    async_client: AsyncClient,
+    admin_h: dict,
+    sv_h: dict,
+    gm_h: dict,
+    test_users: dict,
+    contact_stores,
+) -> None:
+    """개인 지정 — 그 사람만 본다. 이게 '개별적으로 관리' 요구의 본체다."""
+    await _create(
+        async_client,
+        admin_h,
+        name="For SV Only",
+        visibility="restricted",
+        targets=[{"type": "user", "id": str(test_users["testsv"]["id"])}],
+    )
+    assert (await async_client.get(f"{BASE}/", headers=sv_h)).json()["total"] == 1
+    assert (await async_client.get(f"{BASE}/", headers=gm_h)).json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_excluding_a_person_removes_them_even_if_a_target_matches(
+    async_client: AsyncClient,
+    admin_h: dict,
+    sv_h: dict,
+    seed_roles: dict,
+    test_users: dict,
+    contact_stores,
+) -> None:
+    """제외가 포함을 이긴다 (V4) — OR 로 넓게 모으고 개인 단위로 빼는 흐름의 핵심."""
+    await _create(
+        async_client,
+        admin_h,
+        name="SV Except One",
+        visibility="restricted",
+        targets=[{"type": "role", "id": str(seed_roles["supervisor"])}],
+        excluded_user_ids=[str(test_users["testsv"]["id"])],
+    )
+    assert (await async_client.get(f"{BASE}/", headers=sv_h)).json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_creator_always_sees_their_own_contact(
+    async_client: AsyncClient,
+    sv_h: dict,
+    test_users: dict,
+    contact_stores,
+    sv_can_create,
+) -> None:
+    """작성자는 대상이 아니어도 자기가 만든 연락처를 본다 (V6).
+
+    안 그러면 저장하자마자 목록에서 사라져 버그로 읽힌다.
+    """
+    await _create(
+        async_client,
+        sv_h,
+        name="Made By SV",
+        visibility="restricted",
+        targets=[{"type": "user", "id": str(test_users["testgm"]["id"])}],
+    )
+    listing = (await async_client.get(f"{BASE}/", headers=sv_h)).json()
+    assert [c["name"] for c in listing["items"]] == ["Made By SV"]
+
+
+@pytest.mark.asyncio
+async def test_visibility_preview_lists_actual_viewers(
+    async_client: AsyncClient,
+    admin_h: dict,
+    seed_roles: dict,
+    test_users: dict,
+    contact_stores,
+) -> None:
+    """저장 전 미리보기 — 대상을 사람 명단으로 풀어 준다 (V4/V5).
+
+    Owner 는 항상 들어가고 제외할 수 없다(can_exclude=False).
+    """
+    resp = await async_client.post(
+        f"{BASE}/visibility-preview",
+        json={
+            "visibility": "restricted",
+            "targets": [{"type": "role", "id": str(seed_roles["supervisor"])}],
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    ids = {v["id"] for v in body["viewers"]}
+    assert str(test_users["testsv"]["id"]) in ids
+    assert body["total"] == len(body["viewers"])
+    owners = [v for v in body["viewers"] if v["reason"] == "Owner"]
+    assert owners and all(v["can_exclude"] is False for v in owners)
+
+
+@pytest.mark.asyncio
+async def test_visibility_preview_drops_excluded_people(
+    async_client: AsyncClient,
+    admin_h: dict,
+    seed_roles: dict,
+    test_users: dict,
+    contact_stores,
+) -> None:
+    resp = await async_client.post(
+        f"{BASE}/visibility-preview",
+        json={
+            "visibility": "restricted",
+            "targets": [{"type": "role", "id": str(seed_roles["supervisor"])}],
+            "excluded_user_ids": [str(test_users["testsv"]["id"])],
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 200, resp.text
+    ids = {v["id"] for v in resp.json()["viewers"]}
+    assert str(test_users["testsv"]["id"]) not in ids
+
+
+@pytest.mark.asyncio
+async def test_target_from_another_org_is_rejected(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """타 org·존재하지 않는 대상은 저장 자체를 막는다."""
+    resp = await async_client.post(
+        f"{BASE}/",
+        json={
+            "name": "Bad Target",
+            "visibility": "restricted",
+            "targets": [{"type": "user", "id": str(uuid4())}],
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 400
+    assert _err(resp) == "CONTACT_VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_dry_run_saves_nothing(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """미리보기는 검증만 한다 — 화면이 먼저 부르는 경로 (D4)."""
+    resp = await async_client.post(
+        f"{BASE}/bulk",
+        json={
+            "rows": [{"name": "Bulk A"}, {"name": "Bulk B"}],
+            "dry_run": True,
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["dry_run"] is True
+    assert body["valid_count"] == 2 and body["created"] == 0
+    assert (await async_client.get(f"{BASE}/", headers=admin_h)).json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_commits_all_rows(
+    async_client: AsyncClient, admin_h: dict, test_store_id: UUID, contact_stores
+) -> None:
+    resp = await async_client.post(
+        f"{BASE}/bulk",
+        json={
+            "rows": [
+                {"name": "Bulk A", "company": "ACME"},
+                {
+                    "name": "Bulk B",
+                    "visibility": "restricted",
+                    "targets": [{"type": "store", "id": str(test_store_id)}],
+                },
+            ],
+            "reason": "initial import",
+            "dry_run": False,
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["created"] == 2 and body["batch_id"]
+    assert (await async_client.get(f"{BASE}/", headers=admin_h)).json()["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_is_all_or_nothing(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """한 행이 실패하면 **아무것도** 저장되지 않는다 (D4).
+
+    부분 저장을 허용하면 "무엇이 들어갔는지" 사용자가 추적해야 하는 상태가 된다.
+    """
+    resp = await async_client.post(
+        f"{BASE}/bulk",
+        json={
+            "rows": [
+                {"name": "Good Row"},
+                # 대상 0개인 restricted — 저장을 막는 조건 (V1)
+                {"name": "Bad Row", "visibility": "restricted", "targets": []},
+            ],
+            "dry_run": False,
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["failed_count"] == 1
+    assert body["created"] == 0
+    bad = next(r for r in body["rows"] if r["index"] == 1)
+    assert bad["valid"] is False and bad["error"]
+    # 성공한 행조차 남지 않는다
+    assert (await async_client.get(f"{BASE}/", headers=admin_h)).json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_adds_and_removes_tags(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    a = await _create(async_client, admin_h, name="B1", tags=["old"])
+    b = await _create(async_client, admin_h, name="B2", tags=["old"])
+
+    resp = await async_client.post(
+        f"{BASE}/bulk-update",
+        json={
+            "contact_ids": [a["id"], b["id"]],
+            "add_tags": ["vendor"],
+            "remove_tags": ["old"],
+            "reason": "retag",
+            "dry_run": False,
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["changed"] == 2
+
+    detail = (await async_client.get(f"{BASE}/{a['id']}", headers=admin_h)).json()
+    names = {t["name"] for t in detail["tags"]}
+    assert "vendor" in names and "old" not in names
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_writes_one_audit_row_per_contact_with_batch_id(
+    async_client: AsyncClient,
+    admin_h: dict,
+    seed_organization: dict,
+    contact_stores,
+) -> None:
+    """이력은 연락처마다 한 행 + 같은 batch_id + source='batch' (D1).
+
+    배치 1행만 남기면 개별 연락처 이력에서 변경이 안 보인다 — 이 도메인 원칙 위반.
+    """
+    a = await _create(async_client, admin_h, name="B1")
+    b = await _create(async_client, admin_h, name="B2")
+    await async_client.post(
+        f"{BASE}/bulk-update",
+        json={
+            "contact_ids": [a["id"], b["id"]],
+            "company": "Batched Co",
+            "reason": "set company",
+            "dry_run": False,
+        },
+        headers=admin_h,
+    )
+    rows = await _audit_rows(seed_organization["id"], action="update")
+    batched = [r for r in rows if r.source == "batch"]
+    assert len(batched) == 2
+    assert len({r.batch_id for r in batched}) == 1
+    assert {r.contact_id for r in batched} == {UUID(a["id"]), UUID(b["id"])}
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_requires_a_reason(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    a = await _create(async_client, admin_h, name="B1")
+    resp = await async_client.post(
+        f"{BASE}/bulk-update",
+        json={"contact_ids": [a["id"]], "company": "X", "dry_run": False},
+        headers=admin_h,
+    )
+    assert resp.status_code == 400
+    assert _err(resp) == "CONTACT_REASON_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_cannot_touch_invisible_contacts(
+    async_client: AsyncClient,
+    admin_h: dict,
+    sv_h: dict,
+    second_store_id: UUID,
+    contact_stores,
+    sv_can_write,
+) -> None:
+    """쓰기 권한이 있어도 **안 보이는** 연락처는 일괄 수정으로도 못 건드린다."""
+    hidden = await _create(
+        async_client,
+        admin_h,
+        name="Hidden",
+        visibility="restricted",
+        targets=[{"type": "store", "id": str(second_store_id)}],
+    )
+    resp = await async_client.post(
+        f"{BASE}/bulk-update",
+        json={
+            "contact_ids": [hidden["id"]],
+            "company": "Hijack",
+            "reason": "try",
+            "dry_run": False,
+        },
+        headers=sv_h,
+    )
+    assert resp.status_code == 404
+    assert _err(resp) == "CONTACT_NOT_FOUND"
 
 
 @pytest.mark.asyncio
@@ -393,7 +1191,7 @@ async def test_store_filter_none_returns_all_store_contacts(
     async_client: AsyncClient, admin_h: dict, test_store_id: UUID, contact_stores
 ) -> None:
     await _create(async_client, admin_h, name="Org Wide")
-    await _create(async_client, admin_h, name="Store A", store_id=str(test_store_id))
+    await _create(async_client, admin_h, name="Store A", visibility="restricted", targets=[{"type": "store", "id": str(test_store_id)}])
 
     only_shared = (
         await async_client.get(f"{BASE}/?store_id=none", headers=admin_h)
@@ -415,7 +1213,11 @@ async def test_sv_cannot_pin_a_contact_to_a_store_they_cannot_access(
         f"{BASE}/requests",
         json={
             "request_type": "create",
-            "payload": {"name": "Sneaky", "store_id": str(second_store_id)},
+            "payload": {
+                "name": "Sneaky",
+                "visibility": "restricted",
+                "targets": [{"type": "store", "id": str(second_store_id)}],
+            },
         },
         headers=sv_h,
     )
@@ -633,7 +1435,7 @@ async def test_tag_autocomplete_prefix_and_visibility(
         async_client,
         admin_h,
         name="Hidden",
-        store_id=str(second_store_id),
+        visibility="restricted", targets=[{"type": "store", "id": str(second_store_id)}],
         tags=["Vendor"],
     )
 
@@ -946,7 +1748,7 @@ async def test_request_on_invisible_contact_is_404(
     contact_stores,
 ) -> None:
     contact = await _create(
-        async_client, admin_h, name="Store B", store_id=str(second_store_id)
+        async_client, admin_h, name="Store B", visibility="restricted", targets=[{"type": "store", "id": str(second_store_id)}]
     )
     resp = await async_client.post(
         f"{BASE}/requests",
@@ -1259,15 +2061,27 @@ async def test_approving_a_request_for_an_invisible_contact_is_404(
     admin_h: dict,
     gm_h: dict,
     sv_h: dict,
+    test_users: dict,
     second_store_id: UUID,
     contact_stores,
     sv_can_write,
 ) -> None:
-    """쓰기 권한만으로는 안 보이는 매장의 연락처를 승인 경로로 고칠 수 없다."""
+    """쓰기 권한만으로는 **자기에게 안 보이는** 연락처를 승인 경로로 고칠 수 없다.
+
+    셋업이 다축 모델을 그대로 쓴다: 매장 B + **GM 개인 지정**.
+    → GM 은 (개인 지정으로) 보이지만 쓰기 권한이 없어 신청은 pending 으로 남고,
+      SV 는 쓰기 권한이 있지만 대상이 아니라 안 보여서 승인이 404 여야 한다.
+    """
     contact = await _create(
-        async_client, admin_h, name="Store B Vendor", store_id=str(second_store_id)
+        async_client,
+        admin_h,
+        name="Store B Vendor",
+        visibility="restricted",
+        targets=[
+            {"type": "store", "id": str(second_store_id)},
+            {"type": "user", "id": str(test_users["testgm"]["id"])},
+        ],
     )
-    # GM 은 전 매장이 보이므로(D1 예외) 신청은 만들 수 있다. 쓰기 권한은 없어 pending.
     req = await _submit(
         async_client,
         gm_h,
@@ -1295,12 +2109,20 @@ async def test_rejecting_a_request_for_an_invisible_contact_is_404(
     admin_h: dict,
     gm_h: dict,
     sv_h: dict,
+    test_users: dict,
     second_store_id: UUID,
     contact_stores,
     sv_can_write,
 ) -> None:
     contact = await _create(
-        async_client, admin_h, name="Store B Vendor", store_id=str(second_store_id)
+        async_client,
+        admin_h,
+        name="Store B Vendor",
+        visibility="restricted",
+        targets=[
+            {"type": "store", "id": str(second_store_id)},
+            {"type": "user", "id": str(test_users["testgm"]["id"])},
+        ],
     )
     req = await _submit(
         async_client,

@@ -2,10 +2,13 @@
 
 Contacts v1 — 조직 전화번호부. staff/user 레코드와 FK 로 엮지 않는 독립 도메인.
 
-설계 원칙 (docs/99_inbox/2026-08-14-연락처(Contacts)-기능-설계.md D1~D9):
+설계 원칙 (docs/99_inbox/2026-08-14-연락처(Contacts)-기능-설계.md D1~D9,
+docs/99_inbox/2026-08-15-연락처-복수매장-가시성-확장.md D1~D7):
     - org-scope: 모든 조회는 organization_id 로 격리.
-    - store_id NULL = 조직 전체 공유, 값 있으면 그 매장 스코프 (D1).
-      가시성 예외로 GM 이상은 전 매장 연락처를 본다 — 서비스 계층에서 처리.
+    - 가시성은 **명시 모드**(visibility) + 대상 목록(contact_visibility_targets) 이다.
+      대상이 비었다고 전체 공유가 되지 않는다 — 실수가 공개 방향으로 나지 않게.
+      **예외는 Owner 뿐**이다 (V3). GM 의 전 매장 예외는 폐기됐다 — 대상에 없으면 안 보인다.
+      작성자는 언제나 자기 연락처를 본다 (V6).
     - soft delete: deleted_at. 읽기는 항상 부모의 deleted_at IS NULL.
       자식(phones/tag_links)은 삭제하지 않는다(복구 대비).
     - 전화번호는 자식 테이블 + 정규화 컬럼(숫자만)으로 부분일치 검색 (D6).
@@ -16,6 +19,7 @@ Contacts v1 — 조직 전화번호부. staff/user 레코드와 FK 로 엮지 �
 
 Tables:
     - contacts: 연락처 본체
+    - contact_visibility_targets: 연락처 ↔ 공개 대상 (매장/직급/개인, 제외 포함)
     - contact_phones: 번호 복수 (원본 표기 + 정규화)
     - contact_tags: org 단위 태그 마스터
     - contact_tag_links: 연락처 ↔ 태그 매핑
@@ -44,6 +48,32 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 
+# 가시성 모드 (확장 D1) — 모드마다 "대상 목록을 가지는가"가 정해진다.
+#   organization : 조직 전체 공유. 대상 목록은 비어 있어야 한다.
+#   restricted   : 지정한 대상들만. 대상이 1건 이상이어야 한다.
+#                  대상 0개 + restricted 는 저장을 거부한다 (실수가 공개로 나지 않게).
+CONTACT_VISIBILITY_ORGANIZATION = "organization"
+CONTACT_VISIBILITY_RESTRICTED = "restricted"
+CONTACT_VISIBILITIES: tuple[str, ...] = (
+    CONTACT_VISIBILITY_ORGANIZATION,
+    CONTACT_VISIBILITY_RESTRICTED,
+)
+
+# 공개 대상 축 (다축 가시성 V4). 대상들은 **OR 로 합쳐진다** — 고를수록 넓어진다.
+#   store : 그 매장에 배정된 사람
+#   role  : 그 직급인 사람 (동적 — 승진하면 따라온다, V5)
+#   user  : 그 사람 본인
+# position 축은 이 프로젝트에 "사용자의 직책"이 존재하지 않아 만들지 않았다
+# (positions 는 매장별 근무 역할이라 사람 집합으로 풀리지 않는다).
+CONTACT_TARGET_STORE = "store"
+CONTACT_TARGET_ROLE = "role"
+CONTACT_TARGET_USER = "user"
+CONTACT_TARGET_TYPES: tuple[str, ...] = (
+    CONTACT_TARGET_STORE,
+    CONTACT_TARGET_ROLE,
+    CONTACT_TARGET_USER,
+)
+
 # 신청 종류 / 상태 / 이력 action — 서비스·스키마가 이 상수를 단일 원천으로 쓴다.
 CONTACT_REQUEST_TYPES: tuple[str, ...] = ("create", "update", "delete")
 CONTACT_REQUEST_STATUSES: tuple[str, ...] = (
@@ -53,6 +83,19 @@ CONTACT_REQUEST_STATUSES: tuple[str, ...] = (
     "cancelled",
     "superseded",
 )
+# 변경 경로 (대량등록/일괄수정 D1) — 이력 한 행만 봐도 "어떻게 바뀐 건지" 알 수 있게.
+#   direct  : 사람이 화면에서 한 건 고침
+#   batch   : 일괄 수정/대량 등록의 일부 (batch_id 로 묶인다)
+#   request : 변경 신청 승인으로 반영
+CONTACT_SOURCE_DIRECT = "direct"
+CONTACT_SOURCE_BATCH = "batch"
+CONTACT_SOURCE_REQUEST = "request"
+CONTACT_SOURCES: tuple[str, ...] = (
+    CONTACT_SOURCE_DIRECT,
+    CONTACT_SOURCE_BATCH,
+    CONTACT_SOURCE_REQUEST,
+)
+
 # restore 는 엔드포인트 없이 값만 예약 (계약 §4.7 — 스텁 금지 원칙).
 CONTACT_AUDIT_ACTIONS: tuple[str, ...] = (
     "create",
@@ -73,7 +116,7 @@ class Contact(Base):
     Attributes:
         id: 고유 식별자 UUID
         organization_id: 소속 조직 FK (CASCADE)
-        store_id: 매장 FK (SET NULL). **NULL = 조직 전체 공유** (D1)
+        visibility: 가시성 모드 (CONTACT_VISIBILITIES). 대상은 contact_visibility_targets
         name: 이름/표시명 (필수, 검색 대상)
         company: 업체명/소속 (검색 대상)
         email: 이메일 단일 (검색 대상)
@@ -87,7 +130,7 @@ class Contact(Base):
 
     Indexes:
         ix_contacts_org_deleted: (organization_id, deleted_at) — 상시 조건
-        ix_contacts_org_store: (organization_id, store_id) — store 필터
+        ix_contacts_org_visibility: (organization_id, visibility) — 전체공유 필터/가시성 절
         ix_contacts_org_name_lower: (organization_id, lower(name)) — 기본 정렬(N9)
     """
 
@@ -99,9 +142,12 @@ class Contact(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
     )
-    # 매장 FK — NULL 이면 조직 전체 공유, 값이 있으면 그 매장 스코프 (D1)
-    store_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        Uuid, ForeignKey("stores.id", ondelete="SET NULL"), nullable=True
+    # 가시성 모드 — CONTACT_VISIBILITIES. 대상은 contact_visibility_targets 에
+    visibility: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=CONTACT_VISIBILITY_ORGANIZATION,
+        server_default=CONTACT_VISIBILITY_ORGANIZATION,
     )
     # 이름/표시명 — Display name (required, searchable)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -144,10 +190,68 @@ class Contact(Base):
     __table_args__ = (
         # 상시 켜지는 org + soft-delete 필터 커버
         Index("ix_contacts_org_deleted", "organization_id", "deleted_at"),
-        # store 필터 / 가시성 절
-        Index("ix_contacts_org_store", "organization_id", "store_id"),
+        # 전체공유 필터 / 가시성 절
+        Index("ix_contacts_org_visibility", "organization_id", "visibility"),
         # 기본 정렬(이름순, 대소문자 무시) — 표현식 인덱스도 모델에 선언해야 autogenerate 가 안 지운다
         Index("ix_contacts_org_name_lower", "organization_id", text("lower(name)")),
+    )
+
+
+class ContactVisibilityTarget(Base):
+    """연락처 ↔ 공개 대상 (다축 가시성 V1~V7).
+
+    `visibility='restricted'` 인 연락처만 행을 가진다. `organization` 이면 비어 있다.
+    "행이 없음"이 전체 공유를 뜻하지 **않는다** — 전체 공유는 visibility 값으로만 표현된다.
+
+    **포함(include) 대상은 OR 로 합쳐진다** — 고를수록 보는 사람이 늘어난다 (V4).
+    그렇게 모은 후보 명단에서 **개인 단위로 뺄 수 있다**(is_excluded=True).
+    제외는 `target_type='user'` 에만 쓴다 — 미리보기가 사람 명단이므로 빼는 것도 사람이다.
+
+    대상(매장/직급/사용자)이 삭제되면 링크도 함께 사라진다(CASCADE). 그 결과 대상이
+    0개가 되면 그 연락처는 Owner + 작성자에게만 보인다 — 조용히 전 조직에 공개되는 것보다
+    안전한 실패 방향이다.
+
+    Attributes:
+        id: 고유 식별자 UUID
+        contact_id: 연락처 FK (CASCADE)
+        target_type: CONTACT_TARGET_TYPES ('store' | 'role' | 'user')
+        target_id: 대상 id. FK 를 걸지 않는다 — 타입마다 참조 테이블이 달라서다.
+            대신 org 소속 검증을 서비스가 하고, 대상 삭제 시 정리는 아래 트리거 대신
+            서비스/마이그레이션이 책임진다(참조 무결성보다 단순함 우선).
+        is_excluded: True 면 **제외** (user 타입에만 의미)
+        created_at: 생성 일시 UTC
+
+    Constraints:
+        uq_contact_visibility_targets: (contact_id, target_type, target_id) UNIQUE
+        ix_cvt_lookup: (target_type, target_id) — 사람 → 보이는 연락처 역방향 조회
+    """
+
+    __tablename__ = "contact_visibility_targets"
+
+    # 링크 행 고유 식별자 — Link row identifier
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 연락처 FK — Contact side (CASCADE)
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False
+    )
+    # 대상 축 — CONTACT_TARGET_TYPES
+    target_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    # 대상 id — 타입별 테이블(stores/roles/users)의 id. FK 없음(다형 참조)
+    target_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # 제외 여부 — True 면 후보에서 뺀다 (user 타입 전용, V4)
+    is_excluded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # 생성 일시 — Creation timestamp (UTC)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "contact_id", "target_type", "target_id", name="uq_contact_visibility_targets"
+        ),
+        Index("ix_cvt_lookup", "target_type", "target_id"),
     )
 
 
@@ -408,6 +512,8 @@ class ContactAuditLog(Base):
         actor_name: 행위자 이름 스냅샷
         actor_email: 행위자 이메일 스냅샷 (없으면 username)
         reason: 사유 (계약 §7.1 매핑)
+        source: 변경 경로 (CONTACT_SOURCES) — 직접/배치/신청 승인 구분 (D1)
+        batch_id: 일괄 작업 묶음 id (FK 없음). 같은 배치의 행들이 이 값을 공유한다.
         before / after: 변경 전/후 JSONB — 변경된 필드만
         created_at: 발생 시각 UTC
 
@@ -440,6 +546,15 @@ class ContactAuditLog(Base):
     actor_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # 사유 — Reason (필수/선택은 action 별로 다름, 계약 §7.1)
     reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # 변경 경로 — CONTACT_SOURCES. 행 하나만 봐도 어떻게 바뀐 건지 알 수 있게 (D1)
+    source: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=CONTACT_SOURCE_DIRECT,
+        server_default=CONTACT_SOURCE_DIRECT,
+    )
+    # 배치 묶음 id — 일괄 작업의 일부임을 표시. FK 없음(감사 테이블 원칙)
+    batch_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, nullable=True)
     # 변경 전 — Snapshot of changed fields only (NULL = 없음)
     before: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     # 변경 후 — Snapshot of changed fields only (NULL = 없음)
@@ -452,4 +567,6 @@ class ContactAuditLog(Base):
     __table_args__ = (
         Index("ix_contact_audit_org_created", "organization_id", "created_at"),
         Index("ix_contact_audit_contact", "contact_id", "created_at"),
+        # 배치 하나가 무엇을 바꿨는지 되짚기
+        Index("ix_contact_audit_batch", "batch_id"),
     )

@@ -19,11 +19,23 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator
 
+from app.models.contact import CONTACT_TARGET_TYPES, CONTACT_VISIBILITIES
+
 __all__ = [
     "MAX_PHONES_PER_CONTACT",
     "MAX_TAGS_PER_CONTACT",
     "MAX_TAG_LENGTH",
+    "MAX_TARGETS_PER_CONTACT",
     "MAX_SEARCH_LENGTH",
+    "ContactVisibility",
+    "ContactTargetRef",
+    "ContactTargetInput",
+    "ContactVisibilityPreview",
+    "ContactBulkCreate",
+    "ContactBulkRowResult",
+    "ContactBulkCreateResult",
+    "ContactBulkUpdate",
+    "ContactBulkUpdateResult",
     "ContactPhoneInput",
     "ContactPhoneResponse",
     "ContactTagResponse",
@@ -46,6 +58,8 @@ __all__ = [
 MAX_PHONES_PER_CONTACT = 10
 MAX_TAGS_PER_CONTACT = 20
 MAX_TAG_LENGTH = 40
+# 공개 대상 상한 — 조직 규모를 넘길 이유가 없다. 방어적 상한.
+MAX_TARGETS_PER_CONTACT = 200
 # 검색어 상한 — 초과분은 라우터/서비스에서 잘라 쓴다(에러 아님, 계약 §4.2.1)
 MAX_SEARCH_LENGTH = 100
 
@@ -124,7 +138,79 @@ class ContactTagResponse(BaseModel):
     usage_count: int
 
 
-# === 연락처 내용 본문 ===
+# === 가시성 (확장 D1) ===
+
+class ContactTargetRef(BaseModel):
+    """공개 대상 한 건 (응답) — 타입 + id + 표시명."""
+
+    type: str  # CONTACT_TARGET_TYPES
+    id: str
+    name: str
+
+
+class ContactTargetInput(BaseModel):
+    """공개 대상 한 건 (요청)."""
+
+    type: str
+    id: str
+
+    @field_validator("type")
+    @classmethod
+    def _check_type(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v not in CONTACT_TARGET_TYPES:
+            raise ValueError(f"target type must be one of {CONTACT_TARGET_TYPES}")
+        return v
+
+
+def _validate_visibility(v: str | None) -> str | None:
+    """가시성 모드 값 검사 — 모델 상수(CONTACT_VISIBILITIES)가 단일 원천."""
+    if v is None:
+        return None
+    v = v.strip()
+    if v not in CONTACT_VISIBILITIES:
+        raise ValueError(f"visibility must be one of {CONTACT_VISIBILITIES}")
+    return v
+
+
+def _validate_targets(
+    v: list[ContactTargetInput] | None,
+) -> list[ContactTargetInput] | None:
+    """대상 목록 정리 — 중복 제거(입력 순서 보존), 상한 검사.
+
+    org 소속·접근 권한 검사는 서비스가 한다(도메인 에러 코드로 내리기 위해).
+    """
+    if v is None:
+        return None
+    cleaned: list[ContactTargetInput] = []
+    seen: set[tuple[str, str]] = set()
+    for t in v:
+        key = (t.type, (t.id or "").strip())
+        if not key[1] or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(t)
+    if len(cleaned) > MAX_TARGETS_PER_CONTACT:
+        raise ValueError(
+            f"A contact can target at most {MAX_TARGETS_PER_CONTACT} entries"
+        )
+    return cleaned
+
+
+def _validate_user_ids(v: list[str] | None) -> list[str] | None:
+    """제외자 id 목록 정리 — trim, 빈 값·중복 제거."""
+    if v is None:
+        return None
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in v:
+        uid = (raw or "").strip()
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        cleaned.append(uid)
+    return cleaned
+
 
 def _validate_phones(v: list[ContactPhoneInput] | None) -> list[ContactPhoneInput] | None:
     if v is None:
@@ -162,16 +248,38 @@ class ContactPayload(BaseModel):
     """연락처 내용 본문 — 전체 치환 형태.
 
     CRUD 요청과 변경 신청 payload 가 같은 형태를 쓴다(계약 §5.2).
-    store_id 는 NULL 이면 조직 전체 공유 (D1).
+    가시성은 **명시 모드**다 — 대상이 비었다고 전체 공유가 되지 않는다 (V1).
+    모드 ↔ 목록의 정합성 검증은 서비스가 한다(도메인 에러 코드 400 으로 내리기 위해).
     """
 
     name: str
     company: str | None = None
     email: str | None = None
     memo: str | None = None
-    store_id: str | None = None
+    visibility: str = "organization"
+    targets: list[ContactTargetInput] | None = None
+    excluded_user_ids: list[str] | None = None
     phones: list[ContactPhoneInput] | None = None
     tags: list[str] | None = None
+
+    @field_validator("visibility")
+    @classmethod
+    def _check_visibility(cls, v: str) -> str:
+        checked = _validate_visibility(v)
+        assert checked is not None  # 필수 필드라 None 이 올 수 없다
+        return checked
+
+    @field_validator("targets")
+    @classmethod
+    def _check_targets(
+        cls, v: list[ContactTargetInput] | None
+    ) -> list[ContactTargetInput] | None:
+        return _validate_targets(v)
+
+    @field_validator("excluded_user_ids")
+    @classmethod
+    def _check_excluded(cls, v: list[str] | None) -> list[str] | None:
+        return _validate_user_ids(v)
 
     @field_validator("name")
     @classmethod
@@ -213,6 +321,33 @@ class ContactPayload(BaseModel):
         return _validate_tags(v)
 
 
+class ContactVisibilityPreview(BaseModel):
+    """가시성 미리보기 요청 — 저장 전에 "지금 누가 보는가"를 묻는다 (V4/V5)."""
+
+    visibility: str = "organization"
+    targets: list[ContactTargetInput] | None = None
+    excluded_user_ids: list[str] | None = None
+
+    @field_validator("visibility")
+    @classmethod
+    def _check_visibility(cls, v: str) -> str:
+        checked = _validate_visibility(v)
+        assert checked is not None
+        return checked
+
+    @field_validator("targets")
+    @classmethod
+    def _check_targets(
+        cls, v: list[ContactTargetInput] | None
+    ) -> list[ContactTargetInput] | None:
+        return _validate_targets(v)
+
+    @field_validator("excluded_user_ids")
+    @classmethod
+    def _check_excluded(cls, v: list[str] | None) -> list[str] | None:
+        return _validate_user_ids(v)
+
+
 # === 쓰기 요청 ===
 
 class ContactCreate(ContactPayload):
@@ -239,7 +374,9 @@ class ContactUpdate(BaseModel):
     company: str | None = None
     email: str | None = None
     memo: str | None = None
-    store_id: str | None = None
+    visibility: str | None = None
+    targets: list[ContactTargetInput] | None = None
+    excluded_user_ids: list[str] | None = None
     phones: list[ContactPhoneInput] | None = None
     tags: list[str] | None = None
     # 필수이지만 타입은 Optional 이다 — 누락을 Pydantic 422 가 아니라 서비스의
@@ -276,6 +413,27 @@ class ContactUpdate(BaseModel):
     @classmethod
     def _check_memo(cls, v: str | None) -> str | None:
         return _clean_optional_text(v, "Memo", 4000)
+
+    @field_validator("visibility")
+    @classmethod
+    def _check_visibility(cls, v: str | None) -> str | None:
+        if v is None:
+            # 키를 보냈는데 null → 가시성은 비울 수 없다
+            raise ValueError("Visibility cannot be empty")
+        return _validate_visibility(v)
+
+    @field_validator("targets")
+    @classmethod
+    def _check_targets(
+        cls, v: list[ContactTargetInput] | None
+    ) -> list[ContactTargetInput] | None:
+        # null 은 "대상 없음"으로 읽는다 (전체 공유 전환 시 콘솔이 그렇게 보낸다)
+        return _validate_targets(v) if v is not None else []
+
+    @field_validator("excluded_user_ids")
+    @classmethod
+    def _check_excluded(cls, v: list[str] | None) -> list[str] | None:
+        return _validate_user_ids(v) if v is not None else []
 
     @field_validator("phones")
     @classmethod
@@ -326,7 +484,7 @@ class ContactDuplicatePhone(BaseModel):
 class ContactResponse(BaseModel):
     """연락처 상세/목록 응답.
 
-    store_id 가 NULL 이면 store_name 도 NULL 이며 콘솔은 "All stores" 로 표시한다.
+    visibility='organization' 이면 targets 는 빈 배열이며 콘솔은 "All stores" 로 표시한다.
     pending_request_count 는 **상세에서만** 채운다(목록은 N+1 회피로 항상 0).
     duplicate_phone_warnings 는 **생성/수정/승인 응답에만** 채운다(N7 — 경고, 차단 아님).
     """
@@ -336,8 +494,9 @@ class ContactResponse(BaseModel):
     company: str | None
     email: str | None
     memo: str | None
-    store_id: str | None
-    store_name: str | None
+    visibility: str
+    targets: list[ContactTargetRef] = []
+    excluded_users: list[ContactTargetRef] = []
     phones: list[ContactPhoneResponse] = []
     tags: list[ContactTagRef] = []
     created_by: str | None
@@ -353,6 +512,144 @@ class ContactDeleteResponse(BaseModel):
 
     message: str
     superseded_request_count: int
+
+
+# === 대량 등록 / 일괄 수정 (D1~D6) ===
+
+# 한 번에 다룰 수 있는 최대 건수 — 미리보기를 사람이 눈으로 훑을 수 있는 규모로 묶는다.
+MAX_BULK_ROWS = 200
+
+
+class ContactBulkCreate(BaseModel):
+    """대량 등록 — 붙여넣기 표에서 파싱된 행들 (D3).
+
+    `dry_run=True` 면 저장하지 않고 검증 결과만 돌려준다. 화면은 항상 먼저 dry_run 을
+    부르고, 사용자가 확인한 뒤에 실제 저장을 부른다 (D4: 전부 취소 + 미리보기).
+    """
+
+    rows: list[ContactPayload]
+    reason: str | None = None
+    dry_run: bool = True
+
+    @field_validator("rows")
+    @classmethod
+    def _check_rows(cls, v: list[ContactPayload]) -> list[ContactPayload]:
+        if len(v) == 0:
+            raise ValueError("Add at least one row")
+        if len(v) > MAX_BULK_ROWS:
+            raise ValueError(f"Up to {MAX_BULK_ROWS} rows at a time")
+        return v
+
+    @field_validator("reason")
+    @classmethod
+    def _check_reason(cls, v: str | None) -> str | None:
+        return _clean_optional_text(v, "Reason", 500)
+
+
+class ContactBulkRowResult(BaseModel):
+    """대량 등록 미리보기의 한 행 결과.
+
+    `valid=False` 면 `error` 에 사람이 읽을 이유가 담긴다. 하나라도 실패하면 전체가
+    저장되지 않는다 — 어느 줄이 문제인지 화면이 짚어줄 수 있게 index 를 함께 준다.
+
+    **이름이 `ok` 가 아니라 `valid` 인 이유**: 이건 요청의 성공/실패가 아니라 **행의 검증
+    결과**다. 요청 자체는 200 으로 성공했고, 실패는 상태코드로만 알린다는 규약(G7 레칫)을
+    깨지 않기 위해 성공 플래그처럼 읽히는 이름을 쓰지 않는다.
+    """
+
+    index: int
+    name: str
+    valid: bool
+    error: str | None = None
+    # 같은 번호를 이미 가진 연락처 경고 (차단 아님, N7/D6)
+    duplicate_phone_warnings: list[ContactDuplicatePhone] = []
+
+
+class ContactBulkCreateResult(BaseModel):
+    """대량 등록 결과 — dry_run 이면 `created` 는 0 이고 rows 만 채워진다."""
+
+    dry_run: bool
+    total: int
+    valid_count: int
+    failed_count: int
+    created: int
+    batch_id: str | None = None
+    rows: list[ContactBulkRowResult] = []
+
+
+class ContactBulkUpdate(BaseModel):
+    """일괄 수정 (D2).
+
+    v1 이 다루는 것: 태그 추가 / 태그 제거 / 회사명 설정 / 가시성 설정.
+    **memo 는 일부러 뺐다** — 일괄 덮어쓰기는 기존 메모를 전부 날리는데,
+    그 사고 위험이 얻는 편의보다 크다.
+    """
+
+    contact_ids: list[str]
+    add_tags: list[str] | None = None
+    remove_tags: list[str] | None = None
+    company: str | None = None
+    visibility: str | None = None
+    targets: list[ContactTargetInput] | None = None
+    excluded_user_ids: list[str] | None = None
+    # 필수지만 Optional 타입 — 누락을 도메인 400 으로 내리기 위해(다른 쓰기 경로와 동일)
+    reason: str | None = None
+    dry_run: bool = True
+
+    @field_validator("contact_ids")
+    @classmethod
+    def _check_ids(cls, v: list[str]) -> list[str]:
+        cleaned = [x.strip() for x in v if (x or "").strip()]
+        if not cleaned:
+            raise ValueError("Select at least one contact")
+        if len(cleaned) > MAX_BULK_ROWS:
+            raise ValueError(f"Up to {MAX_BULK_ROWS} contacts at a time")
+        return cleaned
+
+    @field_validator("add_tags", "remove_tags")
+    @classmethod
+    def _check_tags(cls, v: list[str] | None) -> list[str] | None:
+        return _validate_tags(v)
+
+    @field_validator("company")
+    @classmethod
+    def _check_company(cls, v: str | None) -> str | None:
+        return _clean_optional_text(v, "Company", 200)
+
+    @field_validator("visibility")
+    @classmethod
+    def _check_visibility(cls, v: str | None) -> str | None:
+        return _validate_visibility(v)
+
+    @field_validator("targets")
+    @classmethod
+    def _check_targets(
+        cls, v: list[ContactTargetInput] | None
+    ) -> list[ContactTargetInput] | None:
+        return _validate_targets(v)
+
+    @field_validator("excluded_user_ids")
+    @classmethod
+    def _check_excluded(cls, v: list[str] | None) -> list[str] | None:
+        return _validate_user_ids(v)
+
+    @field_validator("reason")
+    @classmethod
+    def _check_reason(cls, v: str | None) -> str | None:
+        return _clean_optional_text(v, "Reason", 500)
+
+
+class ContactBulkUpdateResult(BaseModel):
+    """일괄 수정 결과.
+
+    `changed` 는 실제로 값이 바뀐 건수다 — 이미 그 상태였던 건은 이력을 남기지 않으므로
+    선택 건수와 다를 수 있다(계약 §4.6 no-op 규칙).
+    """
+
+    dry_run: bool
+    selected: int
+    changed: int
+    batch_id: str | None = None
 
 
 # === 변경 신청 (D4) ===
