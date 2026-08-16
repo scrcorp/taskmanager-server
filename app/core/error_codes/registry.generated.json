@@ -85,6 +85,9 @@
       "PUSH_NOT_CONFIGURED"
     ],
     "reports": [
+      "ISSUE_FIELD_REQUIRED",
+      "ISSUE_FIELD_VALUES_MALFORMED",
+      "ISSUE_FIELD_VALUE_INVALID",
       "ISSUE_RECIPIENTS_STORE_MISMATCH",
       "ISSUE_RECIPIENTS_TARGET_REQUIRED",
       "ISSUE_RECIPIENTS_UNAVAILABLE",
@@ -822,6 +825,36 @@
       "status": 503,
       "message": "Push notifications are not available right now.",
       "hint": "This server has no push configuration. Contact your administrator.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "ISSUE_FIELD_REQUIRED",
+      "domain": "reports",
+      "kind": "http",
+      "status": 400,
+      "message": "\"{field}\" is required.",
+      "hint": "Fill it in and submit again.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "ISSUE_FIELD_VALUES_MALFORMED",
+      "domain": "reports",
+      "kind": "http",
+      "status": 400,
+      "message": "The form answers are not in a readable format.",
+      "hint": "Reload the form and enter the values again.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "ISSUE_FIELD_VALUE_INVALID",
+      "domain": "reports",
+      "kind": "http",
+      "status": 400,
+      "message": "\"{field}\" has a value that is not allowed.",
+      "hint": "Check the field's allowed range or options and try again.",
       "frozen": false,
       "clients": []
     },

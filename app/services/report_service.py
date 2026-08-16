@@ -48,9 +48,15 @@ from app.repositories.report_repository import (
     report_template_repository,
     report_type_repository,
 )
+from app.core.issue_fields import (
+    build_fields_snapshot,
+    resolve_issue_fields,
+    validate_and_normalize_values,
+)
 from app.schemas.report import (
     DEFAULT_ISSUE_CATEGORIES,
     DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES,
+    DEFAULT_ISSUE_CATEGORY_FIELDS,
     DEFAULT_REPORT_TYPE_DEFS,
     ISSUE_VISIBILITY_SCOPES,
     LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES,
@@ -221,6 +227,8 @@ async def ensure_system_issue_template(db: AsyncSession) -> bool:
                 "sort_order": idx + 1,
                 "is_active": True,
                 "description_template": DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code),
+                # 프리셋 텍스트 대신 진짜 입력칸으로 묻는다(2026-08-15).
+                "fields": [dict(f) for f in DEFAULT_ISSUE_CATEGORY_FIELDS.get(code, [])],
             }
             for idx, code in enumerate(DEFAULT_ISSUE_CATEGORIES)
         ]
@@ -256,21 +264,31 @@ async def ensure_system_issue_template(db: AsyncSession) -> bool:
             "sort_order": max_sort,
             "is_active": True,
             "description_template": DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code),
+            "fields": [dict(f) for f in DEFAULT_ISSUE_CATEGORY_FIELDS.get(code, [])],
         })
         changed = True
 
     for cat in categories:
         code = cat.get("code")
-        if code not in DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES:
-            continue
-        current = DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES[code]
-        if "description_template" not in cat:
+
+        # (a) 기본 필드 백필 — 아직 필드를 안 가진 카테고리에만. 운영자가 만든 필드는
+        #     건드리지 않는다(비어 있을 때만 채운다).
+        seed_fields = DEFAULT_ISSUE_CATEGORY_FIELDS.get(code)
+        if seed_fields and not (cat.get("fields") or []):
+            cat["fields"] = [dict(f) for f in seed_fields]
+            changed = True
+
+        # (b) 프리셋 문구
+        current = DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code)
+        legacy = LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code, [])
+        if current is not None and "description_template" not in cat:
             cat["description_template"] = current
             changed = True
             continue
-        # 옛 프리셋 원문 그대로면 현재 원문으로 갱신. null(운영자가 비움)이나
-        # 손댄 문구는 그대로 둔다.
-        if cat.get("description_template") in LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code, []):
+        # 옛 프리셋 원문 그대로면 → 현재 원문으로 갱신, 현재 원문이 없으면(필드로 승격)
+        # **비운다**. 안 비우면 같은 항목을 필드와 프리셋이 두 번 묻는다.
+        # null(운영자가 비움)이나 손댄 문구는 그대로 둔다.
+        if cat.get("description_template") in legacy:
             cat["description_template"] = current
             changed = True
 
@@ -1543,47 +1561,24 @@ class ReportService:
                 # 카테고리 정의가 비어있으면 시스템 기본 6개로 fallback
                 if not allowed_codes:
                     allowed_codes = set(DEFAULT_ISSUE_CATEGORIES)
-                custom_fields = tpl.get("custom_fields") or []
             else:
+                tpl = {}
                 allowed_codes = set(DEFAULT_ISSUE_CATEGORIES)
-                custom_fields = []
 
             if category not in allowed_codes:
                 raise BadRequestError(
                     f"payload.category must be one of {sorted(allowed_codes)}"
                 )
 
-            # custom_field_values 검증 (required 체크 + select 옵션 매칭)
-            cfv = raw_payload.get("custom_field_values") or {}
-            if not isinstance(cfv, dict):
-                raise BadRequestError("payload.custom_field_values must be an object")
-            for cf in custom_fields:
-                cf_id = cf.get("id")
-                if not cf_id:
-                    continue
-                val = cfv.get(cf_id)
-                if cf.get("required") and (val is None or val == "" or val == []):
-                    raise BadRequestError(f"Custom field '{cf.get('label', cf_id)}' is required")
-                ftype = cf.get("type")
-                if val in (None, "", []):
-                    continue
-                if ftype == "number":
-                    try:
-                        float(val)
-                    except (TypeError, ValueError):
-                        raise BadRequestError(f"Custom field '{cf_id}' must be a number")
-                elif ftype == "single_choice":
-                    opts = cf.get("options") or []
-                    if val not in opts:
-                        raise BadRequestError(
-                            f"Custom field '{cf_id}' must be one of {opts}"
-                        )
-                elif ftype == "multi_choice":
-                    opts = cf.get("options") or []
-                    if not isinstance(val, list) or any(v not in opts for v in val):
-                        raise BadRequestError(
-                            f"Custom field '{cf_id}' values must all be in {opts}"
-                        )
+            # 표시 대상 = 전역 custom_fields + 이 카테고리의 fields (field_order 순)
+            active_fields = resolve_issue_fields(tpl, category)
+            # 미응답은 null 로 명시 기록된다 — "안 물어봄"(키 없음)과 구분하기 위해.
+            cfv = validate_and_normalize_values(
+                active_fields, raw_payload.get("custom_field_values")
+            )
+            # 그때 물어본 정의를 리포트에 박아둔다. 템플릿이 바뀌어도 과거 리포트가
+            # 해석 가능해야 한다. 클라가 보낸 snapshot 은 신뢰하지 않고 서버가 만든다.
+            fields_snapshot = build_fields_snapshot(active_fields)
 
             # attachments key 정규화 (temp → 최종). 멱등.
             attachments = raw_payload.get("attachments") or []
@@ -1615,6 +1610,8 @@ class ReportService:
                 if data.report_date
                 else date.today()
             )
+            raw_payload["custom_field_values"] = cfv
+            raw_payload["fields_snapshot"] = fields_snapshot
             payload = raw_payload
             title = data.title
         else:
@@ -1700,6 +1697,25 @@ class ReportService:
                             dict(data.payload),
                             existing_payload=r.payload,
                         )
+                        # 커스텀 필드도 생성과 **같은 규칙**으로 재검증한다.
+                        # 예전엔 수정 경로가 payload 를 통째 교체만 해서, 작성 때 막히던
+                        # 값이 수정으로는 그냥 들어갔다.
+                        # 스냅샷은 지금 폼 기준으로 다시 만든다 — 사용자가 보고 고친 폼이
+                        # 곧 저장 형태여야 한다(카테고리를 바꿨을 수도 있다).
+                        tpl_u = await report_template_repository.get_template_for_store(
+                            db, type="issue",
+                            organization_id=organization_id, store_id=r.store_id,
+                        )
+                        fields_u = resolve_issue_fields(
+                            (tpl_u.payload if tpl_u else {}) or {},
+                            data.payload.get("category"),
+                        )
+                        data.payload["custom_field_values"] = (
+                            validate_and_normalize_values(
+                                fields_u, data.payload.get("custom_field_values")
+                            )
+                        )
+                        data.payload["fields_snapshot"] = build_fields_snapshot(fields_u)
                 r.payload = data.payload
                 flag_modified(r, "payload")
             if data.sections is not None:

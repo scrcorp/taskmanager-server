@@ -23,6 +23,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.database import async_session
 from app.main import app
@@ -241,8 +242,34 @@ async def issue_people(
 
 @pytest_asyncio.fixture
 async def system_issue_template():
-    """system default issue 템플릿 보장 (review 카테고리 포함)."""
+    """system default issue 템플릿 보장 + **깨끗한 시드 상태로 리셋**.
+
+    이 테스트들은 전역 템플릿 하나(org_id=NULL)를 공유한다. 보정 로직을 검증하려면
+    운영자 편집을 흉내내야 하는데, 그 흔적이 남으면 뒤 테스트가 엉뚱한 상태를 본다.
+    각 테스트 끝에서 원복하는 대신 **시작할 때 리셋**한다 — 원복을 깜빡하면
+    실패가 엉뚱한 테스트에서 터져 원인을 찾기 어렵다.
+    """
     async with async_session() as db:
+        tpl = (
+            await db.execute(
+                select(ReportTemplate).where(
+                    ReportTemplate.type == "issue",
+                    ReportTemplate.organization_id.is_(None),
+                    ReportTemplate.store_id.is_(None),
+                    ReportTemplate.is_default.is_(True),
+                )
+            )
+        ).scalars().first()
+        if tpl is not None:
+            payload = dict(tpl.payload or {})
+            payload["categories"] = [
+                {k: v for k, v in c.items()
+                 if k not in ("description_template", "fields")}
+                for c in (payload.get("categories") or [])
+            ]
+            tpl.payload = payload
+            flag_modified(tpl, "payload")
+            await db.commit()
         await ensure_system_issue_template(db)
 
 
@@ -907,8 +934,12 @@ async def test_issue_expected_viewers_report_mode(
 
 @pytest.mark.asyncio
 async def test_ensure_system_issue_template_idempotent(system_issue_template):
-    """두 번 돌려도 review 가 중복 append 되지 않고 프리셋이 붙는다."""
-    from app.schemas.report import DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES
+    """두 번 돌려도 review 가 중복 append 되지 않고, 기본 필드가 시드돼 있다.
+
+    2026-08-15: 프리셋 텍스트가 블록 필드로 승격되면서 검증 대상이 바뀌었다 —
+    review 는 이제 description_template 이 아니라 fields 를 갖는다.
+    """
+    from app.schemas.report import DEFAULT_ISSUE_CATEGORY_FIELDS
 
     async with async_session() as db:
         changed = await ensure_system_issue_template(db)
@@ -928,15 +959,19 @@ async def test_ensure_system_issue_template_idempotent(system_issue_template):
         codes = [c["code"] for c in cats]
         assert codes.count("review") == 1
         review = next(c for c in cats if c["code"] == "review")
-        assert (
-            review["description_template"]
-            == DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES["review"]
+        assert review.get("description_template") is None, (
+            "필드로 승격했으므로 프리셋은 비어 있어야 한다(두 번 묻지 않기)"
         )
+        seeded = [f["id"] for f in (review.get("fields") or [])]
+        assert seeded == [f["id"] for f in DEFAULT_ISSUE_CATEGORY_FIELDS["review"]]
 
 
 @pytest.mark.asyncio
 async def test_ensure_system_issue_template_keeps_operator_edits(system_issue_template):
-    """운영자가 비운(null) 프리셋은 startup 보정이 되살리지 않는다."""
+    """운영자가 손댄 것은 startup 보정이 되돌리지 않는다.
+
+    비운 프리셋을 되살리지 않고, 운영자가 만든 필드도 시드로 덮지 않는다.
+    """
     async with async_session() as db:
         tpl = (
             await db.execute(
@@ -961,31 +996,44 @@ async def test_ensure_system_issue_template_keeps_operator_edits(system_issue_te
         review = next(c for c in tpl.payload["categories"] if c["code"] == "review")
         assert review["description_template"] is None
 
-        # 원복 (다른 테스트가 review 프리셋을 기대한다)
+        # 운영자가 만든 필드도 시드가 덮지 않는다 — 비어 있을 때만 채운다.
         payload = dict(tpl.payload)
         payload["categories"] = [
-            {k: v for k, v in c.items() if k != "description_template"}
+            {**c, "fields": [{"id": "op_only", "type": "short_text", "label": "Operator"}]}
             if c["code"] == "review" else c
             for c in payload["categories"]
         ]
         tpl.payload = payload
+        flag_modified(tpl, "payload")
+        await db.commit()
+
+        assert await ensure_system_issue_template(db) is False
+        await db.refresh(tpl)
+        review = next(c for c in tpl.payload["categories"] if c["code"] == "review")
+        assert [f["id"] for f in review["fields"]] == ["op_only"], (
+            "운영자가 만든 필드를 시드가 덮으면 안 된다"
+        )
+
+        # 원복 — 다음 테스트가 시드된 상태를 본다(테스트 간 상태 오염 방지).
+        payload = dict(tpl.payload)
+        payload["categories"] = [
+            {**c, "fields": []} if c["code"] == "review" else c
+            for c in payload["categories"]
+        ]
+        tpl.payload = payload
+        flag_modified(tpl, "payload")
         await db.commit()
         assert await ensure_system_issue_template(db) is True
 
 
 @pytest.mark.asyncio
 async def test_ensure_system_issue_template_upgrades_legacy_preset(system_issue_template):
-    """이미 시드된 옛 프리셋 원문은 startup 보정에서 현재 원문(빈 줄 포함)으로 갱신된다."""
-    from app.schemas.report import (
-        DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES,
-        LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES,
-    )
+    """이미 시드된 옛 프리셋 원문은 startup 보정에서 **비워진다**.
 
-    # 현재 원문은 항목 사이가 빈 줄로 떨어져 있어야 한다 (읽기 어렵다는 피드백)
-    assert DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES["review"] == (
-        "Platform:\n\nRating:\n\nWhat was said:\n\n"
-        "How we responded:\n\nFollow-up needed:\n\nPlan:"
-    )
+    2026-08-15: 그 항목들이 블록 필드로 승격됐다. 프리셋을 안 비우면 같은 항목을
+    필드와 프리셋이 두 번 묻는다(실제로 검증에서 그렇게 보였다).
+    """
+    from app.schemas.report import LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES
 
     async with async_session() as db:
         tpl = (
@@ -1011,10 +1059,7 @@ async def test_ensure_system_issue_template_upgrades_legacy_preset(system_issue_
         assert await ensure_system_issue_template(db) is True
         await db.refresh(tpl)
         review = next(c for c in tpl.payload["categories"] if c["code"] == "review")
-        assert (
-            review["description_template"]
-            == DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES["review"]
-        )
+        assert review["description_template"] is None, "옛 프리셋은 은퇴한다"
 
         # 운영자가 직접 고친 문구는 그대로 둔다 (옛 원문일 때만 갈아끼운다)
         payload = dict(tpl.payload)
@@ -1029,16 +1074,6 @@ async def test_ensure_system_issue_template_upgrades_legacy_preset(system_issue_
         await db.refresh(tpl)
         review = next(c for c in tpl.payload["categories"] if c["code"] == "review")
         assert review["description_template"] == "Custom by operator"
-
-        # 원복 (다른 테스트가 현재 프리셋을 기대한다)
-        payload = dict(tpl.payload)
-        payload["categories"] = [
-            {**c, "description_template": DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES["review"]}
-            if c["code"] == "review" else c
-            for c in payload["categories"]
-        ]
-        tpl.payload = payload
-        await db.commit()
 
 
 @pytest.mark.asyncio

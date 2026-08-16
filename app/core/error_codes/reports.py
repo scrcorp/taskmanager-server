@@ -84,3 +84,34 @@ SCHEDULE_REPORT_TIMES_INVALID = REPORTS.code(
     "Send times must be hours between 0 and 23.",
     hint="Use comma separated hours like 7,15,22 — or leave it empty to stop sending.",
 )
+
+
+# ── 이슈 커스텀 필드 입력 검증 ────────────────────────
+# 필드 정의는 매장이 직접 만든다. 그래서 실패 메시지에는 **어떤 항목이 왜 막혔는지**가
+# 들어가야 한다 — "잘못된 값입니다" 만으로는 작성자가 무엇을 고쳐야 할지 알 수 없다.
+# params 로 label/제약을 함께 실어 보내 클라가 해당 입력칸에 붙일 수 있게 한다.
+
+ISSUE_FIELD_REQUIRED = REPORTS.code(
+    "ISSUE_FIELD_REQUIRED",
+    400,
+    # {field} 는 항상 채워진다 — issue_fields.validate_and_normalize_values 가
+    # label(없으면 id)을 반드시 넘긴다. 필드가 여러 개인 폼에서 이름이 없으면
+    # 작성자는 어느 칸을 고쳐야 하는지 알 수 없다.
+    '"{field}" is required.',
+    hint="Fill it in and submit again.",
+)
+
+ISSUE_FIELD_VALUE_INVALID = REPORTS.code(
+    "ISSUE_FIELD_VALUE_INVALID",
+    400,
+    '"{field}" has a value that is not allowed.',
+    # 이유는 여러 가지(범위·정수·선택지·길이)라 호출부가 hint 로 구체화한다.
+    hint="Check the field's allowed range or options and try again.",
+)
+
+ISSUE_FIELD_VALUES_MALFORMED = REPORTS.code(
+    "ISSUE_FIELD_VALUES_MALFORMED",
+    400,
+    "The form answers are not in a readable format.",
+    hint="Reload the form and enter the values again.",
+)
