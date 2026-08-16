@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.permissions import STAFF_PRIORITY
+from app.core.permissions import CONSOLE_ACCESS, STAFF_PRIORITY
 
 from app.config import settings
 from app.models.organization import Organization, Store
@@ -231,15 +231,13 @@ class AuthService:
 
         role: Role = user.role
 
-        # Staff 차단 — admin login은 SV 이상만
-        if role.priority >= STAFF_PRIORITY:
-            raise ForbiddenError("Staff accounts cannot sign in to admin")
-
-        # permission이 없으면 관리자 로그인 불가
+        # 콘솔 진입 게이트 — D12. priority 비교가 아니라 `console:access` 권한으로 판정한다.
+        # priority 로 막으면 "이 매장만 staff 에게 리포트를 연다"(§18) 같은 조정이 불가능하다.
+        # 기존 role 은 마이그레이션 261609d1aeae 가 전부 부여해 두었으므로 동작은 종전과 같다.
         from app.repositories.permission_repository import permission_repository
-        user_permissions = await permission_repository.get_permissions_by_role_id(db, user.role_id)
-        if len(user_permissions) == 0:
-            raise ForbiddenError("No admin permissions assigned to this role")
+        codes = await permission_repository.get_permissions_by_role_id(db, user.role_id)
+        if CONSOLE_ACCESS not in codes:
+            raise ForbiddenError("This account can't sign in to the admin console")
 
         try:
             result = await self._generate_tokens(

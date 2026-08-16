@@ -88,6 +88,21 @@ class OrgMember(Base):
     # 고용 시작/종료일 — Payroll v1 Phase 1. status 와 별개의 날짜 기록 (급여 기간 판정용).
     hire_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     termination_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 퇴사 사유 — Offboard 시 입력. 자유 텍스트(분류는 v1 에서 두지 않는다).
+    termination_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 재고용 가능 여부 — NULL = 미판단. 재입사 검토 시 참고값.
+    rehire_eligible: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # ── 휴직(on_leave) — status='on_leave' 일 때만 의미가 있다 (D5) ──
+    # 휴직을 terminated 로 처리하면 근속 연수·재고용 이력이 왜곡되므로 별도 상태로 둔다.
+    leave_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 복귀 예정일 — NULL = 미정. 경과하면 apply_due_returns() 가 자동 복귀시킨다.
+    leave_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 휴직 분류 코드 — 목록은 Organization 설정 `employment.leave_types` 가 소유.
+    # 고객마다 분류가 다르므로 서버는 코드만 보관하고 값을 강제하지 않는다.
+    leave_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # 유급 여부 — NULL = 미지정
+    leave_is_paid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    leave_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

@@ -18,6 +18,7 @@ from sqlalchemy import Boolean, Date, DateTime, Index, Integer, String, Text, Fo
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.client_surface import current_channel
 from app.database import Base
 
 
@@ -190,6 +191,7 @@ class AttendanceCorrection(Base):
         corrected_value: 전이 후 값 (Value after)
         reason: 사유 (Reason)
         corrected_by: 행위자 FK (Actor). NULL = system (cron)
+        channel: 기록 경로 — 어느 클라이언트 표면에서 이 전이가 만들어졌나
         created_at: 발생 일시 UTC (Timestamp)
     """
 
@@ -223,5 +225,16 @@ class AttendanceCorrection(Base):
     # 수정자 FK — Admin/manager who made the correction
     # nullable — system actor (cron auto clock-out) 는 user_id 없이 기록.
     corrected_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # 채널 — 어느 경로로 이 전이가 기록됐나 (app/core/client_surface.py 상수):
+    # console / console_compact / htma / staff_app / backoffice / system / api.
+    # NULL = 채널 도입 전 레거시 행 (백필하지 않음).
+    # Python-side default 로도 채운다 — timeline 헬퍼를 거치지 않는 생성 경로
+    # (attendance_repository.create_correction 등)에서도 누락되지 않게.
+    # 요청 컨텍스트 밖(cron)이면 current_channel() 이 "system" 을 반환한다.
+    # 주의: zero-arg lambda 유지 — current_channel 을 직접 넘기면 SQLAlchemy 가
+    # default 파라미터 자리에 ExecutionContext 를 주입한다.
+    channel: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, default=lambda: current_channel()
+    )
     # 수정 일시 — Correction timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

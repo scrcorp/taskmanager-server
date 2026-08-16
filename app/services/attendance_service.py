@@ -1427,6 +1427,7 @@ class AttendanceService:
             "id": str(correction.id),
             "group_id": str(correction.group_id) if correction.group_id else None,
             "action": correction.action,
+            "channel": correction.channel,
             "field_name": correction.field_name,
             "target_type": correction.target_type,
             "target_id": str(correction.target_id) if correction.target_id else None,

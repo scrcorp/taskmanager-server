@@ -22,6 +22,13 @@ class EmpidImportEntry(BaseModel):
     warning: str | None = None        # 경고 (그룹 스코프 충돌 등 — 블록 아님)
     dormant: bool = False             # 휴면 배정 — 번호만 기록되고 재활성화되지 않음
     person_name: str | None = None    # 파일 행의 인물 이름 (placeholder 행별 picker 라벨)
+    corp_abr: str | None = None       # 파일 매장 코드 원문 (unmatched 매핑 키·표시용)
+    # 그룹 스코프 매칭 — needs_store/needs_user 의 매장 picker 옵션
+    group_id: str | None = None
+    group_name: str | None = None
+    group_stores: list[dict] | None = None  # [{store_id, store_name}]
+    # 매장→그룹 승격 행이면 파일 corp 가 지목했던 매장 — picker 프리필
+    hint_store_id: str | None = None
 
 
 class EmpidImportPerson(BaseModel):
@@ -36,7 +43,74 @@ class EmpidImportPerson(BaseModel):
     similar: list[str] = []   # deferred — 이름 유사 DB 유저 힌트 (표시용)
     members: list[str] = []   # placeholder — 파일 내 인물 나열 (표시용)
     similar_users: list[dict] = []  # 유저 picker 프리필 후보 {user_id, full_name, email}
-    matched_by: str | None = None   # "crewid" = 파일 CREWID 로 정확 매칭됨
+    matched_by: str | None = None   # "crewid" = CREWID 정확 매칭 / "name" = 이름 자동 매칭(검토 대상)
+
+
+class EmpidReconChange(BaseModel):
+    """매칭된 사람의 매장별 번호 전이."""
+
+    store_id: str | None = None    # needs_store(매장 미정)면 null
+    store_name: str | None = None
+    current: int | None = None     # 현재 번호 (없으면 null)
+    new: int                       # 파일 번호 (커밋 시 이 값)
+    pending_store: bool = False    # 매장 선택 대기(needs_store) 여부
+
+
+class EmpidReconMatched(BaseModel):
+    """파일↔HTM 매칭된 사람 1명."""
+
+    user_id: str
+    name: str
+    changes: list[EmpidReconChange] = []
+
+
+class EmpidReconHtmPerson(BaseModel):
+    """HTM 에 등록돼 있는데 파일이 못 덮은 사람 — 번호 직접 지정 대상."""
+
+    user_id: str
+    name: str
+    store_id: str
+    store_name: str
+    current_empid: int | None = None  # 번호 없는 배정자도 포함 (지정 필요 대상)
+
+
+class EmpidReconFileRow(BaseModel):
+    """파일에만 있는 행 — deferred/placeholder 에서 사람을 골라 해소."""
+
+    empid: int
+    name: str
+
+
+class EmpidReconciliationScope(BaseModel):
+    """스코프(그룹/매장)별 사람 단위 대조."""
+
+    scope: str          # "group" | "store"
+    id: str
+    name: str
+    matched: list[EmpidReconMatched] = []
+    htm_unmatched: list[EmpidReconHtmPerson] = []
+    file_unmatched: list[EmpidReconFileRow] = []
+
+
+class EmpidSavedAlias(BaseModel):
+    """자동 적용된 저장 별칭 1건 — "저장된 매핑" 표시·수정 UI 재료."""
+
+    key: str                 # 정규화 라벨
+    target_id: str           # 저장된 대상 (매장 또는 그룹 id)
+    store_id: str | None = None  # 매장으로 확정된 경우만
+    store_name: str          # 매장명 또는 그룹명
+
+
+class EmpidUnmatchedStore(BaseModel):
+    """매장 미매칭 원문 1건 — 콘솔 매핑 UI 재료.
+
+    key 를 preview 요청의 store_overrides 키로 그대로 되돌려 보내면 된다.
+    """
+
+    key: str                    # 정규화 키 (오버라이드 키)
+    company: str                # 파일 COMPANY 원문
+    corp_abr: str | None = None  # 파일 매장 코드 원문 (있으면 이게 키의 출처)
+    rows: int = 0               # 해당 키의 행 수
 
 
 class EmpidImportPreviewResponse(BaseModel):
@@ -48,6 +122,12 @@ class EmpidImportPreviewResponse(BaseModel):
     counts: dict[str, int] = {}
     excluded_rows: int = 0
     total_rows: int = 0
+    # 매장 미매칭 원문 집계 — 운영자가 매장에 수동 매핑해 재-preview 하는 용도
+    unmatched_stores: list[EmpidUnmatchedStore] = []
+    # 자동 적용된 저장 별칭 — 한 번 매핑한 라벨은 org 에 남아 다음 업로드부터 자동
+    saved_aliases: list[EmpidSavedAlias] = []
+    # 스코프별 양측 대조 — HTM 에만 / 파일에만 있는 번호
+    reconciliation: list[EmpidReconciliationScope] = []
 
 
 class EmpidImportCommitItem(BaseModel):

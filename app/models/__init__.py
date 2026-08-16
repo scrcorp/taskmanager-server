@@ -25,6 +25,8 @@ from app.models.user import Role, User
 from app.models.org_member import OrgMember, OrgMemberStore
 from app.models.platform_admin import PlatformAdmin
 from app.models.license import License
+from app.models.empid_change import EmpidChange
+from app.models.import_label_alias import ImportLabelAlias
 from app.models.employee_no_history import EmployeeNoHistory
 from app.models.work import Shift, Position
 from app.models.token import RefreshToken
@@ -65,6 +67,7 @@ from app.models.rate import HourlyRateHistory
 from app.models.payroll import PayPeriod, PayrollEntry, PayrollEvent
 from app.models.contact import (
     Contact,
+    ContactVisibilityTarget,
     ContactPhone,
     ContactTag,
     ContactTagLink,
@@ -78,6 +81,8 @@ __all__ = [
     "OrgMember", "OrgMemberStore",
     "PlatformAdmin",
     "License",
+    "EmpidChange",
+    "ImportLabelAlias",
     "EmployeeNoHistory",
     "Shift", "Position",
     "RefreshToken", "UserStore",
@@ -115,6 +120,6 @@ __all__ = [
     "StaffAvailability", "StaffAvailabilityHistory", "StaffAvailabilityPreset",
     "HourlyRateHistory",
     "PayPeriod", "PayrollEntry", "PayrollEvent",
-    "Contact", "ContactPhone", "ContactTag", "ContactTagLink",
+    "Contact", "ContactVisibilityTarget", "ContactPhone", "ContactTag", "ContactTagLink",
     "ContactChangeRequest", "ContactAuditLog",
 ]

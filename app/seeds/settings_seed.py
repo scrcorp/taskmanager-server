@@ -51,6 +51,35 @@ class SettingDefinition:
 # 카테고리 순서대로 정의 (UI에서 같은 순서로 노출됨).
 
 SETTINGS_SEED: list[SettingDefinition] = [
+    # ─── Employment ─────────────────────────────────────
+    SettingDefinition(
+        key="employment.record_retention_years",
+        label="Personnel record retention (years)",
+        description=(
+            "How long personnel records are kept after an employee leaves. "
+            "Records are never deleted automatically — once this window passes they "
+            "simply appear in the purge candidate list for an admin to review."
+        ),
+        value_type="number",
+        default_value=7,
+        category="Employment",
+        levels=["org"],
+        default_priority="org",
+    ),
+    SettingDefinition(
+        key="employment.leave_types",
+        label="Leave types",
+        description=(
+            "Leave categories offered when putting an employee on leave. "
+            "Every company classifies leave differently, so the server only stores "
+            "the code you pick here."
+        ),
+        value_type="json",
+        default_value=["Medical", "Family", "Personal", "Military", "Other"],
+        category="Employment",
+        levels=["org"],
+        default_priority="org",
+    ),
     # ─── Work Hour Alerts ──────────────────────────────
     SettingDefinition(
         key="schedule.work_hour_alert.normal_max",

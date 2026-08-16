@@ -46,3 +46,27 @@ FILE_NOT_FOUND = COMMON.legacy("file_not_found", 404, "This file is no longer av
 INVALID_FOLDER = COMMON.legacy("invalid_folder", 400, "This upload location is not allowed.")
 
 INVALID_KEY = COMMON.legacy("invalid_key", 400, "This file reference is not valid.")
+
+GROUP_NOT_FOUND = COMMON.code(
+    "GROUP_NOT_FOUND",
+    404,
+    "This store group no longer exists.",
+)
+
+INVALID_DATE_RANGE = COMMON.code(
+    "INVALID_DATE_RANGE",
+    400,
+    "date_from must be on or before date_to.",
+)
+
+INVALID_STORE_IDS = COMMON.code(
+    "INVALID_STORE_IDS",
+    400,
+    "store_ids must be comma-separated UUIDs.",
+)
+
+INVALID_STORE_OVERRIDES = COMMON.code(
+    "INVALID_STORE_OVERRIDES",
+    400,
+    "store_overrides must be a JSON object of {label: store id}.",
+)

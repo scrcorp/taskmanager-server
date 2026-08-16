@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.issue_fields import render_field_values_text
 from app.models.task import Task, TaskAssignee, TaskComment
 from app.models.organization import Store
 from app.models.report import Report
@@ -361,7 +362,15 @@ class TaskService:
         title = data.title or report.title or "Task"
         description = data.description
         if not description:
-            description = (report.payload or {}).get("description")
+            # Task.description 은 순수 Text 라 구조를 담을 수 없다. 커스텀 필드 값이
+            # 있으면 평문으로 합쳐 넣는다 — 안 그러면 promote 하는 순간 필드 답변이
+            # 통째로 사라진다. 원본 리포트의 payload 는 그대로 남는다.
+            src = report.payload or {}
+            field_text = render_field_values_text(
+                src.get("fields_snapshot") or [], src.get("custom_field_values")
+            )
+            parts = [p for p in (field_text, src.get("description")) if p]
+            description = "\n\n".join(parts) or None
 
         # Issue report → Task promote 시 데이터 inherit. task UI 가 issue report UI 와
         # 별개라도 데이터 schema 는 호환되므로 자연스럽게 채움. 사용자가 task 단계에서

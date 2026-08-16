@@ -20,7 +20,12 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.contact import CONTACT_AUDIT_ACTIONS, ContactAuditLog
+from app.models.contact import (
+    CONTACT_AUDIT_ACTIONS,
+    CONTACT_SOURCE_DIRECT,
+    CONTACT_SOURCES,
+    ContactAuditLog,
+)
 from app.models.user import User
 
 
@@ -30,22 +35,25 @@ def contact_snapshot(
     company: str | None,
     email: str | None,
     memo: str | None,
-    store_id: str | None,
-    store_name: str | None,
+    visibility: str,
+    targets: list[dict[str, Any]],
+    excluded_users: list[dict[str, Any]],
     phones: list[dict[str, Any]],
     tags: list[str],
 ) -> dict[str, Any]:
-    """이력 before/after 에 쓰는 연락처 스냅샷 (계약 §7.2 형태).
+    """이력 before/after 에 쓰는 연락처 스냅샷 (계약 §7.2 + 개정 §0-A 형태).
 
-    store_name 까지 넣는 이유 — 매장이 삭제·개명돼도 이력이 그대로 읽혀야 한다.
+    targets 에 **이름까지** 넣는 이유 — 대상이 삭제·개명돼도 이력이 그대로 읽혀야
+    한다. 이력 조회 UI 가 없어 DB 에서 한 행만 읽으므로 id 목록만 남기면 못 읽는다.
     """
     return {
         "name": name,
         "company": company,
         "email": email,
         "memo": memo,
-        "store_id": store_id,
-        "store_name": store_name,
+        "visibility": visibility,
+        "targets": targets,
+        "excluded_users": excluded_users,
         "phones": phones,
         "tags": tags,
     }
@@ -82,6 +90,8 @@ class ContactAuditService:
         contact_name: str | None = None,
         change_request_id: UUID | None = None,
         reason: str | None = None,
+        source: str = CONTACT_SOURCE_DIRECT,
+        batch_id: UUID | None = None,
         before: dict[str, Any] | None = None,
         after: dict[str, Any] | None = None,
     ) -> ContactAuditLog:
@@ -95,6 +105,8 @@ class ContactAuditService:
             contact_id / contact_name: 대상 연락처 id + 이름 스냅샷.
             change_request_id: 신청 경유 건 연결 id.
             reason: 사유 (계약 §7.1 매핑 — 필수/선택은 호출부에서 이미 검증됨).
+            source: 변경 경로 (direct/batch/request). 오타는 즉시 ValueError.
+            batch_id: 일괄 작업 묶음 id. 같은 배치의 행들이 공유한다.
             before / after: 변경 전/후 (변경된 필드만).
 
         Returns:
@@ -102,6 +114,8 @@ class ContactAuditService:
         """
         if action not in CONTACT_AUDIT_ACTIONS:
             raise ValueError(f"Unknown contact audit action: {action!r}")
+        if source not in CONTACT_SOURCES:
+            raise ValueError(f"Unknown contact audit source: {source!r}")
 
         row = ContactAuditLog(
             organization_id=organization_id,
@@ -114,6 +128,8 @@ class ContactAuditService:
             # 이메일이 없는 계정이 있어 username 으로 대체 (계약 §7.2)
             actor_email=(actor.email or actor.username) if actor else None,
             reason=reason,
+            source=source,
+            batch_id=batch_id,
             before=before,
             after=after,
         )

@@ -46,7 +46,12 @@ class UserRepository(BaseRepository[User]):
             db: 비동기 데이터베이스 세션 (Async database session)
             organization_id: 조직 ID (Organization UUID)
             filters: 필터 딕셔너리 (store_ids, role_id, is_active,
-                     include_provisional, provisional_only)
+                     include_provisional, provisional_only, user_ids,
+                     exclude_member_statuses)
+                     - exclude_member_statuses: 해당 org 소속 상태인 사용자를 제외
+                       (예: ["on_leave"] — 휴직자는 스케줄 배정 후보가 아니다).
+                     - user_ids: 명시한 id 만 조회. is_active 를 함께 주지 않으면
+                       비활성/퇴사자도 그대로 나온다 (로스터 fail-open 용).
                      - include_provisional: 미가입(유령) 계정을 is_active 필터에서 면제.
                        유령은 is_active=False 라 is_active=True 필터에 걸려 사라지는데,
                        스케줄 후보처럼 유령도 봐야 하는 곳에서 True 로 준다.
@@ -67,6 +72,30 @@ class UserRepository(BaseRepository[User]):
             is_active: bool | None = filters.get("is_active")  # type: ignore[assignment]
             include_provisional: bool = bool(filters.get("include_provisional"))
             provisional_only: bool = bool(filters.get("provisional_only"))
+            user_ids: list[UUID] | None = filters.get("user_ids")  # type: ignore[assignment]
+            exclude_member_statuses: list[str] | None = filters.get(  # type: ignore[assignment]
+                "exclude_member_statuses"
+            )
+
+            if exclude_member_statuses:
+                # org 소속 상태로 거른다 (예: 휴직자를 스케줄 후보에서 제외).
+                # 소속 행이 없는 사용자는 제외하지 않는다 — Model B 이행 중이라
+                # org_members 가 아직 없는 계정이 있을 수 있다.
+                from app.models.org_member import OrgMember
+
+                query = query.where(
+                    ~User.id.in_(
+                        select(OrgMember.user_id).where(
+                            OrgMember.organization_id == organization_id,
+                            OrgMember.status.in_(exclude_member_statuses),
+                        )
+                    )
+                )
+
+            if user_ids is not None:
+                # 명시 id 조회 — 퇴사자 로스터(fail-open) 처럼 비활성까지 끌어와야 하는
+                # 호출부에서 쓴다. 빈 리스트면 결과도 비어야 하므로 `is not None` 으로 본다.
+                query = query.where(User.id.in_(user_ids))
 
             if store_ids:
                 # 해당 매장(들)의 스케줄 대상 직원 조회:

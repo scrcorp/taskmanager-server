@@ -23,6 +23,7 @@ from app.core.attendance_manage_session import (
     revoke_session as revoke_manage_session,
 )
 from app.core.app_version_compat import effective_force
+from app.core.client_surface import current_channel
 from app.core.permissions import is_owner, is_sv_plus
 from app.database import get_db
 from app.models.attendance_device import AttendanceDevice
@@ -902,6 +903,8 @@ async def manage_change_attendance_status(
             corrected_value=after,
             reason=reason,
             corrected_by=manager.id,
+            # 채널 — timeline 헬퍼를 우회하는 유일한 API 직접 생성 경로라 여기서도 명시
+            channel=current_channel(),
         ))
 
     if (target.clock_in or None) != new_clock_in:

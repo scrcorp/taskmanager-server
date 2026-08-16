@@ -256,11 +256,38 @@ async def absorb(
                     )
                 )
             ).scalars().all()
+            if g_rows:
+                # 승계 이력용 스냅샷 — 유령→실계정으로 번호가 넘어간 사실을 원장에 남긴다
+                from app.core.client_surface import current_channel
+                from app.models.empid_change import EMPID_SOURCE_ABSORB, EmpidChange
+                from app.models.organization import Store as StoreModel
+
+                store_names = {
+                    r.id: r.name
+                    for r in (
+                        await db.execute(
+                            select(StoreModel.id, StoreModel.name).where(
+                                StoreModel.id.in_([g.store_id for g in g_rows])
+                            )
+                        )
+                    ).all()
+                }
             for row in g_rows:
                 if row.store_id in t_store_ids:
                     await db.delete(row)  # 대상 번호 유지
                 else:
                     row.org_member_id = t_member.id  # empid 그대로 승계
+                    if row.empid is not None:
+                        db.add(EmpidChange(
+                            organization_id=organization_id,
+                            store_id=row.store_id,
+                            store_name=store_names.get(row.store_id),
+                            user_id=target.id,
+                            person_name=target.full_name,
+                            old_empid=None, new_empid=row.empid,
+                            source=EMPID_SOURCE_ABSORB,
+                            channel=current_channel(), changed_by=None,
+                        ))
             await db.flush()
 
         # 3) 레거시 user_stores — (user, store) unique 라 겹치면 버린다

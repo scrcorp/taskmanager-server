@@ -154,6 +154,10 @@ class Settings(BaseSettings):
     # Admin 콘솔 베이스 URL — 이메일 링크 등에서 사용
     ADMIN_BASE_URL: str = "https://console.hermesops.site"
 
+    # Staff 앱(Flutter web) 베이스 URL — 이메일 CTA 링크에서 사용.
+    # 콘솔은 SV 미만이 로그인할 수 없으므로, staff 수신자에게는 이쪽 링크를 보낸다.
+    STAFF_APP_BASE_URL: str = "https://app.hermesops.site"
+
     # ------------------------------------------------------------------
     # Backoffice — 플랫폼 운영자 전용 평면 (org 권한 시스템 밖)
     # Backoffice — vendor-internal operator surface, OUTSIDE org RBAC.

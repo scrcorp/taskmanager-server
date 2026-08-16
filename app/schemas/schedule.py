@@ -531,6 +531,9 @@ class RosterRow(BaseModel):
     # 신규 스케줄 default 표시용 effective rate (GM+ 만; SV 이하는 None 마스킹)
     effective_hourly_rate: float | None = None
     has_schedule_in_period: bool = False
+    # 조회 기간에 근무 기록이 있어 남긴 비활성(퇴사·배정해제) 행인지.
+    # 활성자는 False. 미래 배정 후보에서는 제외되지만 과거 조회에서는 보여야 한다.
+    is_inactive: bool = False
     confirmed_hours: float = 0.0
     pending_hours: float = 0.0
     confirmed_cost: float | None = None  # GM+ 만

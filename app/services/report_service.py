@@ -6,6 +6,7 @@ type별 클래스 분리 고려.
 """
 import logging
 import uuid
+from html import escape
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -24,7 +25,14 @@ from app.core.error_codes.reports import (
     ISSUE_VISIBILITY_SCOPE_INVALID,
     REPORT_NOT_VISIBLE,
 )
-from app.core.permissions import GM_PRIORITY, STAFF_PRIORITY, is_gm_plus, is_owner
+from app.config import settings
+from app.core.permissions import (
+    GM_PRIORITY,
+    STAFF_PRIORITY,
+    SV_PRIORITY,
+    is_gm_plus,
+    is_owner,
+)
 from app.models.organization import Store
 from app.models.report import (
     Report,
@@ -40,9 +48,15 @@ from app.repositories.report_repository import (
     report_template_repository,
     report_type_repository,
 )
+from app.core.issue_fields import (
+    build_fields_snapshot,
+    resolve_issue_fields,
+    validate_and_normalize_values,
+)
 from app.schemas.report import (
     DEFAULT_ISSUE_CATEGORIES,
     DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES,
+    DEFAULT_ISSUE_CATEGORY_FIELDS,
     DEFAULT_REPORT_TYPE_DEFS,
     ISSUE_VISIBILITY_SCOPES,
     LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES,
@@ -213,6 +227,8 @@ async def ensure_system_issue_template(db: AsyncSession) -> bool:
                 "sort_order": idx + 1,
                 "is_active": True,
                 "description_template": DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code),
+                # 프리셋 텍스트 대신 진짜 입력칸으로 묻는다(2026-08-15).
+                "fields": [dict(f) for f in DEFAULT_ISSUE_CATEGORY_FIELDS.get(code, [])],
             }
             for idx, code in enumerate(DEFAULT_ISSUE_CATEGORIES)
         ]
@@ -248,21 +264,31 @@ async def ensure_system_issue_template(db: AsyncSession) -> bool:
             "sort_order": max_sort,
             "is_active": True,
             "description_template": DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code),
+            "fields": [dict(f) for f in DEFAULT_ISSUE_CATEGORY_FIELDS.get(code, [])],
         })
         changed = True
 
     for cat in categories:
         code = cat.get("code")
-        if code not in DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES:
-            continue
-        current = DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES[code]
-        if "description_template" not in cat:
+
+        # (a) 기본 필드 백필 — 아직 필드를 안 가진 카테고리에만. 운영자가 만든 필드는
+        #     건드리지 않는다(비어 있을 때만 채운다).
+        seed_fields = DEFAULT_ISSUE_CATEGORY_FIELDS.get(code)
+        if seed_fields and not (cat.get("fields") or []):
+            cat["fields"] = [dict(f) for f in seed_fields]
+            changed = True
+
+        # (b) 프리셋 문구
+        current = DEFAULT_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code)
+        legacy = LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code, [])
+        if current is not None and "description_template" not in cat:
             cat["description_template"] = current
             changed = True
             continue
-        # 옛 프리셋 원문 그대로면 현재 원문으로 갱신. null(운영자가 비움)이나
-        # 손댄 문구는 그대로 둔다.
-        if cat.get("description_template") in LEGACY_ISSUE_CATEGORY_DESCRIPTION_TEMPLATES.get(code, []):
+        # 옛 프리셋 원문 그대로면 → 현재 원문으로 갱신, 현재 원문이 없으면(필드로 승격)
+        # **비운다**. 안 비우면 같은 항목을 필드와 프리셋이 두 번 묻는다.
+        # null(운영자가 비움)이나 손댄 문구는 그대로 둔다.
+        if cat.get("description_template") in legacy:
             cat["description_template"] = current
             changed = True
 
@@ -745,6 +771,21 @@ async def _resolve_issue_managers(
         return set()
     auto = await _resolve_issue_auto_recipients(db, store_id=report.store_id)
     return {item["user_id"] for item in auto}
+
+
+_EMAIL_EXCERPT_LIMIT = 600
+
+
+def _email_excerpt(text: str | None) -> str | None:
+    """알림 메일 인용 블록에 넣을 본문. 너무 길면 자르고 말줄임을 붙인다.
+
+    예전 160자는 '어떤 이슈인지 알 수 없다'는 문제의 일부였다 — 템플릿 프리셋
+    (Platform:/Rating:/... 같은 여러 줄)은 앞부분이 라벨뿐이라 내용이 안 보인다.
+    """
+    if not text or not text.strip():
+        return None
+    t = text.strip()
+    return t if len(t) <= _EMAIL_EXCERPT_LIMIT else t[:_EMAIL_EXCERPT_LIMIT].rstrip() + "…"
 
 
 def _apply_section_updates(report: Report, updates: list) -> None:
@@ -1520,47 +1561,24 @@ class ReportService:
                 # 카테고리 정의가 비어있으면 시스템 기본 6개로 fallback
                 if not allowed_codes:
                     allowed_codes = set(DEFAULT_ISSUE_CATEGORIES)
-                custom_fields = tpl.get("custom_fields") or []
             else:
+                tpl = {}
                 allowed_codes = set(DEFAULT_ISSUE_CATEGORIES)
-                custom_fields = []
 
             if category not in allowed_codes:
                 raise BadRequestError(
                     f"payload.category must be one of {sorted(allowed_codes)}"
                 )
 
-            # custom_field_values 검증 (required 체크 + select 옵션 매칭)
-            cfv = raw_payload.get("custom_field_values") or {}
-            if not isinstance(cfv, dict):
-                raise BadRequestError("payload.custom_field_values must be an object")
-            for cf in custom_fields:
-                cf_id = cf.get("id")
-                if not cf_id:
-                    continue
-                val = cfv.get(cf_id)
-                if cf.get("required") and (val is None or val == "" or val == []):
-                    raise BadRequestError(f"Custom field '{cf.get('label', cf_id)}' is required")
-                ftype = cf.get("type")
-                if val in (None, "", []):
-                    continue
-                if ftype == "number":
-                    try:
-                        float(val)
-                    except (TypeError, ValueError):
-                        raise BadRequestError(f"Custom field '{cf_id}' must be a number")
-                elif ftype == "single_choice":
-                    opts = cf.get("options") or []
-                    if val not in opts:
-                        raise BadRequestError(
-                            f"Custom field '{cf_id}' must be one of {opts}"
-                        )
-                elif ftype == "multi_choice":
-                    opts = cf.get("options") or []
-                    if not isinstance(val, list) or any(v not in opts for v in val):
-                        raise BadRequestError(
-                            f"Custom field '{cf_id}' values must all be in {opts}"
-                        )
+            # 표시 대상 = 전역 custom_fields + 이 카테고리의 fields (field_order 순)
+            active_fields = resolve_issue_fields(tpl, category)
+            # 미응답은 null 로 명시 기록된다 — "안 물어봄"(키 없음)과 구분하기 위해.
+            cfv = validate_and_normalize_values(
+                active_fields, raw_payload.get("custom_field_values")
+            )
+            # 그때 물어본 정의를 리포트에 박아둔다. 템플릿이 바뀌어도 과거 리포트가
+            # 해석 가능해야 한다. 클라가 보낸 snapshot 은 신뢰하지 않고 서버가 만든다.
+            fields_snapshot = build_fields_snapshot(active_fields)
 
             # attachments key 정규화 (temp → 최종). 멱등.
             attachments = raw_payload.get("attachments") or []
@@ -1592,6 +1610,8 @@ class ReportService:
                 if data.report_date
                 else date.today()
             )
+            raw_payload["custom_field_values"] = cfv
+            raw_payload["fields_snapshot"] = fields_snapshot
             payload = raw_payload
             title = data.title
         else:
@@ -1677,6 +1697,25 @@ class ReportService:
                             dict(data.payload),
                             existing_payload=r.payload,
                         )
+                        # 커스텀 필드도 생성과 **같은 규칙**으로 재검증한다.
+                        # 예전엔 수정 경로가 payload 를 통째 교체만 해서, 작성 때 막히던
+                        # 값이 수정으로는 그냥 들어갔다.
+                        # 스냅샷은 지금 폼 기준으로 다시 만든다 — 사용자가 보고 고친 폼이
+                        # 곧 저장 형태여야 한다(카테고리를 바꿨을 수도 있다).
+                        tpl_u = await report_template_repository.get_template_for_store(
+                            db, type="issue",
+                            organization_id=organization_id, store_id=r.store_id,
+                        )
+                        fields_u = resolve_issue_fields(
+                            (tpl_u.payload if tpl_u else {}) or {},
+                            data.payload.get("category"),
+                        )
+                        data.payload["custom_field_values"] = (
+                            validate_and_normalize_values(
+                                fields_u, data.payload.get("custom_field_values")
+                            )
+                        )
+                        data.payload["fields_snapshot"] = build_fields_snapshot(fields_u)
                 r.payload = data.payload
                 flag_modified(r, "payload")
             if data.sections is not None:
@@ -1990,6 +2029,7 @@ class ReportService:
         """
         try:
             from app.services.alert_service import alert_service
+            from app.utils.deep_links import build_cta_url
             from app.utils.email import send_email
             from app.utils.email_templates import build_reply_email
             import asyncio
@@ -2011,16 +2051,42 @@ class ReportService:
                 subtitle_parts.append(severity)
             subtitle = " · ".join(subtitle_parts) or "issue"
 
+            # 이벤트별 문구/본문.
+            # 예전엔 세 이벤트가 전부 답글 템플릿 기본문구("New reply on your ...")를 타서
+            # 신규 등록도 "누가 답글을 달았다"로 나갔고, 인용 블록에 본문 대신 제목이 들어가
+            # subtitle 의 제목과 중복되면서 정작 내용은 메일에 없었다.
+            description = (report.payload or {}).get("description") or None
+            status_label_map = {
+                "open": "reopened",
+                "in_progress": "marked in progress",
+                "closed": "closed",
+            }
+            title_txt = report.title or "(untitled)"
             if event == "created":
                 context_label = "issue report"
-                excerpt_text = report.title or excerpt
+                excerpt_text = description
+                excerpt_fallback = "(No description provided)"
+                email_subject = f"[Issue] New · {title_txt}"
+                headline = "New issue report"
+                lead = f"<strong>{escape(actor_name)}</strong> reported a new issue:"
             elif event.startswith("status:"):
                 new_status = event.split(":", 1)[1]
                 context_label = f"issue {new_status}"
-                excerpt_text = report.title
+                excerpt_text = description
+                excerpt_fallback = "(No description provided)"
+                status_txt = status_label_map.get(new_status, new_status)
+                email_subject = f"[Issue] {new_status.replace('_', ' ').title()} · {title_txt}"
+                headline = f"Issue {status_txt}"
+                lead = (
+                    f"<strong>{escape(actor_name)}</strong> {escape(status_txt)} this issue:"
+                )
             else:
                 context_label = "issue report"
                 excerpt_text = excerpt
+                excerpt_fallback = "(Photo or video attachment)"
+                email_subject = f"[Issue] Reply · {title_txt}"
+                headline = "New reply on an issue report"
+                lead = f"<strong>{escape(actor_name)}</strong> left a reply on:"
 
             # 1) 수신자에게 in-app alert (email 과 같은 집합 — 조회권자 전원이 아니다)
             for uid in recipients:
@@ -2045,7 +2111,9 @@ class ReportService:
             for uid in recipients:
                 try:
                     recipient = await db.execute(
-                        select(User.full_name, User.email).where(User.id == uid)
+                        select(User.full_name, User.email, Role.priority)
+                        .join(Role, Role.id == User.role_id, isouter=True)
+                        .where(User.id == uid)
                     )
                     row = recipient.first()
                     if not row or not row.email:
@@ -2054,13 +2122,20 @@ class ReportService:
                             report.id, event, uid,
                         )
                         continue
+                    if not await alert_service.should_send_email(db, uid, "reply"):
+                        continue
                     subject, html = build_reply_email(
                         recipient_name=row.full_name or "there",
                         author_name=actor_name,
                         context_label=context_label.title(),
                         context_subtitle=f"{subtitle} · {report.title or ''}".strip(" ·"),
-                        excerpt=(excerpt_text[:160] if excerpt_text else None),
-                        cta_url=None,
+                        excerpt=_email_excerpt(excerpt_text),
+                        cta_url=build_cta_url("issue_report", report.id, row.priority),
+                        subject=email_subject,
+                        headline=headline,
+                        lead=lead,
+                        cta_label="Open issue",
+                        excerpt_fallback=excerpt_fallback,
                     )
                     asyncio.create_task(send_email(to=row.email, subject=subject, html=html))
                 except Exception:
@@ -2088,6 +2163,7 @@ class ReportService:
             return
         try:
             from app.services.alert_service import alert_service
+            from app.utils.deep_links import build_cta_url
             from app.utils.email import send_email
             from app.utils.email_templates import build_reply_email
             import asyncio
@@ -2095,11 +2171,14 @@ class ReportService:
             author_r = await db.execute(select(User.full_name).where(User.id == author_id))
             author_name = author_r.scalar() or "Manager"
             recipient_r = await db.execute(
-                select(User.full_name, User.email).where(User.id == recipient_id)
+                select(User.full_name, User.email, Role.priority)
+                .join(Role, Role.id == User.role_id, isouter=True)
+                .where(User.id == recipient_id)
             )
             row = recipient_r.first()
             recipient_name = (row.full_name if row else None) or "there"
             recipient_email = row.email if row else None
+            recipient_priority = row.priority if row else None
 
             # context label/subtitle: type별
             context_label = "report"
@@ -2135,8 +2214,10 @@ class ReportService:
                     author_name=author_name,
                     context_label=context_label.title(),
                     context_subtitle=subtitle,
-                    excerpt=(excerpt[:160] if excerpt else None),
-                    cta_url=None,
+                    excerpt=_email_excerpt(excerpt),
+                    cta_url=build_cta_url(
+                        f"{report.type}_report", report.id, recipient_priority
+                    ),
                 )
                 asyncio.create_task(send_email(to=recipient_email, subject=subject, html=html))
         except Exception:

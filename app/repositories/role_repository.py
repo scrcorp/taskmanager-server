@@ -6,7 +6,7 @@ Extends BaseRepository with Role-specific database operations.
 
 from uuid import UUID
 
-from sqlalchemy import Select, and_, func, or_, select
+from sqlalchemy import Select, and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import Role
@@ -59,14 +59,19 @@ class RoleRepository(BaseRepository[Role]):
         priority: int,
         exclude_id: UUID | None = None,
     ) -> bool:
-        """같은 조직 내 역할 이름 또는 priority 중복을 확인합니다."""
+        """같은 조직 내 역할 **이름** 중복을 확인합니다.
+
+        priority 는 더 이상 중복 검사 대상이 아니다 (D13) — 같은 rank 에 권한이 다른
+        role 을 여러 개 두는 것이 요구사항이다. `priority` 인자는 호출부 호환을 위해
+        남겨 두었고 판정에는 쓰지 않는다.
+        """
         query: Select = (
             select(func.count())
             .select_from(Role)
             .where(
                 and_(
                     Role.organization_id == organization_id,
-                    or_(Role.name == name, Role.priority == priority),
+                    Role.name == name,
                 )
             )
         )

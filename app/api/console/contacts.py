@@ -30,6 +30,10 @@ from app.models.user import User
 from app.schemas.common import PaginatedResponse
 from app.schemas.contact import (
     ContactApproveResponse,
+    ContactBulkCreate,
+    ContactBulkCreateResult,
+    ContactBulkUpdate,
+    ContactBulkUpdateResult,
     ContactChangeRequestCreate,
     ContactChangeRequestResponse,
     ContactCreate,
@@ -40,6 +44,7 @@ from app.schemas.contact import (
     ContactResponse,
     ContactTagResponse,
     ContactUpdate,
+    ContactVisibilityPreview,
 )
 from app.services.contact_service import REQUEST_TYPE_PERMISSION, contact_service
 
@@ -248,6 +253,54 @@ async def delete_contact(
 # ====================================================================
 # Collection (trailing slash)
 # ====================================================================
+
+
+@router.post("/bulk", response_model=ContactBulkCreateResult)
+async def bulk_create_contacts(
+    data: ContactBulkCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("contacts:create"))],
+) -> dict:
+    """대량 등록 (D3/D4) — 기본은 `dry_run=true` 미리보기.
+
+    **전부 되거나 전부 안 된다.** 한 행이라도 검증에 걸리면 아무것도 저장하지 않고
+    어느 줄이 왜 실패했는지 돌려준다. 정적 경로라 `/{contact_id}` 보다 먼저 등록한다.
+    """
+    accessible = await get_accessible_store_ids(db, current_user)
+    return await contact_service.bulk_create(db, current_user, accessible, data)
+
+
+@router.post("/bulk-update", response_model=ContactBulkUpdateResult)
+async def bulk_update_contacts(
+    data: ContactBulkUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("contacts:update"))],
+) -> dict:
+    """일괄 수정 (D2) — 태그 추가/제거, 회사명, 가시성. 사유 필수.
+
+    이력은 연락처마다 한 행 + 배치 id 로 묶인다 (D1).
+    """
+    accessible = await get_accessible_store_ids(db, current_user)
+    return await contact_service.bulk_update(db, current_user, accessible, data)
+
+
+@router.post("/visibility-preview")
+async def preview_visibility(
+    data: ContactVisibilityPreview,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("contacts:read"))],
+) -> dict:
+    """이 가시성 설정이면 **지금 누가 보는가** — 저장 전 명단 미리보기 (V4/V5).
+
+    정적 경로라 `/{contact_id}` 보다 먼저 등록돼야 한다(shadow 방지).
+    """
+    return await contact_service.preview_viewers(
+        db,
+        current_user,
+        data.visibility,
+        data.targets or [],
+        data.excluded_user_ids or [],
+    )
 
 
 @router.get("/", response_model=PaginatedResponse)

@@ -866,6 +866,9 @@ class AttendanceCorrectionResponse(BaseModel):
     # null = 이 필드 도입 이전 레거시 행 (콘솔이 시간 근접 휴리스틱으로 fallback).
     group_id: str | None = None
     action: str | None = None  # 카드 태그 — 무엇을 했나 (clock_in / modify / break_added …)
+    # 어느 경로로 바꿨나 — console/console_compact/htma/staff_app/backoffice/system/api.
+    # null = 채널 도입 전 레거시 행 (콘솔은 칩을 숨긴다).
+    channel: str | None = None
     field_name: str  # 전이 대상 항목 — 무엇이 바뀌었나 (status / clock_in / break_type …)
     target_type: str | None = None  # "attendance" | "break". null = 레거시(= attendance)
     target_id: str | None = None  # 하위 엔터티 식별자 (break 세션 id). 본체 전이면 null
