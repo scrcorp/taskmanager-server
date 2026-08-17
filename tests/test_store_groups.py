@@ -96,3 +96,37 @@ async def test_update_group_explicit_nulls(db: AsyncSession, org_id: UUID) -> No
         StoreGroupUpdate.model_validate({"number_range_start": None}),
     )
     assert res2.number_range_start is None
+
+
+async def test_code_roundtrips_through_all_responses(
+    db: AsyncSession, org_id: UUID
+) -> None:
+    """code 가 create/list/update 응답에 모두 실린다.
+
+    _to_response 가 code 매핑을 빠뜨려 DB 에는 저장되는데 화면에서는 늘 비어
+    보였다 (2026-08-16). 저장 경로만 보는 테스트로는 잡히지 않으므로 **응답**을
+    세 경로 전부에서 확인한다.
+    """
+    created = await store_group_service.create_group(
+        db, org_id,
+        StoreGroupCreate.model_validate(
+            {"name": f"__sgtest_code_{uuid4().hex[:6]}__", "code": "ODG"}
+        ),
+    )
+    assert created.code == "ODG"
+
+    listed = await store_group_service.list_groups(db, org_id)
+    assert [g.code for g in listed if g.id == created.id] == ["ODG"]
+
+    updated = await store_group_service.update_group(
+        db, UUID(created.id), org_id,
+        StoreGroupUpdate.model_validate({"code": "MKB"}),
+    )
+    assert updated.code == "MKB"
+
+    # 명시적 null 은 해제 (nullable 컬럼)
+    cleared = await store_group_service.update_group(
+        db, UUID(created.id), org_id,
+        StoreGroupUpdate.model_validate({"code": None}),
+    )
+    assert cleared.code is None
