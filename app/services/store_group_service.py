@@ -43,6 +43,7 @@ class StoreGroupService:
             id=str(group.id),
             organization_id=str(group.organization_id),
             name=group.name,
+            code=group.code,
             sort_order=group.sort_order,
             numbering_mode=group.numbering_mode,
             number_range_start=group.number_range_start,
