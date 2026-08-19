@@ -14,6 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.organization import NUMBERING_MODE_GROUP, Store, StoreGroup
 from app.repositories.store_group_repository import store_group_repository
 from app.schemas.organization import (
+    NumberingRecalculateRequest,
+    NumberingRecalculateResponse,
+    NumberingUpdateRequest,
+    NumberingUpdateResponse,
     AssignPreviewConflict,
     AssignPreviewHolder,
     AssignPreviewMember,
@@ -24,6 +28,7 @@ from app.schemas.organization import (
     StoreGroupResponse,
     StoreGroupUpdate,
 )
+from app.services import empid_cursor_service
 from app.services.org_numbering import duplicate_empids_in_scope
 from app.core.error_codes.common import GROUP_NOT_FOUND, STORE_NOT_FOUND
 from app.utils.exceptions import DuplicateError, NotFoundError
@@ -79,6 +84,12 @@ class StoreGroupService:
                 scope = await self._group_store_ids(db, g.id)
                 duplicates = await duplicate_empids_in_scope(db, scope)
             out.append(self._to_response(g, counts.get(g.id, 0), duplicates))
+        # 채번 커서 현황 (§3-1) — Groups 패널이 "다음 발급 번호"와 재계산 버튼을 그린다.
+        numbering = await empid_cursor_service.numbering_for_groups(
+            db, [g.id for g in groups]
+        )
+        for g, response in zip(groups, out):
+            response.numbering = numbering.get(g.id)
         return out
 
     async def create_group(
@@ -104,10 +115,19 @@ class StoreGroupService:
                     "numbering_mode": data.numbering_mode,
                     "number_range_start": data.number_range_start,
                     "sort_order": next_sort,
+                    # 채번 커서 초기화 — 신규 그룹도 NULL 로 두지 않는다(O1: NULL 폴백을
+                    # 남기면 MAX 경로가 코드에 되살아난다).
+                    "next_empid": empid_cursor_service.initial_cursor(
+                        data.number_range_start
+                    ),
                 },
             )
             await db.commit()
-            return self._to_response(group)
+            response = self._to_response(group)
+            response.numbering = await empid_cursor_service.numbering_for_group(
+                db, group.id
+            )
+            return response
         except Exception:
             await db.rollback()
             raise
@@ -154,7 +174,11 @@ class StoreGroupService:
             scope = await self._group_store_ids(db, group.id)
             duplicates = await duplicate_empids_in_scope(db, scope)
         counts = await store_group_repository.store_counts(db, organization_id)
-        return self._to_response(group, counts.get(group.id, 0), duplicates)
+        response = self._to_response(group, counts.get(group.id, 0), duplicates)
+        response.numbering = await empid_cursor_service.numbering_for_group(
+            db, group.id
+        )
+        return response
 
     async def delete_group(
         self,
@@ -171,6 +195,62 @@ class StoreGroupService:
         except Exception:
             await db.rollback()
             raise
+
+    async def _assert_group(
+        self, db: AsyncSession, group_id: UUID, organization_id: UUID
+    ) -> None:
+        """org 소속 그룹인지 검증 — 타 org 그룹은 404 (존재 누설 방지)."""
+        group = await store_group_repository.get_by_id(db, group_id, organization_id)
+        if group is None:
+            raise GROUP_NOT_FOUND()
+
+    async def update_numbering(
+        self,
+        db: AsyncSession,
+        group_id: UUID,
+        organization_id: UUID,
+        data: NumberingUpdateRequest,
+        actor_id: UUID | None,
+    ) -> NumberingUpdateResponse:
+        """그룹 커서 수동 조정 (§3-2). 사유 필수, 낮추는 것도 허용(lowered=true)."""
+        await self._assert_group(db, group_id, organization_id)
+        info, previous, lowered = await empid_cursor_service.set_cursor(
+            db,
+            scope=empid_cursor_service.SCOPE_GROUP,
+            scope_id=group_id,
+            next_empid=data.next_empid,
+            reason=data.reason,
+            actor_id=actor_id,
+        )
+        return NumberingUpdateResponse(
+            **info.model_dump(), previous=previous, lowered=lowered
+        )
+
+    async def recalculate_numbering(
+        self,
+        db: AsyncSession,
+        group_id: UUID,
+        organization_id: UUID,
+        data: NumberingRecalculateRequest,
+        actor_id: UUID | None,
+    ) -> NumberingRecalculateResponse:
+        """그룹 커서 재계산 (§3-3). apply=false 면 미리보기, true 면 사유 필수.
+
+        재계산은 `empid_kind='sequence'` 만 본다 — 예외 번호(본사 이관 등)는 제외되고
+        그 건수가 exception_count 로 함께 나간다 (RULE-C).
+        """
+        await self._assert_group(db, group_id, organization_id)
+        info, applied, previous = await empid_cursor_service.recalculate_cursor(
+            db,
+            scope=empid_cursor_service.SCOPE_GROUP,
+            scope_id=group_id,
+            apply=data.apply,
+            reason=data.reason,
+            actor_id=actor_id,
+        )
+        return NumberingRecalculateResponse(
+            **info.model_dump(), applied=applied, previous=previous
+        )
 
     async def reorder_groups(
         self,

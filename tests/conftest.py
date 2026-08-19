@@ -279,6 +279,43 @@ async def test_store_id(seed_organization: dict) -> UUID:
         return store.id
 
 
+@pytest_asyncio.fixture
+async def centered_day_boundary(test_store_id: UUID):
+    """테스트 매장의 영업일 경계를 **지금으로부터 5시간 전**으로 잠시 옮긴다.
+
+    Move the store day boundary so "now" sits in the middle of the operating day.
+
+    **왜 필요한가** — 공용 테스트 매장은 UTC/00:00 경계다. 근태 테스트는 판정이 실제
+    now 로 이뤄지므로 스케줄을 "지금 기준 ±N시간" 으로 만드는데, 실행 시각이 UTC 자정
+    근처면 그 스케줄이 **다음 영업일의 창**으로 넘어간다. 그런 행(`operating_day=오늘`
+    인데 시작은 내일 창)은 2026-08 오염 사고와 정확히 같은 모양이라, 서버가 저장을
+    거부하고 clock-in 후보에서도 제외한다 — 시나리오 자체가 성립하지 않는다.
+
+    경계를 now-5h 로 옮기면 "몇 시간 전 시프트"(창 안, 오늘 영업일)와 "어제 영업일
+    시프트"(창 앞, 6시간 전)가 실행 시각과 무관하게 의도대로 만들어진다.
+    영업일 라벨은 UTC 캘린더 날짜와 달라질 수 있으므로, 이 픽스처를 쓰는 테스트는
+    날짜를 `get_work_date()` 로 물어봐야 한다(직접 계산 금지).
+    """
+    from app.utils.timezone import get_store_day_config
+
+    boundary = (datetime.now(timezone.utc) - timedelta(hours=5)).strftime("%H:00")
+    async with async_session() as db:
+        store = await db.get(Store, test_store_id)
+        original = store.day_start_time
+        store.day_start_time = {"all": boundary}
+        await db.commit()
+    try:
+        yield boundary
+    finally:
+        async with async_session() as db:
+            store = await db.get(Store, test_store_id)
+            store.day_start_time = original
+            await db.commit()
+        # 다른 테스트가 원래 경계를 보게 확실히 되돌린다.
+        async with async_session() as db:
+            assert (await get_store_day_config(db, test_store_id))[1] == original
+
+
 @pytest_asyncio.fixture(scope="session")
 async def second_store_id(seed_organization: dict) -> UUID:
     """조직 내 두 번째 매장 — list_stores / notices 스코프 테스트용."""
@@ -438,6 +475,15 @@ async def make_schedule(test_store_id: UUID, _tracked_schedule_ids: list):
             e_at = end_at or (datetime.combine(wd, end_time) if end_time else None)
             if end_at is None and s_at and e_at and e_at <= s_at:
                 e_at += timedelta(days=1)
+            # start_at 을 직접 받았고 영업일을 지정하지 않았으면 **시작 시각에서 영업일을
+            # 파생**한다. operating_day 와 start_at 은 독립 입력이 아니라
+            # `start 달력일 = operating_day + (시각 < 경계 ? 1 : 0)` 로 묶여 있고,
+            # 서버는 이 불변식을 어긴 행을 저장 거부·후보 배제한다. 여기서 오늘로 고정하면
+            # 자정 넘김 스케줄이 창 밖 데이터가 되어 "실행 시각에 따라 깨지는" 픽스처가 된다.
+            if start_at is not None and work_date is None and s_at is not None:
+                from app.utils.timezone import operating_day_of
+
+                wd = operating_day_of(day_cfg, s_at)
             sched = Schedule(
                 organization_id=user_info["organization_id"],
                 user_id=user_info["id"],

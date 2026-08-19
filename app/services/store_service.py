@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.organization import Store
 from app.repositories.store_repository import store_repository
 from app.schemas.organization import (
+    NumberingRecalculateRequest,
+    NumberingRecalculateResponse,
+    NumberingUpdateRequest,
+    NumberingUpdateResponse,
     StoreCreate,
     StoreDetailResponse,
     StoreResponse,
@@ -20,6 +24,7 @@ from app.schemas.organization import (
     PositionResponse,
     ShiftResponse,
 )
+from app.services import empid_cursor_service
 from app.utils.exceptions import ConflictError, DuplicateError, NotFoundError
 
 
@@ -153,7 +158,14 @@ class StoreService:
         )
         if accessible_store_ids is not None:
             stores = [s for s in stores if s.id in accessible_store_ids]
-        return [self._to_response(s) for s in stores]
+        responses = [self._to_response(s) for s in stores]
+        # 채번 커서 현황 (§3-1) — org 당 몇 번의 집계 쿼리로 한 번에 붙인다(매장 수 무관).
+        numbering = await empid_cursor_service.numbering_for_stores(
+            db, [s.id for s in stores]
+        )
+        for store, response in zip(stores, responses):
+            response.numbering = numbering.get(store.id)
+        return responses
 
     async def get_store(
         self,
@@ -182,7 +194,7 @@ class StoreService:
         if store is None:
             raise NotFoundError("Store not found")
 
-        return StoreDetailResponse(
+        detail = StoreDetailResponse(
             **self._base_fields(store),
             shifts=[
                 ShiftResponse(id=str(s.id), name=s.name, sort_order=s.sort_order)
@@ -193,6 +205,12 @@ class StoreService:
                 for p in store.positions
             ],
         )
+        # 채번 커서 현황 (§3-1). Shared 그룹 소속이면 scope="group" + 그룹 id 가 온다 —
+        # 콘솔은 이걸 보고 번호대 칸을 비활성화하고 수정 대상을 그룹으로 돌린다.
+        detail.numbering = await empid_cursor_service.numbering_for_store(
+            db, store_id
+        )
+        return detail
 
     async def create_store(
         self,
@@ -216,9 +234,11 @@ class StoreService:
             DuplicateError: 같은 이름의 매장이 이미 존재할 때
                             (When a store with the same name already exists)
         """
-        # 같은 조직 내 매장명 중복 확인 — Check store name uniqueness within org
-        exists: bool = await store_repository.exists(
-            db, {"organization_id": organization_id, "name": data.name}
+        # 같은 조직 내 매장명 중복 확인 — Check store name uniqueness within org.
+        # 폐점 매장은 이름을 놓아준다(code 와 같은 기준) — 삭제가 소프트로 바뀐 뒤
+        # 이 필터가 없으면 폐점한 매장의 이름을 다시 쓸 수 없다.
+        exists: bool = await store_repository.name_exists(
+            db, organization_id, data.name
         )
         if exists:
             raise DuplicateError("A store with this name already exists")
@@ -252,7 +272,18 @@ class StoreService:
             await self._validate_group_org(db, data.group_id, organization_id)
             create_data["group_id"] = data.group_id
         if data.number_range_start is not None:
+            # Shared 그룹은 그룹 번호대 하나만 쓴다 — 매장값을 받아도 채번에서 무시되므로
+            # 저장하지 않고 거절한다 (§4 ERR-RANGE-IGNORED, 조용한 실패 제거).
+            await empid_cursor_service.assert_range_start_allowed(
+                db, organization_id, data.group_id
+            )
             create_data["number_range_start"] = data.number_range_start
+        # 채번 커서 초기화 — 백필(마이그레이션)이 기존 행을 전부 채웠으므로 신규 행도
+        # 여기서 채운다. 비워두면 코드에 NULL 폴백(= MAX 경로)이 되살아난다(O1).
+        create_data["next_empid"] = empid_cursor_service.initial_cursor(
+            data.number_range_start,
+            await empid_cursor_service.group_range_start(db, data.group_id),
+        )
 
         # 영업일 경계는 조직 기본값의 **스냅샷**이다 (D2-2). 라이브 cascade 가 아니다 —
         # cascade 로 두면 조직 기본값을 바꾸는 순간 기존 매장의 경계가 소리 없이 따라 움직이고,
@@ -292,8 +323,19 @@ class StoreService:
                 db, store.id, organization_id
             )
 
+            # RULE-B — 그룹에 들어가면서 생기는 매장도 편입이다. 커서끼리 승격시킨다
+            # (MAX(empid)+1 이 아니다 — 예외 번호가 그룹 커서를 밀어올린다).
+            if store.group_id is not None:
+                await empid_cursor_service.promote_group_cursor_on_join(
+                    db, store.id, store.group_id
+                )
+
             await db.commit()
-            return self._to_response(store)
+            response = self._to_response(store)
+            response.numbering = await empid_cursor_service.numbering_for_store(
+                db, store.id
+            )
+            return response
         except Exception:
             await db.rollback()
             raise
@@ -330,8 +372,8 @@ class StoreService:
             existing = await store_repository.get_by_id(db, store_id, organization_id)
         if data.name is not None:
             if existing is not None and existing.name != data.name:
-                name_exists: bool = await store_repository.exists(
-                    db, {"organization_id": organization_id, "name": data.name}
+                name_exists: bool = await store_repository.name_exists(
+                    db, organization_id, data.name, exclude_id=store_id
                 )
                 if name_exists:
                     raise DuplicateError("A store with this name already exists")
@@ -362,14 +404,35 @@ class StoreService:
                 _select(Store.group_id).where(Store.id == store_id)
             )
             group_changed = old_group != update_data["group_id"]
+        # number_range_start 를 **넣으려는** 경우만 문맥 검사한다 (§4 ERR-RANGE-IGNORED).
+        # 명시적 null(해제)은 그대로 허용 — 지우는 것은 조용한 실패가 아니다.
+        if update_data.get("number_range_start") is not None:
+            from sqlalchemy import select as _select
+            target_group = (
+                update_data["group_id"]
+                if "group_id" in update_data
+                else await db.scalar(_select(Store.group_id).where(Store.id == store_id))
+            )
+            await empid_cursor_service.assert_range_start_allowed(
+                db, organization_id, target_group
+            )
         try:
             store: Store | None = await store_repository.update(
                 db, store_id, update_data, organization_id
             )
             if store is None:
                 raise NotFoundError("Store not found")
+            # RULE-B — 편입 시 그룹 커서를 승격 (group.cursor = max(group, store)).
+            # 커밋 전에 돌려 편성 변경과 같은 트랜잭션에 묶는다.
+            if group_changed and store.group_id is not None:
+                await empid_cursor_service.promote_group_cursor_on_join(
+                    db, store.id, store.group_id
+                )
             await db.commit()
             response = self._to_response(store)
+            response.numbering = await empid_cursor_service.numbering_for_store(
+                db, store.id
+            )
             # 그룹 편성 직후 공유 스코프 내 기존 empid 중복 경고 (블록하지 않음 — 정책 A).
             if group_changed and store.group_id is not None:
                 from app.services.org_numbering import (
@@ -382,6 +445,70 @@ class StoreService:
         except Exception:
             await db.rollback()
             raise
+
+    async def _assert_store_owns_cursor(
+        self,
+        db: AsyncSession,
+        store_id: UUID,
+        organization_id: UUID,
+    ) -> None:
+        """이 매장이 자기 커서를 갖는지 확인. Shared 그룹 소속이면 거절한다.
+
+        커서는 채번 스코프에 하나뿐이다 — Shared 그룹 매장의 커서는 쉬고 있으므로
+        여기서 고치면 아무 일도 일어나지 않는다(조용한 실패). 계약의 numbering.scope
+        가 콘솔에 이미 "group" 이라고 말해주므로, 서버도 같은 말을 한다.
+        """
+        store = await store_repository.get_by_id(db, store_id, organization_id)
+        if store is None:
+            raise NotFoundError("Store not found")
+        info = await empid_cursor_service.numbering_for_store(db, store_id)
+        if info is not None and info.scope == empid_cursor_service.SCOPE_GROUP:
+            from app.core.error_codes.empid import ERR_RANGE_IGNORED
+            raise ERR_RANGE_IGNORED()
+
+    async def update_numbering(
+        self,
+        db: AsyncSession,
+        store_id: UUID,
+        organization_id: UUID,
+        data: NumberingUpdateRequest,
+        actor_id: UUID | None,
+    ) -> NumberingUpdateResponse:
+        """매장 커서 수동 조정 (§3-2). 사유 필수, 낮추는 것도 허용(lowered=true)."""
+        await self._assert_store_owns_cursor(db, store_id, organization_id)
+        info, previous, lowered = await empid_cursor_service.set_cursor(
+            db,
+            scope=empid_cursor_service.SCOPE_STORE,
+            scope_id=store_id,
+            next_empid=data.next_empid,
+            reason=data.reason,
+            actor_id=actor_id,
+        )
+        return NumberingUpdateResponse(
+            **info.model_dump(), previous=previous, lowered=lowered
+        )
+
+    async def recalculate_numbering(
+        self,
+        db: AsyncSession,
+        store_id: UUID,
+        organization_id: UUID,
+        data: NumberingRecalculateRequest,
+        actor_id: UUID | None,
+    ) -> NumberingRecalculateResponse:
+        """매장 커서 재계산 (§3-3). apply=false 면 미리보기, true 면 사유 필수."""
+        await self._assert_store_owns_cursor(db, store_id, organization_id)
+        info, applied, previous = await empid_cursor_service.recalculate_cursor(
+            db,
+            scope=empid_cursor_service.SCOPE_STORE,
+            scope_id=store_id,
+            apply=data.apply,
+            reason=data.reason,
+            actor_id=actor_id,
+        )
+        return NumberingRecalculateResponse(
+            **info.model_dump(), applied=applied, previous=previous
+        )
 
     async def reorder_stores(
         self,
@@ -417,9 +544,14 @@ class StoreService:
         store_id: UUID,
         organization_id: UUID,
     ) -> None:
-        """매장을 삭제합니다.
+        """매장을 **폐점(soft delete)** 처리합니다 — status=closed + deleted_at (§3-7).
 
-        Delete a store by its ID.
+        Close a store: the row stays, only its status changes. 경로·메서드·204 는
+        그대로고 **동작만** 바뀌었다 (콘솔 문구는 `Close store`).
+
+        하드 삭제를 하면 배정 행이 FK 로 함께 사라져 그 매장이 점유하던 empid 가
+        풀린다 — 폐점 매장도 번호를 계속 점유해야 재합류·재발급 충돌이 없다(정책 A).
+        진짜 삭제(purge)가 필요하면 백오피스 도구로 분리한다.
 
         Args:
             db: 비동기 데이터베이스 세션 (Async database session)
@@ -430,8 +562,10 @@ class StoreService:
             NotFoundError: 매장을 찾을 수 없을 때 (Store not found)
         """
         try:
-            deleted: bool = await store_repository.delete(db, store_id, organization_id)
-            if not deleted:
+            closed: bool = await store_repository.soft_delete(
+                db, store_id, organization_id
+            )
+            if not closed:
                 raise NotFoundError("Store not found")
             await db.commit()
         except Exception:

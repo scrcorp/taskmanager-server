@@ -140,6 +140,11 @@ class StoreGroup(Base):
     )
     # 그룹 기본 번호대 시작값 — Default empid range start (e.g. 1000). 매장 값이 우선. NULL=1부터.
     number_range_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 다음 발급 empid — 그룹 공유 스코프(numbering_mode="group")의 채번 커서.
+    # 채번은 이 값에서 시작한다. MAX(empid) 를 쓰지 않는 이유: 예외 번호(본사 이관 등)가
+    # 순번을 끌고 올라가기 때문. 전진만 하고(INV-2), 낮추는 것은 운영자 수동 조정만 허용.
+    # NULL = 아직 백필 전(마이그레이션이 전부 채운다 — 코드에 NULL 폴백을 두지 않는다).
+    next_empid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)
@@ -204,6 +209,10 @@ class Store(Base):
     )
     # 매장 번호대 시작값 — empid range start override (그룹 값보다 우선). NULL=그룹/1 폴백.
     number_range_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 다음 발급 empid — 매장 단독 스코프(미그룹 or 그룹 numbering_mode="store")의 채번 커서.
+    # 그룹 공유 매장은 그룹 커서를 쓰므로 이 값이 쉬고 있다가, 그룹에서 빠지거나
+    # 모드가 바뀌면 다시 쓰인다(그래서 백필도 전 매장을 채운다). 규칙은 그룹 커서와 동일.
+    next_empid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 소프트 삭제 일시 — Timestamp when store was soft-deleted/closed (NULL = live)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 승인 필요 여부 — Whether schedule approval is required (default True)

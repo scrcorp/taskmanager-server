@@ -211,3 +211,48 @@ async def test_build_response_includes_effective_status(
     assert body["effective_status"] in ("working", "late"), (
         f"clock-in 직후 effective_status: {body['effective_status']}"
     )
+
+
+async def test_today_staff_keeps_unfinished_shift_from_previous_operating_day(
+    async_client: AsyncClient,
+    device_auth_headers: dict,
+    make_schedule,
+    test_user: dict,
+    test_store_id: UUID,
+    centered_day_boundary: str,
+) -> None:
+    """영업일 경계를 넘겨 아직 근무 중인 사람이 **화면에서 사라지지 않아야** 한다.
+
+    경계(day_start)를 지나면 라벨은 어제 영업일로 남는다. today-staff 가 오늘 라벨만
+    조회하면, 서버는 그 사람의 퇴근을 받아주는데(`attendance_device_service` 의
+    `open_prev`) 화면에는 안 보이는 비대칭이 생긴다 — 매니저는 누가 아직 남아 있는지
+    알 수 없다. 여기서 그 비대칭을 고정한다.
+    """
+    from app.utils.timezone import get_store_day_config, get_work_date
+
+    async with async_session() as db:
+        tz_name, day_cfg = await get_store_day_config(db, test_store_id)
+    now = datetime.now(timezone.utc)
+    today = get_work_date(tz_name, day_cfg, now)
+
+    # 어제 영업일 시프트 — 경계 **이전**에 시작해 아직 안 끝났다.
+    tz_info = await _tz_for(test_store_id)
+    local_now = now.astimezone(tz_info)
+    start_local = (local_now - timedelta(hours=8)).replace(second=0, microsecond=0, tzinfo=None)
+    end_local = (local_now + timedelta(hours=2)).replace(second=0, microsecond=0, tzinfo=None)
+    sid = await make_schedule(test_user, start_at=start_local, end_at=end_local)
+    await _ensure_attendance(sid)
+    await _set_attendance_state(sid, clock_in=now - timedelta(hours=8), status="working")
+
+    async with async_session() as db:
+        row = (await db.execute(
+            text("SELECT work_date FROM attendances WHERE schedule_id = :sid"), {"sid": sid},
+        )).first()
+    assert row is not None and row[0] == today - timedelta(days=1), (
+        "픽스처 전제: 이 근무는 어제 영업일 라벨이어야 한다"
+    )
+
+    resp = await async_client.get("/api/v1/attendance/today-staff", headers=device_auth_headers)
+    assert resp.status_code == 200, resp.text
+    users = [r["user_id"] for r in resp.json()]
+    assert str(test_user["id"]) in users, "아직 근무 중인데 목록에서 사라졌다"

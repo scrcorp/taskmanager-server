@@ -32,7 +32,13 @@ from app.models.user import User
 from app.models.user_store import UserStore
 from app.services.alert_service import alert_service
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio,
+    # 스케줄을 "지금 기준 ±N시간" 으로 만드는 테스트들이라 매장 영업일 경계가 now 근처면
+    # 시나리오가 성립하지 않는다(그 시프트가 다음 영업일 창으로 넘어간다). 경계를
+    # now-5h 로 옮겨 실행 시각과 무관하게 만든다 — `centered_day_boundary` 참조.
+    pytest.mark.usefixtures("centered_day_boundary"),
+]
 
 
 async def _set_membership(
@@ -329,20 +335,26 @@ async def test_early_clock_in_alerts_reach_store_managers_and_owner(
             .order_by(Attendance.created_at.desc())
             .limit(1)
         )
-        recipients = {
-            row[0]
-            for row in (
-                await db.execute(
-                    select(Alert.user_id).where(
-                        Alert.type == "early_clock_in_override",
-                        Alert.reference_type == "attendance",
-                        Alert.reference_id == attendance_id,
-                    )
+        alert_rows = (
+            await db.execute(
+                select(Alert.user_id, Alert.message).where(
+                    Alert.type == "early_clock_in_override",
+                    Alert.reference_type == "attendance",
+                    Alert.reference_id == attendance_id,
                 )
-            ).all()
-        }
+            )
+        ).all()
+        recipients = {row[0] for row in alert_rows}
 
     assert test_users["testgm"]["id"] in recipients, "매장 manager 인 GM 은 받아야 한다"
     assert test_users["testadmin"]["id"] in recipients, "Owner 는 항상 받아야 한다"
     assert test_users["testsv"]["id"] not in recipients
     assert test_users["teststaff"]["id"] not in recipients
+
+    # 문구에 예정 시각이 **날짜와 함께** 실린다 ("Aug 19, 5:00 PM"). 분 수만 있으면
+    # 하루 어긋난 스케줄(2026-08 오염 사고)이 "1439분 일찍" 이라는 숫자로만 보여서,
+    # 받는 사람이 이상한 건 알아도 무엇이 이상한지 알 수 없다.
+    expected_date = start_at.strftime("%b %-d")
+    assert all(expected_date in message for _uid, message in alert_rows), (
+        f"알림 문구에 날짜가 없다: {[m for _u, m in alert_rows]}"
+    )

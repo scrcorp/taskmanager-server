@@ -38,6 +38,17 @@ class DeviceMeResponse(BaseModel):
     store_timezone: str | None = None   # IANA tz, e.g. "America/Los_Angeles"
     store_timezone_offset_minutes: int | None = None  # 현재 UTC 오프셋 (분, 예: PDT=-420)
     work_date: str | None = None         # store tz + day_start 기준 "YYYY-MM-DD"
+    # 매장 영업일 경계 — 요일별 7키를 **전부 채운** 매핑 {"mon": "11:00", ...}.
+    #
+    # 앱이 시프트의 달력 날짜를 스스로 계산하려면(시작 = 영업일 + (시각 < 경계 ? 1 : 0))
+    # 이 값이 필요하다. 없으면 자정 경계를 가정하고 그리게 되어, 경계가 자정이 아닌
+    # 매장에서 화면의 날짜와 서버가 저장하는 날짜가 갈린다.
+    #
+    # 판정이 아니라 **설정 전달**이다 — store_timezone / work_date 와 같은 성격이라
+    # 같은 자리에 piggyback 한다(additive, 구버전 HTMA 는 무시). 저장 형태의 부분
+    # 구성("all" 만 있거나 일부 요일만)은 서버가 펼쳐서 내려주므로 클라에 폴백 규칙이
+    # 남지 않는다.
+    store_day_start_times: dict[str, str] | None = None
     # 워크인 허용 여부 (store 설정 resolve, store 없으면 false). 키오스크가
     # 스케줄 없이도 clock-in 버튼을 띄울지 판단하는 데 사용.
     walk_in_allowed: bool = False

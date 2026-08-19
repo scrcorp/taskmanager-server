@@ -131,6 +131,58 @@ def resolve_day_start_time(day_start_time: dict | None, weekday: int) -> time:
     return time(int(h), int(m))
 
 
+def day_start_map(day_start_time: dict | None) -> dict[str, str]:
+    """요일별 경계 시각을 **7키 전부 채운** 매핑으로 펼칩니다 (클라이언트 전달용).
+
+    Expand the store day-boundary config into a complete mon..sun map.
+
+    저장 형태(`{"all": "11:00"}` 또는 일부 요일만)를 그대로 내려주면 클라이언트가
+    "없는 요일 → all → 서버 기본값" 폴백 사슬을 다시 구현해야 하고, 그 사슬이 서버와
+    한 칸이라도 어긋나면 화면의 날짜와 저장되는 날짜가 갈린다. 펼쳐서 내려주면
+    클라이언트에 남는 일은 "그 요일 키를 읽는다" 뿐이다.
+    """
+    return {
+        key: resolve_day_start_time(day_start_time, index).strftime("%H:%M")
+        for index, key in enumerate(_WEEKDAY_KEYS)
+    }
+
+
+def operating_day_of(day_start_time: dict | None, moment: datetime) -> date:
+    """벽시계 시각이 속한 **영업일 라벨**. `operating_day_window` 의 역함수다.
+
+    Which operating day a wall-clock moment belongs to.
+
+    시작 달력일 파생 규칙 `so = 시작시각 < day_start(D+1) ? 1 : 0` 을 뒤집은 것이다 —
+    경계 이전 시각은 전날 영업일에 속한다. (`get_work_date` 와 같은 규칙이지만 이쪽은
+    이미 매장 tz 로 표현된 벽시계 datetime 을 받는다.)
+    """
+    boundary = resolve_day_start_time(day_start_time, moment.date().weekday())
+    if moment.time() < boundary:
+        return moment.date() - _timedelta(days=1)
+    return moment.date()
+
+
+def operating_day_window(
+    tz_name: str, day_start_time: dict | None, operating_day: date
+) -> tuple[datetime, datetime]:
+    """영업일 D 의 창 `[D의 경계, D+1의 경계)` — store tz aware (끝은 배타).
+
+    영업일 라벨과 달력일이 다를 수 있는 매장(경계가 자정이 아닌 곳)에서 "이 시각이
+    정말 그 영업일에 속하는가" 를 묻는 **단일 기준**이다. 시작 달력일 파생 규칙
+    (`so = 시작시각 < day_start(D+1) ? 1 : 0`) 과 같은 경계를 쓴다 — 두 곳이 갈리면
+    저장은 통과하는데 근태는 그 시프트를 못 찾는 상태가 만들어진다.
+    """
+    tz = ZoneInfo(tz_name)
+    next_day = operating_day + _timedelta(days=1)
+    start = datetime.combine(
+        operating_day, resolve_day_start_time(day_start_time, operating_day.weekday()), tzinfo=tz
+    )
+    end = datetime.combine(
+        next_day, resolve_day_start_time(day_start_time, next_day.weekday()), tzinfo=tz
+    )
+    return start, end
+
+
 def store_day_start_from_org(org_day_start: time | None) -> dict | None:
     """조직 기본 경계(Time 단일값) → 매장 day_start_time JSONB 형태로 감쌉니다 (D2-2).
 
