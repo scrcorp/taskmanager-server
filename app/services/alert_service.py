@@ -613,6 +613,7 @@ class AlertService:
         staff_user_id: UUID,
         staff_name: str,
         minutes_early: int,
+        scheduled_start_label: str | None = None,
     ) -> list[Alert]:
         """조기 출근 강행 시 그 매장 manager + Owner 에게 알림을 생성합니다.
 
@@ -622,9 +623,14 @@ class AlertService:
         email 은 호출자가 should_send_email 가드와 함께 별도로 보낸다
         (checklist/report 알림과 동일한 분업).
         """
+        # 문구에 **예정 시각을 날짜와 함께** 싣는다("Aug 19, 5:00 PM"). 분 수만 있으면
+        # 날짜가 하루 어긋난 스케줄(2026-08 오염 사고)이 "1439분 일찍" 이라는 숫자로만
+        # 보여서, 받는 사람이 이상한 건 알아도 무엇이 이상한지 알 수 없다.
         message = (
             f"{staff_name} clocked in {minutes_early} minutes before their shift"
         )
+        if scheduled_start_label:
+            message += f" (scheduled {scheduled_start_label})"
 
         filtered = await self._attendance_recipient_ids(
             db,

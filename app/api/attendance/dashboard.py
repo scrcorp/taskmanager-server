@@ -11,7 +11,7 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request, Response, status as http_status
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_attendance_device
@@ -61,14 +61,29 @@ async def today_staff(
     tz_info = ZoneInfo(store_tz)
 
     # ── Eager 모델: attendance row 가 진실원. schedule 은 LEFT JOIN.
+    #
+    # 오늘 라벨 + **전날 라벨의 아직 안 끝난 근무**를 함께 본다.
+    # 영업일 경계(day_start)를 넘겨 일하는 사람은 경계가 지나는 순간 라벨이 어제로
+    # 남는데, 여기서 오늘 라벨만 조회하면 **아직 근무 중인 사람이 화면에서 사라진다**.
+    # 서버는 그 상태에서도 퇴근을 받아주므로(attendance_device_service 의 `open_prev`),
+    # 화면만 그 사람을 못 보여주는 비대칭이 생긴다 — 매니저는 누가 남아 있는지 알 수 없다.
+    # 규칙은 그쪽과 같다: clock_in 이 있고 clock_out 이 없는 전날 라벨 row.
+    yesterday = today - timedelta(days=1)
     rows = await db.execute(
         select(Attendance, Schedule, User)
         .outerjoin(Schedule, Schedule.id == Attendance.schedule_id)
         .join(User, User.id == Attendance.user_id)
         .where(
             Attendance.store_id == device.store_id,
-            Attendance.work_date == today,
             Attendance.status != "cancelled",
+            or_(
+                Attendance.work_date == today,
+                and_(
+                    Attendance.work_date == yesterday,
+                    Attendance.clock_in.is_not(None),
+                    Attendance.clock_out.is_(None),
+                ),
+            ),
         )
     )
     triples: list[tuple[Attendance, Schedule | None, User]] = list(rows.all())

@@ -26,7 +26,13 @@ from app.models.attendance_break import AttendanceBreak
 from app.models.settings import StoreSetting
 from app.models.user_store import UserStore
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio,
+    # 이 파일의 시나리오는 "지금 기준 ±N시간" 스케줄로 만들어진다. 공용 테스트 매장은
+    # UTC/00:00 경계라 실행 시각이 자정 근처면 그 스케줄이 어제 영업일로 넘어가
+    # clock-in 의 오늘 후보에서 빠진다 — `centered_day_boundary` 참조.
+    pytest.mark.usefixtures("centered_day_boundary"),
+]
 
 TIP_KEY = "attendance.tip_entry_enabled"
 

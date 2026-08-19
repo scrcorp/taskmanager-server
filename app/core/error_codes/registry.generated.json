@@ -116,15 +116,17 @@
       "BREAK_OUTSIDE_SHIFT",
       "BREAK_PAIR_INCOMPLETE",
       "BREAK_REVERSED",
+      "END_AFTER_NEXT_DAY_START",
       "OPERATING_DAY_OVERRIDDEN",
       "OVERLAPPING_SCHEDULE",
       "PAY_PERIOD_LOCKED",
       "SCHEDULE_INVALID",
       "SCHEDULE_WARNINGS_UNCONFIRMED",
+      "SHIFT_SPAN_TOO_LONG",
       "SHIFT_TOO_LONG",
-      "START_AFTER_DAY_BOUNDARY",
-      "START_BEFORE_DAY_BOUNDARY",
+      "START_DATE_MISMATCH",
       "START_DATE_OUT_OF_WINDOW",
+      "START_DATE_RECALCULATED",
       "STORE_CLOSED_DAY",
       "TIME_NOT_ON_GRID",
       "USER_NOT_IN_STORE",
@@ -1122,6 +1124,19 @@
       ]
     },
     {
+      "code": "END_AFTER_NEXT_DAY_START",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "This shift runs past {boundary}, when the next business day ({next_operating_day}) starts. Its hours will still count on this operating day.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
       "code": "OPERATING_DAY_OVERRIDDEN",
       "domain": "schedule",
       "kind": "item",
@@ -1187,6 +1202,19 @@
       ]
     },
     {
+      "code": "SHIFT_SPAN_TOO_LONG",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "A shift cannot span more than 24 hours.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
       "code": "SHIFT_TOO_LONG",
       "domain": "schedule",
       "kind": "item",
@@ -1200,24 +1228,11 @@
       ]
     },
     {
-      "code": "START_AFTER_DAY_BOUNDARY",
+      "code": "START_DATE_MISMATCH",
       "domain": "schedule",
       "kind": "item",
       "status": null,
-      "message": "Start is at or after the store's day boundary.",
-      "hint": null,
-      "frozen": true,
-      "clients": [
-        "console/src/lib/scheduleCodes.ts",
-        "app/apps/attendance/lib/utils/schedule_codes.dart"
-      ]
-    },
-    {
-      "code": "START_BEFORE_DAY_BOUNDARY",
-      "domain": "schedule",
-      "kind": "item",
-      "status": null,
-      "message": "Start is before the store's day boundary.",
+      "message": "This store's business day starts at {boundary}, so a shift counted on {operating_day} runs on {auto} when it starts at {start_time}. {chosen} falls in a different business day, where staff cannot clock in for it. To run it on {chosen}, set the operating day to {suggested_operating_day}.",
       "hint": null,
       "frozen": true,
       "clients": [
@@ -1231,6 +1246,19 @@
       "kind": "item",
       "status": null,
       "message": "Start date must be on the operating day or the next day.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "START_DATE_RECALCULATED",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "Changing the time moves this shift from {from_date} to {to_date} (the store's day starts at {boundary}).",
       "hint": null,
       "frozen": true,
       "clients": [

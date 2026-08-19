@@ -21,7 +21,7 @@ from app.schemas.schedule import (
     grid_error_message,
     ScheduleAuditLogResponse, ScheduleCancel,
     ScheduleCreate, ScheduleResponse, ScheduleSwitch, ScheduleUpdate,
-    ScheduleValidation, FinalizeResult,
+    ScheduleValidation, ScheduleIssue, FinalizeResult,
     ScheduleReject, ScheduleBulkConfirmResult,
     ScheduleHistoryItem, ScheduleHistoryListResponse,
     RosterResponse, RosterRow, RosterColumn, RosterTotals, RosterFilterDomain,
@@ -180,9 +180,13 @@ class ScheduleService:
         user_row = user_result.first()
         user_name: str | None = user_row[0] if user_row else None
         user_department: str | None = user_row[1] if user_row else None
-        # Store name
-        store_result = await db.execute(select(Store.name).where(Store.id == entry.store_id))
-        store_name: str | None = store_result.scalar()
+        # Store name + 영업일 경계 (구간 밖 판정용 — 같은 조회에 얹는다)
+        store_result = await db.execute(
+            select(Store.name, Store.day_start_time).where(Store.id == entry.store_id)
+        )
+        _store_row = store_result.first()
+        store_name: str | None = _store_row[0] if _store_row else None
+        _store_day_start = _store_row[1] if _store_row else None
         # Work role name
         work_role_name: str | None = None
         if entry.work_role_id:
@@ -217,6 +221,7 @@ class ScheduleService:
             work_role_name=work_role_name,
             effective_rate=effective_rate,
             effective_source=effective_source,
+            store_day_start=_store_day_start,
         )
 
     async def _list_to_responses(
@@ -258,7 +263,7 @@ class ScheduleService:
         stores: dict[UUID, Any] = {}
         if store_ids:
             rows = await db.execute(
-                select(Store.id, Store.name, Store.default_hourly_rate)
+                select(Store.id, Store.name, Store.default_hourly_rate, Store.day_start_time)
                 .where(Store.id.in_(store_ids))
             )
             stores = {r.id: r for r in rows}
@@ -329,6 +334,10 @@ class ScheduleService:
                 work_role_name=work_role_name,
                 effective_rate=effective_rate,
                 effective_source=effective_source,
+                store_day_start=(
+                    getattr(stores.get(entry.store_id), "day_start_time", None)
+                    if entry.store_id in stores else None
+                ),
             ))
         return responses
 
@@ -369,9 +378,24 @@ class ScheduleService:
         work_role_name: str | None,
         effective_rate: float | None,
         effective_source: str | None,
+        store_day_start: dict | None = None,
     ) -> ScheduleResponse:
-        """resolve된 값들 + entry → ScheduleResponse. 단건/목록 경로 공용 빌더."""
+        """resolve된 값들 + entry → ScheduleResponse. 단건/목록 경로 공용 빌더.
+
+        `store_day_start` 를 주면 "시작이 자기 영업일 구간 밖인가" 를 함께 계산한다.
+        안 주면 판정하지 않는다(False) — 경계를 모르는 채 "정상" 이라고 단정하지 않기 위해
+        호출부가 명시적으로 넘기게 한다.
+        """
         stored_rate = float(entry.hourly_rate) if entry.hourly_rate is not None else 0.0
+        outside = False
+        if store_day_start is not None and entry.start_at is not None and entry.operating_day:
+            from app.utils.timezone import resolve_day_start_time
+
+            _b = resolve_day_start_time(
+                store_day_start, (entry.operating_day + timedelta(days=1)).weekday()
+            )
+            _auto = entry.operating_day + timedelta(days=1 if entry.start_at.time() < _b else 0)
+            outside = entry.start_at.date() != _auto
         return ScheduleResponse(
             id=str(entry.id),
             organization_id=str(entry.organization_id),
@@ -396,6 +420,7 @@ class ScheduleService:
             break_start_at=format_naive_iso(entry.break_start_at),
             break_end_at=format_naive_iso(entry.break_end_at),
             net_work_minutes=entry.net_work_minutes,
+            start_outside_operating_window=outside,
             status=entry.status,
             created_by=str(entry.created_by) if entry.created_by else None,
             approved_by=str(entry.approved_by) if entry.approved_by else None,
@@ -566,6 +591,27 @@ class ScheduleService:
             })
         return warns
 
+    async def _auto_start_offset(
+        self, db: AsyncSession, store_id: UUID, operating_day: date, start_time: time | None,
+    ) -> int:
+        """구(舊) 인코딩(HH:mm)을 조립할 때 쓸 **시작 달력일 오프셋**(0|1).
+
+        규칙은 하나뿐이다 — 영업일 D 의 창은 `[D의 경계, D+1의 경계)` 이므로,
+        경계 이전 시각은 달력상 D+1 이다. 조립하는 다른 지점(`manage._kiosk_shift_iso`)과
+        같은 기준(영업일+1일의 경계)을 쓴다.
+
+        예전엔 이 자리에서 **기존 행의 오프셋을 그대로 보존**했다. 그래서 경계 11:00 매장에서
+        09:00(+1d) 시프트의 시각만 17:00 으로 바꾸면 +1d 가 남아 하루 뒤에 저장됐다
+        (2026-08 "1439분 조기출근" 오염). 보존이 아니라 **재파생**이 답이다.
+        """
+        if start_time is None:
+            return 0
+        from app.utils.timezone import get_store_day_config, resolve_day_start_time
+
+        _, day_cfg = await get_store_day_config(db, store_id)
+        boundary = resolve_day_start_time(day_cfg, (operating_day + timedelta(days=1)).weekday())
+        return 1 if start_time < boundary else 0
+
     async def _validate_entry(
         self,
         db: AsyncSession,
@@ -580,16 +626,33 @@ class ScheduleService:
         exclude_id: UUID | None = None,
         cand_start_at: datetime | None = None,
         cand_end_at: datetime | None = None,
+        date_override: bool = False,
     ) -> ScheduleValidation:
+        """저장 전 검증. `date_override` 는 "시작 달력일을 사람이 직접 골랐다"는 의사표시다.
+
+        날짜는 (영업일, 시작 시각, 매장 경계)에서 **하나로 결정되는 파생값**이라, 그와 다른
+        값이 표시 없이 들어오면 클라이언트 버그이거나 옛 오프셋의 잔재다 → 차단(에러).
+        사람이 화면에서 고른 경우에만 이 플래그가 서고, 그때는 경고로 내려가 확인 후 통과한다.
+        """
         errors: list[dict] = []
         warnings: list[dict] = []
 
         start_m = self._time_to_minutes(start_time)
         end_m = self._time_to_minutes(end_time)
 
-        # 영업일 발산 제약 — start 달력일은 영업일 당일 또는 +1일(새벽조)만 허용.
-        # +1일인데 매장 영업일 경계(day_start, 기본 06:00) 이후 시작이면 다음 영업일
-        # 소속이어야 할 근무일 가능성이 높아 경고(저장은 가능, 프리플라이트에서 확인).
+        # ── 시작 달력일 검증 (2026-08 오염 사고의 차단 지점) ──────────────
+        #
+        # 시작 달력일은 입력이 아니라 **파생값**이다:
+        #     auto = 영업일 + (시작 시각 < day_start(영업일+1) ? 1 : 0)
+        # 경계는 **영업일+1일** 것을 쓴다 — 영업일 D 의 창이 [D의 경계, D+1의 경계) 이므로
+        # "이 시각이 창의 앞쪽이냐 뒤쪽이냐"를 가르는 건 D+1 의 경계다. (조립하는 쪽인
+        # `manage._kiosk_shift_iso` 와 같은 기준. 예전엔 여기만 start 날짜의 요일을 써서
+        # 요일별 경계를 쓰는 매장에서 조립과 검증이 갈렸다.)
+        #
+        # 판정 결과는 셋 중 하나다:
+        #   창 밖(-1일, +2일…)      → 에러. 어떤 규칙으로도 나올 수 없는 값.
+        #   auto 와 다름 + 표시 없음 → 에러. 클라 버그이거나 옛 오프셋의 잔재다.
+        #   auto 와 다름 + 표시 있음 → 경고. 사람이 고른 것이므로 확인 후 통과.
         if cand_start_at is not None and work_date is not None:
             _delta_days = (cand_start_at.date() - work_date).days
             if _delta_days < 0 or _delta_days > 1:
@@ -601,27 +664,78 @@ class ScheduleService:
             else:
                 from app.utils.timezone import get_store_day_config, resolve_day_start_time
                 _, _day_cfg = await get_store_day_config(db, store_id)
-                _boundary = resolve_day_start_time(_day_cfg, cand_start_at.date().weekday())
-                if _delta_days == 1 and cand_start_at.time() >= _boundary:
-                    warnings.append(codes.issue(
-                        codes.START_AFTER_DAY_BOUNDARY,
+                _next_day = work_date + timedelta(days=1)
+                _boundary = resolve_day_start_time(_day_cfg, _next_day.weekday())
+                _auto_delta = 1 if cand_start_at.time() < _boundary else 0
+                if _delta_days != _auto_delta:
+                    # 자동값과 다른 시작 달력일 = **자기 영업일 구간 밖**이다. 항상 그렇다:
+                    # 구간이 [D의 경계, D+1의 경계) 이므로 시각이 경계 이후면 D 만 구간 안이고,
+                    # 경계 이전이면 D+1 만 구간 안이다. 즉 "다른 쪽 후보" 는 예외 없이 구간 밖이다.
+                    #
+                    # 그런 행은 저장돼도 현장에서 쓸 수 없다 — 출근하려는 시각의 영업일과
+                    # 라벨이 달라 후보 조회에 안 잡히고, 경계가 지난 뒤엔 이미 끝난 근무다
+                    # (2026-08-19 확인: 두 시점 모두 "No scheduled shift" / "already completed").
+                    # 그래서 확인으로도 넘기지 않고 **차단**한다.
+                    #
+                    # `date_override` 는 여기서 더 이상 통로가 아니다. 지우지 않고 남겨 둔 것은
+                    # "이벤트 특수근무" 처럼 구간 밖 근무를 **의도적으로** 다루는 기능이 생길 때
+                    # 이 지점만 열면 되게 하기 위함이다. 그 기능 없이 통로만 열어두면
+                    # 쓸 수 없는 스케줄이 계속 만들어진다.
+                    _auto_date = work_date + timedelta(days=_auto_delta)
+                    errors.append(codes.issue(
+                        codes.START_DATE_MISMATCH,
+                        auto=_auto_date.isoformat(),
+                        chosen=cand_start_at.date().isoformat(),
                         boundary=_boundary.strftime("%H:%M"),
-                        start_date=cand_start_at.date().isoformat(),
+                        start_time=cand_start_at.strftime("%H:%M"),
+                        operating_day=work_date.isoformat(),
+                        # 의도가 "그 달력일에 일한다" 면 바꿔야 할 것은 시작 날짜가 아니라 영업일이다.
+                        suggested_operating_day=(
+                            work_date - timedelta(days=1) if _auto_delta == 1
+                            else work_date + timedelta(days=1)
+                        ).isoformat(),
                     ))
-                elif _delta_days == 0 and cand_start_at.time() < _boundary:
-                    # 대칭 경고 — 당일 새벽 시각(경계 이전)은 영업일 판정상 전날 소속.
-                    # 이 영업일의 새벽조라면 start 날짜를 +1일로 지정해야 근태 매칭이 맞는다.
-                    warnings.append(codes.issue(
-                        codes.START_BEFORE_DAY_BOUNDARY,
-                        boundary=_boundary.strftime("%H:%M"),
-                        start_date=cand_start_at.date().isoformat(),
-                    ))
+
+        # 종료가 **다음 영업일 경계**를 넘는가 (경고).
+        # 영업일 D 의 창은 [day_start(D), day_start(D+1)) 다. 종료가 그 끝을 넘으면 근무의
+        # 뒷부분이 D+1 에 속하는데 라벨은 D 하나뿐이라 급여·리포트가 전부 D 로 귀속된다.
+        # 막지 않는 이유는 실제로 가능한 근무이기 때문이고, 확인을 받는 이유는 대개
+        # 영업일 오선택이거나 매장 경계가 근무 패턴과 안 맞는다는 신호이기 때문이다.
+        if cand_end_at is not None and work_date is not None:
+            from app.utils.timezone import get_store_day_config, resolve_day_start_time
+
+            _, _day_cfg_e = await get_store_day_config(db, store_id)
+            _next_od = work_date + timedelta(days=1)
+            _next_boundary = resolve_day_start_time(_day_cfg_e, _next_od.weekday())
+            _window_end = datetime.combine(_next_od, _next_boundary)
+            # 경계가 자정인 매장은 제외한다. `00:00` 은 "영업일 = 달력일" 이라는 뜻이고,
+            # 그러면 **자정을 넘기는 모든 야간조**가 이 경고에 걸린다 — 그건 이 datetime
+            # 인코딩이 존재하는 이유 그 자체라 경고가 아니라 소음이 된다.
+            # 경계를 04:00·11:00 처럼 매장이 닫힌 시각으로 **일부러 옮긴** 경우에만
+            # "그 시각을 넘겨 일한다" 가 확인할 값어치가 있는 사실이 된다.
+            if _next_boundary != time(0, 0) and cand_end_at > _window_end:
+                warnings.append(codes.issue(
+                    codes.END_AFTER_NEXT_DAY_START,
+                    boundary=_next_boundary.strftime("%H:%M"),
+                    end_at=cand_end_at.isoformat(timespec="minutes"),
+                    next_operating_day=_next_od.isoformat(),
+                ))
 
         # A-3: 0분 shift 차단
         if cand_start_at is not None and cand_end_at is not None:
             net_minutes = int((cand_end_at - cand_start_at).total_seconds() // 60)
             if net_minutes <= 0:
                 errors.append(codes.issue(codes.ZERO_DURATION))
+            elif net_minutes > 24 * 60:
+                # 24h 초과는 "긴 근무"(SHIFT_TOO_LONG 경고)가 아니라 **날짜 조립이 틀렸다**는
+                # 신호다. 종료 달력일 후보가 시작일/시작일+1 둘뿐인 것과 같은 근거이며,
+                # 이 검사가 없으면 하루 어긋난 종료일이 "30시간 근무"로 조용히 저장된다.
+                errors.append(codes.issue(
+                    codes.SHIFT_SPAN_TOO_LONG,
+                    span_minutes=net_minutes,
+                    start_at=cand_start_at.isoformat(timespec="minutes"),
+                    end_at=cand_end_at.isoformat(timespec="minutes"),
+                ))
         elif start_m == end_m:
             errors.append(codes.issue(codes.ZERO_DURATION))
             net_minutes = 0
@@ -1003,13 +1117,23 @@ class ScheduleService:
         from app.services.store_service import store_service
         await store_service.assert_open_for_create(db, store_id)
         user_id = UUID(data.user_id)
-        # 전환기 정규화 — 구(work_date+HH:MM)/신(operating_day+ISO) 입력을 하나로
+        # 전환기 정규화 — 구(work_date+HH:MM)/신(operating_day+ISO) 입력을 하나로.
+        # 구 입력만 온 경우 시작 달력일을 **경계 규칙으로 파생**한다(HH:MM 만으로는
+        # 새벽조를 표현할 수 없다). 수정 경로와 같은 규칙을 쓴다.
+        _legacy_off = 0
+        if data.start_at is None and data.start_time:
+            _anchor = data.operating_day or data.work_date
+            if _anchor is not None:
+                _legacy_off = await self._auto_start_offset(
+                    db, store_id, _anchor, self._parse_time(data.start_time),
+                )
         norm = self._normalize_shift_input(
             work_date=data.work_date, operating_day=data.operating_day,
             start_time=data.start_time, end_time=data.end_time,
             break_start_time=data.break_start_time, break_end_time=data.break_end_time,
             start_at=data.start_at, end_at=data.end_at,
             break_start_at=data.break_start_at, break_end_at=data.break_end_at,
+            legacy_start_offset_days=_legacy_off,
         )
         start_time = norm["start_at"].time() if norm["start_at"] else None
         end_time = norm["end_at"].time() if norm["end_at"] else None
@@ -1048,6 +1172,7 @@ class ScheduleService:
             db, user_id, store_id, norm["operating_day"],
             start_time, end_time, break_start, break_end, data.force,
             cand_start_at=norm["start_at"], cand_end_at=norm["end_at"],
+            date_override=data.date_override,
         )
         acknowledged_warnings = self._enforce_validation(validation, data.force)
         if warnings_sink is not None:
@@ -1484,6 +1609,7 @@ class ScheduleService:
                         note=item.note,
                         hourly_rate=item.hourly_rate,
                         reset_checklist=item.reset_checklist,
+                        date_override=item.date_override,
                         # 다건 경로는 409 확인 흐름을 쓰지 않는다(S1-c).
                         # 전체를 409 로 막으면 부분 성공의 의미가 사라지고, 한 항목의
                         # 경고 때문에 나머지가 통째로 멈춘다. 저장은 진행하고 경고는
@@ -1878,12 +2004,29 @@ class ScheduleService:
                         )
             else:
                 # 구 인코딩(또는 work_date/시간 변경): 병합된 시각 locals에서 재조립.
-                # 기존 새벽근무(+1d)의 day-offset을 보존 — 구 클라이언트(키오스크/벌크)가
-                # 시간만 수정해도 start_at 날짜가 영업일로 당겨지지 않도록.
+                #
+                # 기존 새벽근무(+1d)의 day-offset 은 **시작 시각이 그대로일 때만** 보존한다.
+                # 시각이 바뀌면 날짜는 새 시각에서 다시 파생되어야 한다 —
+                # 옛 오프셋을 붙들고 있던 것이 2026-08 오염 사고의 생성 경로였다
+                # (경계 11:00 매장에서 09:00(+1d) shift 의 시각만 17:00 으로 바꾸면
+                #  +1d 가 그대로 남아 `영업일+1 17:00` 이 저장됐다).
+                # 시각이 안 바뀐 저장(직원/역할/메모만 수정)에서는 기존 날짜를 지켜야 하므로
+                # 보존 자체를 없애지는 않는다.
                 _anchor_prev = entry.operating_day
-                _off = 0
-                if entry.start_at is not None and _anchor_prev is not None:
+                _start_unchanged = (
+                    entry.start_at is not None
+                    and new_start is not None
+                    and entry.start_at.time() == new_start
+                )
+                if entry.start_at is not None and _anchor_prev is not None and _start_unchanged:
+                    # 시각이 그대로면 저장된 날짜를 지킨다 — 직원/역할/메모만 고치는 저장이
+                    # 사람이 골라둔 날짜를 뒤집으면 안 된다.
                     _off = max(0, min(1, (entry.start_at.date() - _anchor_prev).days))
+                else:
+                    # 시각이 바뀌었다 → 날짜는 새 시각에서 다시 파생한다.
+                    _off = await self._auto_start_offset(
+                        db, entry.store_id, _sdate or new_work_date, new_start,
+                    )
                 norm = self._normalize_shift_input(
                     work_date=new_work_date, operating_day=_sdate,
                     start_time=self._format_time(new_start),
@@ -1913,7 +2056,34 @@ class ScheduleService:
             data.force, exclude_id=entry.id,
             cand_start_at=(norm["start_at"] if norm else entry.start_at),
             cand_end_at=(norm["end_at"] if norm else entry.end_at),
+            date_override=data.date_override,
         )
+
+        # 구 인코딩(HH:mm 만 전송) 수정으로 **시작 달력일이 이동**하면 확인을 받는다.
+        # 날짜를 표현할 수단이 없는 클라이언트라 조용히 바뀌면 사용자가 알 방법이 없다.
+        # (신 인코딩 클라이언트는 명시 start_at 을 보내므로 `_client_at` 가 비지 않아 제외된다.)
+        if (
+            norm is not None
+            and not _client_at
+            and entry.start_at is not None
+            and norm["start_at"] is not None
+            and norm["start_at"].date() != entry.start_at.date()
+        ):
+            from app.utils.timezone import get_store_day_config, resolve_day_start_time
+
+            _, _dcfg = await get_store_day_config(db, entry.store_id)
+            _bnd = resolve_day_start_time(
+                _dcfg, (norm["operating_day"] + timedelta(days=1)).weekday()
+            )
+            # validation.warnings 는 ScheduleIssue 모델 리스트다 — dict 를 그대로 넣으면
+            # 응답 직렬화 시점에 터진다(코드 계약은 codes.issue 로 만들고 모델로 감싼다).
+            validation.warnings.append(ScheduleIssue(**codes.issue(
+                codes.START_DATE_RECALCULATED,
+                from_date=entry.start_at.date().isoformat(),
+                to_date=norm["start_at"].date().isoformat(),
+                boundary=_bnd.strftime("%H:%M"),
+            )))
+
         acknowledged_warnings = self._enforce_validation(validation, data.force)
 
         # (L3) 영업일이 바뀌는 수정이면 **새 날짜**도 locked 기간이 아니어야 한다 —
@@ -2840,12 +3010,20 @@ class ScheduleService:
     ) -> ScheduleValidation:
         # 프리플라이트도 저장과 동일한 정규화(신 인코딩 우선)로 검증 — 새벽근무(+1d)의
         # 경고/겹침이 실제 instant 기준으로 계산되도록.
+        _legacy_off = 0
+        if data.start_at is None and data.start_time:
+            _anchor = data.operating_day or data.work_date
+            if _anchor is not None:
+                _legacy_off = await self._auto_start_offset(
+                    db, UUID(data.store_id), _anchor, self._parse_time(data.start_time),
+                )
         norm = self._normalize_shift_input(
             work_date=data.work_date, operating_day=data.operating_day,
             start_time=data.start_time, end_time=data.end_time,
             break_start_time=data.break_start_time, break_end_time=data.break_end_time,
             start_at=data.start_at, end_at=data.end_at,
             break_start_at=data.break_start_at, break_end_at=data.break_end_at,
+            legacy_start_offset_days=_legacy_off,
         )
         if norm["start_at"] is None or norm["end_at"] is None:
             return ScheduleValidation(valid=False, errors=["start/end time is required"])
@@ -2856,6 +3034,7 @@ class ScheduleService:
             norm["break_end_at"].time() if norm["break_end_at"] else None,
             data.force,
             cand_start_at=norm["start_at"], cand_end_at=norm["end_at"],
+            date_override=data.date_override,
         )
 
     async def finalize_period_entries(

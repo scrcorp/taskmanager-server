@@ -45,7 +45,8 @@ EARLY_CLOCK_IN_REASON_REQUIRED = ATTENDANCE.legacy(
         "app/apps/attendance/lib/widgets/early_clock_in_dialog.dart",
     ),
 )
-"""params: minutes_early(int), schedule_id(str), scheduled_start(ISO str).
+"""params: minutes_early(int), schedule_id(str), scheduled_start(ISO str),
+scheduled_start_display(str, "Aug 19, 5:00 PM" — 날짜 포함 라벨).
 
 ⚠️ params 는 **detail 최상위에 평탄하게** 실린다. 한 겹 감싸면 구버전이 `minutes_early` 를
 못 찾아 "0m early" 로 틀린 값을 맞는 것처럼 표시한다(X3).
