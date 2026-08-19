@@ -112,6 +112,60 @@ class OrganizationResponse(BaseModel):
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 
+# === EMPID 채번 커서 (Numbering) 스키마 ===
+# 계약 §3-1~3-3. 판정(다음 번호·예외 여부·불일치)은 전부 서버가 한다 — 콘솔은
+# 이 객체를 표시만 하고 스스로 계산하지 않는다 (INV-8).
+
+
+class NumberingInfo(BaseModel):
+    """채번 커서 현황 — 매장/그룹 응답에 얹히는 numbering 객체.
+
+    Numbering cursor facts for a store or group. scope/scope_id 는 콘솔이
+    **어느 주체를 수정해야 하는지** 알기 위한 것 — Shared 그룹 소속 매장은
+    scope="group" + 그룹 id 를 받는다(그 매장의 커서는 쉬고 있다).
+    """
+
+    next_empid: int | None = None  # 현재 커서 = 다음 발급 번호 (Current cursor)
+    recommended: int  # RULE-C 재계산값 (sequence MAX+1 vs floor)
+    exception_count: int = 0  # 재계산에서 제외된 예외 건수 (Excluded exceptions)
+    sequence_count: int = 0  # 순번(sequence) 번호 보유 건수
+    mismatch: bool = False  # RULE-E — 커서 < 재계산값 (조치 필요)
+    scope: str  # 커서 보유 주체 ("group" | "store")
+    scope_id: str  # 커서를 보유한 주체의 UUID 문자열
+
+
+class NumberingUpdateRequest(BaseModel):
+    """커서 수동 조정 요청 (§3-2). reason 은 필수지만 여기서는 optional 로 받는다 —
+
+    Pydantic 이 먼저 걸어버리면 계약의 ERR-REASON-REQUIRED 코드를 실을 수 없다.
+    누락 검증은 서비스에서 하고 에러 코드로 응답한다.
+    """
+
+    next_empid: int  # 새 커서 값 (1 이상 — 위반은 ERR_CURSOR_INVALID)
+    reason: str | None = None  # 변경 사유 (필수 — 누락은 ERR_REASON_REQUIRED)
+
+
+class NumberingRecalculateRequest(BaseModel):
+    """커서 재계산 요청 (§3-3). apply=false 면 미리보기만 (아무것도 쓰지 않는다)."""
+
+    apply: bool = False  # true 면 실제 적용 (이때 reason 필수)
+    reason: str | None = None  # 적용 사유 (apply=true 일 때 필수)
+
+
+class NumberingUpdateResponse(NumberingInfo):
+    """커서 수동 조정 응답 — numbering 객체 + 이전 값/하향 여부."""
+
+    previous: int | None = None  # 변경 전 커서 값 (Previous cursor)
+    lowered: bool = False  # 값을 낮췄는가 (INV-2 예외 — 콘솔이 확인 UI 를 띄운다)
+
+
+class NumberingRecalculateResponse(NumberingInfo):
+    """커서 재계산 응답 — numbering 객체 + 적용 여부/이전 값."""
+
+    applied: bool = False  # 실제로 커서를 바꿨는가 (apply=false 면 false)
+    previous: int | None = None  # 재계산 전 커서 값 (Previous cursor)
+
+
 # === 매장 그룹 (StoreGroup) 스키마 ===
 
 class StoreGroupCreate(BaseModel):
@@ -164,6 +218,8 @@ class StoreGroupResponse(BaseModel):
     number_range_start: int | None = None  # 번호대 시작값 (Range start)
     store_count: int = 0  # 소속 매장 수 (Number of stores in this group)
     duplicate_empids: list[dict[str, int]] = []  # 스코프 내 중복 empid 경고 [{empid, count}]
+    # 채번 커서 현황 (§3-1) — 목록/수정 응답에 얹는다. 기존 필드는 그대로 둔다.
+    numbering: NumberingInfo | None = None
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 
@@ -351,6 +407,8 @@ class StoreResponse(BaseModel):
     group_id: str | None = None  # 소속 그룹 UUID (Store group, null=미그룹)
     number_range_start: int | None = None  # 매장 번호대 시작값 (empid range start override)
     duplicate_empids: list[dict[str, int]] = []  # 그룹 편성 직후 스코프 내 중복 경고 [{empid, count}]
+    # 채번 커서 현황 (§3-1) — Shared 그룹 소속이면 scope="group" + 그룹 id 가 온다.
+    numbering: NumberingInfo | None = None
     created_at: datetime  # 생성 일시 UTC (Creation timestamp)
 
 

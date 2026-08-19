@@ -5,7 +5,11 @@ EMPID import request/response schemas for the console bulk tab
 users.employee_no is deprecated and untouched.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+from app.models.org_member import EMPID_KIND_SEQUENCE
 
 
 class EmpidImportEntry(BaseModel):
@@ -113,6 +117,15 @@ class EmpidUnmatchedStore(BaseModel):
     rows: int = 0               # 해당 키의 행 수
 
 
+class EmpidBandCount(BaseModel):
+    """업로드 번호의 백 단위 분포 1칸 — 대역 밖 번호를 눈에 띄게 하는 재료."""
+
+    band: str   # "1000-1099"
+    lo: int
+    hi: int
+    count: int
+
+
 class EmpidImportPreviewResponse(BaseModel):
     """preview 응답 — 버킷별 사람 목록 + 카운트."""
 
@@ -128,6 +141,8 @@ class EmpidImportPreviewResponse(BaseModel):
     saved_aliases: list[EmpidSavedAlias] = []
     # 스코프별 양측 대조 — HTM 에만 / 파일에만 있는 번호
     reconciliation: list[EmpidReconciliationScope] = []
+    # 백 단위 번호대 분포 (export split_by="band" 와 같은 규칙). 자동 예외 추천은 없다.
+    distribution: list[EmpidBandCount] = []
 
 
 class EmpidImportCommitItem(BaseModel):
@@ -136,6 +151,9 @@ class EmpidImportCommitItem(BaseModel):
     user_id: str
     store_id: str
     empid: int | None = Field(default=None, ge=1)
+    # 번호 구분 — 생략 시 sequence. 화면/경로로 추론하지 않는다 (INV-6).
+    empid_kind: Literal["sequence", "exception"] = EMPID_KIND_SEQUENCE
+    reason: str | None = Field(default=None, max_length=500)  # 변경 사유 (선택)
 
 
 class EmpidImportCommitRequest(BaseModel):
@@ -151,6 +169,8 @@ class EmpidImportCommitResponse(BaseModel):
     renumbered: list[dict] = []   # {user, store, old, new} — 번호를 뺏긴 기존 인원 재채번
     skipped: list[dict] = []      # {user, store, empid, reason}
     rejected: list[dict] = []     # {user_id, store_id, reason}
+    exception_count: int = 0      # 이번 커밋이 예외로 기입한 건수
+    cursor_after: dict[str, int] = {}  # {scope_id: 커밋 후 커서} — 커밋은 커서를 밀지 않는다
 
 
 class EmpidRosterMember(BaseModel):
@@ -160,6 +180,7 @@ class EmpidRosterMember(BaseModel):
     full_name: str
     email: str | None = None
     empid: int | None = None
+    empid_kind: str = EMPID_KIND_SEQUENCE  # sequence | exception (empid 없으면 무의미)
     is_work_assignment: bool = True
     is_manager: bool = False
     crewid: int | None = None          # org 번호 (export crewid 컬럼 — 정확 매칭 키)

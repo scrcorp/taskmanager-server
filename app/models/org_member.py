@@ -32,6 +32,14 @@ from app.database import Base
 # 소속 상태 — org 별 재직 상태. 계정 전체 상태(users.status)와 별개 층.
 ORG_MEMBER_STATUSES = ("active", "on_leave", "terminated")
 
+# empid 번호 구분 — 순번(커서에서 발급) vs 예외(대역 밖 수동 번호. 본사 이관 등).
+# 커서 재계산은 'sequence' 만 본다 → 예외 번호가 순번을 끌어올리지 못한다.
+# 기본값은 항상 'sequence'. 경로(자동/임포트/직접기입)로 추론하지 않는다(INV-6).
+# empid 가 NULL 이면 이 값은 의미가 없다 — 판정에서 제외한다.
+EMPID_KIND_SEQUENCE = "sequence"
+EMPID_KIND_EXCEPTION = "exception"
+EMPID_KINDS = (EMPID_KIND_SEQUENCE, EMPID_KIND_EXCEPTION)
+
 
 class OrgMember(Base):
     """조직 소속 — 한 사람이 특정 org 에서 갖는 role·시급·사번·PIN·재직상태.
@@ -179,6 +187,12 @@ class OrgMemberStore(Base):
     # EMPID — 매장(store) 안에서 1부터 순번, store 내 unique. DB 컬럼명 = 라벨 = empid.
     # 사람이 매장에 배정될 때 그 매장의 다음 번호를 받는다(매장마다 독립).
     empid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # empid 번호 구분 — sequence(순번) | exception(대역 밖 예외). EMPID_KIND_* 상수.
+    # 커서 재계산이 예외를 제외하기 위한 분류값이다. empid 가 NULL 이면 무의미.
+    empid_kind: Mapped[str] = mapped_column(
+        String(20), nullable=False,
+        default=EMPID_KIND_SEQUENCE, server_default=EMPID_KIND_SEQUENCE,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

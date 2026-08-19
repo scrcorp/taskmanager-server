@@ -77,6 +77,30 @@ class StoreRepository(BaseRepository[Store]):
         count = (await db.execute(query)).scalar() or 0
         return count > 0
 
+    async def name_exists(
+        self,
+        db: AsyncSession,
+        organization_id: UUID,
+        name: str,
+        exclude_id: UUID | None = None,
+    ) -> bool:
+        """org 내에 같은 이름의 **살아있는** 매장이 있는지 확인.
+
+        Check whether a live store (deleted_at IS NULL) in the org already uses
+        `name`. 폐점(soft delete) 매장은 이름을 놓아준다 — code_exists 와 같은 기준이다.
+        삭제가 하드에서 소프트로 바뀐 뒤(§3-7) 이 필터가 없으면 폐점한 매장의 이름을
+        **영원히** 다시 쓸 수 없다(행이 남으므로).
+        """
+        query = select(func.count()).select_from(Store).where(
+            Store.organization_id == organization_id,
+            Store.name == name,
+            Store.deleted_at.is_(None),
+        )
+        if exclude_id is not None:
+            query = query.where(Store.id != exclude_id)
+        count = (await db.execute(query)).scalar() or 0
+        return count > 0
+
     async def get_max_sort_order(
         self,
         db: AsyncSession,
@@ -114,6 +138,37 @@ class StoreRepository(BaseRepository[Store]):
             updated += 1
         await db.flush()
         return updated
+
+    async def soft_delete(
+        self,
+        db: AsyncSession,
+        store_id: UUID,
+        organization_id: UUID,
+    ) -> bool:
+        """매장을 폐점(soft delete) 처리합니다 — status=closed + deleted_at.
+
+        Close a store instead of removing the row (계약 §3-7). 하드 삭제
+        (BaseRepository.delete)는 empid·근태·급여 이력을 FK 로 함께 끌고 간다 —
+        번호는 폐점해도 점유를 유지해야 하므로(정책 A) 행을 지우면 안 된다.
+
+        이미 폐점된 매장에 다시 호출해도 True (idempotent) — 삭제는 반복 호출이
+        흔하고, 두 번째 호출만 404 를 내면 콘솔이 "없는 매장"이라고 오인한다.
+
+        Returns:
+            bool: 대상 매장을 찾았는지 (Whether the store existed)
+        """
+        from datetime import datetime, timezone
+
+        from app.models.organization import STORE_STATUS_CLOSED
+
+        store = await self.get_by_id(db, store_id, organization_id)
+        if store is None:
+            return False
+        store.status = STORE_STATUS_CLOSED
+        if store.deleted_at is None:
+            store.deleted_at = datetime.now(timezone.utc)
+        await db.flush()
+        return True
 
     async def get_detail(
         self,

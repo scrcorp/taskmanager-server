@@ -17,6 +17,10 @@ from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.organization import (
+    NumberingRecalculateRequest,
+    NumberingRecalculateResponse,
+    NumberingUpdateRequest,
+    NumberingUpdateResponse,
     GroupAssignPreviewRequest,
     GroupAssignPreviewResponse,
     StoreGroupCreate,
@@ -85,6 +89,42 @@ async def update_store_group(
     """그룹을 수정합니다. 공유 모드면 스코프 내 기존 empid 중복을 duplicate_empids 로 경고."""
     return await store_group_service.update_group(
         db, group_id, current_user.organization_id, data
+    )
+
+
+@router.put("/{group_id}/numbering", response_model=NumberingUpdateResponse)
+async def update_group_numbering(
+    group_id: UUID,
+    data: NumberingUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+) -> NumberingUpdateResponse:
+    """그룹 채번 커서(다음 발급 번호)를 수동 조정합니다 (§3-2).
+
+    사유 필수(ERR_REASON_REQUIRED). 낮추는 것도 허용하되 lowered=true 로 알린다
+    — INV-2(커서는 전진만)의 유일한 예외가 운영자의 명시 조작이고, 그래서 사유와
+    이력(empid_changes, source='cursor')을 강제한다.
+    """
+    return await store_group_service.update_numbering(
+        db, group_id, current_user.organization_id, data, current_user.id
+    )
+
+
+@router.post(
+    "/{group_id}/numbering/recalculate", response_model=NumberingRecalculateResponse
+)
+async def recalculate_group_numbering(
+    group_id: UUID,
+    data: NumberingRecalculateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+) -> NumberingRecalculateResponse:
+    """그룹 채번 커서를 재계산합니다 (§3-3). apply=false 면 미리보기만.
+
+    "예외 N건은 계산에서 제외됨" 문구의 N 이 응답의 exception_count 다.
+    """
+    return await store_group_service.recalculate_numbering(
+        db, group_id, current_user.organization_id, data, current_user.id
     )
 
 

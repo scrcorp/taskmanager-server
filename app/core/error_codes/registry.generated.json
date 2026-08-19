@@ -42,6 +42,11 @@
       "CONTACT_VISIBILITY_CONFLICT",
       "CONTACT_VISIBILITY_REQUIRED"
     ],
+    "empid": [
+      "ERR_CURSOR_INVALID",
+      "ERR_RANGE_IGNORED",
+      "ERR_REASON_REQUIRED"
+    ],
     "employment": [
       "ALREADY_TERMINATED",
       "EMPLOYEE_NOT_FOUND",
@@ -501,6 +506,36 @@
       "status": 400,
       "message": "Pick who can see this contact.",
       "hint": "Select at least one store, or share it with the whole organization.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "ERR_CURSOR_INVALID",
+      "domain": "empid",
+      "kind": "http",
+      "status": 422,
+      "message": "Next EMPID must be a whole number of 1 or more.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "ERR_RANGE_IGNORED",
+      "domain": "empid",
+      "kind": "http",
+      "status": 422,
+      "message": "This store follows its group's shared numbering. Change it in Groups.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "ERR_REASON_REQUIRED",
+      "domain": "empid",
+      "kind": "http",
+      "status": 422,
+      "message": "Enter a reason for this change.",
+      "hint": null,
       "frozen": false,
       "clients": []
     },
