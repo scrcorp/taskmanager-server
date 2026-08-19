@@ -23,7 +23,13 @@ from app.models.attendance import Attendance, AttendanceCorrection
 from app.models.user_store import UserStore
 from app.services.attendance_service import ANOMALY_EARLY_CLOCK_IN_OVERRIDE
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio,
+    # 스케줄을 "지금 기준 ±N시간" 으로 만드는 테스트들이라 매장 영업일 경계가 now 근처면
+    # 시나리오가 성립하지 않는다(그 시프트가 다음 영업일 창으로 넘어간다). 경계를
+    # now-5h 로 옮겨 실행 시각과 무관하게 만든다 — `centered_day_boundary` 참조.
+    pytest.mark.usefixtures("centered_day_boundary"),
+]
 
 
 async def _ensure_user_store(user_id: UUID, store_id: UUID) -> None:
@@ -144,6 +150,15 @@ async def test_early_clock_in_without_reason_is_rejected_with_code(
     assert detail["schedule_id"]
     assert detail["scheduled_start"]
     assert "reason" in detail["message"].lower()
+
+    # 예정 시각은 **날짜와 함께** 실린다 ("Aug 19, 5:00 PM"). 시각만 있으면 하루 어긋난
+    # 스케줄(2026-08 오염 사고)이 문구상 완벽히 정상으로 보인다 — 그때 "1439분 조기출근"
+    # 이 `5:00 PM` 하나만 달고 나가는 바람에 아무도 무엇이 이상한지 알 수 없었다.
+    from datetime import datetime as _dt
+
+    scheduled_local = _dt.fromisoformat(detail["scheduled_start"]).strftime("%b %-d")
+    assert detail["scheduled_start_display"].startswith(scheduled_local)
+    assert scheduled_local in detail["message"]
 
     # 거부됐으므로 출근 기록이 생기면 안 된다.
     att = await _latest_attendance(test_user["id"])

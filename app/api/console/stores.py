@@ -25,6 +25,10 @@ from app.api.deps import (
 from app.database import get_db
 from app.models.user import User
 from app.schemas.organization import (
+    NumberingRecalculateRequest,
+    NumberingRecalculateResponse,
+    NumberingUpdateRequest,
+    NumberingUpdateResponse,
     StoreCreate,
     StoreDetailResponse,
     StoreReorderRequest,
@@ -133,12 +137,51 @@ async def delete_store(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("stores:delete"))],
 ) -> None:
-    """매장을 삭제합니다. Owner만 가능.
+    """매장을 **폐점** 처리합니다 (soft delete). Owner만 가능.
 
-    Delete a store by its ID. Owner only.
+    Close a store (status=closed + deleted_at). 경로·메서드·204 는 그대로고
+    동작만 바뀌었다 (§3-7) — 행이 남으므로 그 매장이 점유한 EMPID 도 남는다.
+    복구/조회는 기존 include_closed 스위치를 쓴다.
     """
     org_id: UUID = current_user.organization_id
     await store_service.delete_store(db, store_id, org_id)
+
+
+@router.put("/{store_id}/numbering", response_model=NumberingUpdateResponse)
+async def update_store_numbering(
+    store_id: UUID,
+    data: NumberingUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+) -> NumberingUpdateResponse:
+    """매장 채번 커서(다음 발급 번호)를 수동 조정합니다 (§3-2).
+
+    사유 필수(ERR_REASON_REQUIRED). 낮추는 것도 허용하되 응답에 lowered=true 로
+    알린다 — 콘솔이 확인 UI 를 띄운다. Shared 그룹 소속 매장은 커서를 그룹이 갖고
+    있으므로 거절한다(ERR_RANGE_IGNORED) — 여기서 고쳐도 채번은 그룹 커서를 본다.
+    """
+    return await store_service.update_numbering(
+        db, store_id, current_user.organization_id, data, current_user.id
+    )
+
+
+@router.post(
+    "/{store_id}/numbering/recalculate", response_model=NumberingRecalculateResponse
+)
+async def recalculate_store_numbering(
+    store_id: UUID,
+    data: NumberingRecalculateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("stores:update"))],
+) -> NumberingRecalculateResponse:
+    """매장 채번 커서를 재계산합니다 (§3-3). apply=false 면 미리보기만.
+
+    재계산은 순번(sequence) 번호만 본다 — 예외로 분류된 번호는 제외되고 건수만
+    exception_count 로 나간다 (RULE-C).
+    """
+    return await store_service.recalculate_numbering(
+        db, store_id, current_user.organization_id, data, current_user.id
+    )
 
 
 @router.get("/{store_id}/work-date")

@@ -431,3 +431,112 @@ def test_yesterday_active_shift_outranks_todays_open_shift() -> None:
 
     assert sort_shift_candidates([morning, night], today=TODAY)[0] is night
     assert pick_default_shift([morning, night], today=TODAY) is night
+
+
+# ---------------------------------------------------------------------------
+# 영업일 창 밖 시프트 배제 (2026-08 시작일 오프셋 오염 사고)
+# ---------------------------------------------------------------------------
+#
+# 사고 재현: 경계 11:00 매장에서 `operating_day=8/18` 인데 `start_at=8/19 17:00`
+# (= 8/19 영업일의 창) 인 스케줄이 24건 저장됐다. 후보 필터가 `operating_day == today`
+# 만 봤기 때문에 8/18 에 출근하면 그 시프트가 잡혔고 "1439분 조기출근" 으로 기록됐다.
+# 저장 단계 검증이 지금은 막지만, **이미 저장된 행**과 SQL 직접 수정·임포트 경로는
+# 그 검증을 지나가지 않는다. 아래가 UI 와 무관한 마지막 방어선이다.
+
+# 경계 11:00 매장 — 영업일 D 의 창은 [D 11:00, D+1 11:00).
+def _window(day: date) -> tuple[datetime, datetime]:
+    return _at(11, day=day), _at(11, day=day + timedelta(days=1))
+
+
+def _windows(*days: date) -> dict[date, tuple[datetime, datetime]]:
+    return {d: _window(d) for d in days}
+
+
+def test_shift_starting_outside_its_operating_day_window_is_dropped() -> None:
+    """`operating_day=오늘` 라벨을 달고 **내일 창**에서 시작하는 시프트는 후보가 아니다."""
+    corrupted = _shift(
+        start=_at(17, day=TODAY + timedelta(days=1)),   # 창 밖(내일 17:00)
+        end=_at(22, day=TODAY + timedelta(days=1)),
+    )
+    healthy = _shift(start=_at(17), end=_at(22))
+
+    today_open, _prev = split_candidates(
+        [corrupted, healthy], now=NOW, today=TODAY, windows=_windows(TODAY)
+    )
+    assert today_open == [healthy]
+
+
+def test_dawn_shift_inside_the_window_is_kept() -> None:
+    """경계 이전 새벽 시각은 **달력상 D+1** 이며 창 안이다 — 이건 정상 시프트다."""
+    dawn = _shift(
+        start=_at(3, day=TODAY + timedelta(days=1)),    # 03:00 < 경계 11:00 → 창 안
+        end=_at(9, day=TODAY + timedelta(days=1)),
+    )
+    today_open, _prev = split_candidates(
+        [dawn], now=_at(2, 30, day=TODAY + timedelta(days=1)),
+        today=TODAY, windows=_windows(TODAY),
+    )
+    assert today_open == [dawn]
+
+
+def test_window_start_is_inclusive_and_end_is_exclusive() -> None:
+    """경계 시각 정각 시작은 창 안, 다음 영업일 경계 정각은 창 밖(= 다음 영업일 소속)."""
+    on_boundary = _shift(start=_at(11), end=_at(19))
+    next_boundary = _shift(
+        start=_at(11, day=TODAY + timedelta(days=1)),
+        end=_at(19, day=TODAY + timedelta(days=1)),
+    )
+    today_open, _prev = split_candidates(
+        [on_boundary, next_boundary], now=NOW, today=TODAY, windows=_windows(TODAY)
+    )
+    assert today_open == [on_boundary]
+
+
+def test_yesterday_shift_is_checked_against_its_own_window() -> None:
+    """어제 후보의 창은 **어제 것**이다 — 오늘 창으로 재면 정상 야간조가 사라진다."""
+    yesterday = TODAY - timedelta(days=1)
+    night = _shift(
+        start=_at(21, day=yesterday),
+        end=_at(1, day=TODAY),
+        operating_day=yesterday,
+    )
+    _today_open, prev_open = split_candidates(
+        [night], now=_at(4, 30), today=TODAY, windows=_windows(TODAY, yesterday)
+    )
+    assert prev_open == [night]
+
+
+def test_active_shift_is_kept_even_when_outside_the_window() -> None:
+    """이미 찍은 시프트는 창 밖이어도 남긴다 — 빼면 clock-out 이 불가능해진다.
+
+    날짜 오염의 정정은 매니저의 일이지, 근무 중인 사람의 퇴근을 막을 이유가 아니다.
+    """
+    corrupted_active = _shift(
+        start=_at(17, day=TODAY + timedelta(days=1)),
+        end=_at(22, day=TODAY + timedelta(days=1)),
+        status="working",
+        clock_in=_at(12),
+    )
+    today_open, _prev = split_candidates(
+        [corrupted_active], now=NOW, today=TODAY, windows=_windows(TODAY)
+    )
+    assert today_open == [corrupted_active]
+
+
+def test_without_windows_nothing_is_dropped() -> None:
+    """창을 모르면 막지 않는다 — 모른다는 이유로 출근을 거부하면 현장에 복구 수단이 없다."""
+    corrupted = _shift(
+        start=_at(17, day=TODAY + timedelta(days=1)),
+        end=_at(22, day=TODAY + timedelta(days=1)),
+    )
+    today_open, _prev = split_candidates([corrupted], now=NOW, today=TODAY)
+    assert today_open == [corrupted]
+
+
+def test_shift_without_start_time_is_not_dropped_by_window() -> None:
+    """시작 시각이 없으면 판단 근거가 없다 — 창 검사로 떨어뜨리지 않는다."""
+    no_start = _shift(start=None, end=_at(19))
+    today_open, _prev = split_candidates(
+        [no_start], now=NOW, today=TODAY, windows=_windows(TODAY)
+    )
+    assert today_open == [no_start]

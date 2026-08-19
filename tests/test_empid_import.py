@@ -125,6 +125,30 @@ async def _give_empid(
     await db.flush()
 
 
+async def _set_cursor(
+    db: AsyncSession, *, store_id: UUID | None = None, group_id: UUID | None = None,
+    value: int,
+) -> None:
+    """커서 시드 — 운영 DB 는 백필로 커서가 채워져 있다(MAX+1). 테스트도 그 상태를 만든다."""
+    if group_id is not None:
+        (await db.get(StoreGroup, group_id)).next_empid = value
+    else:
+        (await db.get(Store, store_id)).next_empid = value
+    await db.flush()
+
+
+async def _kind_of(db: AsyncSession, ctx: Ctx, user_id: UUID, store_id: UUID) -> str:
+    """(사람, 매장) 의 현재 empid_kind."""
+    return (
+        await db.execute(
+            select(OrgMemberStore.empid_kind).where(
+                OrgMemberStore.org_member_id == await _member_id(db, ctx, user_id),
+                OrgMemberStore.store_id == store_id,
+            )
+        )
+    ).scalar_one()
+
+
 async def _empids_in_store(db: AsyncSession, store_id: UUID) -> dict[UUID, int | None]:
     """{user_id: empid} — 검증용."""
     rows = (
@@ -312,9 +336,10 @@ async def test_commit_renumbers_displaced_third_party(db: AsyncSession, ctx: Ctx
     await _give_empid(db, ctx, ux, store, 1)
     await _give_empid(db, ctx, uy, store, 2)
     await _give_empid(db, ctx, uz, store, 3)
+    await _set_cursor(db, store_id=store, value=4)  # 백필 상태 (MAX 3 + 1)
     await db.commit()
 
-    # x 가 3 을 가져감 → 기존 3 소유자 z 는 next_empid 로 재채번
+    # x 가 3 을 가져감 → 기존 3 소유자 z 는 커서(next_empid)에서 재채번
     r = await svc.commit(db, ctx.org_id, [(ux, store, 3)])
     assert len(r.applied) == 1 and r.applied[0]["empid"] == 3
     assert len(r.renumbered) == 1
@@ -429,11 +454,12 @@ async def test_commit_group_scope_renumber_after_sibling_writes(
     await _give_empid(db, ctx, u1, store_a, 1)
     await _give_empid(db, ctx, u2, store_a, 2)
     await _give_empid(db, ctx, u3, store_b, 3)  # 그룹 공유 max = 3
+    await _set_cursor(db, group_id=group.id, value=4)  # 백필 상태 (MAX 3 + 1)
     await db.commit()
 
     # A: u2 가 1 을 가져감 → u1 재채번 필요. B: u3 → 4 로 rebind.
     # 1-pass 순차 처리라면 u1 재채번이 4 를 받아 B 의 기입값 4 와 그룹 스코프 중복이 된다.
-    # 2-pass 에서는 전 매장 기입(4 포함) 후 재채번하므로 u1 은 5 를 받아야 한다.
+    # 2-pass 에서는 전 매장 기입(4 포함) 후 재채번하므로, 커서 4 가 점유(4)를 건너뛰어 5.
     r = await svc.commit(
         db, ctx.org_id, [(u2, store_a, 1), (u3, store_b, 4)]
     )
@@ -766,3 +792,200 @@ async def test_roster_lists_store_members_sorted(db: AsyncSession, ctx: Ctx) -> 
     empids = [m["empid"] for m in mine["members"]]
     assert empids == [3, 7, None]  # 오름차순 + 번호 없는 사람 마지막
     assert {m["user_id"] for m in mine["members"]} == {str(u1), str(u2), str(u3)}
+
+
+# ---------------------------------------------------------------------------
+# 번호 구분(empid_kind) — 계약 §3-4 / INV-6
+# ---------------------------------------------------------------------------
+
+
+async def test_commit_defaults_to_sequence_and_does_not_infer_from_path(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    """empid_kind 생략 = sequence. 임포트 경로라고 exception 으로 추론하지 않는다 (INV-6)."""
+    store = await _make_store(db, ctx, "A")
+    u = await _make_user(db, ctx, "d1", f"d1.{ctx.sfx}@example.com")
+    await _set_cursor(db, store_id=store, value=1)
+    await db.commit()
+
+    r = await svc.commit(db, ctx.org_id, [(u, store, 12)])  # 3-튜플 하위호환 경로
+    assert len(r.applied) == 1 and r.exception_count == 0
+    assert await _kind_of(db, ctx, u, store) == "sequence"
+
+
+async def test_commit_writes_exception_kind_and_counts_it(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    """exception 으로 기입하면 저장 + exception_count 집계. 커서는 밀지 않는다 (INV-5)."""
+    store = await _make_store(db, ctx, "A")
+    ua = await _make_user(db, ctx, "e1", f"e1.{ctx.sfx}@example.com")
+    ub = await _make_user(db, ctx, "e2", f"e2.{ctx.sfx}@example.com")
+    await _set_cursor(db, store_id=store, value=10)
+    await db.commit()
+
+    r = await svc.commit(db, ctx.org_id, [
+        svc.CommitAssignment(ua, store, 6012, "exception", "transferred from HQ"),
+        svc.CommitAssignment(ub, store, 10),
+    ])
+    assert len(r.applied) == 2 and not r.rejected
+    assert r.exception_count == 1
+    assert await _kind_of(db, ctx, ua, store) == "exception"
+    assert await _kind_of(db, ctx, ub, store) == "sequence"
+    # 커밋은 커서를 조용히 바꾸지 않는다 — 그대로 10 을 알려준다
+    assert r.cursor_after == {str(store): 10}
+
+
+async def test_commit_kind_only_change_is_applied_not_skipped(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    """번호는 그대로고 구분만 바꾸는 요청(스태프 상세 경로)이 멱등 스킵에 삼켜지면 안 된다."""
+    store = await _make_store(db, ctx, "A")
+    u = await _make_user(db, ctx, "k1", f"k1.{ctx.sfx}@example.com")
+    await _give_empid(db, ctx, u, store, 7000)
+    await _set_cursor(db, store_id=store, value=20)
+    await db.commit()
+
+    r = await svc.commit(db, ctx.org_id, [
+        svc.CommitAssignment(u, store, 7000, "exception", "kept legacy number"),
+    ])
+    assert len(r.applied) == 1 and not r.skipped
+    assert r.exception_count == 1
+    assert await _kind_of(db, ctx, u, store) == "exception"
+    assert (await _empids_in_store(db, store))[u] == 7000  # 번호는 그대로
+
+    # 같은 요청 재실행 → 이제는 진짜 멱등 스킵
+    r2 = await svc.commit(db, ctx.org_id, [
+        svc.CommitAssignment(u, store, 7000, "exception"),
+    ])
+    assert not r2.applied and len(r2.skipped) == 1
+    assert r2.exception_count == 0
+
+
+async def test_commit_clear_resets_kind_to_sequence(db: AsyncSession, ctx: Ctx) -> None:
+    """번호 삭제 시 구분은 의미를 잃는다 → 기본값(sequence)으로 되돌린다."""
+    store = await _make_store(db, ctx, "A")
+    u = await _make_user(db, ctx, "c1", f"c1.{ctx.sfx}@example.com")
+    await _give_empid(db, ctx, u, store, 5)
+    await db.commit()
+    await svc.commit(db, ctx.org_id, [svc.CommitAssignment(u, store, 6, "exception")])
+    assert await _kind_of(db, ctx, u, store) == "exception"
+
+    r = await svc.commit(db, ctx.org_id, [svc.CommitAssignment(u, store, None)])
+    assert len(r.applied) == 1 and r.exception_count == 0
+    assert await _kind_of(db, ctx, u, store) == "sequence"
+
+
+async def test_commit_renumbered_row_is_sequence(db: AsyncSession, ctx: Ctx) -> None:
+    """재채번은 커서가 준 순번 — 예외 딱지가 붙어 있으면 안 된다."""
+    store = await _make_store(db, ctx, "A")
+    ux = await _make_user(db, ctx, "r1", f"r1.{ctx.sfx}@example.com")
+    uz = await _make_user(db, ctx, "r2", f"r2.{ctx.sfx}@example.com")
+    await _give_empid(db, ctx, ux, store, 1)
+    await _give_empid(db, ctx, uz, store, 3)
+    await _set_cursor(db, store_id=store, value=4)
+    await db.commit()
+    # uz 를 예외로 만들어 둔다 → 번호를 뺏겨 재채번되면 sequence 로 돌아와야 한다
+    await svc.commit(db, ctx.org_id, [svc.CommitAssignment(uz, store, 3, "exception")])
+    assert await _kind_of(db, ctx, uz, store) == "exception"
+
+    r = await svc.commit(db, ctx.org_id, [(ux, store, 3)])
+    assert len(r.renumbered) == 1 and r.renumbered[0]["new"] == 4
+    assert await _kind_of(db, ctx, uz, store) == "sequence"
+
+
+async def test_commit_rejects_unknown_empid_kind(db: AsyncSession, ctx: Ctx) -> None:
+    store = await _make_store(db, ctx, "A")
+    u = await _make_user(db, ctx, "b1", f"b1.{ctx.sfx}@example.com")
+    await db.commit()
+
+    r = await svc.commit(db, ctx.org_id, [
+        svc.CommitAssignment(u, store, 3, "legacy"),
+    ])
+    assert not r.applied and len(r.rejected) == 1
+    assert "empid_kind" in r.rejected[0]["reason"]
+
+
+async def test_commit_cursor_after_reports_group_cursor_once(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    """그룹 공유 스코프는 형제 매장이 같은 커서를 가리킨다 — scope_id 는 그룹 하나."""
+    group = StoreGroup(
+        organization_id=ctx.org_id, name=f"__imptest_grp2_{ctx.sfx}__",
+        numbering_mode="group",
+    )
+    db.add(group)
+    await db.flush()
+    store_a = await _make_store(db, ctx, "A", group_id=group.id)
+    store_b = await _make_store(db, ctx, "B", group_id=group.id)
+    u1 = await _make_user(db, ctx, "gc1", f"gc1.{ctx.sfx}@example.com")
+    u2 = await _make_user(db, ctx, "gc2", f"gc2.{ctx.sfx}@example.com")
+    await _set_cursor(db, group_id=group.id, value=30)
+    await db.commit()
+
+    r = await svc.commit(db, ctx.org_id, [(u1, store_a, 11), (u2, store_b, 12)])
+    assert len(r.applied) == 2
+    assert r.cursor_after == {str(group.id): 30}
+
+
+# ---------------------------------------------------------------------------
+# 분포(distribution) — 계약 §3-5 / export split_by="band" 와 같은 규칙
+# ---------------------------------------------------------------------------
+
+
+def test_empid_band_matches_export_rule() -> None:
+    assert svc.empid_band(1) == (1, 99, "1-99")
+    assert svc.empid_band(99) == (1, 99, "1-99")
+    assert svc.empid_band(100) == (100, 199, "100-199")
+    assert svc.empid_band(1042) == (1000, 1099, "1000-1099")
+    assert svc.empid_band(6012) == (6000, 6099, "6000-6099")
+
+
+async def test_preview_distribution_groups_by_hundred(
+    db: AsyncSession, ctx: Ctx
+) -> None:
+    """업로드 번호를 100 단위로 묶어 오름차순. 정수화 실패 행은 세지 않는다."""
+    store = await _make_store(db, ctx, "A")
+    name = f"IMPTEST STORE A {ctx.sfx}"
+    e1 = f"d_a.{ctx.sfx}@example.com"
+    e2 = f"d_b.{ctx.sfx}@example.com"
+    e3 = f"d_c.{ctx.sfx}@example.com"
+    await _make_user(db, ctx, "da", e1)
+    await _make_user(db, ctx, "db", e2)
+    await _make_user(db, ctx, "dc", e3)
+    await db.commit()
+
+    content = _xlsx([
+        [name, "", "D A", "1001", e1],
+        [name, "", "D B", "1002", e2],
+        [name, "", "D C", "6012", e3],
+        [name, "", "D X", "abc", f"d_x.{ctx.sfx}@example.com"],  # invalid — 제외
+    ])
+    result = await svc.preview(db, ctx.org_id, content, "f.xlsx")
+    assert result.distribution == [
+        {"band": "1000-1099", "lo": 1000, "hi": 1099, "count": 2},
+        {"band": "6000-6099", "lo": 6000, "hi": 6099, "count": 1},
+    ]
+    assert store  # 매장 매칭 전제 (unmatched 면 위 분포가 안 나온다)
+
+
+# ---------------------------------------------------------------------------
+# 로스터 분류 컬럼 — 계약 §3-6
+# ---------------------------------------------------------------------------
+
+
+async def test_roster_includes_empid_kind(db: AsyncSession, ctx: Ctx) -> None:
+    store = await _make_store(db, ctx, "A")
+    ua = await _make_user(db, ctx, "ra", f"ra.{ctx.sfx}@example.com")
+    ub = await _make_user(db, ctx, "rb", f"rb.{ctx.sfx}@example.com")
+    await _give_empid(db, ctx, ua, store, 1)
+    await _give_empid(db, ctx, ub, store, 6012)
+    await db.commit()
+    await svc.commit(db, ctx.org_id, [
+        svc.CommitAssignment(ub, store, 6012, "exception", "transferred"),
+    ])
+
+    rows = await svc.roster(db, ctx.org_id)
+    entry = next(r for r in rows if r["store_id"] == str(store))
+    kinds = {m["user_id"]: m["empid_kind"] for m in entry["members"]}
+    assert kinds[str(ua)] == "sequence"
+    assert kinds[str(ub)] == "exception"

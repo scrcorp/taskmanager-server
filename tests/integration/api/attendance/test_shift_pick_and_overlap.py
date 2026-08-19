@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -37,7 +37,13 @@ from app.services.attendance_service import (
     ANOMALY_OVERLAPPING_CLOCK_IN,
 )
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio,
+    # 스케줄을 "지금 기준 ±N시간" 으로 만드는 테스트들이라 매장 영업일 경계가 now 근처면
+    # 시나리오가 성립하지 않는다(그 시프트가 다음 영업일 창으로 넘어간다). 경계를
+    # now-5h 로 옮겨 실행 시각과 무관하게 만든다 — `centered_day_boundary` 참조.
+    pytest.mark.usefixtures("centered_day_boundary"),
+]
 
 CLOCK_IN_URL = "/api/v1/attendance/clock-in"
 IDENTIFY_URL = "/api/v1/attendance/identify-by-pin"
@@ -69,6 +75,20 @@ async def _store_now(store_id: UUID) -> datetime:
     return datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name)).replace(
         second=0, microsecond=0, tzinfo=None
     )
+
+
+async def _store_today(store_id: UUID) -> "date":
+    """서버가 보는 **현재 영업일**. 달력일로 직접 계산하지 않는다.
+
+    경계가 자정이 아니면 영업일 라벨과 UTC 캘린더 날짜가 갈린다
+    (`centered_day_boundary` 가 그렇게 만든다). 라벨을 직접 계산하면 그 갈림에서
+    테스트가 서버와 다른 날짜를 말하게 된다.
+    """
+    from app.utils.timezone import get_store_day_config, get_work_date
+
+    async with async_session() as db:
+        tz_name, day_cfg = await get_store_day_config(db, store_id)
+    return get_work_date(tz_name, day_cfg, datetime.now(timezone.utc))
 
 
 async def _shift_at(
@@ -282,7 +302,7 @@ async def last_night_shift(
     다른 shift(또는 워크인)에 근무가 붙었다.
     """
     local_now = await _store_now(test_store_id)
-    yesterday = (local_now - timedelta(days=1)).date()
+    yesterday = await _store_today(test_store_id) - timedelta(days=1)
     schedule_id = await make_schedule(
         test_user,
         work_date=yesterday,
@@ -297,6 +317,7 @@ async def test_last_nights_shift_is_offered_but_never_auto_selected(
     async_client: AsyncClient,
     device_auth_headers: dict,
     test_user: dict,
+    test_store_id: UUID,
     staff_in_store: None,
     last_night_shift: UUID,
 ) -> None:
@@ -315,7 +336,7 @@ async def test_last_nights_shift_is_offered_but_never_auto_selected(
     night = next(it for it in items if it["schedule_id"] == str(last_night_shift))
     assert night["clock_in_eligible"] is True
     # 앱이 "Yesterday" 배지를 붙일 수 있는 유일한 단서.
-    assert night["operating_day"] < datetime.now(timezone.utc).date().isoformat()
+    assert night["operating_day"] < (await _store_today(test_store_id)).isoformat()
 
     # 오늘 후보가 없으므로 자동 선택은 어제 shift 로 넘어가지 않고 그냥 거부한다.
     resp = await _clock_in(async_client, device_auth_headers, test_user)
@@ -327,6 +348,7 @@ async def test_last_nights_shift_can_be_picked_explicitly(
     async_client: AsyncClient,
     device_auth_headers: dict,
     test_user: dict,
+    test_store_id: UUID,
     staff_in_store: None,
     last_night_shift: UUID,
 ) -> None:
@@ -339,7 +361,7 @@ async def test_last_nights_shift_can_be_picked_explicitly(
     assert resp.json()["schedule_id"] == str(last_night_shift)
 
     att = await _attendance_for(last_night_shift)
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+    yesterday = await _store_today(test_store_id) - timedelta(days=1)
     assert att.work_date == yesterday, "어제 shift 인데 오늘 영업일로 귀속됐다"
 
 
@@ -356,7 +378,7 @@ async def test_stale_yesterday_shift_is_dropped_after_the_grace_window(
     상한이 없으면 어제 결근한 shift 가 오늘 출근을 계속 낚아챈다.
     """
     local_now = await _store_now(test_store_id)
-    yesterday = (local_now - timedelta(days=1)).date()
+    yesterday = await _store_today(test_store_id) - timedelta(days=1)
     stale = await make_schedule(
         test_user,
         work_date=yesterday,
@@ -435,7 +457,7 @@ async def test_active_night_shift_from_yesterday_is_offered_for_clock_out(
     day_start 를 넘겨 끝나는 모든 야간조에 매일 재현되던 상황이다.
     """
     local_now = await _store_now(test_store_id)
-    yesterday = (local_now - timedelta(days=1)).date()
+    yesterday = await _store_today(test_store_id) - timedelta(days=1)
     night = await make_schedule(
         test_user,
         work_date=yesterday,
@@ -466,6 +488,52 @@ async def test_active_night_shift_from_yesterday_is_offered_for_clock_out(
     # 목록이 바로 Clock Out 을 제시하는데 "지난 근무가 안 닫혔다" 경고까지 띄우면
     # 해결책 옆에서 사고처럼 보인다 — 목록에 실린 건은 stale 에서 뺀다.
     assert body["stale_attendances"] == []
+
+
+async def test_active_night_shift_from_yesterday_can_actually_clock_out(
+    async_client: AsyncClient,
+    device_auth_headers: dict,
+    make_schedule,
+    test_user: dict,
+    test_store_id: UUID,
+    staff_in_store: None,
+) -> None:
+    """★ 목록에 뜨는 것과 **실제로 퇴근이 되는 것**은 다르다 — 끝까지 확인한다.
+
+    바로 위 테스트는 identify 가 어제 영업일의 진행 중 shift 를 보여주는 것까지만 본다.
+    그런데 앱이 퇴근을 누르면 서버는 다시 "오늘" 기준으로 대상 row 를 찾는다. 그 조회가
+    오늘 라벨만 본다면 화면엔 Clock Out 이 떠 있는데 누르면 실패하는, 가장 나쁜 형태가 된다.
+    (서버는 `perform_clock_action` 의 `open_prev` 로 전날 라벨의 열린 row 를 함께 본다.)
+    """
+    local_now = await _store_now(test_store_id)
+    yesterday = await _store_today(test_store_id) - timedelta(days=1)
+    night = await make_schedule(
+        test_user,
+        work_date=yesterday,
+        start_at=local_now - timedelta(hours=6),
+        end_at=local_now + timedelta(hours=1),
+    )
+    await _ensure_attendance(night)
+    async with async_session() as db:
+        att = await db.scalar(select(Attendance).where(Attendance.schedule_id == night))
+        att.clock_in = datetime.now(timezone.utc) - timedelta(hours=6)
+        att.status = "working"
+        await db.commit()
+
+    # 예정 종료보다 1시간 이르므로 조기 퇴근 사유가 필요하다 — 그 400 이 뜬다는 것 자체가
+    # 서버가 **어제 라벨의 그 row 를 대상으로 잡았다**는 증거다(대상을 못 찾으면 다른 에러다).
+    base = {"user_id": str(test_user["id"]), "pin": test_user["clockin_pin"]}
+    co = await async_client.post(
+        "/api/v1/attendance/clock-out",
+        headers=device_auth_headers,
+        json={**base, "reason": "closing early"},
+    )
+    assert co.status_code == 200, co.text
+
+    async with async_session() as db:
+        closed = await db.scalar(select(Attendance).where(Attendance.schedule_id == night))
+        assert closed.clock_out is not None, "어제 라벨 근무가 닫히지 않았다"
+        assert closed.status == "clocked_out"
 
 
 # ---------------------------------------------------------------------------

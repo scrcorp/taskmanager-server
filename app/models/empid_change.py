@@ -21,6 +21,7 @@ EMPID_SOURCE_COMMIT = "commit"       # EMPID Import/Edit/스태프 상세의 명
 EMPID_SOURCE_RENUMBER = "renumber"   # commit 3-phase 의 잔여 인원 자동 재채번
 EMPID_SOURCE_AUTO = "auto"           # 매장 배정 시 자동 채번 (ensure_member_store)
 EMPID_SOURCE_ABSORB = "absorb"       # 유령(미가입) 흡수로 번호 이동
+EMPID_SOURCE_CURSOR = "cursor"       # 커서(next_empid) 자체 변경 — 수동 조정·재계산
 
 
 class EmpidChange(Base):
@@ -42,8 +43,11 @@ class EmpidChange(Base):
         Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     person_name: Mapped[str | None] = mapped_column(String(255), nullable=True)  # 스냅샷
+    # source='cursor' 인 행은 사람이 아니라 커서 값의 old→new 를 담는다(user_id=NULL).
     old_empid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     new_empid: Mapped[int | None] = mapped_column(Integer, nullable=True)  # NULL=번호 삭제
+    # 변경 사유 — 커서 수동 조정·재계산 적용은 필수, 그 외 경로는 선택.
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # 논리 경로 (EMPID_SOURCE_*) — commit/renumber/auto/absorb
     source: Mapped[str] = mapped_column(String(20), nullable=False)
     # 클라이언트 표면 — console/console_compact/htma/staff_app/backoffice/system/api

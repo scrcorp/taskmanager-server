@@ -29,7 +29,7 @@ from app.utils.settings_resolver import (
     SettingNotRegisteredError,
     resolve_setting,
 )
-from app.utils.timezone import get_store_day_config, get_work_date
+from app.utils.timezone import day_start_map, get_store_day_config, get_work_date
 
 
 router: APIRouter = APIRouter()
@@ -139,12 +139,15 @@ async def get_me(
     store_tz: str | None = None
     work_date_str: str | None = None
     offset_minutes: int | None = None
+    day_start_times: dict[str, str] | None = None
     if device.store_id is not None:
         store_result = await db.execute(select(Store).where(Store.id == device.store_id))
         store = store_result.scalar_one_or_none()
         store_name = store.name if store else None
         tz, day_start = await get_store_day_config(db, device.store_id)
         store_tz = tz
+        # 이미 읽은 day_start 를 그대로 펼친다 — 추가 쿼리 없음.
+        day_start_times = day_start_map(day_start)
         now_utc = _dt.now(_tz.utc)
         wd = get_work_date(tz, day_start, now_utc)
         work_date_str = wd.isoformat()
@@ -168,6 +171,7 @@ async def get_me(
         store_timezone=store_tz,
         store_timezone_offset_minutes=offset_minutes,
         work_date=work_date_str,
+        store_day_start_times=day_start_times,
         walk_in_allowed=walk_in_allowed,
         tip_entry_enabled=tip_entry_enabled,
         default_schedule_duration_minutes=default_shift_minutes,
@@ -191,9 +195,11 @@ async def assign_store(
     store_tz: str | None = None
     offset_minutes: int | None = None
     work_date_str: str | None = None
+    day_start_times: dict[str, str] | None = None
     if device.store_id is not None:
         tz, day_start = await get_store_day_config(db, device.store_id)
         store_tz = tz
+        day_start_times = day_start_map(day_start)
         now_utc = _dt.now(_tz.utc)
         work_date_str = get_work_date(tz, day_start, now_utc).isoformat()
         try:
@@ -215,6 +221,7 @@ async def assign_store(
         store_timezone=store_tz,
         store_timezone_offset_minutes=offset_minutes,
         work_date=work_date_str,
+        store_day_start_times=day_start_times,
         walk_in_allowed=walk_in_allowed,
         tip_entry_enabled=tip_entry_enabled,
         default_schedule_duration_minutes=default_shift_minutes,

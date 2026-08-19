@@ -5,7 +5,7 @@ POST /api/v1/console/schedules 가 구(work_date+HH:MM)/신(operating_day+ISO) �
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import AsyncIterator
 
 import pytest
@@ -25,7 +25,20 @@ FUTURE = date(2026, 12, 4)
 
 @pytest_asyncio.fixture
 async def staff_assigned(test_user, test_store_id) -> AsyncIterator[dict]:
-    """test_user 를 test store 에 work-assignment 로 배정 + 미래 스케줄 정리."""
+    """test_user 를 test store 에 work-assignment 로 배정 + 미래 스케줄 정리.
+
+    매장 경계를 **06:00** 으로 둔다. 공용 테스트 매장의 기본값 00:00 에서는
+    "영업일 라벨과 시작 달력일이 다른(+1d) 근무" 자체가 성립하지 않는다 —
+    영업일 D 의 구간이 `[D 00:00, D+1 00:00)` 이라 D+1 의 어떤 시각도 구간 밖이다.
+    이 파일은 그 +1d 인코딩을 검증하므로 경계가 자정이 아니어야 한다.
+    """
+    from app.models.organization import Store as _Store
+
+    async with async_session() as db:
+        _store = await db.get(_Store, test_store_id)
+        _orig_ds = _store.day_start_time
+        _store.day_start_time = {"all": "06:00"}
+        await db.commit()
     async with async_session() as db:
         await db.execute(delete(UserStore).where(
             UserStore.user_id == test_user["id"], UserStore.store_id == test_store_id,
@@ -54,6 +67,8 @@ async def staff_assigned(test_user, test_store_id) -> AsyncIterator[dict]:
                 UserStore.user_id == test_user["id"],
                 UserStore.store_id == test_store_id,
             ))
+            _store = await db.get(_Store, test_store_id)
+            _store.day_start_time = _orig_ds
             await db.commit()
 
 
@@ -83,6 +98,7 @@ async def test_create_new_fields_early_morning(async_client, admin_headers, staf
         "store_id": str(staff_assigned["store_id"]),
         "operating_day": FUTURE.isoformat(),
         "start_at": "2026-12-05T01:00", "end_at": "2026-12-05T09:00",
+        # 경계 06:00 이라 01:00 시작의 자동 판정이 곧 12/5 다 — 사람이 고를 것도 없다.
         "status": "confirmed", "force": True,
     }
     resp = await async_client.post(CREATE_URL, json=payload, headers=admin_headers)
@@ -117,10 +133,11 @@ async def test_cross_day_overlap_detected(async_client, admin_headers, staff_ass
         "status": "confirmed", "force": True,
     }, headers=admin_headers)
     assert r1.status_code == 201, r1.text
-    # 12/5 01:00~09:00 — 12/5 01:00~02:00 구간이 물리적으로 겹침
+    # 12/5 01:00~09:00 — 12/5 01:00~02:00 구간이 물리적으로 겹침.
+    # 경계 06:00 이므로 01:00 시작은 **영업일 12/4 의 새벽조**다(12/5 로 두면 12/6 01:00 이 된다).
     body = {
         "user_id": str(staff_assigned["id"]), "store_id": str(staff_assigned["store_id"]),
-        "work_date": "2026-12-05", "start_time": "01:00", "end_time": "09:00",
+        "work_date": FUTURE.isoformat(), "start_time": "01:00", "end_time": "09:00",
         "status": "confirmed", "force": False,
     }
     r2 = await async_client.post(CREATE_URL, json=body, headers=admin_headers)
@@ -136,15 +153,20 @@ async def test_cross_day_overlap_detected(async_client, admin_headers, staff_ass
 
 
 async def test_early_morning_explicit_no_false_overlap(async_client, admin_headers, staff_assigned):
-    """같은 영업일 라벨이라도 실제 instant가 다르면(당일 01시 vs 익일 01시) 겹침 아님."""
+    """실제 instant 가 다르면 겹침이 아니다 — 하루 차이 나는 두 새벽조.
+
+    예전엔 "같은 영업일 라벨 + 다른 달력일" 로 이 상황을 만들었는데, 그 모양은 이제
+    성립하지 않는다(두 후보 중 하나는 반드시 자기 영업일 구간 밖이다). 영업일을 하루씩
+    나눠 같은 취지를 검증한다 — 겹침 판정은 라벨이 아니라 **물리 시각**으로 한다.
+    """
     r1 = await async_client.post(CREATE_URL, json={
         "user_id": str(staff_assigned["id"]), "store_id": str(staff_assigned["store_id"]),
-        "operating_day": FUTURE.isoformat(),
+        "operating_day": (FUTURE - timedelta(days=1)).isoformat(),
         "start_at": f"{FUTURE.isoformat()}T01:00", "end_at": f"{FUTURE.isoformat()}T05:00",
         "status": "confirmed", "force": True,
     }, headers=admin_headers)
     assert r1.status_code == 201, r1.text
-    # 같은 영업일 12/4 라벨, 실제는 12/5 새벽 — 물리적으로 안 겹침 → 성공해야 함
+    # 하루 뒤 같은 시각 — 물리적으로 안 겹침 → 성공해야 한다
     r2 = await async_client.post(CREATE_URL, json={
         "user_id": str(staff_assigned["id"]), "store_id": str(staff_assigned["store_id"]),
         "operating_day": FUTURE.isoformat(),
@@ -166,37 +188,59 @@ async def test_start_date_hard_constraint(async_client, admin_headers, staff_ass
     assert "operating day" in resp.text.lower()
 
 
-async def test_boundary_warning_on_validate(async_client, admin_headers, staff_assigned):
-    """+1일인데 매장 경계(기본 06:00) 이후 시작이면 프리플라이트 경고."""
+async def test_start_date_outside_window_is_an_error_on_validate(async_client, admin_headers, staff_assigned):
+    """경계(06:00) 이후 시작인데 +1일 = 자기 영업일 구간 밖 → 프리플라이트가 **에러**로 답한다.
+
+    예전엔 경고였고 `force` 로 넘길 수 있었다. 그렇게 저장된 행은 출근 시점에 후보로
+    잡히지 않아 현장에서 쓸 수 없다(2026-08 사고). 이제 확인으로도 못 넘긴다.
+    """
     resp = await async_client.post(f"{CREATE_URL}/validate", json={
         "user_id": str(staff_assigned["id"]), "store_id": str(staff_assigned["store_id"]),
         "operating_day": FUTURE.isoformat(),
-        "start_at": "2026-12-05T07:00", "end_at": "2026-12-05T15:00",  # 경계 06:00 이후
+        "start_at": "2026-12-05T07:00", "end_at": "2026-12-05T15:00",  # 경계 이후인데 +1일
         "force": False,
     }, headers=admin_headers)
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # D9-4 — 경고는 코드+파라미터. 문구 매칭 금지.
-    assert any(w["code"] == "START_AFTER_DAY_BOUNDARY" for w in body["warnings"]), body
+    assert body["valid"] is False
+    err = next(e for e in body["errors"] if e["code"] == "START_DATE_MISMATCH")
+    # 사람이 다음에 뭘 바꿔야 하는지 — 시작 날짜가 아니라 영업일이다.
+    assert err["params"]["suggested_operating_day"] == "2026-12-05"
 
 
-async def test_legacy_time_edit_preserves_next_day_offset(async_client, admin_headers, staff_assigned):
-    """구 클라이언트(start_time만 전송)가 새벽근무 시각을 수정해도 +1d가 보존돼야 함."""
+async def test_legacy_time_edit_recalculates_date(async_client, admin_headers, staff_assigned):
+    """구 클라이언트(start_time만 전송)가 시각을 바꾸면 **날짜를 다시 파생**한다.
+
+    예전 계약은 반대였다 — 기존 +1d 오프셋을 보존했다. 그게 2026-08 오염의 생성 경로였다
+    (경계 11:00 매장에서 09:00(+1d) shift 의 시각만 17:00 으로 바꾸면 +1d 가 남아 하루 뒤에 저장).
+    이제는 새 시각에서 다시 계산하되, 날짜가 움직이면 START_DATE_RECALCULATED 경고로 확인을 받는다.
+    """
     create = await async_client.post(CREATE_URL, json={
         "user_id": str(staff_assigned["id"]), "store_id": str(staff_assigned["store_id"]),
         "operating_day": FUTURE.isoformat(),
         "start_at": "2026-12-05T01:00", "end_at": "2026-12-05T09:00",
+        # 경계 06:00 이라 01:00 시작의 자동 판정이 곧 12/5 다 — 사람이 고를 것도 없다.
         "status": "confirmed", "force": True,
     }, headers=admin_headers)
     assert create.status_code == 201, create.text
     sid = create.json()["id"]
-    # 키오스크/벌크식 구 필드 PATCH: 01:00 → 02:00
+    # 키오스크/벌크식 구 필드 PATCH: 01:00 → 07:00 (날짜를 보낼 수단이 없는 클라이언트).
+    # 07:00 은 경계(06:00) 이후라 시작 달력일이 12/5 → 12/4 로 움직인다.
+    # 확인 없이 보내면 409 — 날짜가 조용히 움직이지 않는다.
+    unconfirmed = await async_client.patch(f"{CREATE_URL}/{sid}", json={
+        "start_time": "07:00", "end_time": "15:00",
+    }, headers=admin_headers)
+    assert unconfirmed.status_code == 409, unconfirmed.text
+    warns = unconfirmed.json()["detail"]["warnings"]
+    assert any(w["code"] == "START_DATE_RECALCULATED" for w in warns), warns
+
+    # 확인 후 재요청 — 경계 06:00 이후 시각이므로 자동 판정은 영업일 당일이다.
     patch = await async_client.patch(f"{CREATE_URL}/{sid}", json={
-        "start_time": "02:00", "end_time": "09:00", "force": True,
+        "start_time": "07:00", "end_time": "15:00", "force": True,
     }, headers=admin_headers)
     assert patch.status_code == 200, patch.text
     b = patch.json()
-    assert b["start_at"] == "2026-12-05T02:00", b  # +1d 보존 (12/4로 안 당겨짐)
+    assert b["start_at"] == f"{FUTURE.isoformat()}T07:00", b
     assert b["operating_day"] == FUTURE.isoformat()
 
 

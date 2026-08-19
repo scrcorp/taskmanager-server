@@ -15,6 +15,7 @@ from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.schemas.empid_import import (
+    EmpidBandCount,
     EmpidExportRequest,
     EmpidReconciliationScope,
     EmpidSavedAlias,
@@ -107,6 +108,7 @@ async def preview_empid_import(
         reconciliation=[
             EmpidReconciliationScope(**r) for r in result.reconciliation
         ],
+        distribution=[EmpidBandCount(**d) for d in result.distribution],
     )
 
 
@@ -203,11 +205,19 @@ async def commit_empid_import(
     """체크된 (user, store, empid) 목록을 매장 단위 3-phase 로 반영합니다 (멱등).
 
     empid=null 은 번호 삭제(배정 행 유지). 임포트 탭·bulk 에디터·스태프 상세가 공용.
+    empid_kind 는 생략하면 sequence — 어느 화면에서 왔는지로 추론하지 않는다.
+    응답의 cursor_after 는 커밋 후 커서(커밋이 커서를 밀지는 않는다).
     """
-    assignments: list[tuple[UUID, UUID, int | None]] = []
+    assignments: list[svc.CommitAssignment] = []
     for item in data.assignments:
         try:
-            assignments.append((UUID(item.user_id), UUID(item.store_id), item.empid))
+            assignments.append(svc.CommitAssignment(
+                user_id=UUID(item.user_id),
+                store_id=UUID(item.store_id),
+                empid=item.empid,
+                empid_kind=item.empid_kind,
+                reason=item.reason,
+            ))
         except ValueError:
             continue  # 잘못된 UUID 는 무시 (프론트 방어)
     result = await svc.commit(
@@ -218,4 +228,6 @@ async def commit_empid_import(
         renumbered=result.renumbered,
         skipped=result.skipped,
         rejected=result.rejected,
+        exception_count=result.exception_count,
+        cursor_after=result.cursor_after,
     )

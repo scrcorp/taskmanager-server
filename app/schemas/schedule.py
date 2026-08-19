@@ -159,6 +159,11 @@ class ScheduleCreate(BaseModel):
     hourly_rate: float | None = Field(default=None, ge=0)  # 시급 override (optional, non-negative)
     status: str = "confirmed"  # "requested" for app submissions, "confirmed" for direct admin creation
     force: bool = False  # Override warnings
+    # 시작 달력일을 **사람이 화면에서 직접 골랐다**는 의사표시.
+    # 날짜는 (영업일, 시작 시각, 매장 경계)에서 하나로 결정되는 파생값이라, 표시 없이
+    # 자동값과 다른 날짜가 오면 클라 버그/옛 오프셋 잔재로 보고 차단한다(START_DATE_MISMATCH).
+    # 화면에서 후보를 고른 경우에만 true 로 실어 보낸다 — 그때만 경고(확인 후 진행)가 된다.
+    date_override: bool = False
 
     # 시각 grid 검증은 여기서 하지 않는다 — 판정의 단일 관문은
     # schedule_service._normalize_shift_input 이다(D6-4).
@@ -181,6 +186,8 @@ class ScheduleUpdate(BaseModel):
     note: str | None = None
     hourly_rate: float | None = Field(default=None, ge=0)  # 시급 override (optional, non-negative)
     force: bool = False
+    # 시작 달력일을 사람이 직접 골랐다는 의사표시 (ScheduleCreate 와 같은 의미).
+    date_override: bool = False
     # 수정 사유 — schedule_audit_logs.reason 에 그대로 기록된다 (History 노출).
     # attendance correction 은 reason 이 필수인데 schedule 수정만 사유 없이 diff 만 남아서,
     # "왜 바꿨나" 를 History 에서 알 수 없었다. 선택 입력 (기존 호출자 호환).
@@ -221,6 +228,14 @@ class ScheduleResponse(BaseModel):
     break_start_at: str | None = None
     break_end_at: str | None = None
     net_work_minutes: int
+    # 이 스케줄의 시작이 **자기 영업일 구간 밖**인가 (데이터 이상 신호).
+    #
+    # 영업일 D 의 구간은 `[day_start(D), day_start(D+1))` 이고, 시작은 그 안에 있어야 한다.
+    # 지금은 저장 단계에서 막지만(START_DATE_MISMATCH) **이미 저장된 행**, SQL 직접 수정,
+    # 임포트, 그리고 **매장 경계 설정을 나중에 바꾼 경우**는 그 검증을 지나가지 않는다.
+    # 그런 행은 현장에서 출근이 안 되므로(후보 조회에 안 잡힌다) 화면이 **이상하다고
+    # 표시**해서 사람이 고칠 수 있어야 한다. 조용히 정상처럼 보이는 것이 가장 나쁘다.
+    start_outside_operating_window: bool = False
     status: str
     created_by: str | None
     approved_by: str | None
@@ -490,6 +505,9 @@ class BulkUpdateItem(BaseModel):
     note: str | None = None
     hourly_rate: float | None = None
     reset_checklist: bool | None = None
+    # 시작 달력일을 사람이 직접 골랐다는 의사표시 (ScheduleCreate 와 같은 의미).
+    # 벌크에서도 필요하다 — 여기가 비면 다건 경로만 검증 강도가 달라진다.
+    date_override: bool = False
     # status 변경 (선택). 명시되면 시간 필드 update 후 적절한 전이 함수 호출.
     # draft/requested/confirmed. 권한/현재 status에 따라 거부될 수 있음.
     status: str | None = None

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,7 +33,12 @@ from app.models.empid_change import (
     EMPID_SOURCE_RENUMBER,
     EmpidChange,
 )
-from app.models.org_member import OrgMember, OrgMemberStore
+from app.models.org_member import (
+    EMPID_KIND_SEQUENCE,
+    EMPID_KINDS,
+    OrgMember,
+    OrgMemberStore,
+)
 from app.models.organization import Store
 from app.repositories.store_repository import store_repository
 from app.repositories.user_repository import user_repository
@@ -46,7 +51,12 @@ from app.services.empid_reconcile_service import (
     _first_name_token,
     parse_emplist,
 )
-from app.services.org_numbering import empid_scope_store_ids, lock_empid_scope, next_empid
+from app.services.org_numbering import (
+    empid_cursor_state,
+    empid_scope_store_ids,
+    lock_empid_scope,
+    next_empid,
+)
 from app.utils.exceptions import DuplicateError
 
 # 액션 값 — 사람×매장 1건의 처리 분류.
@@ -102,6 +112,18 @@ def _emp_id_int(raw: str) -> int | None:
         return None
     v = int(s)
     return v if v >= 1 else None
+
+
+def empid_band(empid: int) -> tuple[int, int, str]:
+    """백 단위 번호대 → (lo, hi, label). 1-99, 100-199, 1000-1099 …
+
+    export split_by="band" 시트 구분과 preview 분포가 **같은 규칙**을 쓰도록 한 곳에 둔다
+    (계약 §3-5). 규칙 = (empid // 100) * 100, 0 대는 1 부터 표기.
+    """
+    base = (empid // 100) * 100
+    lo = base if base > 0 else 1
+    hi = base + 99
+    return lo, hi, f"{lo}-{hi}"
 
 
 def build_store_index(stores: list[Store]) -> dict[str, list[Store]]:
@@ -210,6 +232,9 @@ class ImportPreview:
     # 양측 대조 — 스코프(그룹/매장)별 empid diff.
     # [{scope, id, name, matched, htm_only:[{empid,user,store}], file_only:[{empid,name}]}]
     reconciliation: list[dict] = field(default_factory=list)
+    # 업로드 번호의 백 단위 분포 — [{band, lo, hi, count}]. 대역 밖 번호가 눈에 띄게 하는 용도
+    # (계약 §3-5). 자동 예외 추천은 하지 않는다 — 판단은 운영자 몫.
+    distribution: list[dict] = field(default_factory=list)
 
     def counts(self) -> dict[str, int]:
         entry_actions = [e.action for p in self.people for e in p.entries]
@@ -252,8 +277,9 @@ async def _current_empid_map(
     dict[UUID, UUID],
     dict[tuple[UUID, UUID], int | None],
     dict[tuple[UUID, UUID], bool],
+    dict[tuple[UUID, UUID], str],
 ]:
-    """(user_id→org_member_id, (member, store)→empid, (member, store)→is_work_assignment)."""
+    """(user_id→org_member_id, (member, store)→empid, →is_work_assignment, →empid_kind)."""
     member_rows = (
         await db.execute(
             select(OrgMember.id, OrgMember.user_id).where(
@@ -265,6 +291,7 @@ async def _current_empid_map(
     member_ids = [r.id for r in member_rows]
     empid_map: dict[tuple[UUID, UUID], int | None] = {}
     work_map: dict[tuple[UUID, UUID], bool] = {}
+    kind_map: dict[tuple[UUID, UUID], str] = {}
     if member_ids:
         store_rows = (
             await db.execute(
@@ -273,12 +300,14 @@ async def _current_empid_map(
                     OrgMemberStore.store_id,
                     OrgMemberStore.empid,
                     OrgMemberStore.is_work_assignment,
+                    OrgMemberStore.empid_kind,
                 ).where(OrgMemberStore.org_member_id.in_(member_ids))
             )
         ).all()
         empid_map = {(r.org_member_id, r.store_id): r.empid for r in store_rows}
         work_map = {(r.org_member_id, r.store_id): r.is_work_assignment for r in store_rows}
-    return member_by_user, empid_map, work_map
+        kind_map = {(r.org_member_id, r.store_id): r.empid_kind for r in store_rows}
+    return member_by_user, empid_map, work_map, kind_map
 
 
 async def preview(
@@ -319,7 +348,9 @@ async def preview(
 
     stores = await store_repository.get_by_org(db, organization_id, include_closed=True)
     store_index = build_store_index(stores)
-    member_by_user, empid_map, work_map = await _current_empid_map(db, organization_id)
+    member_by_user, empid_map, work_map, _kind_map = await _current_empid_map(
+        db, organization_id
+    )
     member_user: dict[UUID, UUID] = {m: u for u, m in member_by_user.items()}
 
     # ── 스코프 해석 준비 ──────────────────────────────────────────────
@@ -1028,8 +1059,27 @@ async def preview(
             continue
         _emit(ident, st.name, {st.id}, {st.id: st.name})
     result.reconciliation.sort(key=lambda x: (x["scope"], x["name"]))
+    result.distribution = _build_distribution(result)
 
     return result
+
+
+def _build_distribution(result: ImportPreview) -> list[dict]:
+    """업로드 파일의 유효 번호를 백 단위로 묶어 [{band, lo, hi, count}] (오름차순).
+
+    세 버킷(people/placeholder/deferred) 전체의 정수화된 emp_id 를 센다 — 아직 사람이
+    확정되지 않은 행도 "파일이 어떤 대역을 쓰는가" 의 일부이기 때문이다.
+    번호 없는/정수화 실패 행은 세지 않는다 (분포는 번호대 이야기다).
+    """
+    buckets: dict[int, dict] = {}
+    for person in list(result.people) + list(result.placeholder) + list(result.deferred):
+        for e in person.entries:
+            if e.emp_id is None:
+                continue
+            lo, hi, label = empid_band(e.emp_id)
+            row = buckets.setdefault(lo, {"band": label, "lo": lo, "hi": hi, "count": 0})
+            row["count"] += 1
+    return [buckets[k] for k in sorted(buckets)]
 
 
 def _build_entry(
@@ -1107,6 +1157,7 @@ async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
             select(
                 OrgMemberStore.store_id,
                 OrgMemberStore.empid,
+                OrgMemberStore.empid_kind,
                 OrgMemberStore.is_work_assignment,
                 OrgMemberStore.is_manager,
                 OrgMember.user_id,
@@ -1133,6 +1184,9 @@ async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
             "full_name": r.full_name,
             "email": r.email,
             "empid": r.empid,
+            # 번호 구분 — 콘솔 로스터의 조용한 컬럼/필터용. empid 가 없으면 무의미하나
+            # 컬럼 타입을 흔들지 않도록 저장값(기본 sequence)을 그대로 낸다 (계약 §3-6).
+            "empid_kind": r.empid_kind,
             "is_work_assignment": r.is_work_assignment,
             "is_manager": r.is_manager,
             "crewid": r.crewid,
@@ -1328,9 +1382,8 @@ async def build_selected_export_xlsx(
         def band_key(empid: int | None) -> tuple[int, str]:
             if empid is None:
                 return (10**9, "No number")
-            base = (empid // 100) * 100
-            lo = base if base > 0 else 1
-            return (base, f"{lo}-{base + 99}")
+            lo, _hi, label = empid_band(empid)
+            return (lo, label)
 
         tagged = sorted(
             ((band_key(e["empid"]), e["row"]) for e in entries), key=lambda t: t[0][0]
@@ -1349,19 +1402,59 @@ async def build_selected_export_xlsx(
 
 
 @dataclass
+class CommitAssignment:
+    """commit 요청 1건 — (사람, 매장) 의 번호 + 번호 구분 + 사유.
+
+    empid=None 은 번호 삭제. empid_kind 는 **요청이 말하는 값을 그대로** 쓴다 —
+    경로(임포트 탭/bulk 에디터/스태프 상세)로 추론하지 않는다 (INV-6).
+    """
+
+    user_id: UUID
+    store_id: UUID
+    empid: int | None = None
+    empid_kind: str = EMPID_KIND_SEQUENCE
+    reason: str | None = None
+
+
+@dataclass
 class CommitResult:
-    """commit 결과 — 반영/재채번/스킵/거절 내역."""
+    """commit 결과 — 반영/재채번/스킵/거절 내역 + 예외 건수/커밋 후 커서."""
 
     applied: list[dict] = field(default_factory=list)      # {user, store, empid, created}
     renumbered: list[dict] = field(default_factory=list)   # {user, store, old, new}
     skipped: list[dict] = field(default_factory=list)      # {user, store, empid, reason}
     rejected: list[dict] = field(default_factory=list)     # {user_id, store_id, reason}
+    # 이번 커밋이 예외(exception)로 기입한 건수 — 콘솔 요약 "예외 N건 제외 → 커서 X"
+    exception_count: int = 0
+    # 커밋이 건드린 스코프의 **커밋 후 커서** — {scope_id: next_empid}
+    cursor_after: dict[str, int] = field(default_factory=dict)
+
+
+async def _cursor_after(db: AsyncSession, store_ids: list[UUID]) -> dict[str, int]:
+    """커밋이 건드린 스코프들의 현재 커서 — {scope_id: next_empid}.
+
+    commit(=수동 기입)은 커서를 전진시키지 않는다(INV-5). 이 값은 "그래서 지금 커서가
+    얼마인가" 를 조용히 바꾸지 않고 운영자에게 그대로 알려주기 위한 것이고, 어긋났다면
+    운영자가 커서 재계산으로 맞춘다.
+
+    스코프 판정·커서 읽기는 전부 org_numbering(단일 게이트웨이)에 맡긴다.
+    """
+    out: dict[str, int] = {}
+    seen: set[UUID] = set()
+    for store_id in store_ids:
+        state = await empid_cursor_state(db, store_id=store_id)
+        if state.scope_id in seen:  # 그룹 공유 — 형제 매장들이 같은 커서를 가리킨다
+            continue
+        seen.add(state.scope_id)
+        if state.next_empid is not None:  # 미초기화(NULL) 스코프는 알릴 값이 없다
+            out[str(state.scope_id)] = state.next_empid
+    return out
 
 
 async def commit(
     db: AsyncSession,
     organization_id: UUID,
-    assignments: list[tuple[UUID, UUID, int | None]],  # (user_id, store_id, empid|None=번호 삭제)
+    assignments: list[CommitAssignment] | list[tuple[UUID, UUID, int | None]],
     actor_id: UUID | None = None,
 ) -> CommitResult:
     """확정 — 매장 단위 3-phase 로 empid 재기입. 단일 트랜잭션, 멱등.
@@ -1369,10 +1462,19 @@ async def commit(
     empid=None 은 번호 삭제(비우기) — 배정 행은 유지, 번호만 해제되어 재사용 가능.
     users.employee_no 는 기록하지 않는다 (폐기 방향).
     변경 1건마다 empid_changes 이력을 남긴다 (actor_id = 실행 운영자).
+
+    assignments 는 CommitAssignment 목록. (user_id, store_id, empid) 3-튜플도 받는다
+    (기존 호출부 하위호환 — 그때 empid_kind 는 기본값 sequence).
     """
     result = CommitResult()
+    items: list[CommitAssignment] = [
+        a if isinstance(a, CommitAssignment) else CommitAssignment(*a)
+        for a in assignments
+    ]
 
-    member_by_user, empid_map, _work_map = await _current_empid_map(db, organization_id)
+    member_by_user, empid_map, _work_map, kind_map = await _current_empid_map(
+        db, organization_id
+    )
     member_user: dict[UUID, UUID] = {m: u for u, m in member_by_user.items()}
 
     # org 매장 검증용 (폐점 포함 — 번호는 폐점 매장에도 존재)
@@ -1394,6 +1496,7 @@ async def commit(
     def _log_change(
         member_id: UUID, store_id: UUID,
         old: int | None, new: int | None, source: str,
+        reason: str | None = None,
     ) -> None:
         """empid 변경 이력 1건 — 같은 트랜잭션에 적재 (commit 실패 시 함께 롤백)."""
         if old == new:
@@ -1405,16 +1508,21 @@ async def commit(
             store_name=store_by_id[store_id].name,
             user_id=user_id,
             person_name=user_names.get(user_id) if user_id else None,
-            old_empid=old, new_empid=new,
+            old_empid=old, new_empid=new, reason=reason,
             source=source, channel=channel, changed_by=actor_id,
         ))
 
     # 매장별 mapping 구성 — {store_id: {org_member_id: empid}}.
     # claims 는 매장별 역맵(empid→member) — 같은 매장에 같은 번호를 두 사람이 요청하면
     # 현재 보유자를 우선하고 나머지는 거절한다 (전체 롤백/무단 재채번 방지).
+    # kinds/reasons 는 mapping 과 같은 키(store_id → member_id)를 쓰는 병렬 맵 —
+    # 3-phase 비교 로직(값 충돌·멱등)은 번호만 보므로 mapping 의 모양을 건드리지 않는다.
     per_store: dict[UUID, dict[UUID, int | None]] = {}
+    kinds: dict[UUID, dict[UUID, str]] = {}
+    reasons: dict[UUID, dict[UUID, str | None]] = {}
     claims: dict[UUID, dict[int, UUID]] = {}
-    for user_id, store_id, empid in assignments:
+    for item in items:
+        user_id, store_id, empid = item.user_id, item.store_id, item.empid
         if store_id not in store_by_id:
             result.rejected.append({"user_id": str(user_id), "store_id": str(store_id),
                                     "reason": "store not in this org"})
@@ -1428,7 +1536,13 @@ async def commit(
             result.rejected.append({"user_id": str(user_id), "store_id": str(store_id),
                                     "reason": "empid must be >= 1"})
             continue
+        if item.empid_kind not in EMPID_KINDS:
+            result.rejected.append({"user_id": str(user_id), "store_id": str(store_id),
+                                    "reason": "empid_kind must be sequence|exception"})
+            continue
         mapping = per_store.setdefault(store_id, {})
+        store_kinds = kinds.setdefault(store_id, {})
+        store_reasons = reasons.setdefault(store_id, {})
         store_claims = claims.setdefault(store_id, {})
         if member_id in mapping and mapping[member_id] != empid:
             result.rejected.append({"user_id": str(user_id), "store_id": str(store_id),
@@ -1442,12 +1556,17 @@ async def commit(
                                        "empid": None, "reason": "nothing to clear"})
                 continue
             mapping[member_id] = None
+            # 번호가 사라지면 구분은 의미를 잃는다 → 기본값으로 되돌린다.
+            store_kinds[member_id] = EMPID_KIND_SEQUENCE
+            store_reasons[member_id] = item.reason
             continue
         other = store_claims.get(empid)
         if other is not None and other != member_id:
             if empid_map.get((member_id, store_id)) == empid:
                 # 이번 요청자가 현재 보유자 — 앞서 등록된 다른 사람을 밀어내고 거절.
                 del mapping[other]
+                store_kinds.pop(other, None)
+                store_reasons.pop(other, None)
                 other_user = member_user.get(other)
                 result.rejected.append({
                     "user_id": str(other_user) if other_user else str(other),
@@ -1460,20 +1579,43 @@ async def commit(
                 continue
         store_claims[empid] = member_id
         mapping[member_id] = empid
+        store_kinds[member_id] = item.empid_kind
+        store_reasons[member_id] = item.reason
 
     try:
         # Pass 1 — 매장별: 멱등 스킵 → 스코프 락 → 비우기 → 기입. 재채번은 미룬다.
         # (그룹 공유 스코프에서 형제 매장의 기입값이 재채번 max 에 반영되도록 2-pass.)
         deferred: list[tuple[UUID, dict[UUID, int], list[OrgMemberStore]]] = []
         for store_id, mapping in per_store.items():
-            # 이미 같은 값이면 skip (멱등) — mapping 에서 제거
+            store_kinds = kinds.get(store_id, {})
+            store_reasons = reasons.get(store_id, {})
+            # 이미 같은 값이면 skip (멱등) — mapping 에서 제거.
+            # 단, 번호는 그대로인데 **구분만** 바뀌는 요청은 스킵이 아니다 (스태프 상세에서
+            # "이 번호를 예외로 표시" 하는 경로가 조용히 무시되면 안 된다).
             for member_id in list(mapping.keys()):
-                if empid_map.get((member_id, store_id)) == mapping[member_id]:
-                    name, store_name = _label(member_id, store_id)
+                value = mapping[member_id]
+                if empid_map.get((member_id, store_id)) != value:
+                    continue
+                name, store_name = _label(member_id, store_id)
+                want_kind = store_kinds.get(member_id, EMPID_KIND_SEQUENCE)
+                if value is not None and kind_map.get((member_id, store_id)) != want_kind:
+                    await db.execute(
+                        update(OrgMemberStore)
+                        .where(
+                            OrgMemberStore.org_member_id == member_id,
+                            OrgMemberStore.store_id == store_id,
+                        )
+                        .values(empid_kind=want_kind)
+                    )
+                    result.applied.append({"user": name, "store": store_name,
+                                           "empid": value, "created": False})
+                    if want_kind != EMPID_KIND_SEQUENCE:
+                        result.exception_count += 1
+                else:
                     result.skipped.append({"user": name, "store": store_name,
-                                           "empid": mapping[member_id],
+                                           "empid": value,
                                            "reason": "already set"})
-                    del mapping[member_id]
+                del mapping[member_id]
             if not mapping:
                 continue
 
@@ -1503,22 +1645,33 @@ async def commit(
             for member_id, value in mapping.items():
                 name, store_name = _label(member_id, store_id)
                 row = by_member.get(member_id)
+                # 번호 삭제면 구분도 기본값으로. 그 외엔 요청값 그대로 (경로 추론 없음).
+                want_kind = (
+                    EMPID_KIND_SEQUENCE if value is None
+                    else store_kinds.get(member_id, EMPID_KIND_SEQUENCE)
+                )
+                reason = store_reasons.get(member_id)
+                if value is not None and want_kind != EMPID_KIND_SEQUENCE:
+                    result.exception_count += 1
                 if row is None:
                     db.add(OrgMemberStore(
                         org_member_id=member_id, store_id=store_id,
                         is_manager=False, is_work_assignment=True, empid=value,
+                        empid_kind=want_kind,
                     ))
                     result.applied.append({"user": name, "store": store_name,
                                            "empid": value, "created": True})
-                    _log_change(member_id, store_id, None, value, EMPID_SOURCE_COMMIT)
+                    _log_change(member_id, store_id, None, value, EMPID_SOURCE_COMMIT,
+                                reason=reason)
                 else:
                     row.empid = value
+                    row.empid_kind = want_kind
                     result.applied.append({"user": name, "store": store_name,
                                            "empid": value, "created": False})
                     _log_change(
                         member_id, store_id,
                         empid_map.get((member_id, store_id)), value,
-                        EMPID_SOURCE_COMMIT,
+                        EMPID_SOURCE_COMMIT, reason=reason,
                     )
             await db.flush()
             deferred.append((store_id, mapping, cleared))
@@ -1532,6 +1685,7 @@ async def commit(
                     continue
                 old = empid_map.get((row.org_member_id, store_id))
                 row.empid = await next_empid(db, store_id)
+                row.empid_kind = EMPID_KIND_SEQUENCE  # 커서가 준 순번 — 예외가 아니다
                 name, store_name = _label(row.org_member_id, store_id)
                 result.renumbered.append({"user": name, "store": store_name,
                                           "old": old, "new": row.empid})
@@ -1540,6 +1694,8 @@ async def commit(
             await db.flush()
 
         await db.commit()
+        # 커밋이 끝난 뒤의 커서를 그대로 알려준다 — 조용히 바꾸지 않는다 (INV-5).
+        result.cursor_after = await _cursor_after(db, list(per_store.keys()))
     except IntegrityError as e:
         await db.rollback()
         raise DuplicateError(

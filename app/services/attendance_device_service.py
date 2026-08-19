@@ -82,6 +82,20 @@ def generate_device_name(suffix_length: int = 4) -> str:
     return f"Terminal-{suffix}"
 
 
+def shift_moment_label(value: datetime | None, tz) -> str | None:
+    """시프트 시각을 **날짜와 함께** 사람이 읽는 라벨로 (예: "Aug 19, 5:00 PM").
+
+    시각만 찍으면(`"5:00 PM"`) 하루 어긋난 스케줄이 문구상 완벽히 정상으로 보인다 —
+    2026-08 오염 사고에서 "1439분 조기출근" 알림이 `5:00 PM` 하나만 달고 나가는 바람에
+    받는 사람이 무엇이 이상한지 알 수 없었다. 조기/지각 문구가 날짜를 달고 있었으면
+    그날 바로 드러났다. 조기 clock-in 의 세 채널(400 응답 / in-app / email)이 이 하나를
+    같이 쓴다 — 채널마다 포맷이 갈리면 같은 사건이 다르게 읽힌다.
+    """
+    if value is None:
+        return None
+    return value.astimezone(tz).strftime("%b %-d, %-I:%M %p")
+
+
 def generate_clockin_pin() -> str:
     """6자리 숫자 PIN 생성 (random, uniqueness 미보장).
 
@@ -764,11 +778,19 @@ class AttendanceDeviceService:
             ShiftCandidate,
             clock_in_eligibility,
             is_open_prev_day_candidate,
+            is_within_operating_window,
             pick_default_shift,
             sort_shift_candidates,
         )
+        from app.utils.timezone import operating_day_window
 
         yesterday = today - _td_prev_day(days=1)
+        # 영업일 창(오늘·어제) — clock-in 경로와 **같은 값, 같은 규칙**으로 후보를 거른다.
+        # 목록에서만 걸러지고 clock-in 에서 안 걸러지면(또는 반대면) 화면과 서버가 갈린다.
+        day_windows = {
+            d: operating_day_window(store_tz, store_day_start, d)
+            for d in (today, yesterday)
+        }
 
         rows = list(
             (
@@ -888,6 +910,17 @@ class AttendanceDeviceService:
             ):
                 continue
 
+            # 자기 영업일 창 밖에서 시작하는 **미출근** shift — 목록에는 남기고
+            # `clock_in_eligible=false` + 이유로 내린다(아래 clock_in_eligibility).
+            #
+            # 예전엔 여기서 `continue` 로 아예 뺐다. 그러면 잘못 만들어진 스케줄이
+            # 화면에서 **소리 없이 사라져** 결근인지 잘못 만든 건지 구분할 수 없고,
+            # 매장에서는 "분명 넣었는데 아무 데도 안 보인다" 가 된다.
+            # 고를 수 없게 하는 것과 안 보이게 하는 것은 다르다.
+            in_window = (not candidate.is_open) or is_within_operating_window(
+                candidate, windows=day_windows
+            )
+
             cur_break: dict | None = None
             if eff_status == "on_break" and att is not None:
                 br = (
@@ -907,7 +940,9 @@ class AttendanceDeviceService:
                         "started_at": br.started_at,
                     }
 
-            eligible, ineligible_reason = clock_in_eligibility(candidate)
+            eligible, ineligible_reason = clock_in_eligibility(
+                candidate, within_window=in_window
+            )
             # 판정 프리뷰 — "지금 이 shift 로 찍으면 어떻게 기록되는가"(D3).
             # **숫자만** 내린다. "3h 12m late" 문자열은 앱이 l10n 으로 조립한다.
             # 계산은 clock-in 실기록과 똑같이 judge_clock_in 을 쓴다 — 앱이 자체 계산하면
@@ -965,7 +1000,15 @@ class AttendanceDeviceService:
         }
         entries.sort(key=lambda pair: order[id(pair[0])])
 
-        default = pick_default_shift([c for c, _i in entries], today=today)
+        # 기본 제시에서는 **고를 수 없는 shift 를 뺀다**. 창 밖 시프트는 목록에 남지만
+        # (존재 자체는 보여야 하므로) 기본값으로 내밀면 앱이 그 id 를 실어 보내고
+        # 서버가 거부하는, 현장에서 손쓸 수 없는 화면이 된다.
+        # 이미 찍은 shift 는 계속 후보다 — clock-out 대상이 그쪽이기 때문.
+        _selectable = [
+            c for c, i in entries
+            if i.get("clock_in_eligible") or i.get("clock_in") is not None
+        ]
+        default = pick_default_shift(_selectable or [c for c, _i in entries], today=today)
         default_schedule_id = default.schedule_id if default is not None else None
         items = [item for _c, item in entries]
         for candidate, item in entries:
@@ -1128,6 +1171,7 @@ class AttendanceDeviceService:
                 pick_fallback_shift,
                 split_candidates,
             )
+            from app.utils.timezone import operating_day_window
 
             yesterday = today - _td_prev(days=1)
             sch_result = await db.execute(
@@ -1182,8 +1226,18 @@ class AttendanceDeviceService:
                     clock_out=att.clock_out if att is not None else None,
                 )
 
+            # 영업일 창은 **호출자가 주입**한다 — 후보 규칙 모듈은 DB 를 읽지 않는다.
+            # identify 도 같은 창을 만들어 같은 규칙으로 거른다. 두 경로가 갈리면
+            # "목록엔 보이는데 찍으면 거부" 가 된다.
+            windows = {
+                d: operating_day_window(store_tz, store_day_start, d)
+                for d in (today, yesterday)
+            }
             today_candidates, prev_candidates = split_candidates(
-                [_to_candidate(s) for s in all_schedules], now=now, today=today
+                [_to_candidate(s) for s in all_schedules],
+                now=now,
+                today=today,
+                windows=windows,
             )
             candidates = today_candidates + prev_candidates
 
@@ -1380,6 +1434,9 @@ class AttendanceDeviceService:
                         from fastapi import HTTPException, status
 
                         minutes_early = verdict.minutes_early
+                        # params 는 detail **최상위에 평탄하게** 싣는다(구버전 계약).
+                        # `scheduled_start_display` 는 추가 필드일 뿐이라 구버전은 무시한다.
+                        start_label = shift_moment_label(scheduled_start, tz)
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
                             detail={
@@ -1387,8 +1444,9 @@ class AttendanceDeviceService:
                                 "minutes_early": minutes_early,
                                 "schedule_id": str(schedule.id),
                                 "scheduled_start": scheduled_start.isoformat(),
+                                "scheduled_start_display": start_label,
                                 "message": (
-                                    "This shift starts in "
+                                    f"This shift starts {start_label} — in "
                                     f"{minutes_early} minutes. To clock in now, "
                                     "enter a reason — your manager will see it."
                                 ),
@@ -1792,6 +1850,10 @@ class AttendanceDeviceService:
             # 빼기 계산을 하면 알림 문구와 400 응답의 minutes_early 가 갈린다.
             minutes_early = minutes_between(attendance.clock_in, scheduled_start)
             staff_name = display_name(user)
+            tz = _Zone(store_tz)
+            # 세 채널(400 / in-app / email)이 같은 라벨 포맷을 쓴다 — 날짜 포함.
+            scheduled_start_label = shift_moment_label(scheduled_start, tz)
+            clock_in_label = shift_moment_label(attendance.clock_in, tz)
 
             await alert_service.create_for_early_clock_in(
                 db,
@@ -1801,6 +1863,7 @@ class AttendanceDeviceService:
                 staff_user_id=user.id,
                 staff_name=staff_name,
                 minutes_early=minutes_early,
+                scheduled_start_label=scheduled_start_label,
             )
             await db.commit()
 
@@ -1823,15 +1886,12 @@ class AttendanceDeviceService:
                     exclude_user_id=user.id,
                 ).where(User.email.is_not(None))
             )
-            tz = _Zone(store_tz)
             subject, html = build_early_clock_in_email(
                 staff_name=staff_name,
                 store_name=store_name or "your store",
                 minutes_early=minutes_early,
-                scheduled_start_label=scheduled_start.astimezone(tz).strftime(
-                    "%-I:%M %p"
-                ),
-                clock_in_label=attendance.clock_in.astimezone(tz).strftime("%-I:%M %p"),
+                scheduled_start_label=scheduled_start_label or "",
+                clock_in_label=clock_in_label or "",
                 reason=reason or "(no reason provided)",
             )
             for uid, email in recipients.all():
