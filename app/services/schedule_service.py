@@ -30,6 +30,7 @@ from app.core.permissions import GM_PRIORITY, OWNER_PRIORITY, SV_PRIORITY, hide_
 from fastapi import HTTPException
 
 from app.core import schedule_codes as codes
+from app.services import staff_assignment_service
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 from app.utils.timezone import (
@@ -801,6 +802,22 @@ class ScheduleService:
                     codes.USER_NOT_MARKED_FOR_STORE, user_id=str(user_id), store_id=str(store_id),
                 ))
 
+        # 3. 고용 상태 — 퇴사·비활성자에게 새 근무를 꽂는 것을 막는다 (2026-08-19).
+        #    판정은 staff_assignment_service 가 단독 소유한다. 화면이 칸을 잠글 때
+        #    읽는 `assignable_until` 과 **같은 함수**라야 화면과 저장이 갈리지 않는다.
+        #    Owner 예외를 두지 않는다 — 매장 배정(위 2번)과 달리 "퇴사자에게 배정"은
+        #    권한이 높다고 허용되는 종류의 일이 아니다.
+        if work_date is not None:
+            store_org_id = await db.scalar(
+                select(Store.organization_id).where(Store.id == store_id)
+            )
+            if store_org_id is not None:
+                employment_issue = await staff_assignment_service.assert_assignable(
+                    db, store_org_id, user_id, work_date,
+                )
+                if employment_issue is not None:
+                    errors.append(employment_issue)
+
         valid = len(errors) == 0
         return ScheduleValidation(valid=valid, warnings=warnings, errors=errors)
 
@@ -1008,8 +1025,17 @@ class ScheduleService:
             )
 
         if staff_ids:
+            # 지목은 **교집합이 아니라 후보 확장**이다. 사용자가 필터로 콕 집은 사람은
+            # 지금 비활성이거나 이 기간에 기록이 없어도 행을 만든다 — 안 그러면
+            # "이름을 골랐는데 그리드가 텅 빈" 상태가 되어 필터가 고장난 것처럼 보인다.
+            # (행은 나오되 배정 가능 여부는 assignable* 이 따로 판정한다.)
             sset = {str(u) for u in staff_ids}
             users = [u for u in users if u.id in sset]
+            missing = [UUID(i) for i in sset - {u.id for u in users}]
+            if missing:
+                users = users + await user_service.list_users(
+                    db, organization_id, {"user_ids": missing}
+                )
         if roles:
             rset = {r.lower() for r in roles}
             users = [u for u in users if self._role_badge(u.role_priority) in rset]
@@ -1058,8 +1084,14 @@ class ScheduleService:
             elif s.status == "requested":
                 agg["ph"] += hrs; agg["pc"] += cost
 
+        # 배정 가능 범위 — 화면이 날짜 단위로 칸을 잠그는 데 쓴다. 저장 검증과 같은 판정.
+        assign_map = await staff_assignment_service.get_assignability(
+            db, organization_id, [UUID(u.id) for u in users]
+        )
+
         rows: list[RosterRow] = []
         for u in users:
+            _assign = assign_map.get(UUID(u.id))
             agg = per_user.get(u.id)
             has = agg is not None
             if schedule_level_filter and not has:
@@ -1071,6 +1103,18 @@ class ScheduleService:
                 has_schedule_in_period=has,
                 # 유령(미가입)은 is_active=False 지만 '앞으로 일할 사람'이라 퇴사자가 아니다.
                 is_inactive=(not u.is_active) and (not u.is_provisional),
+                assignable=_assign.employed if _assign else False,
+                assignable_until=(
+                    _assign.assignable_until.isoformat()
+                    if _assign and _assign.assignable_until else None
+                ),
+                employed_from=(
+                    _assign.hire_date.isoformat() if _assign and _assign.hire_date else None
+                ),
+                employed_to=(
+                    _assign.termination_date.isoformat()
+                    if _assign and _assign.termination_date else None
+                ),
                 confirmed_hours=round(agg["ch"], 2) if agg else 0.0,
                 pending_hours=round(agg["ph"], 2) if agg else 0.0,
                 confirmed_cost=None if hide_cost else (round(agg["cc"], 2) if agg else 0.0),

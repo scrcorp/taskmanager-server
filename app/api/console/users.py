@@ -86,6 +86,23 @@ async def list_users(
         "provisional_only": provisional_only,
     }
     users = await user_service.list_users(db, org_id, filters)
+    # 배정 가능 범위 — 스케줄 화면이 "이 사람 이 날짜에 꽂아도 되나" 를 서버와
+    # 같은 기준으로 판단하게 한다 (staff_assignment_service 가 단일 판정).
+    from app.services import staff_assignment_service
+
+    assign_map = await staff_assignment_service.get_assignability(
+        db, org_id, [UUID(u.id) for u in users]
+    )
+    for u in users:
+        info = assign_map.get(UUID(u.id))
+        u.assignable = info.employed if info else False
+        u.assignable_until = (
+            info.assignable_until.isoformat() if info and info.assignable_until else None
+        )
+        u.employed_from = info.hire_date.isoformat() if info and info.hire_date else None
+        u.employed_to = (
+            info.termination_date.isoformat() if info and info.termination_date else None
+        )
     if hide_cost_for(current_user):
         for u in users:
             scrub_cost_fields(u)
