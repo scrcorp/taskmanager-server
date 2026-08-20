@@ -190,6 +190,43 @@ async def test_roster_items_carry_empid_kind(
     assert member["empid_kind"] == "exception"
 
 
+async def test_roster_items_carry_is_active(
+    async_client: AsyncClient, admin_headers: dict, empid_target: dict
+) -> None:
+    """roster 는 계정 활성 여부를 싣는다 — 콘솔 export 의 비활성 제외 필터 축."""
+    from uuid import UUID
+
+    from app.models.user import User
+
+    uid = UUID(empid_target["user_id"])
+
+    async def _read_member() -> dict:
+        resp = await async_client.get(f"{BASE}/roster", headers=admin_headers)
+        assert resp.status_code == 200, resp.text
+        store_row = next(
+            s for s in resp.json() if s["store_id"] == empid_target["store_id"]
+        )
+        return next(
+            m for m in store_row["members"] if m["user_id"] == empid_target["user_id"]
+        )
+
+    member = await _read_member()
+    assert member["is_active"] is True
+
+    async with async_session() as db:
+        user = await db.get(User, uid)
+        user.is_active = False
+        await db.commit()
+    try:
+        member = await _read_member()
+        assert member["is_active"] is False
+    finally:
+        async with async_session() as db:
+            user = await db.get(User, uid)
+            user.is_active = True
+            await db.commit()
+
+
 async def test_preview_returns_hundred_band_distribution(
     async_client: AsyncClient, admin_headers: dict, empid_target: dict
 ) -> None:

@@ -183,6 +183,7 @@ class EmpidRosterMember(BaseModel):
     empid_kind: str = EMPID_KIND_SEQUENCE  # sequence | exception (empid 없으면 무의미)
     is_work_assignment: bool = True
     is_manager: bool = False
+    is_active: bool = True             # 계정 활성 여부 — 비활성 계정 export 제외 필터 축
     crewid: int | None = None          # org 번호 (export crewid 컬럼 — 정확 매칭 키)
     role_name: str | None = None       # 역할 (owner/general_manager/supervisor/staff/커스텀)
     role_priority: int | None = None   # 정렬용 우선순위 (낮을수록 상위)
