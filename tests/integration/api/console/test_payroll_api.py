@@ -33,7 +33,9 @@ from app.core.payroll_rules import (
 from app.database import async_session
 from app.models.attendance import Attendance
 from app.models.org_member import OrgMember, OrgMemberStore
-from app.models.organization import Store
+from app.models.organization import Store, StoreGroup
+from app.models.settings import StoreSetting
+from app.seeds.settings_seed import REST_BREAK_TRACKING_KEY
 from app.models.payroll import PayPeriod, PayrollEntry, PayrollEvent
 from app.models.rate import HourlyRateHistory
 from app.models.schedule import Schedule
@@ -95,8 +97,16 @@ async def api_ctx(
     org_id: UUID = seed_organization["id"]
     suffix = uuid_mod.uuid4().hex[:8]
     async with async_session() as db:
+        # A/B 는 **서로 다른 법인(group)** — 게이트 ⑤(cross-group)와 타법인
+        # 격리 의미를 유지한다. 같은 법인 겸업은 엔진이 직접 계산하므로
+        # 그 케이스는 별도 테스트(test_confirm_same_group_two_stores_*)가 담당.
+        group_a = StoreGroup(organization_id=org_id, name=f"__payroll_api_group_A_{suffix}")
+        group_b = StoreGroup(organization_id=org_id, name=f"__payroll_api_group_B_{suffix}")
+        db.add_all([group_a, group_b])
+        await db.flush()
         store_a = Store(
             organization_id=org_id,
+            group_id=group_a.id,
             name=f"__payroll_api_store_A_{suffix}",
             timezone="UTC",
             day_start_time={"all": "00:00"},
@@ -104,6 +114,7 @@ async def api_ctx(
         )
         store_b = Store(
             organization_id=org_id,
+            group_id=group_b.id,
             name=f"__payroll_api_store_B_{suffix}",
             timezone="UTC",
             day_start_time={"all": "00:00"},
@@ -113,14 +124,30 @@ async def api_ctx(
         await db.commit()
         await db.refresh(store_a)
         await db.refresh(store_b)
+        await db.refresh(group_a)
+        await db.refresh(group_b)
+        # rest penalty 는 "휴게를 기록하는 매장"에서만 판정한다(기본 off).
+        # 이 테스트들은 penalty 이벤트/금액을 검증하므로 켜 둔다.
+        db.add_all(
+            [
+                StoreSetting(
+                    store_id=store.id, key=REST_BREAK_TRACKING_KEY, value=True
+                )
+                for store in (store_a, store_b)
+            ]
+        )
+        await db.commit()
 
     ctx = {
         "org_id": org_id,
+        "group_id": group_a.id,
+        "group_b_id": group_b.id,
         "store_id": store_a.id,
         "store_b_id": store_b.id,
         "role_id": seed_roles["staff"],
         "user_ids": [],
         "member_ids": [],
+        "extra_store_ids": [],
     }
     crewid = 900_000 + int(uuid_mod.uuid4().hex[:4], 16)
     main = await _mk_user(ctx, "Payroll Main", crewid=crewid, empid=7, empid_b=99)
@@ -131,12 +158,22 @@ async def api_ctx(
     yield ctx
 
     async with async_session() as db:
-        store_ids = [ctx["store_id"], ctx["store_b_id"]]
+        store_ids = [ctx["store_id"], ctx["store_b_id"], *ctx["extra_store_ids"]]
         await db.execute(
             delete(PayrollEvent).where(PayrollEvent.store_id.in_(store_ids))
         )
+        group_ids = [ctx["group_id"], ctx["group_b_id"]]
         await db.execute(
-            delete(PayrollEntry).where(PayrollEntry.store_id.in_(store_ids))
+            delete(PayrollEntry).where(
+                PayrollEntry.pay_period_id.in_(
+                    select(PayPeriod.id).where(
+                        PayPeriod.store_group_id.in_(group_ids)
+                    )
+                )
+            )
+        )
+        await db.execute(
+            delete(PayPeriod).where(PayPeriod.store_group_id.in_(group_ids))
         )
         await db.execute(delete(PayPeriod).where(PayPeriod.store_id.in_(store_ids)))
         await db.execute(delete(TipEntry).where(TipEntry.store_id.in_(store_ids)))
@@ -151,6 +188,7 @@ async def api_ctx(
         await db.execute(delete(OrgMember).where(OrgMember.id.in_(ctx["member_ids"])))
         await db.execute(delete(User).where(User.id.in_(ctx["user_ids"])))
         await db.execute(delete(Store).where(Store.id.in_(store_ids)))
+        await db.execute(delete(StoreGroup).where(StoreGroup.id.in_(group_ids)))
         await db.commit()
 
 
@@ -282,7 +320,7 @@ async def _ensure_period(ctx: dict, date_in_period: date = _JUL_MID) -> str:
     """테스트 대상 기간 행 보장 (시스템 생성 경로) → period id 문자열."""
     async with async_session() as db:
         period = await payroll_period_service.ensure_period(
-            db, store_id=ctx["store_id"], date_in_period=date_in_period
+            db, store_group_id=ctx["group_id"], date_in_period=date_in_period
         )
         await db.commit()
         return str(period.id)
@@ -343,7 +381,7 @@ async def test_list_periods_auto_ensures_range(
 ) -> None:
     """과거 범위 조회 시 반월 기간이 자동 생성되고, 재조회에 중복이 없다."""
     params = {
-        "store_id": str(api_ctx["store_id"]),
+        "group_id": str(api_ctx["group_id"]),
         "start": "2026-07-01",
         "end": "2026-07-31",
     }
@@ -369,7 +407,7 @@ async def test_list_periods_auto_ensures_range(
     # 기본 범위(파라미터 없음) — 오늘이 속한 현재 기간 포함
     resp3 = await async_client.get(
         f"{_BASE}/periods/",
-        params={"store_id": str(api_ctx["store_id"])},
+        params={"group_id": str(api_ctx["group_id"])},
         headers=admin_headers,
     )
     assert resp3.status_code == 200
@@ -385,7 +423,7 @@ async def test_list_periods_invalid_range_400(
     resp = await async_client.get(
         f"{_BASE}/periods/",
         params={
-            "store_id": str(api_ctx["store_id"]),
+            "group_id": str(api_ctx["group_id"]),
             "start": "2026-07-31",
             "end": "2026-07-01",
         },
@@ -397,7 +435,7 @@ async def test_list_periods_invalid_range_400(
     resp2 = await async_client.get(
         f"{_BASE}/periods/",
         params={
-            "store_id": str(api_ctx["store_id"]),
+            "group_id": str(api_ctx["group_id"]),
             "start": "2024-01-01",
             "end": "2026-07-01",
         },
@@ -415,7 +453,7 @@ async def test_list_periods_shows_tip_status(
     resp = await async_client.get(
         f"{_BASE}/periods/",
         params={
-            "store_id": str(api_ctx["store_id"]),
+            "group_id": str(api_ctx["group_id"]),
             "start": "2026-07-01",
             "end": "2026-07-15",
         },
@@ -882,6 +920,121 @@ async def test_multi_store_under_40h_confirms(
     assert entries[0]["regular_minutes"] == 960  # A 매장 2일만
 
 
+async def _mk_sibling_store(ctx: dict) -> UUID:
+    """A 와 **같은 법인** 의 2호점 — 그룹 합산 검증용 (tip 게이트 대응 포함)."""
+    suffix = uuid_mod.uuid4().hex[:8]
+    async with async_session() as db:
+        store = Store(
+            organization_id=ctx["org_id"],
+            group_id=ctx["group_id"],
+            name=f"__payroll_api_sibling_{suffix}",
+            timezone="UTC",
+            day_start_time={"all": "00:00"},
+            default_hourly_rate=_RATE,
+        )
+        db.add(store)
+        await db.commit()
+        await db.refresh(store)
+        db.add(
+            TipPeriod(
+                store_id=store.id, start_date=_JUL_START, end_date=_JUL_END,
+                status="confirmed",
+            )
+        )
+        await db.commit()
+    ctx["extra_store_ids"].append(store.id)
+    return store.id
+
+
+async def test_confirm_same_group_two_stores_sums_weekly_ot(
+    async_client: AsyncClient, admin_headers: dict, api_ctx: dict
+) -> None:
+    """★ P0 해소 — 같은 법인 두 매장 겸업의 주 40h 가 합산돼 OT 가 나온다.
+
+    구 store 스코프에선 30h(A)+20h(2호점)=50h 가 OT 0 으로 갈라졌다 (확정 임금
+    미지급). group 스코프는 한 기간에서 합산 계산하고, 게이트 ⑤(cross-group)에도
+    걸리지 않는다. entry 는 1인 1행, 매장 귀속 없음.
+    """
+    sibling_id = await _mk_sibling_store(api_ctx)
+    # A: Sun~Wed 7.5h ×4 = 30h / 2호점: Thu~Fri 10h ×2 = 20h → 주 합산 50h
+    for i in range(4):
+        await _mk_attendance(
+            api_ctx, work_date=_SUN + timedelta(days=i), total_work_minutes=450
+        )
+    await _mk_attendance(
+        api_ctx, work_date=_THU, total_work_minutes=600, store_id=sibling_id
+    )
+    await _mk_attendance(
+        api_ctx, work_date=_FRI, total_work_minutes=600, store_id=sibling_id
+    )
+    await _mk_tip_period(api_ctx)  # A 매장 tip period (2호점은 헬퍼가 생성)
+    period_id = await _ensure_period(api_ctx)
+
+    resp = await _confirm(async_client, admin_headers, period_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["period"]["status"] == "confirmed"
+
+    entries = body["entries"]
+    assert len(entries) == 1  # 그룹당 1인 1행 — merge_by_person 봉합 불필요
+    entry = entries[0]
+    total = entry["regular_minutes"] + entry["ot_minutes"] + entry["dt_minutes"]
+    assert total == 3000  # 50h 전부 지급
+    # 일별(목/금 10h → 각 2h daily OT) + 주간(straight 46h → 6h weekly OT)
+    # = OT 합 10h. 구 스코프에선 A 30h/B 20h 로 갈라져 weekly OT 0 이었다.
+    assert entry["dt_minutes"] == 0
+    assert entry["ot_minutes"] == 600
+    assert entry["regular_minutes"] == 2400
+    assert _money(entry["ot_pay"]) == Decimal("300.00")  # 10h × 1.5 × $20
+
+    async with async_session() as db:
+        db_entry = (
+            await db.execute(
+                select(PayrollEntry).where(
+                    PayrollEntry.pay_period_id == UUID(period_id)
+                )
+            )
+        ).scalar_one()
+        assert db_entry.store_id is None  # group 스코프 — 매장 귀속 없음
+        period = await db.get(PayPeriod, UUID(period_id))
+        assert period.store_group_id == api_ctx["group_id"]
+
+    # 그룹 확정 = 그룹 내 두 매장 모두 잠금 (D3)
+    async with async_session() as db:
+        from app.services.payroll_period_service import payroll_period_service as pps
+
+        assert await pps.is_date_locked(
+            db, store_id=sibling_id, work_date=_THU
+        ) is True
+        assert await pps.is_date_locked(
+            db, store_id=api_ctx["store_id"], work_date=_MON
+        ) is True
+
+
+async def test_confirm_same_group_requires_every_store_tip_period(
+    async_client: AsyncClient, admin_headers: dict, api_ctx: dict
+) -> None:
+    """게이트 ④ (group) — 그룹 내 한 매장이라도 tip period 미확정이면 막힌다."""
+    sibling_id = await _mk_sibling_store(api_ctx)
+    async with async_session() as db:
+        tp = (
+            await db.execute(
+                select(TipPeriod).where(TipPeriod.store_id == sibling_id)
+            )
+        ).scalar_one()
+        tp.status = "open"
+        await db.commit()
+    await _mk_attendance(api_ctx, work_date=_MON, total_work_minutes=240)
+    await _mk_tip_period(api_ctx)  # A 는 confirmed
+    period_id = await _ensure_period(api_ctx)
+
+    resp = await _confirm(async_client, admin_headers, period_id)
+    assert resp.status_code == 409, resp.text
+    gates = _gate_map(resp.json())
+    assert VALIDATION_TIP_PERIOD_NOT_CONFIRMED in gates
+    assert "open" in gates[VALIDATION_TIP_PERIOD_NOT_CONFIRMED]["message"]
+
+
 # ---------------------------------------------------------------------------
 # All-green confirm — 동결 검증
 # ---------------------------------------------------------------------------
@@ -1058,7 +1211,7 @@ async def test_gm_denied_on_payroll_endpoints(
 
     resp = await async_client.get(
         f"{_BASE}/periods/",
-        params={"store_id": str(api_ctx["store_id"])},
+        params={"group_id": str(api_ctx["group_id"])},
         headers=headers,
     )
     assert resp.status_code == 403
@@ -1409,9 +1562,11 @@ async def test_export_unconfirmed_period_draft(
     resp = await _export(async_client, admin_headers, period_id)
     assert resp.status_code == 200, resp.text
     disposition = resp.headers["content-disposition"]
-    assert "_DRAFT.xlsx" in disposition  # 저장된 파일만 봐도 미확정본
+    # 파일명만 봐도 구분된다: 기간ID · 날짜범위 · 미확정 · 받은 시각
     assert "Payroll_" in disposition
-    assert "2026-07-01~2026-07-15_DRAFT.xlsx" in disposition
+    assert "2026.07.FH" in disposition
+    assert "20260701-0715" in disposition
+    assert "_DRAFT_" in disposition
 
     wb = load_workbook(BytesIO(resp.content))
     ws = wb[EXPORT_SHEET_TITLE]
@@ -1554,7 +1709,9 @@ async def test_export_confirmed_period_workbook(
     )
     disposition = resp.headers["content-disposition"]
     assert "Payroll_" in disposition
-    assert "2026-07-01~2026-07-15.xlsx" in disposition
+    assert "2026.07.FH" in disposition
+    assert "20260701-0715" in disposition
+    assert "_FINAL_" in disposition  # 확정본도 상태를 명시한다
     assert "_DRAFT" not in disposition  # 확정본에는 draft 표식 없음
     assert "filename*=UTF-8''" in disposition  # 유니코드 파라미터 항상 동반
 

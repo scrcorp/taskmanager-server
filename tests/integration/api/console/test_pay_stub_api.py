@@ -27,7 +27,7 @@ from app.database import async_session
 from app.models.attendance import Attendance
 from app.models.file import File, FileUsage
 from app.models.org_member import OrgMember, OrgMemberStore
-from app.models.organization import Store
+from app.models.organization import Store, StoreGroup
 from app.models.payroll import PayPeriod, PayrollEntry, PayrollEvent
 from app.models.tip import TipEntry, TipPeriod
 from app.models.user import User
@@ -53,8 +53,12 @@ async def stub_ctx(
     suffix = uuid_mod.uuid4().hex[:8]
     crewid = 910_000 + int(uuid_mod.uuid4().hex[:4], 16)
     async with async_session() as db:
+        group = StoreGroup(organization_id=org_id, name=f"__pay_stub_group_{suffix}")
+        db.add(group)
+        await db.flush()
         store = Store(
             organization_id=org_id,
+            group_id=group.id,
             name=f"__pay_stub_store_{suffix}",
             timezone="UTC",
             day_start_time={"all": "00:00"},
@@ -64,6 +68,7 @@ async def stub_ctx(
         db.add(store)
         await db.commit()
         await db.refresh(store)
+        await db.refresh(group)
 
         user = User(
             organization_id=org_id,
@@ -90,6 +95,7 @@ async def stub_ctx(
 
     ctx = {
         "org_id": org_id,
+        "group_id": group.id,
         "store_id": store.id,
         "user_id": user.id,
         "member_id": member.id,
@@ -101,7 +107,10 @@ async def stub_ctx(
         # stub 파일 레지스트리 + blob 정리 (period 기반 고정 key)
         period_ids = (
             await db.scalars(
-                select(PayPeriod.id).where(PayPeriod.store_id == store.id)
+                select(PayPeriod.id).where(
+                    (PayPeriod.store_id == store.id)
+                    | (PayPeriod.store_group_id == group.id)
+                )
             )
         ).all()
         for pid in period_ids:
@@ -120,9 +129,9 @@ async def stub_ctx(
             delete(PayrollEvent).where(PayrollEvent.store_id == store.id)
         )
         await db.execute(
-            delete(PayrollEntry).where(PayrollEntry.store_id == store.id)
+            delete(PayrollEntry).where(PayrollEntry.pay_period_id.in_(period_ids))
         )
-        await db.execute(delete(PayPeriod).where(PayPeriod.store_id == store.id))
+        await db.execute(delete(PayPeriod).where(PayPeriod.id.in_(period_ids)))
         await db.execute(delete(TipEntry).where(TipEntry.store_id == store.id))
         await db.execute(delete(TipPeriod).where(TipPeriod.store_id == store.id))
         await db.execute(delete(Attendance).where(Attendance.store_id == store.id))
@@ -132,6 +141,7 @@ async def stub_ctx(
         await db.execute(delete(OrgMember).where(OrgMember.id == member.id))
         await db.execute(delete(User).where(User.id == user.id))
         await db.execute(delete(Store).where(Store.id == store.id))
+        await db.execute(delete(StoreGroup).where(StoreGroup.id == group.id))
         await db.commit()
 
 
@@ -159,7 +169,7 @@ async def _confirmed_entry_id(
             )
         )
         period = await payroll_period_service.ensure_period(
-            db, store_id=ctx["store_id"], date_in_period=_JUL_MID
+            db, store_group_id=ctx["group_id"], date_in_period=_JUL_MID
         )
         await db.commit()
         period_id = str(period.id)
@@ -225,7 +235,8 @@ async def test_generate_registers_file_and_usage(
         assert file.file_type == "document"
         assert file.mime_type == "application/pdf"
         assert file.organization_id == stub_ctx["org_id"]
-        assert file.store_id == stub_ctx["store_id"]
+        # group 스코프 entry 는 매장 귀속이 없다 — 파일도 org 레벨로 등록된다
+        assert file.store_id is None
         assert file.size_bytes == body["size_bytes"]
     # blob 실재 확인 (로컬 버킷)
     assert storage_service.read_bytes(
@@ -329,7 +340,7 @@ async def test_open_period_entry_409(
     """open 기간에 (비정상 경로로) entry 가 있어도 stub 은 409 로 거부."""
     async with async_session() as db:
         period = await payroll_period_service.ensure_period(
-            db, store_id=stub_ctx["store_id"], date_in_period=_JUL_MID
+            db, store_group_id=stub_ctx["group_id"], date_in_period=_JUL_MID
         )
         entry = PayrollEntry(
             pay_period_id=period.id,
@@ -395,12 +406,17 @@ async def test_stub_key_and_filename_scheme(
         assert pay_stub_service.stub_key(entry) == (
             f"payroll/stubs/{entry.pay_period_id}/{entry.id}.pdf"
         )
-        assert pay_stub_service.stub_filename(entry, period) == (
-            "PayStub_StubEmployee_2026-07-01~2026-07-15.pdf"
+        # 이름 → 식별자(EMPID/CREWID) → 기간ID → 날짜범위 → 상태
+        final = pay_stub_service.stub_filename(entry, period)
+        assert final.startswith("PayStub_StubEmployee_")
+        assert "_2026.07.FH_20260701-0715_FINAL.pdf" in final
+        assert pay_stub_service.stub_filename(entry, period, draft=True).endswith(
+            "_2026.07.FH_20260701-0715_DRAFT.pdf"
         )
-        assert pay_stub_service.stub_filename(entry, period, draft=True) == (
-            "PayStub_StubEmployee_2026-07-01~2026-07-15_DRAFT.pdf"
-        )
+        # 동명이인 구분용 식별자가 이름 뒤에 붙는다
+        ident = entry.empid if entry.empid is not None else entry.crewid
+        if ident is not None:
+            assert f"{ident}" in final
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +438,7 @@ async def _open_period_id(ctx: dict) -> str:
             )
         )
         period = await payroll_period_service.ensure_period(
-            db, store_id=ctx["store_id"], date_in_period=_JUL_MID
+            db, store_group_id=ctx["group_id"], date_in_period=_JUL_MID
         )
         await db.commit()
         return str(period.id)

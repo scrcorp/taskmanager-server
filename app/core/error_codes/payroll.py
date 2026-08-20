@@ -22,3 +22,32 @@ PAYROLL_CLOSE_GATES_FAILED = PAYROLL.legacy(
     "Some close gates failed. Resolve every issue below, then confirm again.",
 )
 """params: gates(list) — 콘솔이 목록으로 렌더한다."""
+
+# ── group 스코프 전환 (2026-08-19, D1~D6) ─────────────────────────────
+
+PAYROLL_GROUP_HAS_NO_STORES = PAYROLL.code(
+    "PAYROLL_GROUP_HAS_NO_STORES",
+    400,
+    "This group has no stores.",
+    hint="Assign at least one store to the group before running payroll.",
+)
+
+PAYROLL_GROUP_TIMEZONE_MISMATCH = PAYROLL.code(
+    "PAYROLL_GROUP_TIMEZONE_MISMATCH",
+    400,
+    "Stores in this group use different timezones: {zones}.",
+    hint="Payroll needs a single business-day boundary per group — align the store timezones, then retry.",
+)
+
+PAYROLL_SCOPE_MISSING = PAYROLL.code(
+    "PAYROLL_SCOPE_MISSING",
+    400,
+    "This pay period's store or group no longer exists.",
+)
+
+BONUS_EFFECTIVE_DATE_INVALID = PAYROLL.code(
+    "BONUS_EFFECTIVE_DATE_INVALID",
+    400,
+    "Bonus rate changes must take effect on the 1st or 16th.",
+    hint="Pick a pay-period start date (1st or 16th) as the effective date.",
+)

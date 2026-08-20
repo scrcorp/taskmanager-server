@@ -19,6 +19,15 @@ STORE_OPERATING_HOURS_KEY = "store.operating_hours"
 SCHEDULE_RANGE_KEY = "schedule.range"
 SCHEDULE_REPORT_RECIPIENTS_KEY = "schedule.report_recipients"
 SCHEDULE_REPORT_TIMES_KEY = "schedule.report_times"
+TIP_DISTRIBUTION_MODE_KEY = "payroll.tip_distribution_mode"
+REST_BREAK_TRACKING_KEY = "payroll.rest_break_tracking"
+PERFORMANCE_BONUS_ENABLED_KEY = "payroll.performance_bonus_enabled"
+
+# 팁 분배 방식 — 매장 단위. "none" 이 상위 게이트라 직원별 tip_eligible 을 무력화한다.
+TIP_MODE_NONE = "none"                    # 이 매장은 팁을 운영하지 않음 (기본값)
+TIP_MODE_MANUAL = "manual"                # 받은 사람이 직접 분배 (tip_distributions, 24h 자동수락)
+TIP_MODE_HOURS_PRORATED = "hours_prorated"  # 근무시간 비례 자동 분배 (일 단위, min(h,8), 자동확정)
+TIP_MODES = (TIP_MODE_NONE, TIP_MODE_MANUAL, TIP_MODE_HOURS_PRORATED)
 
 
 class SettingDefinition:
@@ -341,5 +350,45 @@ SETTINGS_SEED: list[SettingDefinition] = [
         value_type="number",
         default_value=10,
         category="Attendance",
+    ),
+    # ─── Payroll ────────────────────────────────────────
+    SettingDefinition(
+        key=TIP_DISTRIBUTION_MODE_KEY,
+        label="Tip distribution",
+        description=(
+            "How tips collected at this store are split. "
+            "'none' = this store does not run tips (staff tip eligibility is forced off). "
+            "'manual' = whoever received the tips assigns amounts to co-workers. "
+            "'hours_prorated' = split automatically every day across eligible staff by hours "
+            "worked, counting at most 8 hours per person."
+        ),
+        value_type="string",
+        default_value=TIP_MODE_NONE,
+        category="Payroll",
+    ),
+    SettingDefinition(
+        key=REST_BREAK_TRACKING_KEY,
+        label="Rest breaks are recorded",
+        description=(
+            "Turn on only if staff actually clock their paid 10-minute rest breaks "
+            "at this store. Rest-break penalties are detected by looking for "
+            "recorded breaks, so if they are never recorded every shift over "
+            "3.5 hours is flagged as a violation. When off, rest-break penalties "
+            "are not evaluated — there is no evidence either way."
+        ),
+        value_type="boolean",
+        default_value=False,
+        category="Payroll",
+    ),
+    SettingDefinition(
+        key=PERFORMANCE_BONUS_ENABLED_KEY,
+        label="Performance bonus",
+        description=(
+            "Allow an hourly add-on rate per staff member at this store. "
+            "When disabled, bonus rates cannot be set and no bonus is paid."
+        ),
+        value_type="boolean",
+        default_value=False,
+        category="Payroll",
     ),
 ]

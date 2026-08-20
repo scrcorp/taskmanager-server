@@ -86,3 +86,59 @@ class HourlyRateHistory(Base):
     )
 
     org_member = relationship("OrgMember")
+
+
+class BonusRateHistory(Base):
+    """성과 보너스 가산율 변경 이력 — org_member_store 당 effective_date 별 1행.
+
+    HourlyRateHistory 와 같은 규칙을 따른다. 다른 점은 스코프 하나뿐 —
+    시급은 org_member(조직) 단위인데 보너스는 **매장별**이라 org_member_stores 에 매달린다
+    (한 사람이 두 매장에서 다른 보너스를 받을 수 있다).
+
+    보너스도 임금이라 "언제부터 얼마였는지"가 분쟁 시 근거가 된다. 시급과 규칙이
+    같아야 운영이 단순해지므로 effective_date 는 급여기간 시작일(1일/16일)만 허용한다
+    (검증은 서비스 계층 — payroll_period_service.assert_period_start).
+
+    Attributes:
+        old_rate: 변경 전 가산율 (NULL = 최초 기록)
+        new_rate: 변경 후 가산율 (>= 0 CHECK — 0 은 "보너스 없앰"이라 유효한 값)
+    """
+
+    __tablename__ = "bonus_rate_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # 급여 근거 데이터 — 배정 삭제로 소멸 금지 (RESTRICT)
+    org_member_store_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("org_member_stores.id", ondelete="RESTRICT"), nullable=False
+    )
+    old_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    # 0 허용 — 시급과 달리 "보너스를 없앤다"가 정상 변경이다.
+    new_rate: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "org_member_store_id", "effective_date",
+            name="uq_bonus_history_member_store_effective",
+        ),
+        CheckConstraint("new_rate >= 0", name="ck_bonus_history_new_rate_non_negative"),
+        Index(
+            "ix_bonus_history_member_store_effective",
+            "org_member_store_id",
+            desc("effective_date"),
+        ),
+    )
+
+    org_member_store = relationship("OrgMemberStore")

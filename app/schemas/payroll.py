@@ -29,6 +29,9 @@ CALC_VERSION = 1
 VALIDATION_RATE_MISSING = "rate_missing"  # rate_at 결과 None 또는 ≤ 0 (계산 규칙 5)
 VALIDATION_BELOW_MINIMUM_WAGE = "below_minimum_wage"  # 적용 rate < 법정 최저 (C8)
 VALIDATION_OPEN_SHIFT = "open_shift"  # clock_out 없는 열린 근무 (L5-②)
+# 스케줄은 있었는데 clock-in 이 없어 cron 이 no_show 로 승격한 근무 — "진짜 결근"과
+# "일했는데 기록 안 됨"을 구분할 수 없어 확정 전 사람이 본다. 경고만 (차단 게이트 아님).
+VALIDATION_NO_SHOW = "no_show"
 # 자동퇴근 미확인 — Phase 3 에서 auto_clock_out_confirmed_* 컬럼으로 정교화 예정 (L5-①)
 VALIDATION_UNCONFIRMED_AUTO_CLOCKOUT = "unconfirmed_auto_clockout"
 VALIDATION_TIP_PERIOD_NOT_CONFIRMED = "tip_period_not_confirmed"  # 계산 규칙 4
@@ -105,6 +108,15 @@ class DayDetail(BaseModel):
     # 옛 동결본과 전기 frozen 소스 일자는 빈 목록 (재계산하지 않는다).
     shifts: list[WorkedShift] = Field(default_factory=list)
     breaks: list[WorkedBreak] = Field(default_factory=list)
+    # 그날 대표 매장 (net 최다) — group 스코프에선 기간에 매장이 없어서
+    # 이 값이 없으면 콘솔이 "어느 매장 근태인지" 를 알 방법이 없다 (근태 딥링크가
+    # 기본 매장으로 열리는 회귀의 원인). additive 선택 필드 — 옛 동결본은 None.
+    store_id: str | None = None
+    # 그날 근무한 매장 전체 (같은 날 그룹 내 두 매장이면 2개). 표시/링크 판단용.
+    store_ids: list[str] = Field(default_factory=list)
+    # 그날 attendance 가 정확히 1건일 때만 — 콘솔이 목록 대신 상세로 바로 연다.
+    # split shift·같은 날 두 매장이면 None (하나로 특정할 수 없다).
+    attendance_id: str | None = None
 
 
 class PenaltyLine(BaseModel):
@@ -133,6 +145,20 @@ class ContextDay(BaseModel):
     paid_in_prior: bool = True  # 지급은 직전 기간에서 — 이 기간 총계에 미포함
 
 
+class BonusLine(BaseModel):
+    """성과 보너스 1건 — 매장 단위 (group 스코프 전환 후 다중 매장 지원).
+
+    보너스 가산율은 (member, store) 값이라 그룹 기간에서는 매장별로 갈릴 수 있다.
+    지급액 = rate × 그 매장 근무 분/60 (OT 할증 없음). additive 선택 필드 —
+    옛 동결본은 빈 목록으로 파싱되고, 그 경우 bonus_rate 스칼라가 원천이다.
+    """
+
+    store_id: str  # 매장 UUID 문자열
+    rate: Decimal  # 시급 가산율
+    minutes: int  # 그 매장 근무 분 (기간 내 지급 대상 분)
+    amount: Decimal  # rate × minutes / 60, 센트 반올림
+
+
 class EntryBreakdown(BaseModel):
     """payroll_entries.breakdown 전체 — calc_version=1 계약 (스펙 §5)."""
 
@@ -143,7 +169,16 @@ class EntryBreakdown(BaseModel):
     # 경계 걸친 주의 직전 기간 일자 (지급 아님 — 판정 근거). work_date 오름차순.
     # 선택 필드 추가라 calc_version 유지 — 옛 동결본은 빈 목록으로 파싱된다.
     context_days: list[ContextDay] = Field(default_factory=list)
-    tip_period_id: str | None = None  # 대응 tip_period UUID (계산 규칙 4 추적)
+    # 성과 보너스 가산율 (시급 add-on). 지급액은 bonus_rate × 총시간 — OT 할증 없음.
+    # 선택 필드 추가라 calc_version 유지 (옛 동결본은 0 으로 파싱).
+    bonus_rate: Decimal = Decimal("0.00")
+    # 매장별 보너스 라인 (group 스코프) — 있으면 bonus_pay 검증의 원천.
+    # additive 선택 필드 (옛 동결본은 빈 목록 → bonus_rate × 총시간 공식으로 검증).
+    bonus_lines: list[BonusLine] = Field(default_factory=list)
+    tip_period_id: str | None = None  # 대응 tip_period UUID (단일 매장일 때만, 하위호환)
+    # group 스코프: 그룹 내 매장별 대응 tip_period UUID 목록 (계산 규칙 4 추적).
+    # additive 선택 필드 — 옛 동결본은 빈 목록.
+    tip_period_ids: list[str] = Field(default_factory=list)
     # 계산 입력 출처 메모 (선택) — 예: 경계 걸친 주의 전기 frozen 참조 (계산 규칙 3)
     sources: dict | None = None
 
@@ -170,8 +205,9 @@ class PayrollPreviewRow(BaseModel):
     ot_pay: Decimal = Decimal("0.00")
     dt_pay: Decimal = Decimal("0.00")
     penalty_pay: Decimal = Decimal("0.00")
+    bonus_pay: Decimal = Decimal("0.00")  # bonus_rate × 총시간 (OT 할증 없음)
     card_tips: Decimal = Decimal("0.00")  # C6: own_card − paid_out + received(수락)
-    gross_pay: Decimal = Decimal("0.00")  # 위 5개 pay 의 합
+    gross_pay: Decimal = Decimal("0.00")  # 위 6개 pay 의 합
     breakdown: EntryBreakdown
     validations: list[PreviewValidation] = Field(default_factory=list)
 
@@ -194,15 +230,18 @@ class PayPeriodResponse(BaseModel):
 
     id: UUID
     organization_id: UUID
-    store_id: UUID
+    # 급여 스코프 = 법인 (2026-08-19 전환). 레거시(전환 전 확정) 기간만 NULL.
+    store_group_id: UUID | None = None
+    # 레거시 store 스코프 기간 전용 — 신규(group) 기간은 NULL.
+    store_id: UUID | None = None
     start_date: date
     end_date: date
     status: str  # 'open' | 'confirmed'
     confirmed_at: datetime | None = None
     confirmed_by: UUID | None = None
     override_reason: str | None = None
-    # 대응 tip_period.status (같은 store+범위). None = tip period 미생성.
-    # 마감 게이트 ④ 의 사전 표시용 (계산 규칙 4).
+    # 대응 tip_period status 요약 — 그룹 내 전 매장 confirmed 여야 'confirmed'.
+    # None = 미생성 매장이 있음. 마감 게이트 ④ 의 사전 표시용 (계산 규칙 4).
     tip_period_status: str | None = None
 
 

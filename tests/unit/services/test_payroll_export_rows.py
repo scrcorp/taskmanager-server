@@ -13,7 +13,7 @@ DB 없음 — PayrollEntry 모델 / PayrollPreviewRow 를 직접 조립해 분�
 from __future__ import annotations
 
 import uuid as uuid_mod
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -34,11 +34,13 @@ from app.services.payroll_export_service import (
     RATE_CHANGES_SHEET_TITLE,
     RateChangeExportRow,
     WARNINGS_SHEET_TITLE,
+    IdleMemberRow,
     build_draft_workbook,
     build_export_workbook,
     entry_export_row,
     export_filename,
     format_rates,
+    idle_member_export_row,
     minutes_to_hours,
     preview_export_row,
 )
@@ -296,6 +298,65 @@ def test_frozen_workbook_has_no_banner() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 무활동 재직 직원 0 행 (include_idle_members) — 데이터 행 뒤 블록
+# ---------------------------------------------------------------------------
+
+
+def _idle(name: str, *, empid: int | None = 11, crewid: int | None = 900777) -> IdleMemberRow:
+    return IdleMemberRow(
+        user_id=uuid_mod.uuid4(), member_name=name, empid=empid, crewid=crewid
+    )
+
+
+def test_idle_member_row_is_all_zero_with_blank_rates() -> None:
+    cells = idle_member_export_row(_idle("Idle One"))
+    assert cells[:3] == [11, 900777, "Idle One"]
+    assert cells[6] == ""  # Rate(s) — 근무가 없으니 구간도 없다
+    assert all(v == 0 for v in cells[3:6] + cells[7:])
+
+
+def test_idle_member_row_falls_back_to_crewid_for_empid_cell() -> None:
+    cells = idle_member_export_row(_idle("Idle One", empid=None))
+    assert cells[0] == 900777 and cells[1] == 900777
+
+
+def test_workbook_appends_idle_rows_after_entries_sorted_by_name() -> None:
+    """지급 행 뒤에 0 행 블록 — 이름순. 회계사가 0 행을 골라내지 않아도 되게."""
+    wb = build_export_workbook(
+        [_entry(name="Zed Worker")], [_idle("Bob Idle"), _idle("Amy Idle")]
+    )
+    ws = wb[EXPORT_SHEET_TITLE]
+    assert [ws.cell(row=r, column=3).value for r in (2, 3, 4)] == [
+        "Zed Worker",
+        "Amy Idle",
+        "Bob Idle",
+    ]
+    assert ws.cell(row=3, column=13).value == 0  # Gross Pay
+
+
+def test_draft_workbook_appends_idle_rows_below_banner_block() -> None:
+    wb = build_draft_workbook([_preview_row()], [_idle("Idle One")])
+    ws = wb[EXPORT_SHEET_TITLE]
+    assert ws.cell(row=1, column=1).value == DRAFT_BANNER
+    assert ws.max_row == 4  # 배너 + 헤더 + 지급 1 + idle 1
+    assert ws.cell(row=4, column=3).value == "Idle One"
+
+
+def test_idle_rows_without_ids_go_to_warnings_sheet() -> None:
+    wb = build_export_workbook(
+        [_entry()], [_idle("No Ids Idle", empid=None, crewid=None)]
+    )
+    warn = wb[WARNINGS_SHEET_TITLE]
+    assert warn.max_row == 2
+    assert warn.cell(row=2, column=1).value == "No Ids Idle"
+
+
+def test_workbook_without_idle_rows_is_unchanged() -> None:
+    """기본 호출(idle 생략)은 기존 시트 모양 그대로 — 선택 기능이 기본을 바꾸지 않는다."""
+    assert build_export_workbook([_entry()])[EXPORT_SHEET_TITLE].max_row == 2
+
+
+# ---------------------------------------------------------------------------
 # Rate Changes 시트
 # ---------------------------------------------------------------------------
 
@@ -324,7 +385,7 @@ def test_workbook_without_rate_changes_has_no_sheet() -> None:
 
 
 def test_workbook_rate_changes_sheet_rows() -> None:
-    wb = build_export_workbook([_entry()], [_rate_change()])
+    wb = build_export_workbook([_entry()], rate_changes=[_rate_change()])
     assert wb.sheetnames == [EXPORT_SHEET_TITLE, RATE_CHANGES_SHEET_TITLE]
     ws = wb[RATE_CHANGES_SHEET_TITLE]
     assert [c.value for c in ws[1]] == RATE_CHANGES_COLUMNS
@@ -343,7 +404,7 @@ def test_workbook_rate_changes_sheet_rows() -> None:
 def test_rate_changes_first_record_and_blank_memo() -> None:
     """old_rate NULL(최초 기록)·memo 없음도 빈칸으로 그대로 나간다."""
     wb = build_draft_workbook(
-        [_preview_row()], [_rate_change(old_rate=None, memo=None)]
+        [_preview_row()], rate_changes=[_rate_change(old_rate=None, memo=None)]
     )
     ws = wb[RATE_CHANGES_SHEET_TITLE]
     assert ws.cell(row=2, column=3).value is None  # Old Rate
@@ -352,7 +413,7 @@ def test_rate_changes_first_record_and_blank_memo() -> None:
 
 def test_draft_workbook_keeps_banner_with_rate_changes() -> None:
     """draft 배너와 Rate Changes 시트가 공존 — 본 시트 모양은 불변."""
-    wb = build_draft_workbook([_preview_row()], [_rate_change()])
+    wb = build_draft_workbook([_preview_row()], rate_changes=[_rate_change()])
     ws = wb[EXPORT_SHEET_TITLE]
     assert ws.cell(row=1, column=1).value == DRAFT_BANNER
     assert wb.sheetnames == [EXPORT_SHEET_TITLE, RATE_CHANGES_SHEET_TITLE]
@@ -363,33 +424,63 @@ def test_draft_workbook_keeps_banner_with_rate_changes() -> None:
 # ---------------------------------------------------------------------------
 
 
+_AT = datetime(2026, 8, 20, 13, 52, tzinfo=timezone.utc)
+
+
 def test_export_filename_scheme() -> None:
-    name = export_filename("Main St", date(2026, 7, 1), date(2026, 7, 15))
-    assert name == "Payroll_MainSt_2026-07-01~2026-07-15.xlsx"
-
-
-def test_export_filename_draft_suffix() -> None:
-    """미확정본은 _DRAFT 접미 — 저장된 파일만 봐도 구분된다."""
+    """`Payroll_{스코프}_{기간ID}_{날짜범위}_{상태}_{생성시각}.xlsx`."""
     name = export_filename(
-        "Main St", date(2026, 7, 1), date(2026, 7, 15), draft=True
+        "ODG", date(2026, 7, 1), date(2026, 7, 15), generated_at=_AT
     )
-    assert name == "Payroll_MainSt_2026-07-01~2026-07-15_DRAFT.xlsx"
+    assert name == "Payroll_ODG_2026.07.FH_20260701-0715_FINAL_20260820-1352Z.xlsx"
 
 
-def test_export_filename_keeps_unicode_store_name() -> None:
-    """한글 매장명 보존 — 받는 사람이 어느 매장인지 알아야 한다."""
-    name = export_filename("서울 2호점", date(2026, 7, 1), date(2026, 7, 15))
-    assert name == "Payroll_서울2호점_2026-07-01~2026-07-15.xlsx"
+def test_export_filename_marks_draft_and_final_explicitly() -> None:
+    """확정 여부를 **양쪽 다** 명시 — '표시 없음 = 확정본' 은 파일만 봐선 모른다."""
+    draft = export_filename(
+        "ODG", date(2026, 7, 16), date(2026, 7, 31), draft=True, generated_at=_AT
+    )
+    final = export_filename(
+        "ODG", date(2026, 7, 16), date(2026, 7, 31), generated_at=_AT
+    )
+    assert "_DRAFT_" in draft and "_FINAL_" in final
+    assert "2026.07.LH" in draft  # 16일 시작 → LH
+
+
+def test_export_filename_stamp_separates_repeated_downloads() -> None:
+    """DRAFT 는 받을 때마다 숫자가 달라진다 — 시각이 최신본을 가른다."""
+    first = export_filename(
+        "ODG", date(2026, 7, 1), date(2026, 7, 15), draft=True,
+        generated_at=datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc),
+    )
+    second = export_filename(
+        "ODG", date(2026, 7, 1), date(2026, 7, 15), draft=True,
+        generated_at=datetime(2026, 8, 20, 17, 30, tzinfo=timezone.utc),
+    )
+    assert first != second
+    assert first.endswith("_20260820-0900Z.xlsx")
+    assert second.endswith("_20260820-1730Z.xlsx")
+
+
+def test_export_filename_keeps_unicode_scope_name() -> None:
+    """한글 법인/매장명 보존 — 받는 사람이 어디 것인지 알아야 한다."""
+    name = export_filename(
+        "서울 2호점", date(2026, 7, 1), date(2026, 7, 15), generated_at=_AT
+    )
+    assert name.startswith("Payroll_서울2호점_2026.07.FH_")
 
 
 def test_export_filename_replaces_only_illegal_characters() -> None:
     """파일시스템 불가 문자만 '_' — '.' '#' 처럼 합법 문자는 그대로 둔다."""
-    name = export_filename("Main St. #2/A*B", date(2026, 7, 1), date(2026, 7, 15))
-    assert name == "Payroll_MainSt.#2_A_B_2026-07-01~2026-07-15.xlsx"
+    name = export_filename(
+        "Main St. #2/A*B", date(2026, 7, 1), date(2026, 7, 15), generated_at=_AT
+    )
+    assert name.startswith("Payroll_MainSt.#2_A_B_")
 
 
 def test_export_filename_blank_store_falls_back() -> None:
     assert (
-        export_filename("///", date(2026, 7, 1), date(2026, 7, 15))
-        == "Payroll_download_2026-07-01~2026-07-15.xlsx"
+        export_filename("///", date(2026, 7, 1), date(2026, 7, 15),
+                        generated_at=_AT)
+        == "Payroll_download_2026.07.FH_20260701-0715_FINAL_20260820-1352Z.xlsx"
     )

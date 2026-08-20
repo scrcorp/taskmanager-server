@@ -27,7 +27,7 @@ from app.database import async_session
 from app.models.attendance import Attendance
 from app.models.attendance_break import AttendanceBreak
 from app.models.org_member import OrgMember, OrgMemberStore
-from app.models.organization import Store
+from app.models.organization import Store, StoreGroup
 from app.models.payroll import PayPeriod, PayrollEntry, PayrollEvent
 from app.models.rate import HourlyRateHistory
 from app.models.schedule import Schedule
@@ -57,8 +57,14 @@ async def backfill_ctx(
     org_id: UUID = seed_organization["id"]
     suffix = uuid_mod.uuid4().hex[:8]
     async with async_session() as db:
+        group = StoreGroup(
+            organization_id=org_id, name=f"__payroll_backfill_group_{suffix}"
+        )
+        db.add(group)
+        await db.flush()
         store = Store(
             organization_id=org_id,
+            group_id=group.id,
             name=f"__payroll_backfill_store_{suffix}",
             timezone="UTC",
             day_start_time={"all": "00:00"},
@@ -67,6 +73,7 @@ async def backfill_ctx(
         db.add(store)
         await db.commit()
         await db.refresh(store)
+        await db.refresh(group)
 
         user = User(
             organization_id=org_id,
@@ -117,6 +124,7 @@ async def backfill_ctx(
 
     ctx = {
         "org_id": org_id,
+        "group_id": group.id,
         "store_id": store.id,
         "user_id": user.id,
         "member_id": member.id,
@@ -129,7 +137,16 @@ async def backfill_ctx(
             delete(PayrollEvent).where(PayrollEvent.store_id == store.id)
         )
         await db.execute(
-            delete(PayrollEntry).where(PayrollEntry.store_id == store.id)
+            delete(PayrollEntry).where(
+                PayrollEntry.pay_period_id.in_(
+                    select(PayPeriod.id).where(
+                        PayPeriod.store_group_id == group.id
+                    )
+                )
+            )
+        )
+        await db.execute(
+            delete(PayPeriod).where(PayPeriod.store_group_id == group.id)
         )
         await db.execute(delete(PayPeriod).where(PayPeriod.store_id == store.id))
         await db.execute(delete(TipEntry).where(TipEntry.store_id == store.id))
@@ -144,6 +161,7 @@ async def backfill_ctx(
         await db.execute(delete(OrgMember).where(OrgMember.id == member.id))
         await db.execute(delete(User).where(User.id == user.id))
         await db.execute(delete(Store).where(Store.id == store.id))
+        await db.execute(delete(StoreGroup).where(StoreGroup.id == group.id))
         await db.commit()
 
 
@@ -156,13 +174,13 @@ async def _confirm_period(ctx: dict) -> UUID:
     """기간 보장 + 확정 → period id (현행 엔진이라 금액까지 동결된다)."""
     async with async_session() as db:
         period = await payroll_period_service.ensure_period(
-            db, store_id=ctx["store_id"], date_in_period=_JUL_MID
+            db, store_group_id=ctx["group_id"], date_in_period=_JUL_MID
         )
         await db.commit()
         period_id = period.id
         actor = await db.get(User, ctx["actor"]["id"])
         await payroll_confirm_service.confirm_period(
-            db, store_id=ctx["store_id"], period_id=period_id, actor=actor
+            db, period_id=period_id, actor=actor
         )
         await db.commit()
     return period_id
@@ -373,13 +391,13 @@ async def test_backfill_restores_context_days_for_straddle_week(
 
     async with async_session() as db:
         period = await payroll_period_service.ensure_period(
-            db, store_id=store_id, date_in_period=date(2026, 7, 20)
+            db, store_group_id=backfill_ctx["group_id"], date_in_period=date(2026, 7, 20)
         )
         await db.commit()
         period_id = period.id
         actor = await db.get(User, backfill_ctx["actor"]["id"])
         await payroll_confirm_service.confirm_period(
-            db, store_id=store_id, period_id=period_id, actor=actor
+            db, period_id=period_id, actor=actor
         )
         await db.commit()
 
@@ -503,7 +521,7 @@ async def test_backfill_rejects_open_period(backfill_ctx: dict) -> None:
     """미확정 기간은 동결본이 없다 — 400 (preview 가 원천)."""
     async with async_session() as db:
         period = await payroll_period_service.ensure_period(
-            db, store_id=backfill_ctx["store_id"], date_in_period=_JUL_MID
+            db, store_group_id=backfill_ctx["group_id"], date_in_period=_JUL_MID
         )
         await db.commit()
         period_id = period.id

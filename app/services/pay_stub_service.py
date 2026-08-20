@@ -27,12 +27,35 @@ from app.models.file import File, FileUsage
 from app.models.organization import Organization, Store
 from app.models.payroll import PayPeriod, PayrollEntry
 from app.services.storage_service import storage_service
-from app.utils.download import safe_filename
+from app.core.payroll_rules import payroll_period_label
+from app.utils.download import payroll_range_tag, safe_filename
 from app.utils.exceptions import DuplicateError, NotFoundError
 from app.utils.pay_stub_pdf import build_pay_stub_pdf
 
 # file_usages.owner_type — pay stub PDF 의 사용 주체 (owner_id = payroll_entries.id)
 STUB_OWNER_TYPE = "pay_stub"
+
+
+async def _stub_scope(db: AsyncSession, period: PayPeriod, store_id):
+    """PDF 헤더용 스코프 객체 — 레거시는 Store, group 기간은 법인 표시명.
+
+    build_pay_stub_pdf 는 .name / .address 만 읽는다. group 기간은 매장 귀속이
+    없으므로 법인(payroll_corp_name 폴백 name)을 같은 모양으로 넘긴다.
+    """
+    if store_id is not None:
+        return await db.get(Store, store_id)
+    if period.store_group_id is None:
+        return None
+    from types import SimpleNamespace
+
+    from app.models.organization import StoreGroup
+
+    group = await db.get(StoreGroup, period.store_group_id)
+    if group is None:
+        return None
+    return SimpleNamespace(
+        name=group.payroll_corp_name or group.name, address=None
+    )
 
 
 @dataclass
@@ -55,15 +78,30 @@ class PayStubService:
     def stub_filename(
         self, entry: PayrollEntry, period: PayPeriod, *, draft: bool = False
     ) -> str:
-        """PayStub_{직원명}_{start}~{end}.pdf — 미확정본은 _DRAFT 접미.
+        """`PayStub_{직원명}_{EMPID}_{기간ID}_{날짜범위}_{상태}.pdf`.
+
+        예: `PayStub_ChristineReyes_EMPID8_2026.08.FH_20260801-0815_FINAL.pdf`
+
+        직원에게 건네는 문서라 **이름이 앞**이고, EMPID 는 동명이인 구분용이다
+        (없으면 CREWID, 둘 다 없으면 생략). 기간ID(2026.08.FH)는 급여 파일·명세서가
+        같은 라벨을 쓰게 한다.
+
+        다운로드 시각은 넣지 않는다 — 확정본 명세서는 재생성해도 같은 내용이라
+        (멱등) 시각이 붙으면 같은 문서가 여러 이름으로 쌓인다.
 
         직원명은 유니코드 그대로 (한글 이름 보존) — 전송 규격은 헤더가 맡는다.
         """
-        suffix = "_DRAFT" if draft else ""
-        return (
-            f"PayStub_{safe_filename(entry.member_name)}"
-            f"_{period.start_date}~{period.end_date}{suffix}.pdf"
-        )
+        parts = ["PayStub", safe_filename(entry.member_name)]
+        ident = entry.empid if entry.empid is not None else entry.crewid
+        if ident is not None:
+            label = "EMPID" if entry.empid is not None else "CREWID"
+            parts.append(f"{label}{ident}")
+        parts += [
+            payroll_period_label(period.start_date),
+            payroll_range_tag(period.start_date, period.end_date),
+            "DRAFT" if draft else "FINAL",
+        ]
+        return "_".join(parts) + ".pdf"
 
     async def load_context(self, db: AsyncSession, entry_id: UUID) -> StubContext:
         """entry + period/store/org 로드 — 404/409 가드 포함.
@@ -82,7 +120,7 @@ class PayStubService:
                 "Pay stubs are only available for confirmed pay periods — "
                 "confirm the pay period first"
             )
-        store = await db.get(Store, entry.store_id)
+        store = await _stub_scope(db, period, entry.store_id)
         org = await db.get(Organization, entry.organization_id)
         if store is None or org is None:
             # RESTRICT/CASCADE 정책상 도달 어려움 — 도달 시 명확히
@@ -212,14 +250,14 @@ class PayStubService:
             raise DuplicateError(
                 "Period is confirmed — use the pay stub on its frozen entry"
             )
-        store = await db.get(Store, period.store_id)
+        store = await _stub_scope(db, period, period.store_id)
         org = await db.get(Organization, period.organization_id)
         if store is None or org is None:
             raise NotFoundError("Store or organization for this period no longer exists")
 
         # read-only 계산 — draft 다운로드가 이벤트 라이프사이클을 건드리지 않게
         rows = await payroll_calc_service.preview_period(
-            db, period.store_id, period, mutate_events=False
+            db, period, mutate_events=False
         )
         row = next((r for r in rows if r.user_id == user_id), None)
         if row is None:

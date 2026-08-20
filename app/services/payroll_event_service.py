@@ -9,11 +9,12 @@ payroll_events(스펙 §6, grain = 일 단위)의 유일한 쓰기 경로:
     - list_events() / tag_event(): 콘솔 조회 + 귀책 태그(E1)
 
 감지 규칙 (v1, 상수는 app/core/payroll_rules.py):
-    - meal_penalty: 일 C1 net > 6h(blanket waiver 적용 임계) 인데 그날 attendance 전체에 30분 이상
-      완료된 무급 meal break 세션이 하나도 없으면 위반 (presence 기반).
+    - meal_penalty: required_meal_breaks() 만큼 30분 이상 무급 meal 세션이 필요.
+      §512(a) 면제 반영 — 총 6h 이하는 상호 합의로 면제 가능하므로 위반이 아니고,
+      12h 초과부터 2회가 필요하다.
       타이밍 기반 고도화 — "5th hour 종료 전에 meal 시작했는지" 판정 — 는 v2.
     - rest_penalty: 일 net ≥ 3.5h 부터 required_rest_breaks() 단계
-      (3.5–6h→1, >6–10h→2, >10h→3)만큼 유급 10분 휴게 세션이 필요.
+      (3.5–6h→1, >6–10h→2, >10–14h→3, >14h→4)만큼 유급 10분 휴게 세션이 필요.
       기록된 완료 세션 수 < 필요 수면 위반 (세션 길이는 v1 미검증 — presence 기반).
     - kind 당 하루 1건 — uq_payroll_event_user_date_kind 가 스키마 보장.
 
@@ -59,7 +60,7 @@ from app.core.payroll_rules import (
     EVENT_KIND_SEVENTH_DAY,
     EVENT_KIND_WEEKLY_OT,
     MEAL_BREAK_MIN_MINUTES,
-    MEAL_PENALTY_NET_MINUTES,
+    required_meal_breaks,
     PENALTY_EVENT_KINDS,
     VALID_ATTRIBUTIONS,
     WEEKLY_OT_HOURS,
@@ -72,13 +73,25 @@ from app.models.attendance_break import (
     AttendanceBreak,
 )
 from app.models.organization import Store
+from app.seeds.settings_seed import REST_BREAK_TRACKING_KEY
 from app.models.payroll import PayrollEvent
 from app.utils.exceptions import BadRequestError, NotFoundError
+from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 
 
 def _fmt_hours(minutes: int) -> str:
-    """분 → 'H.Th' 표기 (reason 문구용). 372 → '6.2'."""
+    """분 → 'H.Th' 표기 (분류 이벤트 문구용). 372 → '6.2'."""
     return f"{minutes / 60:.1f}"
+
+
+def _fmt_hours_exact(minutes: int) -> str:
+    """분 → 소수 2자리 시간 (penalty 사유용). 363 → '6.05'.
+
+    1자리로 줄이면 면제 경계에서 문구가 거짓말을 한다 — 363분(6시간 3분)이
+    'Worked 6.0h' 로 나오면 "6시간이면 면제 아닌가"로 읽힌다. 위반 사유는
+    그 자체가 근거 자료라 경계를 흐리면 안 된다.
+    """
+    return f"{minutes / 60:.2f}"
 
 
 # ---------------------------------------------------------------------------
@@ -92,23 +105,25 @@ def evaluate_meal_penalty(
 ) -> str | None:
     """meal penalty 판정 — 위반이면 reason(영어), 아니면 None.
 
-    조건: 일 net > 6h(blanket waiver 실효 임계, payroll_rules 참조) AND
-    그날 완료된(ended_at 有) 무급 meal 세션 중
-    30분 이상이 하나도 없음. 진행 중 세션은 duration 미확정이라 불인정.
-    레거시 break_type(unpaid_long)도 무급 meal 로 인식 (dual-read).
+    필요 횟수는 required_meal_breaks() (§512(a) — 6h 이하 면제, 12h 초과 2회).
+    인정되는 세션: 완료된(ended_at 有) 무급 meal 중 30분 이상.
+    진행 중 세션은 duration 미확정이라 불인정. 레거시 unpaid_long 도 인식 (dual-read).
     """
-    if day_net_minutes <= MEAL_PENALTY_NET_MINUTES:
+    required = required_meal_breaks(day_net_minutes)
+    if required == 0:
         return None
-    for br in day_breaks:
-        if (
-            br.break_type in UNPAID_BREAK_TYPES
-            and br.ended_at is not None
-            and (br.duration_minutes or 0) >= MEAL_BREAK_MIN_MINUTES
-        ):
-            return None
+    taken = sum(
+        1
+        for br in day_breaks
+        if br.break_type in UNPAID_BREAK_TYPES
+        and br.ended_at is not None
+        and (br.duration_minutes or 0) >= MEAL_BREAK_MIN_MINUTES
+    )
+    if taken >= required:
+        return None
     return (
-        f"Worked {_fmt_hours(day_net_minutes)}h with no "
-        f"{MEAL_BREAK_MIN_MINUTES}-min meal break"
+        f"Worked {_fmt_hours_exact(day_net_minutes)}h with {taken} of {required} "
+        f"required {MEAL_BREAK_MIN_MINUTES}-min meal break(s)"
     )
 
 
@@ -132,7 +147,7 @@ def evaluate_rest_penalty(
     if taken >= required:
         return None
     return (
-        f"Worked {_fmt_hours(day_net_minutes)}h with {taken} of "
+        f"Worked {_fmt_hours_exact(day_net_minutes)}h with {taken} of "
         f"{required} required 10-min rest break(s)"
     )
 
@@ -158,6 +173,7 @@ class ClassifiedDay:
         weekly_ot_minutes: 이 날에 귀속된 주 40h 초과분 (C2/C4)
         seventh_day: 7일 연속 근무의 7일째 여부 (C2)
         attendance_id: 그날 attendance 가 1:1 이면 해당 id, 아니면 None (참고용)
+        store_id: 그날 대표 매장 (net 최다 — group 스코프에서 이벤트 행 귀속용)
     """
 
     user_id: UUID
@@ -167,6 +183,7 @@ class ClassifiedDay:
     weekly_ot_minutes: int = 0
     seventh_day: bool = False
     attendance_id: UUID | None = None
+    store_id: UUID | None = None
 
 
 @dataclass
@@ -186,6 +203,29 @@ class PayrollEventService:
 
     # ── 내부 헬퍼 ────────────────────────────────────────────────
 
+    async def _rest_break_tracked(
+        self, db: AsyncSession, org_id: UUID, store_id: UUID
+    ) -> bool:
+        """이 매장이 유급 휴게를 실제로 기록하는가.
+
+        rest penalty 는 "기록된 휴게 세션이 몇 개인가"로 판정한다. 그런데 유급
+        10분 휴게는 보통 clock-out 을 하지 않아 아무 흔적도 남지 않는다. 기록하지
+        않는 매장에서 이 판정을 돌리면 3.5h 이상 근무가 **전부** 위반이 된다
+        (실측: 근무일 2,039 중 1,658 = 81%). 근거가 없으면 판정하지 않는다.
+
+        기록을 시작한 매장은 설정을 켜면 그때부터 정상 판정된다.
+        """
+        try:
+            value = await resolve_setting(
+                db,
+                REST_BREAK_TRACKING_KEY,
+                organization_id=org_id,
+                store_id=store_id,
+            )
+        except SettingNotRegisteredError:
+            return False
+        return bool(value)
+
     async def _resolve_org_id(self, db: AsyncSession, store_id: UUID) -> UUID:
         org_id = await db.scalar(
             select(Store.organization_id).where(Store.id == store_id)
@@ -199,7 +239,7 @@ class PayrollEventService:
         db: AsyncSession,
         *,
         organization_id: UUID,
-        store_id: UUID,
+        store_ids: list[UUID],
         start_date: date,
         end_date: date,
         kinds: frozenset[str],
@@ -209,16 +249,20 @@ class PayrollEventService:
         """일 키 upsert 공통 코어 — penalty/classification 경로 공유.
 
         Args:
+            store_ids: 이 실행(스코프)이 소유하는 매장 집합 — group 스코프면
+                그룹 전체. INSERT 의 귀속 매장은 detected payload 의 store_id
+                (그날 대표 매장), 없으면 store_ids[0].
             kinds: 이 실행이 소유하는 kind 집합 (다른 kind 는 안 건드림)
             detected: {(user_id, work_date, kind): {"reason": str,
-                "attendance_id": UUID | None}} — 현재 조건이 성립하는 키
+                "attendance_id": UUID | None, "store_id": UUID | None}}
+                — 현재 조건이 성립하는 키
             hold_keys: 판정 보류 (user_id, work_date) — 해당 일의 기존 이벤트를
                 void 하지 않는다 (net 미계산 일 등)
 
         의미론: INSERT 신규 / UPDATE reason·attendance_id (attribution 계열 보존,
         voided 면 revive) / detected 에 없으면 voided_at 마킹 / frozen 은 불변.
-        void 는 이 store 가 만든 행(row.store_id == store_id)만 대상 — 같은 org
-        다른 매장 run 이 소유한 행을 이 매장 스캔이 끄지 않도록.
+        void 는 이 스코프가 만든 행(row.store_id ∈ store_ids)만 대상 — 같은 org
+        다른 그룹 run 이 소유한 행을 이 스캔이 끄지 않도록.
 
         commit 하지 않는다 — 호출자 트랜잭션 소유.
         """
@@ -247,6 +291,7 @@ class PayrollEventService:
         summary = EventUpsertSummary()
         touched: list[PayrollEvent] = []
 
+        owned = set(store_ids)
         # 성립 조건 반영 — INSERT / UPDATE(+revive)
         for key, payload in detected.items():
             row = existing.get(key)
@@ -254,7 +299,7 @@ class PayrollEventService:
                 user_id, work_date, kind = key
                 row = PayrollEvent(
                     organization_id=organization_id,
-                    store_id=store_id,
+                    store_id=payload.get("store_id") or store_ids[0],
                     user_id=user_id,
                     attendance_id=payload.get("attendance_id"),
                     work_date=work_date,
@@ -285,8 +330,8 @@ class PayrollEventService:
                 continue
             if (key[0], key[1]) in hold_keys:
                 continue  # 판정 보류 일 — 건드리지 않음
-            if row.store_id != store_id:
-                continue  # 다른 매장 run 소유 행
+            if row.store_id not in owned:
+                continue  # 다른 스코프(그룹 밖 매장) run 소유 행
             if row.pay_period_id is not None:
                 summary.skipped_frozen += 1
                 continue
@@ -303,18 +348,25 @@ class PayrollEventService:
     async def detect_and_upsert_events(
         self,
         db: AsyncSession,
-        store_id: UUID,
+        store_ids: list[UUID],
         start_date: date,
         end_date: date,
     ) -> EventUpsertSummary:
         """범위 내 meal/rest penalty 를 attendance 원천에서 재감지해 upsert.
 
-        입력: 해당 store 의 non-cancelled attendance (user 유실 행 제외).
-        일 net 은 attendance 별 C1 공식(compute_net_work_minutes)의 합 —
-        net 계산 가능한(퇴근 완료) attendance 만 합산하고, 그날 전부가
-        미퇴근이면 판정 보류(기존 이벤트 유지).
+        입력: 스코프 매장들(group 스코프면 그룹 전체)의 non-cancelled attendance
+        (user 유실 행 제외). 일 net 은 attendance 별 C1 공식
+        (compute_net_work_minutes)의 합 — **같은 날 그룹 내 두 매장 근무도 한
+        일로 합산**한다 (구 store 스코프의 알려진 한계 해소). net 계산 가능한
+        (퇴근 완료) attendance 만 합산하고, 그날 전부가 미퇴근이면 판정 보류
+        (기존 이벤트 유지).
+
+        rest penalty 게이트는 매장 설정(rest_break_tracking)인데 판정은 일
+        단위다 — 그날 기여한 **모든 매장**이 기록 매장일 때만 판정한다
+        (한 매장이라도 기록을 안 하면 근거 불충분 → 오탐 방지).
 
         attendance_id 는 그날 attendance 가 정확히 1건일 때만 기록 (참고용).
+        이벤트 행의 귀속 매장 = 그날 net 최다 매장.
 
         commit 하지 않는다 — 호출자 트랜잭션 소유.
         """
@@ -323,13 +375,17 @@ class PayrollEventService:
             compute_net_work_minutes,
         )
 
-        org_id = await self._resolve_org_id(db, store_id)
+        org_id = await self._resolve_org_id(db, store_ids[0])
+        rest_tracked: dict[UUID, bool] = {
+            sid: await self._rest_break_tracked(db, org_id, sid)
+            for sid in store_ids
+        }
 
         attendances = (
             (
                 await db.execute(
                     select(Attendance).where(
-                        Attendance.store_id == store_id,
+                        Attendance.store_id.in_(store_ids),
                         Attendance.work_date >= start_date,
                         Attendance.work_date <= end_date,
                         Attendance.status != "cancelled",
@@ -344,7 +400,7 @@ class PayrollEventService:
             db, [a.id for a in attendances]
         )
 
-        # (user, work_date) 일 단위 그룹핑 — split shift 는 같은 일로 합산
+        # (user, work_date) 일 단위 그룹핑 — split shift/그룹 내 겸업 합산
         by_day: dict[tuple[UUID, date], list[Attendance]] = {}
         for att in attendances:
             by_day.setdefault((att.user_id, att.work_date), []).append(att)
@@ -352,40 +408,57 @@ class PayrollEventService:
         detected: dict[tuple[UUID, date, str], dict] = {}
         hold_keys: set[tuple[UUID, date]] = set()
         for (user_id, work_date), day_atts in by_day.items():
-            nets = [
-                net
-                for att in day_atts
-                if (net := compute_net_work_minutes(att, breaks_map.get(att.id, [])))
-                is not None
-            ]
-            if not nets:
+            per_store: dict[UUID, int] = {}
+            day_net = 0
+            complete = False
+            for att in day_atts:
+                net = compute_net_work_minutes(att, breaks_map.get(att.id, []))
+                if net is None:
+                    continue
+                complete = True
+                day_net += net
+                per_store[att.store_id] = per_store.get(att.store_id, 0) + net
+            if not complete:
                 # 전부 미퇴근 — 판정 불가. 기존 이벤트 유지 (void 금지).
                 hold_keys.add((user_id, work_date))
                 continue
-            day_net = sum(nets)
             day_breaks = [
                 br for att in day_atts for br in breaks_map.get(att.id, [])
             ]
-            # 참고용 attendance 링크 — 1:1 일 때만
+            # 참고용 attendance 링크 — 1:1 일 때만. 귀속 매장 = net 최다.
             att_id = day_atts[0].id if len(day_atts) == 1 else None
+            primary = (
+                max(per_store, key=lambda sid: (per_store[sid], str(sid)))
+                if per_store
+                else day_atts[0].store_id
+            )
 
             meal_reason = evaluate_meal_penalty(day_net, day_breaks)
             if meal_reason is not None:
                 detected[(user_id, work_date, EVENT_KIND_MEAL_PENALTY)] = {
                     "reason": meal_reason,
                     "attendance_id": att_id,
+                    "store_id": primary,
                 }
-            rest_reason = evaluate_rest_penalty(day_net, day_breaks)
+            day_rest_tracked = all(
+                rest_tracked.get(att.store_id, False) for att in day_atts
+            )
+            rest_reason = (
+                evaluate_rest_penalty(day_net, day_breaks)
+                if day_rest_tracked
+                else None
+            )
             if rest_reason is not None:
                 detected[(user_id, work_date, EVENT_KIND_REST_PENALTY)] = {
                     "reason": rest_reason,
                     "attendance_id": att_id,
+                    "store_id": primary,
                 }
 
         return await self._upsert(
             db,
             organization_id=org_id,
-            store_id=store_id,
+            store_ids=store_ids,
             start_date=start_date,
             end_date=end_date,
             kinds=PENALTY_EVENT_KINDS,
@@ -421,7 +494,7 @@ class PayrollEventService:
     async def upsert_classification_events(
         self,
         db: AsyncSession,
-        store_id: UUID,
+        store_ids: list[UUID],
         start_date: date,
         end_date: date,
         classified_days: list[ClassifiedDay],
@@ -437,7 +510,7 @@ class PayrollEventService:
 
         commit 하지 않는다 — 호출자 트랜잭션 소유.
         """
-        org_id = await self._resolve_org_id(db, store_id)
+        org_id = await self._resolve_org_id(db, store_ids[0])
 
         detected: dict[tuple[UUID, date, str], dict] = {}
         for day in classified_days:
@@ -454,12 +527,13 @@ class PayrollEventService:
                 detected[(day.user_id, day.work_date, kind)] = {
                     "reason": self._classification_reason(day, kind),
                     "attendance_id": day.attendance_id,
+                    "store_id": day.store_id,
                 }
 
         return await self._upsert(
             db,
             organization_id=org_id,
-            store_id=store_id,
+            store_ids=store_ids,
             start_date=start_date,
             end_date=end_date,
             kinds=CLASSIFICATION_EVENT_KINDS,
@@ -472,16 +546,16 @@ class PayrollEventService:
     async def list_events(
         self,
         db: AsyncSession,
-        store_id: UUID,
+        store_ids: list[UUID],
         start_date: date,
         end_date: date,
         include_voided: bool = False,
     ) -> list[PayrollEvent]:
-        """store + 기간의 이벤트 목록. 기본은 유효(voided IS NULL) 행만."""
+        """매장(들) + 기간의 이벤트 목록. 기본은 유효(voided IS NULL) 행만."""
         query = (
             select(PayrollEvent)
             .where(
-                PayrollEvent.store_id == store_id,
+                PayrollEvent.store_id.in_(store_ids),
                 PayrollEvent.work_date >= start_date,
                 PayrollEvent.work_date <= end_date,
             )

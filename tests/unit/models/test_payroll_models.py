@@ -37,30 +37,41 @@ def test_pay_period_table_shape() -> None:
     t = PayPeriod.__table__
     assert t.name == "pay_periods"
     expected = {
-        "id", "organization_id", "store_id", "start_date", "end_date",
+        "id", "organization_id", "store_group_id", "store_id",
+        "start_date", "end_date",
         "status", "confirmed_at", "confirmed_by", "override_reason",
         "created_at", "updated_at",
     }
     assert set(t.columns.keys()) == expected
 
-    # nullability
-    for col in ("organization_id", "store_id", "start_date", "end_date", "status"):
+    # nullability — group 스코프 전환 후 store_id/store_group_id 는 상호 배타적
+    # 레거시/신규 구분이라 둘 다 nullable (레거시 행: store_id 有 / 신규: group 有)
+    for col in ("organization_id", "start_date", "end_date", "status"):
         assert not t.columns[col].nullable, col
-    for col in ("confirmed_at", "confirmed_by", "override_reason"):
+    for col in (
+        "store_group_id", "store_id",
+        "confirmed_at", "confirmed_by", "override_reason",
+    ):
         assert t.columns[col].nullable, col
 
 
 def test_pay_period_fk_ondelete() -> None:
     t = PayPeriod.__table__
     assert _fk(t, "organization_id").ondelete == "CASCADE"
-    # 확정 급여 기록 보존 — 매장 삭제 금지
+    # 확정 급여 기록 보존 — 그룹/매장 삭제 금지
+    assert _fk(t, "store_group_id").ondelete == "RESTRICT"
     assert _fk(t, "store_id").ondelete == "RESTRICT"
     assert _fk(t, "confirmed_by").ondelete == "SET NULL"
 
 
-def test_pay_period_unique_store_start() -> None:
+def test_pay_period_unique_scope_start() -> None:
     t = PayPeriod.__table__
     uqs = {c.name: c for c in t.constraints if isinstance(c, UniqueConstraint)}
+    assert "uq_pay_period_group_start" in uqs
+    assert [c.name for c in uqs["uq_pay_period_group_start"].columns] == [
+        "store_group_id", "start_date",
+    ]
+    # 레거시 행 보존용
     assert "uq_pay_period_store_start" in uqs
     assert [c.name for c in uqs["uq_pay_period_store_start"].columns] == [
         "store_id", "start_date",
@@ -79,27 +90,31 @@ def test_payroll_entry_table_shape() -> None:
         "id", "pay_period_id", "organization_id", "store_id",
         "user_id", "org_member_id", "empid", "crewid", "member_name",
         "revision", "regular_minutes", "ot_minutes", "dt_minutes",
-        "regular_pay", "ot_pay", "dt_pay", "penalty_pay", "card_tips", "gross_pay",
+        "regular_pay", "ot_pay", "dt_pay", "penalty_pay", "bonus_pay",
+        "card_tips", "gross_pay",
         "calc_version", "breakdown", "created_at", "updated_at",
     }
     assert set(t.columns.keys()) == expected
 
     # NOT NULL
     for col in (
-        "pay_period_id", "organization_id", "store_id", "member_name",
+        "pay_period_id", "organization_id", "member_name",
         "revision", "regular_minutes", "ot_minutes", "dt_minutes",
-        "regular_pay", "ot_pay", "dt_pay", "penalty_pay", "card_tips",
+        "regular_pay", "ot_pay", "dt_pay", "penalty_pay", "bonus_pay", "card_tips",
         "gross_pay", "calc_version", "breakdown",
     ):
         assert not t.columns[col].nullable, col
-    # NULL 허용 (SET NULL 관례 / export 스냅샷)
-    for col in ("user_id", "org_member_id", "empid", "crewid"):
+    # NULL 허용 (SET NULL 관례 / export 스냅샷 / group 스코프 entry 는 store 無)
+    for col in ("store_id", "user_id", "org_member_id", "empid", "crewid"):
         assert t.columns[col].nullable, col
 
 
 def test_payroll_entry_money_numeric_10_2() -> None:
     t = PayrollEntry.__table__
-    for col in ("regular_pay", "ot_pay", "dt_pay", "penalty_pay", "card_tips", "gross_pay"):
+    for col in (
+        "regular_pay", "ot_pay", "dt_pay", "penalty_pay", "bonus_pay",
+        "card_tips", "gross_pay",
+    ):
         typ = t.columns[col].type
         assert isinstance(typ, Numeric), col
         assert (typ.precision, typ.scale) == (10, 2), col

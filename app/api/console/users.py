@@ -6,15 +6,18 @@ activation toggle, and user-store association management.
 """
 
 from datetime import date
+from decimal import Decimal
 from io import BytesIO
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import hide_cost_for, require_permission, scrub_cost_fields
+from app.core.error_codes.payroll import BONUS_EFFECTIVE_DATE_INVALID
 from app.core.error_codes.common import INVALID_STORE_IDS
 from app.database import get_db
 from app.models.user import User
@@ -539,6 +542,46 @@ async def add_user_store(
     return {"message": "Store assigned successfully"}
 
 
+class StorePayrollAttrs(BaseModel):
+    """직원 x 매장 급여 속성 — 급여 파일의 emp_id / tip_apply / performance_bonus."""
+
+    empid: int | None = Field(default=None, ge=1)
+    tip_eligible: bool | None = None
+    bonus_rate: Decimal | None = Field(default=None, ge=0)
+    # 보너스 효력일. 급여기간 시작일(1일/16일)만 허용한다 — 기간 중간에 바뀌면
+    # 한 기간에 두 개의 율이 생겨 급여 파일의 한 칸에 담을 수 없다.
+    bonus_effective_date: date | None = None
+
+
+@router.patch("/{user_id}/stores/{store_id}/payroll", status_code=200)
+async def set_user_store_payroll(
+    user_id: UUID,
+    store_id: UUID,
+    data: StorePayrollAttrs,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("users:update"))],
+) -> dict:
+    """직원의 매장별 급여 속성을 설정합니다 (empid / 팁 대상 / 보너스 가산율)."""
+    if data.bonus_effective_date is not None and data.bonus_effective_date.day not in (1, 16):
+        raise BONUS_EFFECTIVE_DATE_INVALID()
+    member_store = await user_service.set_store_payroll_attrs(
+        db,
+        user_id=user_id,
+        store_id=store_id,
+        organization_id=current_user.organization_id,
+        empid=data.empid,
+        tip_eligible=data.tip_eligible,
+        bonus_rate=data.bonus_rate,
+        bonus_effective_date=data.bonus_effective_date,
+        changed_by=current_user.id,
+    )
+    return {
+        "empid": member_store.empid,
+        "tip_eligible": member_store.tip_eligible,
+        "bonus_rate": str(member_store.bonus_rate) if member_store.bonus_rate is not None else None,
+    }
+
+
 @router.delete("/{user_id}/stores/{store_id}", status_code=204)
 async def remove_user_store(
     user_id: UUID,
@@ -579,7 +622,7 @@ async def admin_reset_password(
 def _require_cost_visibility(current_user: User) -> None:
     """cost(시급) 가시성 게이트 — GM 미만이면 403 (원인+대상 역할 명시)."""
     if hide_cost_for(current_user):
-        from app.utils.exceptions import ForbiddenError
+        from app.utils.exceptions import BadRequestError, ForbiddenError
 
         raise ForbiddenError(
             "Hourly rate information is only available to GM and above"

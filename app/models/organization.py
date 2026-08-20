@@ -145,6 +145,10 @@ class StoreGroup(Base):
     # 순번을 끌고 올라가기 때문. 전진만 하고(INV-2), 낮추는 것은 운영자 수동 조정만 허용.
     # NULL = 아직 백필 전(마이그레이션이 전부 채운다 — 코드에 NULL 폴백을 두지 않는다).
     next_empid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 급여 파일 표시명 — corp column value in the payroll export (e.g. "M KOREAN BBQ").
+    # NULL 이면 export 시 group.name 으로 폴백. 시트/파일 식별자는 code 필드가 담당
+    # (구 payroll_code 는 code 로 통합 — 둘 다 짧은 그룹 식별자라 역할이 같았다).
+    payroll_corp_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # 생성 일시 — Record creation timestamp (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # 수정 일시 — Last modification timestamp (UTC, auto-updated)

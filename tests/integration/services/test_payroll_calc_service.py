@@ -37,7 +37,9 @@ from app.database import async_session
 from app.models.attendance import Attendance
 from app.models.attendance_break import AttendanceBreak
 from app.models.org_member import OrgMember, OrgMemberStore
-from app.models.organization import Store
+from app.models.organization import Store, StoreGroup
+from app.models.settings import StoreSetting
+from app.seeds.settings_seed import REST_BREAK_TRACKING_KEY
 from app.models.payroll import PayPeriod, PayrollEntry, PayrollEvent
 from app.models.rate import HourlyRateHistory
 from app.models.schedule import Schedule
@@ -46,6 +48,7 @@ from app.models.user import User
 from app.schemas.payroll import (
     CALC_VERSION,
     VALIDATION_BELOW_MINIMUM_WAGE,
+    VALIDATION_NO_SHOW,
     VALIDATION_OPEN_SHIFT,
     VALIDATION_RATE_MISSING,
     VALIDATION_TIP_PERIOD_NOT_CONFIRMED,
@@ -82,8 +85,12 @@ async def calc_ctx(
     org_id: UUID = seed_organization["id"]
     suffix = uuid_mod.uuid4().hex[:8]
     async with async_session() as db:
+        group = StoreGroup(organization_id=org_id, name=f"__payroll_calc_group_{suffix}")
+        db.add(group)
+        await db.flush()
         store = Store(
             organization_id=org_id,
+            group_id=group.id,
             name=f"__payroll_calc_store_{suffix}",
             timezone="UTC",
             day_start_time={"all": "00:00"},
@@ -92,8 +99,20 @@ async def calc_ctx(
         db.add(store)
         await db.commit()
         await db.refresh(store)
+        await db.refresh(group)
+        # rest penalty 는 "휴게를 기록하는 매장"에서만 판정한다(기본 off).
+        # 이 테스트들은 penalty 금액을 검증하므로 켜 둔다.
+        db.add(
+            StoreSetting(
+                store_id=store.id,
+                key=REST_BREAK_TRACKING_KEY,
+                value=True,
+            )
+        )
+        await db.commit()
     ctx = {
         "org_id": org_id,
+        "group_id": group.id,
         "store_id": store.id,
         "role_id": seed_roles["staff"],
         "user_ids": [],
@@ -111,7 +130,18 @@ async def calc_ctx(
     async with async_session() as db:
         store_id = ctx["store_id"]
         await db.execute(delete(PayrollEvent).where(PayrollEvent.store_id == store_id))
-        await db.execute(delete(PayrollEntry).where(PayrollEntry.store_id == store_id))
+        await db.execute(
+            delete(PayrollEntry).where(
+                PayrollEntry.pay_period_id.in_(
+                    select(PayPeriod.id).where(
+                        PayPeriod.store_group_id == ctx["group_id"]
+                    )
+                )
+            )
+        )
+        await db.execute(
+            delete(PayPeriod).where(PayPeriod.store_group_id == ctx["group_id"])
+        )
         await db.execute(delete(PayPeriod).where(PayPeriod.store_id == store_id))
         await db.execute(delete(TipEntry).where(TipEntry.store_id == store_id))
         await db.execute(delete(TipPeriod).where(TipPeriod.store_id == store_id))
@@ -128,6 +158,7 @@ async def calc_ctx(
         )
         await db.execute(delete(User).where(User.id.in_(ctx["user_ids"])))
         await db.execute(delete(Store).where(Store.id == store_id))
+        await db.execute(delete(StoreGroup).where(StoreGroup.id == ctx["group_id"]))
         await db.commit()
 
 
@@ -249,9 +280,9 @@ async def _preview(ctx: dict, date_in_period: date) -> list[PayrollPreviewRow]:
     """ensure_period + preview 실행 후 commit (호출자 트랜잭션 소유 관례)."""
     async with async_session() as db:
         period = await payroll_period_service.ensure_period(
-            db, store_id=ctx["store_id"], date_in_period=date_in_period
+            db, store_group_id=ctx["group_id"], date_in_period=date_in_period
         )
-        rows = await payroll_calc_service.preview_period(db, ctx["store_id"], period)
+        rows = await payroll_calc_service.preview_period(db, period)
         await db.commit()
         return rows
 
@@ -450,7 +481,7 @@ async def test_straddle_week_live_prior_period(calc_ctx: dict) -> None:
     assert await _events(calc_ctx, EVENT_KIND_DAILY_OT) == []
     # 전기 일자 이벤트는 이 기간 범위 밖 — 생성되지 않는다
     assert row.breakdown.sources == {
-        "prior_period_id": None,
+        "prior_period_ids": [],
         "prior_period_frozen": False,
     }
 
@@ -543,7 +574,7 @@ async def test_straddle_week_frozen_prior_period(calc_ctx: dict) -> None:
     assert [e.work_date for e in seventh] == [date(2026, 10, 17)]
     assert await _events(calc_ctx, EVENT_KIND_DAILY_OT) == []
     assert row.breakdown.sources == {
-        "prior_period_id": str(prior_id),
+        "prior_period_ids": [str(prior_id)],
         "prior_period_frozen": True,
     }
 
@@ -676,8 +707,8 @@ async def test_meal_and_rest_penalty_amounts(calc_ctx: dict) -> None:
         (EVENT_KIND_MEAL_PENALTY, Decimal("20.00")),
         (EVENT_KIND_REST_PENALTY, Decimal("20.00")),
     ]
-    assert lines[0].reason == "Worked 6.2h with no 30-min meal break"
-    assert lines[1].reason == "Worked 6.2h with 0 of 2 required 10-min rest break(s)"
+    assert lines[0].reason == "Worked 6.17h with 0 of 1 required 30-min meal break(s)"
+    assert lines[1].reason == "Worked 6.17h with 0 of 2 required 10-min rest break(s)"
     assert all(l.work_date == _MON for l in lines)
 
 
@@ -1007,3 +1038,120 @@ async def test_preview_is_deterministic_and_idempotent(calc_ctx: dict) -> None:
     assert rows1 == rows2  # pydantic 모델 동등성 — 전체 필드 일치
     assert len(events1) == len(events2)
     assert {e.id for e in events1} == {e.id for e in events2}
+
+
+# ---------------------------------------------------------------------------
+# 로스터 게이트 — 빈 행 제외 / 계정 상태 무관 (has_payroll_activity)
+# ---------------------------------------------------------------------------
+
+
+async def test_zero_net_completed_attendance_is_not_a_row(calc_ctx: dict) -> None:
+    """완결됐는데 net 0분 — 지급할 것도 경고도 없으니 목록에 없다."""
+    await _mk_attendance(calc_ctx, work_date=_MON, total_work_minutes=0)
+
+    rows = await _preview(calc_ctx, _JUL_MID)
+
+    assert [r for r in rows if r.user_id == calc_ctx["user_id"]] == []
+
+
+async def test_deactivated_account_with_hours_stays_in_roster(calc_ctx: dict) -> None:
+    """비활성 계정이라도 기간에 근무가 있으면 지급 대상 — 숨기지 않는다."""
+    await _mk_attendance(calc_ctx, work_date=_MON, total_work_minutes=480)
+    async with async_session() as db:
+        user = await db.get(User, calc_ctx["user_id"])
+        user.is_active = False
+        user.status = "deactivated"
+        await db.commit()
+
+    rows = await _preview(calc_ctx, _JUL_MID)
+
+    assert _row_for(rows, calc_ctx["user_id"]).regular_minutes == 480
+
+
+async def test_open_shift_with_no_minutes_stays_as_warning_row(calc_ctx: dict) -> None:
+    """미퇴근 — 분은 0 이지만 해결할 경고가 있으면 남는다 (숨기면 급여 누락)."""
+    await _mk_attendance(
+        calc_ctx, work_date=_TUE, total_work_minutes=None, status="working",
+        clock_in=datetime(2026, 7, 7, 9, 0, tzinfo=timezone.utc),
+    )
+
+    rows = await _preview(calc_ctx, _JUL_MID)
+    row = _row_for(rows, calc_ctx["user_id"])
+
+    assert row.regular_minutes == 0
+    assert VALIDATION_OPEN_SHIFT in _codes(row)
+
+
+async def test_no_show_attendance_stays_as_warning_row(calc_ctx: dict) -> None:
+    """cron 이 no_show 로 승격한 근무 — 결근인지 기록 누락인지 확정 전 사람이 본다."""
+    sched = await _mk_schedule(calc_ctx, work_date=_TUE)
+    await _mk_attendance(
+        calc_ctx, work_date=_TUE, total_work_minutes=None, status="no_show",
+        schedule_id=sched,
+    )
+
+    rows = await _preview(calc_ctx, _JUL_MID)
+    row = _row_for(rows, calc_ctx["user_id"])
+
+    assert row.regular_minutes == 0
+    assert VALIDATION_NO_SHOW in _codes(row)
+    assert VALIDATION_OPEN_SHIFT not in _codes(row)  # clock_in 자체가 없다
+    no_show = next(v for v in row.validations if v.code == VALIDATION_NO_SHOW)
+    assert str(_TUE) in no_show.message
+
+
+async def test_upcoming_attendance_is_not_a_row(calc_ctx: dict) -> None:
+    """upcoming(판정 전) 은 경고가 아니다 — open 기간의 미래 근무가 뜨면 안 된다."""
+    sched = await _mk_schedule(calc_ctx, work_date=_TUE)
+    await _mk_attendance(
+        calc_ctx, work_date=_TUE, total_work_minutes=None, status="upcoming",
+        schedule_id=sched,
+    )
+
+    rows = await _preview(calc_ctx, _JUL_MID)
+
+    assert [r for r in rows if r.user_id == calc_ctx["user_id"]] == []
+
+
+# ---------------------------------------------------------------------------
+# 일자별 매장/attendance — 콘솔 근태 딥링크의 원천 (group 스코프)
+# ---------------------------------------------------------------------------
+
+
+async def test_day_detail_carries_store_and_attendance_for_deeplink(
+    calc_ctx: dict
+) -> None:
+    """group 기간은 period 에 매장이 없다 — 일자별 매장이 breakdown 에 있어야
+    콘솔이 "이 날 근태" 로 정확히 이동한다. attendance 가 1건이면 상세로 직행."""
+    att_id = await _mk_attendance(calc_ctx, work_date=_MON, total_work_minutes=480)
+
+    rows = await _preview(calc_ctx, _JUL_MID)
+    day = next(
+        d for d in _row_for(rows, calc_ctx["user_id"]).breakdown.days
+        if d.work_date == _MON
+    )
+
+    assert day.store_id == str(calc_ctx["store_id"])
+    assert day.store_ids == [str(calc_ctx["store_id"])]
+    assert day.attendance_id == str(att_id)  # 1:1 → 상세 페이지로 바로 열 수 있다
+
+
+async def test_day_detail_attendance_is_none_for_split_shift(calc_ctx: dict) -> None:
+    """같은 날 근무가 둘이면 하나로 특정할 수 없다 — 목록 필터로 폴백."""
+    s1 = await _mk_schedule(calc_ctx, work_date=_MON)
+    s2 = await _mk_schedule(calc_ctx, work_date=_MON)
+    await _mk_attendance(
+        calc_ctx, work_date=_MON, total_work_minutes=240, schedule_id=s1
+    )
+    await _mk_attendance(
+        calc_ctx, work_date=_MON, total_work_minutes=180, schedule_id=s2
+    )
+
+    rows = await _preview(calc_ctx, _JUL_MID)
+    day = next(
+        d for d in _row_for(rows, calc_ctx["user_id"]).breakdown.days
+        if d.work_date == _MON
+    )
+
+    assert day.attendance_id is None
+    assert day.store_id == str(calc_ctx["store_id"])  # 매장은 여전히 특정된다
