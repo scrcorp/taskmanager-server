@@ -30,6 +30,9 @@ from app.services.payroll_export_service import (
     DRAFT_BANNER,
     EXPORT_COLUMNS,
     EXPORT_SHEET_TITLE,
+    RATE_CHANGES_COLUMNS,
+    RATE_CHANGES_SHEET_TITLE,
+    RateChangeExportRow,
     WARNINGS_SHEET_TITLE,
     build_draft_workbook,
     build_export_workbook,
@@ -290,6 +293,69 @@ def test_draft_workbook_unmatched_gets_warnings_sheet() -> None:
 def test_frozen_workbook_has_no_banner() -> None:
     ws = build_export_workbook([_entry()])[EXPORT_SHEET_TITLE]
     assert ws.cell(row=1, column=1).value == EXPORT_COLUMNS[0]
+
+
+# ---------------------------------------------------------------------------
+# Rate Changes 시트
+# ---------------------------------------------------------------------------
+
+
+def _rate_change(
+    *,
+    name: str = "Export Unit",
+    old_rate: str | None = "16.00",
+    memo: str | None = "Set from payroll",
+) -> RateChangeExportRow:
+    return RateChangeExportRow(
+        name=name,
+        empid=7,
+        old_rate=Decimal(old_rate) if old_rate is not None else None,
+        new_rate=Decimal("18.00"),
+        effective_date=_MON,
+        memo=memo,
+        changed_by="Manager Kim",
+        changed_at="2026-07-08 17:30",
+    )
+
+
+def test_workbook_without_rate_changes_has_no_sheet() -> None:
+    wb = build_export_workbook([_entry()])
+    assert RATE_CHANGES_SHEET_TITLE not in wb.sheetnames
+
+
+def test_workbook_rate_changes_sheet_rows() -> None:
+    wb = build_export_workbook([_entry()], [_rate_change()])
+    assert wb.sheetnames == [EXPORT_SHEET_TITLE, RATE_CHANGES_SHEET_TITLE]
+    ws = wb[RATE_CHANGES_SHEET_TITLE]
+    assert [c.value for c in ws[1]] == RATE_CHANGES_COLUMNS
+    assert [c.value for c in ws[2]] == [
+        "Export Unit",
+        7,
+        Decimal("16.00"),
+        Decimal("18.00"),
+        _MON.isoformat(),
+        "Set from payroll",
+        "Manager Kim",
+        "2026-07-08 17:30",
+    ]
+
+
+def test_rate_changes_first_record_and_blank_memo() -> None:
+    """old_rate NULL(최초 기록)·memo 없음도 빈칸으로 그대로 나간다."""
+    wb = build_draft_workbook(
+        [_preview_row()], [_rate_change(old_rate=None, memo=None)]
+    )
+    ws = wb[RATE_CHANGES_SHEET_TITLE]
+    assert ws.cell(row=2, column=3).value is None  # Old Rate
+    assert ws.cell(row=2, column=6).value is None  # Memo
+
+
+def test_draft_workbook_keeps_banner_with_rate_changes() -> None:
+    """draft 배너와 Rate Changes 시트가 공존 — 본 시트 모양은 불변."""
+    wb = build_draft_workbook([_preview_row()], [_rate_change()])
+    ws = wb[EXPORT_SHEET_TITLE]
+    assert ws.cell(row=1, column=1).value == DRAFT_BANNER
+    assert wb.sheetnames == [EXPORT_SHEET_TITLE, RATE_CHANGES_SHEET_TITLE]
 
 
 # ---------------------------------------------------------------------------

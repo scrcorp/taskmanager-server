@@ -59,6 +59,8 @@ from app.services.payroll_export_service import (
     DRAFT_BANNER,
     EXPORT_COLUMNS,
     EXPORT_SHEET_TITLE,
+    RATE_CHANGES_COLUMNS,
+    RATE_CHANGES_SHEET_TITLE,
     WARNINGS_SHEET_TITLE,
     preview_export_row,
 )
@@ -1438,6 +1440,62 @@ async def test_export_unknown_period_404(
 ) -> None:
     resp = await _export(async_client, admin_headers, str(uuid_mod.uuid4()))
     assert resp.status_code == 404
+
+
+async def test_export_includes_rate_changes_sheet(
+    async_client: AsyncClient, admin_headers: dict, api_ctx: dict
+) -> None:
+    """기간 내 effective_date 인 시급 변경(메모 포함)이 Rate Changes 시트로 나간다.
+
+    payroll 화면 인라인 rate 등록의 감사 흔적 — 없으면 시트 자체가 없어야 한다.
+    """
+    await _mk_attendance(api_ctx, work_date=_MON, total_work_minutes=600)
+    await _mk_tip_period(api_ctx)
+    period_id = await _ensure_period(api_ctx)
+
+    # 변경 전 export — 시트 없음
+    resp = await _export(async_client, admin_headers, period_id)
+    assert resp.status_code == 200, resp.text
+    assert RATE_CHANGES_SHEET_TITLE not in load_workbook(BytesIO(resp.content)).sheetnames
+
+    # 기간 시작일 소급 시급 등록 (payroll 인라인 팝오버와 같은 호출)
+    rc = await async_client.post(
+        f"/api/v1/console/users/{api_ctx['user_id']}/rate-changes",
+        headers=admin_headers,
+        json={
+            "new_rate": "21.50",
+            "effective_date": "2026-07-01",
+            "reason": "Set from payroll",
+        },
+    )
+    assert rc.status_code == 200, rc.text
+
+    resp = await _export(async_client, admin_headers, period_id)
+    assert resp.status_code == 200, resp.text
+    wb = load_workbook(BytesIO(resp.content))
+    assert RATE_CHANGES_SHEET_TITLE in wb.sheetnames
+    ws = wb[RATE_CHANGES_SHEET_TITLE]
+    assert [c.value for c in ws[1]] == RATE_CHANGES_COLUMNS
+    rows = [[c.value for c in row] for row in ws.iter_rows(min_row=2)]
+    assert len(rows) == 1
+    name, empid, old_rate, new_rate, eff, memo, changed_by, changed_at = rows[0]
+    assert name  # 본 시트와 같은 스냅샷 이름
+    assert _money(new_rate) == Decimal("21.50")
+    assert eff == "2026-07-01"
+    assert memo == "Set from payroll"
+    assert changed_by  # admin 이름
+    assert changed_at  # UTC 타임스탬프
+
+    # 기간 밖 effective_date 는 시트 대상 아님
+    rc2 = await async_client.post(
+        f"/api/v1/console/users/{api_ctx['user_id']}/rate-changes",
+        headers=admin_headers,
+        json={"new_rate": "22.00", "effective_date": "2026-08-01"},
+    )
+    assert rc2.status_code == 200, rc2.text
+    resp = await _export(async_client, admin_headers, period_id)
+    ws = load_workbook(BytesIO(resp.content))[RATE_CHANGES_SHEET_TITLE]
+    assert ws.max_row == 2  # 여전히 7/1 변경 1건뿐
 
 
 async def test_export_confirmed_period_workbook(

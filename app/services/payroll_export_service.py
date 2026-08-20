@@ -35,17 +35,23 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
+from app.models.org_member import OrgMember
 from app.models.payroll import PayPeriod, PayrollEntry
+from app.models.rate import HourlyRateHistory
+from app.models.user import User
 from app.schemas.payroll import EntryBreakdown, PayrollPreviewRow
 from app.services.payroll_calc_service import (
     parse_frozen_breakdown,
     payroll_calc_service,
 )
 from app.utils.download import safe_filename
+from app.utils.names import display_name
 
 EXPORT_SHEET_TITLE = "Payroll"
 WARNINGS_SHEET_TITLE = "Warnings"
+RATE_CHANGES_SHEET_TITLE = "Rate Changes"
 
 # 미확정 기간 export 상단 배너 — 시트를 열자마자 draft 임을 알린다.
 DRAFT_BANNER = "DRAFT — period not confirmed; numbers may change"
@@ -67,6 +73,18 @@ EXPORT_COLUMNS: list[str] = [
     "Gross Pay",
 ]
 _COLUMN_WIDTHS: list[int] = [10, 10, 22, 14, 12, 12, 16, 13, 12, 12, 13, 12, 12]
+
+RATE_CHANGES_COLUMNS: list[str] = [
+    "Name",
+    "EMPID",
+    "Old Rate",
+    "New Rate",
+    "Effective Date",
+    "Memo",
+    "Changed By",
+    "Changed At (UTC)",
+]
+_RATE_CHANGES_WIDTHS: list[int] = [22, 10, 11, 11, 14, 40, 18, 20]
 
 WARNINGS_COLUMNS: list[str] = ["Name", "Issue"]
 _UNMATCHED_ISSUE = (
@@ -186,13 +204,32 @@ def _add_draft_banner(ws: Worksheet, column_count: int) -> None:
     ws.row_dimensions[1].height = 22
 
 
+@dataclass
+class RateChangeExportRow:
+    """Rate Changes 시트 1행 — 기간 내 effective_date 를 갖는 시급 변경."""
+
+    name: str
+    empid: Optional[int]
+    old_rate: Optional[Decimal]
+    new_rate: Decimal
+    effective_date: date
+    memo: Optional[str]
+    changed_by: Optional[str]
+    changed_at: Optional[str]  # "YYYY-MM-DD HH:MM" (UTC)
+
+
 def _assemble_workbook(
-    rows: Sequence[list], unmatched_names: Sequence[str], *, draft: bool
+    rows: Sequence[list],
+    unmatched_names: Sequence[str],
+    *,
+    draft: bool,
+    rate_changes: Sequence[RateChangeExportRow] = (),
 ) -> Workbook:
     """셀 값 행 목록 → 워크북 (draft 면 배너 1행 뒤에 헤더).
 
     Payroll 시트 1개 + (empid/crewid 둘 다 없는 직원이 있을 때만) Warnings
-    시트. Warnings 시트는 draft 여부와 무관하게 같은 모양이다.
+    시트 + (기간 내 시급 변경이 있을 때만) Rate Changes 시트.
+    부속 시트들은 draft 여부와 무관하게 같은 모양이다.
     """
     wb = Workbook()
     ws = wb.active
@@ -212,10 +249,28 @@ def _assemble_workbook(
         for name in unmatched_names:
             warn_ws.append([name, _UNMATCHED_ISSUE])
 
+    if rate_changes:
+        rc_ws = wb.create_sheet(RATE_CHANGES_SHEET_TITLE)
+        _style_headers(rc_ws, RATE_CHANGES_COLUMNS, _RATE_CHANGES_WIDTHS)
+        for rc in rate_changes:
+            rc_ws.append([
+                rc.name,
+                rc.empid,
+                rc.old_rate,
+                rc.new_rate,
+                rc.effective_date.isoformat(),
+                rc.memo,
+                rc.changed_by,
+                rc.changed_at,
+            ])
+
     return wb
 
 
-def build_export_workbook(entries: Sequence[PayrollEntry]) -> Workbook:
+def build_export_workbook(
+    entries: Sequence[PayrollEntry],
+    rate_changes: Sequence[RateChangeExportRow] = (),
+) -> Workbook:
     """동결 entries → 워크북 (순수 함수 — DB 없음).
 
     breakdown 은 계약 파서 경유 — calc_version 이 다르면 조용히 오독하지 않고
@@ -228,10 +283,15 @@ def build_export_workbook(entries: Sequence[PayrollEntry]) -> Workbook:
         rows.append(entry_export_row(entry, breakdown))
         if entry.empid is None and entry.crewid is None:
             unmatched.append(entry.member_name)
-    return _assemble_workbook(rows, unmatched, draft=False)
+    return _assemble_workbook(
+        rows, unmatched, draft=False, rate_changes=rate_changes
+    )
 
 
-def build_draft_workbook(preview_rows: Sequence[PayrollPreviewRow]) -> Workbook:
+def build_draft_workbook(
+    preview_rows: Sequence[PayrollPreviewRow],
+    rate_changes: Sequence[RateChangeExportRow] = (),
+) -> Workbook:
     """live preview 행 → DRAFT 워크북 (순수 함수 — DB 없음).
 
     동결본과 같은 컬럼/행 매핑이고, 상단 배너로만 구분된다. preview 행의
@@ -243,7 +303,9 @@ def build_draft_workbook(preview_rows: Sequence[PayrollPreviewRow]) -> Workbook:
         for row in preview_rows
         if row.empid is None and row.crewid is None
     ]
-    return _assemble_workbook(rows, unmatched, draft=True)
+    return _assemble_workbook(
+        rows, unmatched, draft=True, rate_changes=rate_changes
+    )
 
 
 def workbook_bytes(wb: Workbook) -> bytes:
@@ -278,6 +340,58 @@ class PeriodExport:
 class PayrollExportService:
     """기간 export — 라우터에서 호출하는 파사드."""
 
+    async def _load_rate_changes(
+        self,
+        db: AsyncSession,
+        period: PayPeriod,
+        *,
+        user_ids: Sequence,
+        name_by_user: dict,
+        empid_by_user: dict,
+    ) -> list[RateChangeExportRow]:
+        """Rate Changes 시트 데이터 — 기간 내 effective_date 인 개인 시급 변경.
+
+        스코프 = 이번 export 행에 등장하는 직원(user_ids). 이름/EMPID 는
+        export 행의 스냅샷을 재사용해 본 시트와 표기가 어긋나지 않게 한다.
+        """
+        if not user_ids:
+            return []
+        changer = aliased(User)
+        rows = (
+            await db.execute(
+                select(HourlyRateHistory, OrgMember.user_id, changer)
+                .join(OrgMember, OrgMember.id == HourlyRateHistory.org_member_id)
+                .outerjoin(changer, changer.id == HourlyRateHistory.changed_by)
+                .where(
+                    OrgMember.organization_id == period.organization_id,
+                    OrgMember.user_id.in_(list(user_ids)),
+                    HourlyRateHistory.effective_date >= period.start_date,
+                    HourlyRateHistory.effective_date <= period.end_date,
+                )
+                .order_by(
+                    HourlyRateHistory.effective_date.asc(),
+                    HourlyRateHistory.created_at.asc(),
+                )
+            )
+        ).all()
+        return [
+            RateChangeExportRow(
+                name=name_by_user.get(user_id, ""),
+                empid=empid_by_user.get(user_id),
+                old_rate=history.old_rate,
+                new_rate=history.new_rate,
+                effective_date=history.effective_date,
+                memo=history.reason,
+                changed_by=display_name(changed_by_user) if changed_by_user else None,
+                changed_at=(
+                    history.created_at.strftime("%Y-%m-%d %H:%M")
+                    if history.created_at
+                    else None
+                ),
+            )
+            for history, user_id, changed_by_user in rows
+        ]
+
     async def build_period_export(
         self, db: AsyncSession, period: PayPeriod
     ) -> PeriodExport:
@@ -291,7 +405,19 @@ class PayrollExportService:
             rows = await payroll_calc_service.preview_period(
                 db, period.store_id, period
             )
-            return PeriodExport(workbook=build_draft_workbook(rows), is_draft=True)
+            rate_changes = await self._load_rate_changes(
+                db,
+                period,
+                user_ids=[r.user_id for r in rows],
+                name_by_user={r.user_id: r.member_name for r in rows},
+                empid_by_user={
+                    r.user_id: (r.empid if r.empid is not None else r.crewid)
+                    for r in rows
+                },
+            )
+            return PeriodExport(
+                workbook=build_draft_workbook(rows, rate_changes), is_draft=True
+            )
 
         entries = (
             (
@@ -306,7 +432,22 @@ class PayrollExportService:
             .scalars()
             .all()
         )
-        return PeriodExport(workbook=build_export_workbook(entries), is_draft=False)
+        rate_changes = await self._load_rate_changes(
+            db,
+            period,
+            user_ids=[e.user_id for e in entries if e.user_id is not None],
+            name_by_user={
+                e.user_id: e.member_name for e in entries if e.user_id is not None
+            },
+            empid_by_user={
+                e.user_id: (e.empid if e.empid is not None else e.crewid)
+                for e in entries
+                if e.user_id is not None
+            },
+        )
+        return PeriodExport(
+            workbook=build_export_workbook(entries, rate_changes), is_draft=False
+        )
 
 
 payroll_export_service = PayrollExportService()
