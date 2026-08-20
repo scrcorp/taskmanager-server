@@ -347,8 +347,8 @@ async def test_writer_creates_directly(
         admin_h,
         name="Acme Plumbing",
         company="Acme",
-        email="ops@acme.com",
-        memo="24h emergency",
+        emails=[{"label": "ops", "address": "ops@acme.com"}],
+        notes="24h emergency",
         phones=[{"label": "office", "number": "213-555-0142"}],
         tags=["Vendor"],
     )
@@ -1237,8 +1237,8 @@ async def search_seed(async_client: AsyncClient, admin_h: dict) -> None:
         admin_h,
         name="Acme Plumbing",
         company="Acme Industrial",
-        email="ops@acme-ind.com",
-        memo="Emergency line after 9pm",
+        emails=[{"label": "ops", "address": "ops@acme-ind.com"}],
+        notes="Emergency line after 9pm",
         phones=[{"label": "office", "number": "213-555-0142"}],
         tags=["Vendor", "Plumbing"],
     )
@@ -1247,8 +1247,8 @@ async def search_seed(async_client: AsyncClient, admin_h: dict) -> None:
         admin_h,
         name="Bright Linens",
         company="Bright Co",
-        email="hello@bright.example",
-        memo="Weekly pickup",
+        emails=[{"label": "hello", "address": "hello@bright.example"}],
+        notes="Weekly pickup",
         phones=[{"label": "mobile", "number": "(310) 777-8899"}],
         tags=["Laundry"],
     )
@@ -2175,3 +2175,408 @@ async def test_approving_a_request_whose_contact_was_deleted_is_409(
     )
     assert approve.status_code == 409, approve.text
     assert _err(approve) == "CONTACT_DELETED"
+
+
+# ===========================================================================
+# I. 이메일 복수화 (D7) · 링크 · 즐겨찾기 (D3/D4) · Notes 상한 (D8) · 비활성 가드 (D12)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_emails_and_links_round_trip(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """이메일·링크는 전화번호와 같은 규칙 — 라벨 + 복수 + 순서 유지 + 대표 자동 승격."""
+    body = await _create(
+        async_client,
+        admin_h,
+        name="Sysco Foods",
+        emails=[
+            {"label": "Orders", "address": "orders@sysco-la.com"},
+            {"label": "Billing", "address": "ap@sysco-la.com"},
+        ],
+        links=[
+            {"label": "Order portal", "url": "order.sysco.com"},
+            {"label": "Catalog", "url": "https://sysco.com/catalog"},
+        ],
+    )
+    assert [e["address"] for e in body["emails"]] == [
+        "orders@sysco-la.com",
+        "ap@sysco-la.com",
+    ]
+    # 대표가 지정되지 않았으면 첫 번째가 대표가 된다 (Main contact 가 비지 않게)
+    assert body["emails"][0]["is_primary"] is True
+    assert body["emails"][1]["is_primary"] is False
+    assert [e["label"] for e in body["emails"]] == ["Orders", "Billing"]
+    # URL 은 **입력 원문 그대로** — 스킴 보정은 여는 쪽 몫이다
+    assert [l["url"] for l in body["links"]] == [
+        "order.sysco.com",
+        "https://sysco.com/catalog",
+    ]
+    assert [l["sort_order"] for l in body["links"]] == [0, 1]
+
+    # 수정은 전량 교체
+    resp = await async_client.put(
+        f"{BASE}/{body['id']}",
+        json={
+            "emails": [{"label": "Support", "address": "help@sysco-la.com"}],
+            "links": [],
+            "reason": "Vendor changed contacts",
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 200, resp.text
+    updated = resp.json()
+    assert [e["address"] for e in updated["emails"]] == ["help@sysco-la.com"]
+    assert updated["links"] == []
+
+
+@pytest.mark.asyncio
+async def test_search_matches_email_and_link(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """이메일·링크도 통합검색 대상이다 — 한 곳이라도 빠지면 '왜 안 걸리지'가 된다."""
+    await _create(
+        async_client,
+        admin_h,
+        name="Star Produce",
+        emails=[{"label": "Orders", "address": "orders@starproduce.com"}],
+        links=[{"label": "Portal", "url": "portal.starproduce.com"}],
+    )
+    for q in ("starproduce.com", "orders@star", "portal.star", "Portal"):
+        resp = await async_client.get(f"{BASE}/", params={"q": q}, headers=admin_h)
+        assert resp.status_code == 200, resp.text
+        assert [c["name"] for c in resp.json()["items"]] == ["Star Produce"], q
+
+
+@pytest.mark.asyncio
+async def test_favorite_toggle_is_idempotent(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """즐겨찾기 토글은 멱등 — 두 번 켜도, 없던 걸 꺼도 200."""
+    body = await _create(async_client, admin_h, name="ABC Plumbing")
+    assert body["is_favorite"] is False
+
+    for _ in range(2):
+        resp = await async_client.put(f"{BASE}/{body['id']}/favorite", headers=admin_h)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["is_favorite"] is True
+
+    for _ in range(2):
+        resp = await async_client.delete(f"{BASE}/{body['id']}/favorite", headers=admin_h)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["is_favorite"] is False
+
+
+@pytest.mark.asyncio
+async def test_favorite_is_personal_not_shared(
+    async_client: AsyncClient, admin_h: dict, sv_h: dict, contact_stores
+) -> None:
+    """남의 별은 보이지 않는다 — 즐겨찾기는 연락처의 내용이 아니라 개인 설정이다."""
+    body = await _create(async_client, admin_h, name="Pacific Waste")
+    await async_client.put(f"{BASE}/{body['id']}/favorite", headers=admin_h)
+
+    mine = await async_client.get(f"{BASE}/{body['id']}", headers=admin_h)
+    theirs = await async_client.get(f"{BASE}/{body['id']}", headers=sv_h)
+    assert mine.json()["is_favorite"] is True
+    assert theirs.json()["is_favorite"] is False
+
+
+@pytest.mark.asyncio
+async def test_favorites_sort_to_top_and_can_be_filtered(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """즐겨찾기는 어느 정렬에서든 맨 위 — 그리고 그 안에서는 고른 정렬이 유지된다 (D4)."""
+    await _create(async_client, admin_h, name="Alpha Supply")
+    await _create(async_client, admin_h, name="Beta Supply")
+    gamma = await _create(async_client, admin_h, name="Gamma Supply")
+    await async_client.put(f"{BASE}/{gamma['id']}/favorite", headers=admin_h)
+
+    resp = await async_client.get(f"{BASE}/", params={"sort": "name"}, headers=admin_h)
+    assert [c["name"] for c in resp.json()["items"]] == [
+        "Gamma Supply",
+        "Alpha Supply",
+        "Beta Supply",
+    ]
+
+    # 정렬을 뒤집어도 즐겨찾기는 맨 위에 남고, 나머지 순서만 뒤집힌다
+    resp = await async_client.get(f"{BASE}/", params={"sort": "name_desc"}, headers=admin_h)
+    assert [c["name"] for c in resp.json()["items"]] == [
+        "Gamma Supply",
+        "Beta Supply",
+        "Alpha Supply",
+    ]
+
+    resp = await async_client.get(
+        f"{BASE}/", params={"favorites_only": "true"}, headers=admin_h
+    )
+    body = resp.json()
+    assert [c["name"] for c in body["items"]] == ["Gamma Supply"]
+    assert body["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_favorite_on_invisible_contact_is_404(
+    async_client: AsyncClient, admin_h: dict, sv_h: dict, contact_stores, second_store_id
+) -> None:
+    """안 보이는 연락처엔 별을 달 수 없다 — 존재 여부가 새면 안 된다 (IDOR)."""
+    body = await _create(
+        async_client,
+        admin_h,
+        name="Hidden Vendor",
+        visibility="restricted",
+        targets=[{"type": "store", "id": str(second_store_id)}],
+    )
+    resp = await async_client.put(f"{BASE}/{body['id']}/favorite", headers=sv_h)
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_notes_limit_applies_only_to_changed_values(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """Notes 300 상한은 **바뀐 값**에만 건다.
+
+    구 memo 상한이 4000 이었다. 기존 긴 값을 그대로 돌려보내는 수정까지 막으면
+    그 연락처는 이름 한 글자도 못 고치게 된다.
+    """
+    body = await _create(async_client, admin_h, name="Long Notes Vendor")
+
+    # 새로 300 을 넘기는 건 막힌다
+    resp = await async_client.put(
+        f"{BASE}/{body['id']}",
+        json={"notes": "x" * 301, "reason": "too long"},
+        headers=admin_h,
+    )
+    assert resp.status_code == 400, resp.text
+
+    # 레거시 긴 메모를 DB 에 심어 둔다 (구 상한 시절에 저장된 값)
+    legacy = "y" * 800
+    async with async_session() as db:
+        contact = (
+            await db.execute(select(Contact).where(Contact.id == UUID(body["id"])))
+        ).scalar_one()
+        contact.notes = legacy
+        await db.commit()
+
+    # 그 값을 그대로 되돌려 보내며 다른 필드를 고치는 건 통과해야 한다
+    resp = await async_client.put(
+        f"{BASE}/{body['id']}",
+        json={"name": "Long Notes Vendor 2", "notes": legacy, "reason": "rename"},
+        headers=admin_h,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["name"] == "Long Notes Vendor 2"
+
+    # 줄이는 방향의 수정도 당연히 통과한다
+    resp = await async_client.put(
+        f"{BASE}/{body['id']}",
+        json={"notes": "y" * 200, "reason": "shorten"},
+        headers=admin_h,
+    )
+    assert resp.status_code == 200, resp.text
+
+
+@pytest_asyncio.fixture
+async def deactivated_staff(test_users: dict):
+    """teststaff 를 비활성으로 만들었다가 되돌린다 (배정 차단 대상 만들기)."""
+    uid: UUID = test_users["teststaff"]["id"]
+    async with async_session() as db:
+        user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
+        user.is_active = False
+        await db.commit()
+    yield uid
+    async with async_session() as db:
+        user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
+        user.is_active = True
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_inactive_person_cannot_be_added_as_new_target(
+    async_client: AsyncClient, admin_h: dict, contact_stores, deactivated_staff
+) -> None:
+    """비활성자를 공개 대상으로 **새로 추가**하는 것은 서버가 막는다 (D12).
+
+    화면만 막으면 API 직접 호출이 그대로 들어온다.
+    """
+    resp = await async_client.post(
+        f"{BASE}/",
+        json={
+            "name": "Blocked Target Vendor",
+            "visibility": "restricted",
+            "targets": [{"type": "user", "id": str(deactivated_staff)}],
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 400, resp.text
+    assert _err(resp) == "CONTACT_VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_existing_target_stays_editable_after_deactivation(
+    async_client: AsyncClient, admin_h: dict, contact_stores, test_users: dict
+) -> None:
+    """이미 지정돼 있던 사람 때문에 연락처 자체가 잠기면 안 된다 — diff 검사인 이유."""
+    uid: UUID = test_users["teststaff"]["id"]
+    body = await _create(
+        async_client,
+        admin_h,
+        name="Existing Target Vendor",
+        visibility="restricted",
+        targets=[{"type": "user", "id": str(uid)}],
+    )
+
+    async with async_session() as db:
+        user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
+        user.is_active = False
+        await db.commit()
+    try:
+        resp = await async_client.put(
+            f"{BASE}/{body['id']}",
+            json={
+                "name": "Existing Target Vendor 2",
+                "visibility": "restricted",
+                "targets": [{"type": "user", "id": str(uid)}],
+                "reason": "rename only",
+            },
+            headers=admin_h,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["name"] == "Existing Target Vendor 2"
+    finally:
+        async with async_session() as db:
+            user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
+            user.is_active = True
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_excluding_an_inactive_person_is_allowed(
+    async_client: AsyncClient, admin_h: dict, contact_stores, test_store_id, deactivated_staff
+) -> None:
+    """제외 축은 막지 않는다 — 제외는 보는 사람을 **줄이는** 방향이라 정리를 막을 이유가 없다."""
+    resp = await async_client.post(
+        f"{BASE}/",
+        json={
+            "name": "Exclude Inactive Vendor",
+            "visibility": "restricted",
+            "targets": [{"type": "store", "id": str(test_store_id)}],
+            "excluded_user_ids": [str(deactivated_staff)],
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.asyncio
+async def test_main_contact_is_one_across_all_channels(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """메인 연락수단은 전화/이메일/링크를 **통틀어 딱 하나**다.
+
+    채널마다 대표를 따로 두면 목록의 Main contact 가 무엇이 될지 사람이 알 수 없다.
+    """
+    # 링크를 메인으로 명시 — 전화가 있어도 링크가 이긴다(전화 없이 포털만 쓰는 업체가 있다)
+    body = await _create(
+        async_client,
+        admin_h,
+        name="Portal First Vendor",
+        phones=[{"label": "office", "number": "213-555-0142"}],
+        emails=[{"label": "orders", "address": "orders@portal.com"}],
+        links=[{"label": "Portal", "url": "portal.example.com", "is_primary": True}],
+    )
+    assert [p["is_primary"] for p in body["phones"]] == [False]
+    assert [e["is_primary"] for e in body["emails"]] == [False]
+    assert [l["is_primary"] for l in body["links"]] == [True]
+
+
+@pytest.mark.asyncio
+async def test_two_mains_in_one_request_collapse_to_one(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """여러 채널에 대표가 켜져 오면 하나만 남긴다 — 전화 → 이메일 → 링크 순."""
+    body = await _create(
+        async_client,
+        admin_h,
+        name="Two Mains Vendor",
+        phones=[{"number": "213-555-0142", "is_primary": True}],
+        emails=[{"address": "a@vendor.com", "is_primary": True}],
+    )
+    mains = [p["is_primary"] for p in body["phones"]] + [
+        e["is_primary"] for e in body["emails"]
+    ]
+    assert mains.count(True) == 1
+    assert body["phones"][0]["is_primary"] is True
+
+
+@pytest.mark.asyncio
+async def test_setting_a_new_main_moves_it_off_the_old_channel(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """메인을 옮기면 이전 채널의 대표는 꺼진다 — 방금 지정한 쪽이 이긴다."""
+    body = await _create(
+        async_client,
+        admin_h,
+        name="Moving Main Vendor",
+        phones=[{"number": "213-555-0142"}],
+    )
+    assert body["phones"][0]["is_primary"] is True  # 하나뿐이라 자동으로 메인
+
+    resp = await async_client.put(
+        f"{BASE}/{body['id']}",
+        json={
+            "phones": [{"number": "213-555-0142"}],
+            "emails": [{"label": "Orders", "address": "orders@vendor.com", "is_primary": True}],
+            "reason": "email is the main contact now",
+        },
+        headers=admin_h,
+    )
+    assert resp.status_code == 200, resp.text
+    updated = resp.json()
+    assert updated["emails"][0]["is_primary"] is True
+    assert updated["phones"][0]["is_primary"] is False
+
+
+@pytest.mark.asyncio
+async def test_main_is_never_empty_when_a_channel_exists(
+    async_client: AsyncClient, admin_h: dict, contact_stores
+) -> None:
+    """아무도 지정하지 않아도 메인은 비지 않는다 — 목록의 Main contact 칸이 비면 안 된다."""
+    body = await _create(
+        async_client,
+        admin_h,
+        name="Link Only Vendor",
+        links=[{"label": "Site", "url": "vendor.example.com"}],
+    )
+    assert body["links"][0]["is_primary"] is True
+
+
+@pytest.mark.asyncio
+async def test_visibility_filter_separates_shared_from_restricted(
+    async_client: AsyncClient, admin_h: dict, contact_stores, test_store_id
+) -> None:
+    """공개 범위로 걸러 볼 수 있어야 "안 보여야 할 게 열려 있나"를 눈으로 확인한다."""
+    await _create(async_client, admin_h, name="Everyone Vendor")
+    await _create(
+        async_client,
+        admin_h,
+        name="Store Only Vendor",
+        visibility="restricted",
+        targets=[{"type": "store", "id": str(test_store_id)}],
+    )
+
+    org = await async_client.get(
+        f"{BASE}/", params={"visibility": "organization"}, headers=admin_h
+    )
+    assert [c["name"] for c in org.json()["items"]] == ["Everyone Vendor"]
+
+    restricted = await async_client.get(
+        f"{BASE}/", params={"visibility": "restricted"}, headers=admin_h
+    )
+    assert [c["name"] for c in restricted.json()["items"]] == ["Store Only Vendor"]
+
+    bad = await async_client.get(
+        f"{BASE}/", params={"visibility": "nonsense"}, headers=admin_h
+    )
+    assert bad.status_code == 400, bad.text

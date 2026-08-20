@@ -50,6 +50,9 @@ from app.models.contact import (
     CONTACT_VISIBILITY_RESTRICTED,
     Contact,
     ContactChangeRequest,
+    ContactEmail,
+    ContactFavorite,
+    ContactLink,
     ContactPhone,
     ContactTag,
     ContactTagLink,
@@ -58,11 +61,16 @@ from app.models.contact import (
 from app.models.organization import Store
 from app.models.user import User
 from app.schemas.contact import (
+    MAX_NOTES_LENGTH,
     MAX_SEARCH_LENGTH,
     ContactApproveResponse,
     ContactChangeRequestCreate,
     ContactChangeRequestResponse,
     ContactDuplicatePhone,
+    ContactEmailInput,
+    ContactEmailResponse,
+    ContactLinkInput,
+    ContactLinkResponse,
     ContactPayload,
     ContactPhoneInput,
     ContactPhoneResponse,
@@ -442,8 +450,13 @@ class ContactService:
         contacts: Sequence[Contact],
         *,
         include_pending: bool = False,
+        viewer: User | None = None,
     ) -> list[ContactResponse]:
-        """Contact 행들 → ContactResponse 목록. 자식/조인은 전부 in-bulk 로 한 번씩."""
+        """Contact 행들 → ContactResponse 목록. 자식/조인은 전부 in-bulk 로 한 번씩.
+
+        `viewer` 를 주면 **그 사람 기준** 즐겨찾기 여부를 채운다 (D3 — 즐겨찾기는 개인 설정).
+        주지 않으면 전부 False 다. 남의 별이 섞이지 않게 기본값을 False 로 둔다.
+        """
         if not contacts:
             return []
         ids = [c.id for c in contacts]
@@ -468,6 +481,61 @@ class ContactService:
                     sort_order=p.sort_order,
                 )
             )
+
+        # 이메일 — sort_order 순 (전화번호와 같은 취급)
+        email_rows = (
+            await db.execute(
+                select(ContactEmail)
+                .where(ContactEmail.contact_id.in_(ids))
+                .order_by(ContactEmail.contact_id, ContactEmail.sort_order)
+            )
+        ).scalars().all()
+        emails_by_contact: dict[UUID, list[ContactEmailResponse]] = {}
+        for e in email_rows:
+            emails_by_contact.setdefault(e.contact_id, []).append(
+                ContactEmailResponse(
+                    id=str(e.id),
+                    label=e.label,
+                    address=e.address,
+                    is_primary=e.is_primary,
+                    sort_order=e.sort_order,
+                )
+            )
+
+        # 링크 — sort_order 순
+        link_rows = (
+            await db.execute(
+                select(ContactLink)
+                .where(ContactLink.contact_id.in_(ids))
+                .order_by(ContactLink.contact_id, ContactLink.sort_order)
+            )
+        ).scalars().all()
+        links_by_contact: dict[UUID, list[ContactLinkResponse]] = {}
+        for l in link_rows:
+            links_by_contact.setdefault(l.contact_id, []).append(
+                ContactLinkResponse(
+                    id=str(l.id),
+                    label=l.label,
+                    url=l.url,
+                    is_primary=l.is_primary,
+                    sort_order=l.sort_order,
+                )
+            )
+
+        # 즐겨찾기 — **요청자 것만**. viewer 가 없으면 조회 자체를 하지 않는다.
+        favorite_ids: set[UUID] = set()
+        if viewer is not None:
+            favorite_ids = {
+                row
+                for row in (
+                    await db.execute(
+                        select(ContactFavorite.contact_id).where(
+                            ContactFavorite.user_id == viewer.id,
+                            ContactFavorite.contact_id.in_(ids),
+                        )
+                    )
+                ).scalars().all()
+            }
 
         # 태그 — 표시명 기준 정렬
         tag_rows = (
@@ -522,13 +590,16 @@ class ContactService:
                 id=str(c.id),
                 name=c.name,
                 company=c.company,
-                email=c.email,
-                memo=c.memo,
+                summary=c.summary,
+                notes=c.notes,
                 visibility=c.visibility,
                 targets=targets_by_contact.get(c.id, []),
                 excluded_users=excluded_by_contact.get(c.id, []),
                 phones=phones_by_contact.get(c.id, []),
+                emails=emails_by_contact.get(c.id, []),
+                links=links_by_contact.get(c.id, []),
                 tags=tags_by_contact.get(c.id, []),
+                is_favorite=c.id in favorite_ids,
                 created_by=str(c.created_by) if c.created_by else None,
                 created_by_name=user_names.get(c.created_by) if c.created_by else None,
                 created_at=c.created_at,
@@ -539,9 +610,16 @@ class ContactService:
         ]
 
     async def _build_response(
-        self, db: AsyncSession, contact: Contact, *, include_pending: bool = False
+        self,
+        db: AsyncSession,
+        contact: Contact,
+        *,
+        include_pending: bool = False,
+        viewer: User | None = None,
     ) -> ContactResponse:
-        items = await self._build_responses(db, [contact], include_pending=include_pending)
+        items = await self._build_responses(
+            db, [contact], include_pending=include_pending, viewer=viewer
+        )
         return items[0]
 
     def _snapshot(self, resp: ContactResponse) -> dict[str, Any]:
@@ -549,8 +627,8 @@ class ContactService:
         return contact_snapshot(
             name=resp.name,
             company=resp.company,
-            email=resp.email,
-            memo=resp.memo,
+            summary=resp.summary,
+            notes=resp.notes,
             visibility=resp.visibility,
             targets=[
                 {"type": t.type, "id": t.id, "name": t.name} for t in resp.targets
@@ -561,6 +639,14 @@ class ContactService:
             phones=[
                 {"label": p.label, "number": p.number, "is_primary": p.is_primary}
                 for p in resp.phones
+            ],
+            emails=[
+                {"label": e.label, "address": e.address, "is_primary": e.is_primary}
+                for e in resp.emails
+            ],
+            links=[
+                {"label": l.label, "url": l.url, "is_primary": l.is_primary}
+                for l in resp.links
             ],
             tags=[t.name for t in resp.tags],
         )
@@ -679,18 +765,39 @@ class ContactService:
         q: str | None = None,
         tag: str | None = None,
         store_id: str | None = None,
+        visibility: str | None = None,
+        favorites_only: bool = False,
         sort: str = "name",
         page: int = 1,
         per_page: int = 20,
     ) -> tuple[list[ContactResponse], int]:
         """통합 검색 목록 (계약 §4.2).
 
-        q 는 name/company/email/memo/tag.name/phone(원본·정규화) 를 OR 부분일치한다.
+        q 는 name/company/summary/notes/tag.name/phone(원본·정규화)/email/link 을 OR 부분일치한다.
         store_id 는 가시 조건을 **좁히기만** 한다: UUID | 'none'(전체 공유만) | 미지정.
         """
         page = max(1, page)
         per_page = max(1, min(per_page, 100))
         stmt = self._base_select(user, accessible)
+
+        # 즐겨찾기 — **요청자 것만** 본다. 필터와 정렬 두 곳에 같은 조건을 쓴다.
+        is_favorite = exists(
+            select(ContactFavorite.id).where(
+                ContactFavorite.contact_id == Contact.id,
+                ContactFavorite.user_id == user.id,
+            )
+        )
+        if favorites_only:
+            stmt = stmt.where(is_favorite)
+
+        # --- 공개 범위 필터 ---
+        # "전 조직 공유로 잘못 열려 있는 건 없나" 를 눈으로 확인하려면 모드로 걸러야 한다.
+        if visibility:
+            if visibility not in CONTACT_VISIBILITIES:
+                raise CONTACT_VALIDATION_ERROR(
+                    message="That sharing filter is not valid.", field="visibility"
+                )
+            stmt = stmt.where(Contact.visibility == visibility)
 
         # --- store 필터 ---
         if store_id:
@@ -744,8 +851,25 @@ class ContactService:
                 or_(
                     Contact.name.ilike(pattern, escape="\\"),
                     Contact.company.ilike(pattern, escape="\\"),
-                    Contact.email.ilike(pattern, escape="\\"),
-                    Contact.memo.ilike(pattern, escape="\\"),
+                    Contact.summary.ilike(pattern, escape="\\"),
+                    Contact.notes.ilike(pattern, escape="\\"),
+                    # 이메일·링크도 전화번호와 **동일 취급** — 한 곳이라도 빠지면
+                    # "링크로는 왜 검색이 안 되지"가 된다
+                    exists(
+                        select(ContactEmail.id).where(
+                            ContactEmail.contact_id == Contact.id,
+                            ContactEmail.address.ilike(pattern, escape="\\"),
+                        )
+                    ),
+                    exists(
+                        select(ContactLink.id).where(
+                            ContactLink.contact_id == Contact.id,
+                            or_(
+                                ContactLink.url.ilike(pattern, escape="\\"),
+                                ContactLink.label.ilike(pattern, escape="\\"),
+                            ),
+                        )
+                    ),
                     exists(
                         select(ContactTagLink.id)
                         .join(ContactTag, ContactTag.id == ContactTagLink.tag_id)
@@ -764,19 +888,24 @@ class ContactService:
             )
 
         # --- 정렬 (기본 이름순, tie-breaker id) ---
+        # **즐겨찾기가 언제나 맨 앞에 붙는다** (D4). 정렬 키 앞에 하나 얹는 방식이라
+        # 즐겨찾기끼리는 사용자가 고른 정렬이 그대로 유지된다 —
+        # "즐겨찾기만 위로 뜬다" 한 줄로 설명이 끝난다.
         if sort not in _SORTS:
             sort = "name"
+        order: list[Any] = [is_favorite.desc()]
         if sort == "name":
-            stmt = stmt.order_by(func.lower(Contact.name).asc(), Contact.id.asc())
+            order += [func.lower(Contact.name).asc(), Contact.id.asc()]
         elif sort == "name_desc":
-            stmt = stmt.order_by(func.lower(Contact.name).desc(), Contact.id.asc())
+            order += [func.lower(Contact.name).desc(), Contact.id.asc()]
         elif sort == "created_at":
-            stmt = stmt.order_by(Contact.created_at.desc(), Contact.id.asc())
+            order += [Contact.created_at.desc(), Contact.id.asc()]
         else:
-            stmt = stmt.order_by(Contact.updated_at.desc(), Contact.id.asc())
+            order += [Contact.updated_at.desc(), Contact.id.asc()]
+        stmt = stmt.order_by(*order)
 
         rows, total = await paginate(db, stmt, page=page, per_page=per_page)
-        return await self._build_responses(db, rows), total
+        return await self._build_responses(db, rows, viewer=user), total
 
     # ====================================================================
     # 단건 조회
@@ -815,7 +944,57 @@ class ContactService:
         self, db: AsyncSession, user: User, accessible: list[UUID] | None, contact_id: UUID
     ) -> ContactResponse:
         contact = await self._load_visible(db, user, accessible, contact_id)
-        return await self._build_response(db, contact, include_pending=True)
+        return await self._build_response(
+            db, contact, include_pending=True, viewer=user
+        )
+
+    # ====================================================================
+    # 즐겨찾기 (D3) — 개인 설정. 감사 로그도, 변경 신청도 타지 않는다.
+    # ====================================================================
+
+    async def set_favorite(
+        self,
+        db: AsyncSession,
+        user: User,
+        accessible: list[UUID] | None,
+        contact_id: UUID,
+        favorite: bool,
+    ) -> ContactResponse:
+        """즐겨찾기 켜기/끄기 — **멱등**이다. 이미 그 상태면 아무 일도 일어나지 않는다.
+
+        가시성 절을 그대로 태운다(`_load_visible`) — 안 보이는 연락처를 즐겨찾기로
+        붙잡아 두면 목록에 뜨지 않는 유령 별이 생기고, 존재 여부까지 새어 나간다.
+
+        쓰기 권한은 보지 않는다. 읽을 수 있으면 자기 별은 달 수 있다 —
+        이건 연락처를 바꾸는 행위가 아니라 보는 사람의 설정이다.
+        """
+        contact = await self._load_visible(db, user, accessible, contact_id)
+
+        if favorite:
+            # UNIQUE(user_id, contact_id) 를 근거로 한 upsert — 동시에 두 번 눌러도 안전하다
+            await db.execute(
+                pg_insert(ContactFavorite)
+                .values(user_id=user.id, contact_id=contact.id)
+                .on_conflict_do_nothing(constraint="uq_contact_favorites")
+            )
+        else:
+            existing = (
+                await db.execute(
+                    select(ContactFavorite).where(
+                        ContactFavorite.user_id == user.id,
+                        ContactFavorite.contact_id == contact.id,
+                    )
+                )
+            ).scalars().all()
+            for row in existing:
+                await db.delete(row)
+
+        await db.flush()
+        resp = await self._build_response(
+            db, contact, include_pending=True, viewer=user
+        )
+        await db.commit()
+        return resp
 
     # ====================================================================
     # 태그
@@ -915,7 +1094,8 @@ class ContactService:
     ) -> None:
         """번호 전량 교체 — delete-all + re-insert (행 id 는 외부에 의미가 없다).
 
-        대표번호가 하나도 없으면 첫 번째를 자동 승격한다(응답에 반영되므로 조용한 실패 아님).
+        **대표 승격은 여기서 하지 않는다.** 메인 연락수단은 전화/이메일/링크를 가로질러
+        하나이므로, 세 채널을 모두 쓴 뒤 `_normalize_main_contact` 가 한 번에 정한다.
         """
         existing = (
             await db.execute(
@@ -926,7 +1106,6 @@ class ContactService:
             await db.delete(row)
         await db.flush()
 
-        has_primary = any(p.is_primary for p in phones)
         for index, p in enumerate(phones):
             db.add(
                 ContactPhone(
@@ -934,7 +1113,60 @@ class ContactService:
                     label=p.label,
                     number=p.number,
                     number_normalized=normalize_phone(p.number),
-                    is_primary=p.is_primary or (index == 0 and not has_primary),
+                    is_primary=p.is_primary,
+                    sort_order=index,
+                )
+            )
+        await db.flush()
+
+    async def _write_emails(
+        self, db: AsyncSession, contact: Contact, emails: list[ContactEmailInput]
+    ) -> None:
+        """이메일 전량 교체 — 전화번호와 같은 규칙(행 id 는 외부에 의미 없음).
+
+        대표 승격은 `_normalize_main_contact` 가 세 채널을 함께 보고 정한다.
+        """
+        existing = (
+            await db.execute(
+                select(ContactEmail).where(ContactEmail.contact_id == contact.id)
+            )
+        ).scalars().all()
+        for row in existing:
+            await db.delete(row)
+        await db.flush()
+
+        for index, e in enumerate(emails):
+            db.add(
+                ContactEmail(
+                    contact_id=contact.id,
+                    label=e.label,
+                    address=e.address,
+                    is_primary=e.is_primary,
+                    sort_order=index,
+                )
+            )
+        await db.flush()
+
+    async def _write_links(
+        self, db: AsyncSession, contact: Contact, links: list[ContactLinkInput]
+    ) -> None:
+        """링크 전량 교체. URL 은 **입력 원문 그대로** 저장한다(스킴 보정은 여는 쪽 몫)."""
+        existing = (
+            await db.execute(
+                select(ContactLink).where(ContactLink.contact_id == contact.id)
+            )
+        ).scalars().all()
+        for row in existing:
+            await db.delete(row)
+        await db.flush()
+
+        for index, l in enumerate(links):
+            db.add(
+                ContactLink(
+                    contact_id=contact.id,
+                    label=l.label,
+                    url=l.url,
+                    is_primary=getattr(l, "is_primary", False),
                     sort_order=index,
                 )
             )
@@ -1041,7 +1273,9 @@ class ContactService:
         """
         if "name" in fields:
             contact.name = fields["name"]
-        for key in ("company", "email", "memo"):
+        if "notes" in fields:
+            self._guard_notes_length(contact, fields["notes"])
+        for key in ("company", "summary", "notes"):
             if key in fields:
                 setattr(contact, key, fields[key])
         # 가시성 — 모드/대상/제외는 각각 독립한 키지만, **검증은 병합 후 최종 상태**로
@@ -1061,12 +1295,164 @@ class ContactService:
             else:
                 excluded = await self._current_excluded_user_ids(db, contact)
 
+            await self._guard_new_user_targets(db, contact, resolved)
             await self._write_targets(db, contact, resolved, excluded)
             contact.visibility = visibility
+        touched: set[str] = set()
         if fields.get("phones") is not None:
             await self._write_phones(db, contact, fields["phones"])
+            touched.add("phone")
+        if fields.get("emails") is not None:
+            await self._write_emails(db, contact, fields["emails"])
+            touched.add("email")
+        if fields.get("links") is not None:
+            await self._write_links(db, contact, fields["links"])
+            touched.add("link")
+        if touched:
+            await self._normalize_main_contact(db, contact, touched)
         if fields.get("tags") is not None:
             await self._write_tags(db, user, contact, fields["tags"])
+
+    async def _normalize_main_contact(
+        self, db: AsyncSession, contact: Contact, touched: set[str]
+    ) -> None:
+        """메인 연락수단을 **연락처당 정확히 하나**로 맞춘다.
+
+        전화·이메일·링크는 각각 다른 테이블이라 "셋을 통틀어 하나"는 DB 제약으로 표현할 수
+        없다. 그래서 쓰기가 끝난 뒤 여기서 한 번에 정리한다.
+
+        규칙:
+          - 여러 개가 켜져 있으면 **이번 요청이 건드린 채널** 것을 남긴다. 방금 지정한 것이
+            이기는 게 사람이 기대하는 동작이다(전화가 메인인 연락처에 이메일을 메인으로
+            지정하면 이메일로 옮겨간다). 그래도 여럿이면 전화 → 이메일 → 링크 순.
+          - 하나도 없고 연락수단이 있으면 첫 전화 → 없으면 첫 이메일 → 없으면 첫 링크를 올린다.
+            메인이 비면 목록의 Main contact 칸이 빈다 — 조용히 비게 두지 않는다.
+        """
+        phones = (
+            await db.execute(
+                select(ContactPhone)
+                .where(ContactPhone.contact_id == contact.id)
+                .order_by(ContactPhone.sort_order)
+            )
+        ).scalars().all()
+        emails = (
+            await db.execute(
+                select(ContactEmail)
+                .where(ContactEmail.contact_id == contact.id)
+                .order_by(ContactEmail.sort_order)
+            )
+        ).scalars().all()
+        links = (
+            await db.execute(
+                select(ContactLink)
+                .where(ContactLink.contact_id == contact.id)
+                .order_by(ContactLink.sort_order)
+            )
+        ).scalars().all()
+
+        groups: list[tuple[str, list[Any]]] = [
+            ("phone", list(phones)),
+            ("email", list(emails)),
+            ("link", list(links)),
+        ]
+        flagged = [(kind, row) for kind, rows in groups for row in rows if row.is_primary]
+
+        winner: Any | None = None
+        if flagged:
+            preferred = [item for item in flagged if item[0] in touched]
+            winner = (preferred or flagged)[0][1]
+        else:
+            for _kind, rows in groups:
+                if rows:
+                    winner = rows[0]
+                    break
+
+        for _kind, rows in groups:
+            for row in rows:
+                row.is_primary = row is winner
+        await db.flush()
+
+    def _guard_notes_length(self, contact: Contact, value: str | None) -> None:
+        """Notes 300자 상한 — **바뀐 값에만** 건다 (D8-2).
+
+        구 memo 상한이 4000 이었다. 저장된 긴 메모를 그대로 되돌려 보내는 수정까지 막으면
+        그 연락처는 이름 한 글자도 못 고치게 된다. 그래서 "길이 초과 + 값이 실제로 달라짐"
+        일 때만 거절한다. 줄이는 방향의 수정은 언제나 통과한다.
+        """
+        if value is None:
+            return
+        if len(value) <= MAX_NOTES_LENGTH:
+            return
+        if value == (contact.notes or None):
+            return  # 손대지 않은 기존 값 — 통과시킨다
+        raise CONTACT_VALIDATION_ERROR(
+            message=(
+                f"Notes must be {MAX_NOTES_LENGTH} characters or fewer "
+                f"({len(value)} now). Shorten it, or move the details to a document."
+            ),
+            field="notes",
+        )
+
+    async def _guard_new_user_targets(
+        self,
+        db: AsyncSession,
+        contact: Contact,
+        resolved: Sequence[tuple[str, UUID]],
+    ) -> None:
+        """공개 대상(People 축)에 **새로 추가되는** 사람이 배정 가능한지 본다.
+
+        판정은 `staff_assignment_service` 단독이다 — 도메인마다 자체 판정을 만들면
+        화면마다 기준이 갈린다(그게 스케줄 쪽 사고의 원인이었다).
+
+        **이번에 늘어난 대상만** 검사한다. 저장 시점의 전체 목록을 검사하면, 비활성자가
+        이미 들어 있는 연락처는 이름 한 글자 고치는 것도 막혀 손댈 수 없게 된다.
+        제외(exclude) 축은 보지 않는다 — 제외는 보는 사람을 **줄이는** 방향이라
+        막을 이유가 없고, 막으면 오히려 정리를 못 하게 된다.
+
+        이 검사는 생성·수정·**신청 승인**이 모두 지나는 자리에 있다. 따라서 승인은
+        신청 시점이 아니라 **승인 시점** 기준으로 판정된다(신청이 떠 있는 동안 퇴사할 수 있다).
+
+        주의: contacts 에는 매장 축이 없어 org 기준으로 판정한다. terminate 가 매장 단위로
+        바뀌면(`2026-08-19-퇴사-매장별-재정의.md`) 이 호출부에 매장 인자가 붙어야 한다.
+        그래서 판정 호출을 이 메서드 하나로 감싸 둔다.
+        """
+        from app.services.staff_assignment_service import (
+            blocking_message,
+            get_assignability,
+        )
+
+        new_user_ids = {i for t, i in resolved if t == CONTACT_TARGET_USER}
+        if not new_user_ids:
+            return
+        if contact.id is not None:
+            current = await self._current_targets(db, contact)
+            new_user_ids -= {i for t, i in current if t == CONTACT_TARGET_USER}
+        if not new_user_ids:
+            return
+
+        # 날짜 축이 없는 도메인이라 "오늘" 로 판정한다.
+        today = datetime.now(timezone.utc).date()
+        infos = await get_assignability(
+            db, contact.organization_id, sorted(new_user_ids)
+        )
+        for uid in sorted(new_user_ids):
+            info = infos.get(uid)
+            if info is None:
+                continue
+            reason = blocking_message(info, today)
+            if reason:
+                name = await self._user_display_name(db, uid)
+                raise CONTACT_VALIDATION_ERROR(
+                    message=f"{name} can no longer be added. {reason}",
+                    field="targets",
+                )
+
+    async def _user_display_name(self, db: AsyncSession, user_id: UUID) -> str:
+        """차단 문구에 쓸 이름 — 누구 때문에 막혔는지 모르면 고칠 수가 없다."""
+        name = (
+            await db.execute(select(User.full_name).where(User.id == user_id))
+        ).scalar_one_or_none()
+        return name or "That person"
 
     async def _duplicate_warnings(
         self,
@@ -1149,8 +1535,8 @@ class ContactService:
             visibility=CONTACT_VISIBILITY_ORGANIZATION,
             name=payload.name,
             company=payload.company,
-            email=payload.email,
-            memo=payload.memo,
+            summary=payload.summary,
+            notes=payload.notes,
             created_by=created_by or user.id,
             updated_by=user.id,
         )
@@ -1158,7 +1544,10 @@ class ContactService:
         await db.flush()
 
         fields = payload.model_dump(exclude_unset=False)
+        # 자식들은 Pydantic 모델 그대로 넘긴다 (model_dump 결과는 dict 라 writer 가 못 쓴다)
         fields["phones"] = payload.phones or []
+        fields["emails"] = payload.emails or []
+        fields["links"] = payload.links or []
         fields["tags"] = payload.tags or []
         # 생성은 전체 치환이므로 가시성 두 키가 항상 함께 간다(부분 수정과 다르다).
         fields["targets"] = [t.model_dump() for t in (payload.targets or [])]
@@ -1166,7 +1555,7 @@ class ContactService:
         await self._apply_content(db, user, contact, fields)
         await db.flush()
 
-        resp = await self._build_response(db, contact)
+        resp = await self._build_response(db, contact, viewer=user)
         await contact_audit_service.record(
             db,
             organization_id=user.organization_id,
@@ -1197,12 +1586,14 @@ class ContactService:
         payload = ContactPayload(
             name=data.name,
             company=data.company,
-            email=data.email,
-            memo=data.memo,
+            summary=data.summary,
+            notes=data.notes,
             visibility=data.visibility,
             targets=data.targets,
             excluded_user_ids=data.excluded_user_ids,
             phones=data.phones,
+            emails=data.emails,
+            links=data.links,
             tags=data.tags,
         )
         resp = await self.create_contact(
@@ -1233,7 +1624,7 @@ class ContactService:
         contact.updated_by = user.id
         await db.flush()
 
-        after_resp = await self._build_response(db, contact)
+        after_resp = await self._build_response(db, contact, viewer=user)
         after_snapshot = self._snapshot(after_resp)
 
         changed_before, changed_after = diff_snapshots(before_snapshot, after_snapshot)
@@ -1272,6 +1663,10 @@ class ContactService:
         # phones 는 Pydantic 모델 그대로 써야 하므로 model_dump 결과를 원본으로 되돌린다.
         if "phones" in fields:
             fields["phones"] = data.phones if data.phones is not None else []
+        if "emails" in fields:
+            fields["emails"] = data.emails if data.emails is not None else []
+        if "links" in fields:
+            fields["links"] = data.links if data.links is not None else []
         if "tags" in fields:
             fields["tags"] = data.tags if data.tags is not None else []
         if "targets" in fields:
@@ -1435,7 +1830,7 @@ class ContactService:
             ).scalars().all()
             contacts = {c.id: c for c in rows}
             if include_current and rows:
-                built = await self._build_responses(db, rows)
+                built = await self._build_responses(db, rows, viewer=user)
                 current_map = {UUID(item.id): item for item in built}
 
         return [
@@ -1788,6 +2183,8 @@ class ContactService:
             assert target is not None and effective is not None
             fields = effective.model_dump(exclude_unset=False)
             fields["phones"] = effective.phones or []
+            fields["emails"] = effective.emails or []
+            fields["links"] = effective.links or []
             fields["tags"] = effective.tags or []
             contact_resp = await self.update_contact(
                 db,

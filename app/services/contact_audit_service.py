@@ -33,12 +33,14 @@ def contact_snapshot(
     *,
     name: str | None,
     company: str | None,
-    email: str | None,
-    memo: str | None,
+    summary: str | None,
+    notes: str | None,
     visibility: str,
     targets: list[dict[str, Any]],
     excluded_users: list[dict[str, Any]],
     phones: list[dict[str, Any]],
+    emails: list[dict[str, Any]],
+    links: list[dict[str, Any]],
     tags: list[str],
 ) -> dict[str, Any]:
     """이력 before/after 에 쓰는 연락처 스냅샷 (계약 §7.2 + 개정 §0-A 형태).
@@ -49,12 +51,14 @@ def contact_snapshot(
     return {
         "name": name,
         "company": company,
-        "email": email,
-        "memo": memo,
+        "summary": summary,
+        "notes": notes,
         "visibility": visibility,
         "targets": targets,
         "excluded_users": excluded_users,
         "phones": phones,
+        "emails": emails,
+        "links": links,
         "tags": tags,
     }
 

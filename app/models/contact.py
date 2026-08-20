@@ -21,6 +21,9 @@ Tables:
     - contacts: 연락처 본체
     - contact_visibility_targets: 연락처 ↔ 공개 대상 (매장/직급/개인, 제외 포함)
     - contact_phones: 번호 복수 (원본 표기 + 정규화)
+    - contact_emails: 이메일 복수 (라벨 + 대표) — 전화번호와 같은 모양 (D7)
+    - contact_links: 링크 복수 (라벨 + URL 원문)
+    - contact_favorites: 사람별 즐겨찾기 (개인 설정 — 감사·신청 대상 아님)
     - contact_tags: org 단위 태그 마스터
     - contact_tag_links: 연락처 ↔ 태그 매핑
     - contact_change_requests: 변경 신청 (create/update/delete)
@@ -119,8 +122,8 @@ class Contact(Base):
         visibility: 가시성 모드 (CONTACT_VISIBILITIES). 대상은 contact_visibility_targets
         name: 이름/표시명 (필수, 검색 대상)
         company: 업체명/소속 (검색 대상)
-        email: 이메일 단일 (검색 대상)
-        memo: 자유 메모 (검색 대상)
+        summary: 한 줄 요약 (검색 대상, 목록 노출)
+        notes: 상세 메모 (검색 대상, 상세/펼침 전용)
         created_by: 작성자 FK (SET NULL)
         updated_by: 최종 수정자 FK (SET NULL)
         deleted_at: 소프트 삭제 일시 (NULL = 유효)
@@ -153,10 +156,12 @@ class Contact(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     # 업체명/소속 — Company or affiliation (searchable)
     company: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    # 이메일 — Single email address (searchable)
-    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    # 자유 메모 — Free-form memo (searchable)
-    memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 한 줄 요약 — Short summary shown in the list (D8, 72자 상한은 스키마에서 검증)
+    summary: Mapped[Optional[str]] = mapped_column(String(72), nullable=True)
+    # 상세 메모 — Long notes, detail/expand only (D8).
+    # 컬럼은 Text 다. 상한 300 은 **새로 들어오는 값에만** 스키마에서 건다 —
+    # 기존 memo 는 4000 까지 허용됐고, 길다는 이유로 열람·수정이 막히면 안 된다.
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # 작성자 FK — Creator (SET NULL on user delete)
     created_by: Mapped[Optional[uuid.UUID]] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -308,6 +313,153 @@ class ContactPhone(Base):
         # 선행 와일드카드 LIKE 에는 B-tree 이득이 제한적이나 정확/prefix 매칭에는 유효.
         # 데이터가 늘면 pg_trgm 으로 확장 (v1 비범위).
         Index("ix_contact_phones_normalized", "number_normalized"),
+    )
+
+
+class ContactEmail(Base):
+    """연락처 이메일 — 한 연락처에 여러 개 (D7).
+
+    전화번호(`ContactPhone`)와 **의도적으로 같은 모양**이다. 업체 하나에 Orders/Billing 처럼
+    용도가 다른 주소가 흔하고, 라벨이 없으면 어느 주소인지 알 수 없다.
+
+    Attributes:
+        id: 고유 식별자 UUID
+        contact_id: 부모 연락처 FK (CASCADE)
+        label: 자유 라벨 (orders/billing/... 서버는 값 검증 안 함)
+        address: 이메일 주소 (표시·검색 대상, 필수)
+        is_primary: 대표 여부 (연락처당 최대 1개 — 서비스가 보장)
+        sort_order: 입력 배열 순서 (0부터)
+        created_at: 생성 일시 UTC
+
+    Indexes:
+        ix_contact_emails_contact: (contact_id, sort_order)
+        ix_contact_emails_address: (address) — 검색
+    """
+
+    __tablename__ = "contact_emails"
+
+    # 이메일 행 고유 식별자 — 외부에 의미 없음 (수정 시 delete-all + re-insert)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 부모 연락처 FK — Parent contact (CASCADE)
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False
+    )
+    # 라벨 — Free-form label (orders / billing / support / ...)
+    label: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    # 주소 — Email address as entered
+    address: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 대표 여부 — Primary flag (연락처당 최대 1 true)
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # 정렬 순서 — Order within the contact (0-based)
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # 생성 일시 — Creation timestamp (UTC)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        Index("ix_contact_emails_contact", "contact_id", "sort_order"),
+        Index("ix_contact_emails_address", "address"),
+    )
+
+
+class ContactLink(Base):
+    """연락처 링크 — 한 연락처에 여러 개.
+
+    홈페이지·주문 포털·카탈로그처럼 URL 이 여럿인 경우가 흔하다. 라벨이 있어야 무슨 링크인지 안다.
+
+    **URL 은 입력 원문 그대로 저장한다.** 스킴이 없는 값(`order.sysco.com`)에 `https://` 를
+    붙이는 것은 **여는 시점**의 클라이언트 몫이다 — 저장 때 건드리면 사용자가 적은 것과
+    저장된 것이 달라지고, 되돌릴 수도 없다.
+
+    Attributes:
+        id: 고유 식별자 UUID
+        contact_id: 부모 연락처 FK (CASCADE)
+        label: 자유 라벨 (order portal / website / ...)
+        url: 입력 원문 (표시·검색 대상, 필수)
+        is_primary: 대표 여부 — 전화/이메일/링크를 통틀어 연락처당 최대 1건
+        sort_order: 입력 배열 순서 (0부터)
+        created_at: 생성 일시 UTC
+
+    Indexes:
+        ix_contact_links_contact: (contact_id, sort_order)
+    """
+
+    __tablename__ = "contact_links"
+
+    # 링크 행 고유 식별자 — 외부에 의미 없음 (수정 시 delete-all + re-insert)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 부모 연락처 FK — Parent contact (CASCADE)
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False
+    )
+    # 라벨 — Free-form label (order portal / website / catalog / ...)
+    label: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # URL — Exactly as entered (scheme 보정은 여는 쪽에서)
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    # 대표 여부 — 메인 연락수단은 **채널을 가로질러 연락처당 하나**다 (서비스가 보장)
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # 정렬 순서 — Order within the contact (0-based)
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # 생성 일시 — Creation timestamp (UTC)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (Index("ix_contact_links_contact", "contact_id", "sort_order"),)
+
+
+class ContactFavorite(Base):
+    """즐겨찾기 — **사람마다 다른 개인 설정** (D3).
+
+    연락처의 내용이 아니라 보는 사람의 설정이므로:
+      - 조직에 공유되지 않는다 (남의 즐겨찾기는 보이지 않는다)
+      - **감사 로그를 남기지 않는다** (상태 변경이 아니라 개인 취향이다)
+      - 변경신청 대상이 아니다 (권한과 무관하게 누구나 자기 것을 켜고 끈다)
+
+    지금은 연락처 전용이다. 다른 도메인에 별이 필요해지면 `user_favorites`
+    (user_id, entity_type, entity_id) 로 옮긴다 — 데이터가 가볍고 참조하는 곳이 없어
+    `INSERT ... SELECT` 한 번이면 끝난다.
+
+    Attributes:
+        id: 고유 식별자 UUID
+        user_id: 즐겨찾기를 한 사람 FK (CASCADE — 탈퇴하면 함께 사라진다)
+        contact_id: 대상 연락처 FK (CASCADE)
+        created_at: 등록 일시 UTC
+
+    Constraints:
+        uq_contact_favorites: (user_id, contact_id) UNIQUE — 토글이 멱등이 되는 근거
+        ix_contact_favorites_user: (user_id) — "내 즐겨찾기" 조회
+    """
+
+    __tablename__ = "contact_favorites"
+
+    # 즐겨찾기 행 고유 식별자 — Favorite row identifier
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 사용자 FK — Owner of this favorite (CASCADE)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # 연락처 FK — Favorited contact (CASCADE)
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False
+    )
+    # 등록 일시 — Creation timestamp (UTC)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "contact_id", name="uq_contact_favorites"),
+        Index("ix_contact_favorites_user", "user_id"),
     )
 
 

@@ -56,7 +56,17 @@ __all__ = [
 
 # 입력 상한 — 계약 §4.1 / §4.5
 MAX_PHONES_PER_CONTACT = 10
+MAX_EMAILS_PER_CONTACT = 10
+MAX_LINKS_PER_CONTACT = 10
 MAX_TAGS_PER_CONTACT = 20
+# 한 줄 요약 상한 (D8-1) — 목록에 그대로 실리는 값이라 짧게 강제한다
+MAX_SUMMARY_LENGTH = 72
+# 상세 메모 상한 (D8-2). **새로 들어오는 값에만** 건다 — 아래 LEGACY 상한 참고
+MAX_NOTES_LENGTH = 300
+# 구 memo 시절 상한. 스키마는 여기까지 받아준다 —
+# 기존에 저장된 긴 메모를 그대로 되돌려 보내는 수정 요청이 422 로 튕기면
+# 그 연락처는 이름 한 글자도 못 고치게 된다. 300 초과 **변경**만 서비스가 막는다.
+MAX_NOTES_LEGACY_LENGTH = 4000
 MAX_TAG_LENGTH = 40
 # 공개 대상 상한 — 조직 규모를 넘길 이유가 없다. 방어적 상한.
 MAX_TARGETS_PER_CONTACT = 200
@@ -112,6 +122,90 @@ class ContactPhoneResponse(BaseModel):
     label: str | None
     number: str
     number_normalized: str | None
+    is_primary: bool
+    sort_order: int
+
+
+# === 이메일 (D7 — 전화번호와 같은 모양) ===
+
+class ContactEmailInput(BaseModel):
+    """이메일 입력 1건 — 배열 순서가 곧 sort_order.
+
+    형식 검증은 전화번호와 같은 이유로 느슨하다('@' 포함만 요구, 계약 §4.5).
+    실제로 쓰이는 주소가 표준을 벗어나는 경우가 있고, 저장을 막아 얻는 것보다 잃는 게 크다.
+    """
+
+    label: str | None = None  # orders / billing / support / ... 자유 입력
+    address: str
+    is_primary: bool = False
+
+    @field_validator("label")
+    @classmethod
+    def _check_label(cls, v: str | None) -> str | None:
+        return _clean_optional_text(v, "Label", 30)
+
+    @field_validator("address")
+    @classmethod
+    def _check_address(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("Email address is required")
+        if len(v) > 255:
+            raise ValueError("Email must be 255 characters or fewer")
+        if "@" not in v:
+            raise ValueError("Enter a valid email address")
+        return v
+
+
+class ContactEmailResponse(BaseModel):
+    """이메일 응답 1건."""
+
+    id: str
+    label: str | None
+    address: str
+    is_primary: bool
+    sort_order: int
+
+
+# === 링크 ===
+
+class ContactLinkInput(BaseModel):
+    """링크 입력 1건 — URL 은 **입력 원문 그대로** 저장한다.
+
+    스킴이 없는 값(`order.sysco.com`)에 `https://` 를 붙이는 건 여는 쪽 몫이다.
+    저장 때 고쳐 쓰면 사용자가 적은 것과 저장된 것이 달라진다.
+    """
+
+    label: str | None = None  # website / order portal / catalog / ... 자유 입력
+    url: str
+    # 메인 연락수단은 채널을 가로질러 하나다 — 링크도 후보가 된다(전화 없이 포털만 쓰는 곳)
+    is_primary: bool = False
+
+    @field_validator("label")
+    @classmethod
+    def _check_label(cls, v: str | None) -> str | None:
+        return _clean_optional_text(v, "Label", 40)
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("Link is required")
+        if len(v) > 500:
+            raise ValueError("Link must be 500 characters or fewer")
+        # 공백이 들어간 값은 URL 이 아니다 — 이건 막아도 잃는 게 없다
+        if any(ch.isspace() for ch in v):
+            raise ValueError("Link cannot contain spaces")
+        return v
+
+
+class ContactLinkResponse(BaseModel):
+    """링크 응답 1건 — url 은 저장된 원문."""
+
+    id: str
+    label: str | None
+    url: str
     is_primary: bool
     sort_order: int
 
@@ -222,6 +316,36 @@ def _validate_phones(v: list[ContactPhoneInput] | None) -> list[ContactPhoneInpu
     return v
 
 
+def _validate_emails(
+    v: list["ContactEmailInput"] | None,
+) -> list["ContactEmailInput"] | None:
+    """이메일 배열 검증 — 건수 상한 + 대표 1개 이하."""
+    if v is None:
+        return None
+    if len(v) > MAX_EMAILS_PER_CONTACT:
+        raise ValueError(f"Up to {MAX_EMAILS_PER_CONTACT} email addresses")
+    if sum(1 for e in v if e.is_primary) > 1:
+        raise ValueError("Only one email can be the primary one")
+    return v
+
+
+def _validate_links(
+    v: list["ContactLinkInput"] | None,
+) -> list["ContactLinkInput"] | None:
+    """링크 배열 검증 — 건수 상한 + 대표 1개 이하.
+
+    채널을 **가로지르는** 유일성(전화/이메일/링크 통틀어 하나)은 여기서 볼 수 없다.
+    배열 하나만 보이기 때문이다 — 그 검사는 서비스가 한다.
+    """
+    if v is None:
+        return None
+    if len(v) > MAX_LINKS_PER_CONTACT:
+        raise ValueError(f"Up to {MAX_LINKS_PER_CONTACT} links")
+    if sum(1 for l in v if l.is_primary) > 1:
+        raise ValueError("Only one link can be the main contact")
+    return v
+
+
 def _validate_tags(v: list[str] | None) -> list[str] | None:
     """태그 문자열 배열 정리 — trim, 빈 값 제거, 정규화 키 기준 중복 제거(입력 순서 보존)."""
     if v is None:
@@ -254,12 +378,14 @@ class ContactPayload(BaseModel):
 
     name: str
     company: str | None = None
-    email: str | None = None
-    memo: str | None = None
+    summary: str | None = None
+    notes: str | None = None
     visibility: str = "organization"
     targets: list[ContactTargetInput] | None = None
     excluded_user_ids: list[str] | None = None
     phones: list[ContactPhoneInput] | None = None
+    emails: list[ContactEmailInput] | None = None
+    links: list[ContactLinkInput] | None = None
     tags: list[str] | None = None
 
     @field_validator("visibility")
@@ -296,24 +422,31 @@ class ContactPayload(BaseModel):
     def _check_company(cls, v: str | None) -> str | None:
         return _clean_optional_text(v, "Company", 200)
 
-    @field_validator("email")
+    @field_validator("summary")
     @classmethod
-    def _check_email(cls, v: str | None) -> str | None:
-        v = _clean_optional_text(v, "Email", 255)
-        # 형식 검증은 느슨하게 — '@' 포함만 요구 (계약 §4.5)
-        if v is not None and "@" not in v:
-            raise ValueError("Enter a valid email address")
-        return v
+    def _check_summary(cls, v: str | None) -> str | None:
+        return _clean_optional_text(v, "Summary", MAX_SUMMARY_LENGTH)
 
-    @field_validator("memo")
+    @field_validator("notes")
     @classmethod
-    def _check_memo(cls, v: str | None) -> str | None:
-        return _clean_optional_text(v, "Memo", 4000)
+    def _check_notes(cls, v: str | None) -> str | None:
+        # 여기서는 레거시 상한까지 받아준다. 300 초과 **변경**은 서비스가 막는다.
+        return _clean_optional_text(v, "Notes", MAX_NOTES_LEGACY_LENGTH)
 
     @field_validator("phones")
     @classmethod
     def _check_phones(cls, v: list[ContactPhoneInput] | None) -> list[ContactPhoneInput] | None:
         return _validate_phones(v)
+
+    @field_validator("emails")
+    @classmethod
+    def _check_emails(cls, v: list[ContactEmailInput] | None) -> list[ContactEmailInput] | None:
+        return _validate_emails(v)
+
+    @field_validator("links")
+    @classmethod
+    def _check_links(cls, v: list[ContactLinkInput] | None) -> list[ContactLinkInput] | None:
+        return _validate_links(v)
 
     @field_validator("tags")
     @classmethod
@@ -372,12 +505,14 @@ class ContactUpdate(BaseModel):
 
     name: str | None = None
     company: str | None = None
-    email: str | None = None
-    memo: str | None = None
+    summary: str | None = None
+    notes: str | None = None
     visibility: str | None = None
     targets: list[ContactTargetInput] | None = None
     excluded_user_ids: list[str] | None = None
     phones: list[ContactPhoneInput] | None = None
+    emails: list[ContactEmailInput] | None = None
+    links: list[ContactLinkInput] | None = None
     tags: list[str] | None = None
     # 필수이지만 타입은 Optional 이다 — 누락을 Pydantic 422 가 아니라 서비스의
     # CONTACT_REASON_REQUIRED(400, 계약 §6)로 내리기 위해서다. 값 검사는 서비스가 한다.
@@ -401,18 +536,16 @@ class ContactUpdate(BaseModel):
     def _check_company(cls, v: str | None) -> str | None:
         return _clean_optional_text(v, "Company", 200)
 
-    @field_validator("email")
+    @field_validator("summary")
     @classmethod
-    def _check_email(cls, v: str | None) -> str | None:
-        v = _clean_optional_text(v, "Email", 255)
-        if v is not None and "@" not in v:
-            raise ValueError("Enter a valid email address")
-        return v
+    def _check_summary(cls, v: str | None) -> str | None:
+        return _clean_optional_text(v, "Summary", MAX_SUMMARY_LENGTH)
 
-    @field_validator("memo")
+    @field_validator("notes")
     @classmethod
-    def _check_memo(cls, v: str | None) -> str | None:
-        return _clean_optional_text(v, "Memo", 4000)
+    def _check_notes(cls, v: str | None) -> str | None:
+        # 레거시 상한까지 받아준다 — 300 초과 **변경**만 서비스가 막는다(기존 값 잠금 방지)
+        return _clean_optional_text(v, "Notes", MAX_NOTES_LEGACY_LENGTH)
 
     @field_validator("visibility")
     @classmethod
@@ -440,10 +573,15 @@ class ContactUpdate(BaseModel):
     def _check_phones(cls, v: list[ContactPhoneInput] | None) -> list[ContactPhoneInput] | None:
         return _validate_phones(v)
 
-    @field_validator("tags")
+    @field_validator("emails")
     @classmethod
-    def _check_tags(cls, v: list[str] | None) -> list[str] | None:
-        return _validate_tags(v)
+    def _check_emails(cls, v: list[ContactEmailInput] | None) -> list[ContactEmailInput] | None:
+        return _validate_emails(v)
+
+    @field_validator("links")
+    @classmethod
+    def _check_links(cls, v: list[ContactLinkInput] | None) -> list[ContactLinkInput] | None:
+        return _validate_links(v)
 
     @field_validator("reason")
     @classmethod
@@ -492,13 +630,17 @@ class ContactResponse(BaseModel):
     id: str
     name: str
     company: str | None
-    email: str | None
-    memo: str | None
+    summary: str | None
+    notes: str | None
     visibility: str
     targets: list[ContactTargetRef] = []
     excluded_users: list[ContactTargetRef] = []
     phones: list[ContactPhoneResponse] = []
+    emails: list[ContactEmailResponse] = []
+    links: list[ContactLinkResponse] = []
     tags: list[ContactTagRef] = []
+    # 즐겨찾기는 **보는 사람마다 다르다** — 요청자 기준으로 채운다 (D3)
+    is_favorite: bool = False
     created_by: str | None
     created_by_name: str | None
     created_at: datetime
