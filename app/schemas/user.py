@@ -254,6 +254,17 @@ class UserListResponse(BaseModel):
     # 미가입(유령) 계정 — 관리자가 미리 만든 자리, 본인 가입 전. 항상 is_active=False.
     is_provisional: bool = False
     claim_code: str | None = None  # 인수 코드 (유령만, 인수 완료 시 NULL)
+    # 배정 가능 범위 (2026-08-19) — 스케줄 화면이 후보/칸을 잠그는 데 쓴다.
+    #   assignable=False      → 어떤 날짜도 배정 불가
+    #   assignable_until=None → 제한 없음, "D" → D 까지(당일 포함)
+    # 서버 저장 검증과 같은 판정(staff_assignment_service)에서 나온다.
+    assignable: bool = True
+    assignable_until: str | None = None
+    # 표시용 재직기간 (hire_date ~ termination_date). hire_date 는 아직 대부분 비어 있다.
+    # [보류 2026-08-19] 콘솔 미표시 — 매장별 입·퇴사일 도입 시 재개.
+    # 설계: docs/99_inbox/2026-08-19-퇴사-매장별-재정의.md
+    employed_from: str | None = None
+    employed_to: str | None = None
     created_at: datetime  # 생성 일시 UTC (Account creation timestamp)
 
 

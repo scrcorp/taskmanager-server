@@ -255,6 +255,36 @@ async def delete_contact(
 # ====================================================================
 
 
+@router.put("/{contact_id}/favorite", response_model=ContactResponse)
+async def add_favorite(
+    contact_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("contacts:read"))],
+) -> ContactResponse:
+    """즐겨찾기 등록 — **멱등**. 이미 켜져 있어도 200 이다.
+
+    쓰기 권한을 보지 않는 이유: 즐겨찾기는 연락처를 바꾸는 행위가 아니라
+    **보는 사람의 개인 설정**이다. 읽을 수 있으면 자기 별은 달 수 있다.
+    """
+    accessible = await get_accessible_store_ids(db, current_user)
+    return await contact_service.set_favorite(
+        db, current_user, accessible, contact_id, True
+    )
+
+
+@router.delete("/{contact_id}/favorite", response_model=ContactResponse)
+async def remove_favorite(
+    contact_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("contacts:read"))],
+) -> ContactResponse:
+    """즐겨찾기 해제 — **멱등**. 없던 것을 지워도 200 이다."""
+    accessible = await get_accessible_store_ids(db, current_user)
+    return await contact_service.set_favorite(
+        db, current_user, accessible, contact_id, False
+    )
+
+
 @router.post("/bulk", response_model=ContactBulkCreateResult)
 async def bulk_create_contacts(
     data: ContactBulkCreate,
@@ -310,13 +340,15 @@ async def list_contacts(
     q: Annotated[str | None, Query(description="Search name, company, phone, email, memo, tag")] = None,
     tag: Annotated[str | None, Query()] = None,
     store_id: Annotated[str | None, Query(description="Store UUID or 'none' for all-store contacts")] = None,
+    visibility: Annotated[str | None, Query(description="'organization' | 'restricted'")] = None,
+    favorites_only: Annotated[bool, Query(description="Only contacts the caller starred")] = False,
     sort: Annotated[str, Query()] = "name",
     page: Annotated[int, Query()] = 1,
     per_page: Annotated[int, Query()] = 20,
 ) -> dict:
-    """연락처 목록/검색 — 기본 이름순.
+    """연락처 목록/검색 — 기본 이름순. **즐겨찾기는 어느 정렬에서든 맨 위로 온다** (D4).
 
-    q 한 개로 이름/업체/이메일/메모/태그/전화번호(원본·정규화)를 OR 부분일치한다.
+    q 한 개로 이름/업체/요약/메모/태그/전화번호(원본·정규화)/이메일/링크를 OR 부분일치한다.
     """
     accessible = await get_accessible_store_ids(db, current_user)
     items, total = await contact_service.list_contacts(
@@ -326,6 +358,8 @@ async def list_contacts(
         q=q,
         tag=tag,
         store_id=store_id,
+        visibility=visibility,
+        favorites_only=favorites_only,
         sort=sort,
         page=page,
         per_page=per_page,

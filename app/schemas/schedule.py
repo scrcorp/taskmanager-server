@@ -552,6 +552,20 @@ class RosterRow(BaseModel):
     # 조회 기간에 근무 기록이 있어 남긴 비활성(퇴사·배정해제) 행인지.
     # 활성자는 False. 미래 배정 후보에서는 제외되지만 과거 조회에서는 보여야 한다.
     is_inactive: bool = False
+    # 배정 가능 범위 — 화면이 **날짜 단위로** 칸을 잠그기 위한 값 (2026-08-19).
+    #   assignable=False        → 어떤 날짜도 불가 (모든 칸 잠금)
+    #   assignable_until=None   → 제한 없음
+    #   assignable_until="D"    → D 까지(당일 포함) 가능, 다음날부터 잠금
+    # 서버 저장 검증과 **같은 판정 함수**(staff_assignment_service)에서 나온다.
+    assignable: bool = True
+    assignable_until: str | None = None
+    # 표시용 재직기간 — "언제부터 언제까지 일했나". 판정(assignable_until)과 별개 축이다.
+    # [보류 2026-08-19] 콘솔은 이 값을 **아직 표시하지 않는다.** 퇴사는 매장 단위 개념인데
+    # 여기 실리는 날짜는 org 단위라, 그대로 띄우면 다른 매장 재직자를 잘못 말한다.
+    # 매장별 입·퇴사일이 생기면 이 필드가 그 값을 싣고 화면이 다시 켜진다.
+    # 설계: docs/99_inbox/2026-08-19-퇴사-매장별-재정의.md
+    employed_from: str | None = None
+    employed_to: str | None = None
     confirmed_hours: float = 0.0
     pending_hours: float = 0.0
     confirmed_cost: float | None = None  # GM+ 만

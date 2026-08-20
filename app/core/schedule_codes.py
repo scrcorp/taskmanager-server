@@ -83,6 +83,14 @@ USER_NOT_IN_STORE = "USER_NOT_IN_STORE"
 USER_NOT_MARKED_FOR_STORE = "USER_NOT_MARKED_FOR_STORE"
 """매장 근무 대상으로 표시되지 않은 직원. params: {user_id, store_id}"""
 
+USER_NOT_EMPLOYED = "USER_NOT_EMPLOYED"
+"""재직 중이 아닌 직원(비활성·삭제·소속 아님). 어떤 날짜로도 배정할 수 없다.
+params: {user_id}"""
+
+USER_TERMINATED_BEFORE_DATE = "USER_TERMINATED_BEFORE_DATE"
+"""퇴사일 **이후** 날짜로 배정하려 함. 퇴사일 당일까지는 배정할 수 있다.
+params: {user_id, termination_date, operating_day}"""
+
 TIME_NOT_ON_GRID = "TIME_NOT_ON_GRID"
 """시각이 입력 단위를 벗어남. params: {field, value, step_minutes}"""
 
@@ -151,6 +159,8 @@ ERROR_CODES: frozenset[str] = frozenset({
     SHIFT_SPAN_TOO_LONG,
     USER_NOT_IN_STORE,
     USER_NOT_MARKED_FOR_STORE,
+    USER_NOT_EMPLOYED,
+    USER_TERMINATED_BEFORE_DATE,
     TIME_NOT_ON_GRID,
     BREAK_PAIR_INCOMPLETE,
     BREAK_REVERSED,
@@ -198,6 +208,13 @@ _FALLBACK: dict[str, str] = {
     SHIFT_SPAN_TOO_LONG: "A shift cannot span more than 24 hours.",
     USER_NOT_IN_STORE: "This employee is not assigned to this store.",
     USER_NOT_MARKED_FOR_STORE: "This employee is not marked for work at this store.",
+    USER_NOT_EMPLOYED: "This employee is no longer active, so they can't be scheduled.",
+    # 퇴사일 당일까지는 배정 가능하다 — 문장이 "이후 날짜만 막힌다"를 분명히 해야
+    # 사용자가 "왜 지난주는 되고 이번주는 안 되나"를 묻지 않는다.
+    USER_TERMINATED_BEFORE_DATE: (
+        "This employee's last working day was {termination_date}, "
+        "so they can't be scheduled on {operating_day}."
+    ),
     TIME_NOT_ON_GRID: "Time must be in {step_minutes}-minute increments.",
     BREAK_PAIR_INCOMPLETE: "Break start and end must be provided together.",
     BREAK_REVERSED: "Break end must be after break start.",

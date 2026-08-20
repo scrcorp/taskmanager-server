@@ -223,12 +223,14 @@ def _snap(**over) -> dict:
     base = dict(
         name="Acme Plumbing",
         company="Acme",
-        email="a@acme.com",
-        memo="24h",
+        summary="24h emergency plumbing",
+        notes="Ask for Mike",
         visibility="organization",
         targets=[],
         excluded_users=[],
         phones=[{"label": "office", "number": "213-555-0142", "is_primary": True}],
+        emails=[{"label": "orders", "address": "a@acme.com", "is_primary": True}],
+        links=[{"label": "website", "url": "acme.com"}],
         tags=["vendor"],
     )
     base.update(over)
@@ -268,17 +270,93 @@ def test_diff_snapshots_noop_is_empty() -> None:
 
 
 def test_payload_trims_and_nulls_blank_optional_fields() -> None:
-    p = ContactPayload(name="  Acme  ", company="   ", memo="")
+    p = ContactPayload(name="  Acme  ", company="   ", summary="  ", notes="")
     assert p.name == "Acme"
     assert p.company is None
-    assert p.memo is None
+    assert p.summary is None
+    assert p.notes is None
 
 
 def test_payload_rejects_blank_name_and_bad_email() -> None:
     with pytest.raises(ValueError):
         ContactPayload(name="   ")
     with pytest.raises(ValueError):
-        ContactPayload(name="Acme", email="not-an-email")
+        ContactPayload(name="Acme", emails=[{"address": "not-an-email"}])
+
+
+# --- 이메일 복수화 (D7) -----------------------------------------------------
+
+
+def test_emails_allow_labels_and_multiple_entries() -> None:
+    p = ContactPayload(
+        name="Acme",
+        emails=[
+            {"label": " Orders ", "address": " orders@acme.com "},
+            {"label": "Billing", "address": "ap@acme.com", "is_primary": True},
+        ],
+    )
+    assert [e.address for e in p.emails] == ["orders@acme.com", "ap@acme.com"]
+    assert p.emails[0].label == "Orders"
+    assert sum(1 for e in p.emails if e.is_primary) == 1
+
+
+def test_emails_reject_two_primaries() -> None:
+    with pytest.raises(ValueError):
+        ContactPayload(
+            name="Acme",
+            emails=[
+                {"address": "a@acme.com", "is_primary": True},
+                {"address": "b@acme.com", "is_primary": True},
+            ],
+        )
+
+
+def test_emails_reject_over_the_limit() -> None:
+    with pytest.raises(ValueError):
+        ContactPayload(
+            name="Acme",
+            emails=[{"address": f"a{i}@acme.com"} for i in range(11)],
+        )
+
+
+# --- 링크 -------------------------------------------------------------------
+
+
+def test_links_keep_the_url_exactly_as_entered() -> None:
+    """스킴 보정은 여는 쪽 몫이다 — 저장은 원문 그대로여야 한다."""
+    p = ContactPayload(
+        name="Acme", links=[{"label": " Order portal ", "url": " order.acme.com "}]
+    )
+    assert p.links[0].url == "order.acme.com"
+    assert p.links[0].label == "Order portal"
+
+
+def test_links_reject_blank_and_spaced_urls() -> None:
+    with pytest.raises(ValueError):
+        ContactPayload(name="Acme", links=[{"url": "   "}])
+    with pytest.raises(ValueError):
+        ContactPayload(name="Acme", links=[{"url": "acme.com/order portal"}])
+
+
+# --- Summary / Notes (D8) ---------------------------------------------------
+
+
+def test_summary_is_capped_at_72() -> None:
+    ContactPayload(name="Acme", summary="x" * 72)
+    with pytest.raises(ValueError):
+        ContactPayload(name="Acme", summary="x" * 73)
+
+
+def test_notes_schema_still_accepts_legacy_length() -> None:
+    """스키마는 구 memo 상한(4000)까지 받는다.
+
+    300 초과를 **여기서** 막으면, 이미 저장된 긴 메모를 그대로 돌려보내는 수정 요청이
+    422 로 튕겨 그 연락처를 아예 못 고치게 된다. 300 상한은 "값이 실제로 바뀐 경우"에만
+    서비스가 건다.
+    """
+    ContactPayload(name="Acme", notes="x" * 4000)
+    with pytest.raises(ValueError):
+        ContactPayload(name="Acme", notes="x" * 4001)
 
 
 def test_tags_are_deduped_case_insensitively_and_keep_first_casing() -> None:
