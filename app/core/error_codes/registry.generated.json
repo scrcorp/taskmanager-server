@@ -8,6 +8,7 @@
       "ORG_LICENSE_INACTIVE"
     ],
     "attendance": [
+      "BREAK_END_TOO_SHORT",
       "DEVICE_NO_STORE",
       "access_code_taken",
       "early_clock_in_reason_required",
@@ -21,6 +22,7 @@
       "INVALID_DATE_RANGE",
       "INVALID_STORE_IDS",
       "INVALID_STORE_OVERRIDES",
+      "MEMBER_STORE_NOT_FOUND",
       "file_not_found",
       "file_too_large",
       "forbidden",
@@ -97,6 +99,10 @@
       "too_many"
     ],
     "payroll": [
+      "BONUS_EFFECTIVE_DATE_INVALID",
+      "PAYROLL_GROUP_HAS_NO_STORES",
+      "PAYROLL_GROUP_TIMEZONE_MISMATCH",
+      "PAYROLL_SCOPE_MISSING",
       "pay_period_already_confirmed",
       "payroll_close_gates_failed"
     ],
@@ -202,6 +208,16 @@
         "console/src/types/index.ts",
         "console/src/app/license-inactive/page.tsx"
       ]
+    },
+    {
+      "code": "BREAK_END_TOO_SHORT",
+      "domain": "attendance",
+      "kind": "http",
+      "status": 400,
+      "message": "This break has not reached its minimum length yet.",
+      "hint": "Wait until the minimum is met, or fix the break times on the record instead of ending it now.",
+      "frozen": false,
+      "clients": []
     },
     {
       "code": "DEVICE_NO_STORE",
@@ -324,6 +340,16 @@
       "kind": "http",
       "status": 400,
       "message": "store_overrides must be a JSON object of {label: store id}.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "MEMBER_STORE_NOT_FOUND",
+      "domain": "common",
+      "kind": "http",
+      "status": 404,
+      "message": "This person is not assigned to this store.",
       "hint": null,
       "frozen": false,
       "clients": []
@@ -967,6 +993,46 @@
       "kind": "http",
       "status": 400,
       "message": "You picked more times than allowed.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "BONUS_EFFECTIVE_DATE_INVALID",
+      "domain": "payroll",
+      "kind": "http",
+      "status": 400,
+      "message": "Bonus rate changes must take effect on the 1st or 16th.",
+      "hint": "Pick a pay-period start date (1st or 16th) as the effective date.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PAYROLL_GROUP_HAS_NO_STORES",
+      "domain": "payroll",
+      "kind": "http",
+      "status": 400,
+      "message": "This group has no stores.",
+      "hint": "Assign at least one store to the group before running payroll.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PAYROLL_GROUP_TIMEZONE_MISMATCH",
+      "domain": "payroll",
+      "kind": "http",
+      "status": 400,
+      "message": "Stores in this group use different timezones: {zones}.",
+      "hint": "Payroll needs a single business-day boundary per group — align the store timezones, then retry.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PAYROLL_SCOPE_MISSING",
+      "domain": "payroll",
+      "kind": "http",
+      "status": 400,
+      "message": "This pay period's store or group no longer exists.",
       "hint": null,
       "frozen": false,
       "clients": []

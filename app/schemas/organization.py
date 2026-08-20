@@ -184,6 +184,8 @@ class StoreGroupCreate(BaseModel):
     code: str | None = Field(default=None, max_length=20)
     numbering_mode: str = NUMBERING_MODE_GROUP  # 채번 모드 (group=공유 시퀀스, store=매장별)
     number_range_start: int | None = Field(default=None, ge=1)  # 번호대 시작값 (예: 1000)
+    # 급여 파일 corp 표시명 — 시트 식별자는 code 가 겸한다 (구 payroll_code 통합).
+    payroll_corp_name: str | None = Field(default=None, max_length=255)
 
     _norm_mode = field_validator("numbering_mode")(_validate_numbering_mode)
 
@@ -198,6 +200,7 @@ class StoreGroupUpdate(BaseModel):
     code: str | None = Field(default=None, max_length=20)  # 그룹 코드 (예: "ODG")
     numbering_mode: str | None = None  # 채번 모드 변경 (group|store, optional)
     number_range_start: int | None = Field(default=None, ge=1)  # 번호대 시작값 (optional)
+    payroll_corp_name: str | None = Field(default=None, max_length=255)
 
     _norm_mode = field_validator("numbering_mode")(_validate_numbering_mode)
 
@@ -216,6 +219,7 @@ class StoreGroupResponse(BaseModel):
     sort_order: int = 0  # 정렬 순서 (Manual display order)
     numbering_mode: str = NUMBERING_MODE_GROUP  # 채번 모드 (group|store)
     number_range_start: int | None = None  # 번호대 시작값 (Range start)
+    payroll_corp_name: str | None = None  # 급여 파일 corp 표시명 (시트 식별자는 code)
     store_count: int = 0  # 소속 매장 수 (Number of stores in this group)
     duplicate_empids: list[dict[str, int]] = []  # 스코프 내 중복 empid 경고 [{empid, count}]
     # 채번 커서 현황 (§3-1) — 목록/수정 응답에 얹는다. 기존 필드는 그대로 둔다.

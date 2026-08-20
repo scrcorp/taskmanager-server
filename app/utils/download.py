@@ -37,6 +37,30 @@ def safe_filename(name: str) -> str:
     return cleaned or _FALLBACK_NAME
 
 
+def payroll_range_tag(start_date, end_date) -> str:
+    """급여 기간 날짜 범위 → `20260801-0815` (같은 달이면 뒤는 월일만).
+
+    파일명 안에서 `2026-08-01~2026-08-15` 는 길고 `~` 가 셸/URL 에서 성가시다.
+    """
+    if start_date.year == end_date.year:
+        return f"{start_date:%Y%m%d}-{end_date:%m%d}"
+    return f"{start_date:%Y%m%d}-{end_date:%Y%m%d}"
+
+
+def download_stamp(generated_at=None) -> str:
+    """다운로드 시각 → `20260820-1352Z` (UTC).
+
+    `Z` 를 붙이는 이유: 파일을 받는 사람의 시계와 다를 수 있는데, 표기가 없으면
+    현지시각으로 읽고 "왜 미래/과거지" 가 된다. 서버는 UTC 로 돈다.
+    """
+    from datetime import datetime, timezone
+
+    stamp = generated_at or datetime.now(timezone.utc)
+    if stamp.tzinfo is not None:
+        stamp = stamp.astimezone(timezone.utc)
+    return f"{stamp:%Y%m%d-%H%M}Z"
+
+
 def _ascii_only(text: str) -> str:
     stripped = "".join(
         ch for ch in text if ch.isascii() and ch.isprintable() and ch != '"'

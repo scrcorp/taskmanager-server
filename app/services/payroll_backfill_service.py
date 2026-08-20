@@ -224,7 +224,7 @@ class PayrollBackfillService:
 
         # 읽기 전용 재계산 — 동결 이벤트 불변 (mutate_events=False)
         rows = await payroll_calc_service.preview_period(
-            db, period.store_id, period, mutate_events=False
+            db, period, mutate_events=False
         )
         rows_by_user = {row.user_id: row for row in rows}
 
@@ -258,10 +258,24 @@ class PayrollBackfillService:
     async def backfill_all_confirmed(
         self, db: AsyncSession, *, store_id: Optional[UUID] = None
     ) -> list[dict]:
-        """확정된 모든 기간을 훑어 백필 (store 한정 가능) — 기간별 결과 목록."""
+        """확정된 모든 기간을 훑어 백필 (store 한정 가능) — 기간별 결과 목록.
+
+        store 한정 시 그 매장의 레거시 기간 + 매장이 속한 그룹의 group 기간을
+        함께 훑는다 (group 스코프 전환 후 신규 기간은 그룹 행이다).
+        """
         query = select(PayPeriod).where(PayPeriod.status == "confirmed")
         if store_id is not None:
-            query = query.where(PayPeriod.store_id == store_id)
+            from sqlalchemy import or_
+
+            from app.models.organization import Store
+
+            group_id = await db.scalar(
+                select(Store.group_id).where(Store.id == store_id)
+            )
+            conditions = [PayPeriod.store_id == store_id]
+            if group_id is not None:
+                conditions.append(PayPeriod.store_group_id == group_id)
+            query = query.where(or_(*conditions))
         periods = (
             (await db.execute(query.order_by(PayPeriod.start_date.asc())))
             .scalars()

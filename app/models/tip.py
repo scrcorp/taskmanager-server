@@ -5,6 +5,7 @@ Tip-related SQLAlchemy ORM model definitions.
 Tables:
     - tip_entries: 직원 일별 팁 입력 (Daily tip entries per employee+store+work_role)
     - tip_distributions: 동료 분배 (Card-tip distributions to coworkers, 24h auto-accept)
+    - tip_allocations: 근무시간 비례 자동 분배 결과 (hours_prorated 매장 전용)
     - tip_audit_logs: 변경 이력 (Audit trail for tip entries / distributions)
 
 Design notes:
@@ -25,6 +26,7 @@ from sqlalchemy import (
     String,
     DateTime,
     Date,
+    Integer,
     Text,
     Numeric,
     ForeignKey,
@@ -266,4 +268,50 @@ class TipAuditLog(Base):
     __table_args__ = (
         Index("ix_tip_audit_entity", "entity_type", "entity_id"),
         Index("ix_tip_audit_actor_created", "actor_id", "created_at"),
+    )
+
+
+class TipAllocation(Base):
+    """근무시간 비례 자동 분배 결과 — 매장 × 일자 × 직원 1행.
+
+    매장 설정 payroll.tip_distribution_mode = "hours_prorated" 인 매장에서만 쓴다.
+    tip_distributions(1안: 받은 사람이 직접 지정 + 24h 수락)와는 성격이 아예 다르다 —
+    이쪽은 규칙으로 계산된 값이라 수락 절차가 없고, 언제든 재계산 가능하다.
+    두 방식을 한 테이블에 담으면 "이 금액이 합의된 것인지 계산된 것인지"가 흐려지고
+    금액 검증이 불가능해져서 분리했다.
+
+    재계산은 (store_id, date) 단위 전량 삭제 후 재삽입 — 부분 갱신하지 않는다.
+    근무시간이 하루라도 바뀌면 그날 전원의 몫이 바뀌기 때문이다.
+
+    Attributes:
+        card_amount / cash_amount: 그날 풀을 카드/현금 각각 같은 가중치로 나눈 몫.
+            둘을 나눠 두는 이유 — 급여 지급 대상(카드)과 신고 대상(현금)이 다를 수 있어서다.
+            합계는 항상 그날 풀의 자기 몫과 일치한다 (가중치가 동일하므로).
+        weight_minutes: 분배 가중치 = min(그날 net 근무분, 480). 재현/감사용으로 남긴다.
+    """
+
+    __tablename__ = "tip_allocations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    store_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False
+    )
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    card_amount: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=Decimal("0")
+    )
+    cash_amount: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=Decimal("0")
+    )
+    weight_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        UniqueConstraint("store_id", "employee_id", "date", name="uq_tip_allocation_day"),
+        Index("ix_tip_allocation_store_date", "store_id", "date"),
     )

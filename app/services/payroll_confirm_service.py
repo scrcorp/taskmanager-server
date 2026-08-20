@@ -52,7 +52,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -174,7 +174,44 @@ def verify_row_consistency(row: PayrollPreviewRow) -> list[str]:
             f"penalty line total {penalty_total} != penalty_pay {row.penalty_pay}"
         )
 
-    gross = work_pay + row.penalty_pay + row.card_tips
+    # 보너스 — 매장별 라인(bonus_lines)이 있으면 그 합이 원천 (group 스코프).
+    # 라인이 없는 옛 동결본은 가산율 × 총시간 공식으로 검증한다 (하위호환).
+    if bd.bonus_lines:
+        expected_bonus = sum(
+            (line.amount for line in bd.bonus_lines), start=Decimal("0.00")
+        )
+        line_mismatch = [
+            line
+            for line in bd.bonus_lines
+            if (line.rate * Decimal(line.minutes) / Decimal(60)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            != line.amount
+        ]
+        if line_mismatch:
+            problems.append(
+                f"{len(line_mismatch)} bonus line(s) fail rate x minutes = amount"
+            )
+        if expected_bonus != row.bonus_pay:
+            problems.append(
+                f"bonus line total {expected_bonus} != bonus_pay {row.bonus_pay}"
+            )
+    else:
+        total_minutes = row.regular_minutes + row.ot_minutes + row.dt_minutes
+        expected_bonus = (
+            (bd.bonus_rate * Decimal(total_minutes) / Decimal(60)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if bd.bonus_rate
+            else Decimal("0.00")
+        )
+        if expected_bonus != row.bonus_pay:
+            problems.append(
+                f"bonus_rate {bd.bonus_rate} x {total_minutes}min = {expected_bonus} "
+                f"!= bonus_pay {row.bonus_pay}"
+            )
+
+    gross = work_pay + row.penalty_pay + row.bonus_pay + row.card_tips
     if gross != row.gross_pay:
         problems.append(
             f"component sum {gross} != gross_pay {row.gross_pay}"
@@ -277,7 +314,6 @@ class PayrollConfirmService:
         self,
         db: AsyncSession,
         *,
-        store_id: UUID,
         period_id: UUID,
         actor: User,
     ) -> ConfirmResult:
@@ -295,8 +331,21 @@ class PayrollConfirmService:
             HTTPException 500: breakdown 합계 != 스칼라 (엔진 버그 — 동결 중단)
         """
         period = await db.get(PayPeriod, period_id)
-        if period is None or period.store_id != store_id:
+        if period is None:
             raise NotFoundError("Pay period not found")
+        if period.store_group_id is None:
+            # 레거시 store 스코프 기간은 전부 확정 상태로만 남아 있다 (전환
+            # 마이그레이션이 open 행을 삭제) — 새로 확정할 일이 없다.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": CODE_ALREADY_CONFIRMED,
+                    "message": (
+                        "This pay period predates the group-scope payroll "
+                        "transition and can no longer be confirmed."
+                    ),
+                },
+            )
         if period.status == "confirmed":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -311,9 +360,12 @@ class PayrollConfirmService:
             )
 
         # 계산 (이벤트 upsert 는 flush 만 — 게이트 실패 시 rollback 으로 소거)
-        rows = await payroll_calc_service.preview_period(db, store_id, period)
+        rows = await payroll_calc_service.preview_period(db, period)
 
-        gates = await self._evaluate_gates(db, period, rows)
+        stores = await payroll_period_service.group_stores(
+            db, period.store_group_id
+        )
+        gates = await self._evaluate_gates(db, period, stores, rows)
         if gates:
             await db.rollback()
             raise HTTPException(
@@ -330,7 +382,9 @@ class PayrollConfirmService:
             )
 
         entries = await self._freeze_entries(db, period, rows)
-        events_frozen = await self._stamp_events(db, period)
+        events_frozen = await self._stamp_events(
+            db, period, [s.id for s in stores]
+        )
         period.status = "confirmed"
         period.confirmed_at = datetime.now(timezone.utc)
         period.confirmed_by = actor.id
@@ -358,20 +412,27 @@ class PayrollConfirmService:
         self,
         db: AsyncSession,
         period: PayPeriod,
+        stores: list,
         rows: list[PayrollPreviewRow],
     ) -> list[ConfirmGateFailure]:
-        """L5 게이트 ①~④ + 멀티스토어 정합(계산 규칙 2)을 전부 평가."""
+        """L5 게이트 ①~④ + 멀티스토어 정합(계산 규칙 2)을 전부 평가.
+
+        스캔 스코프 = 그룹 내 전 매장 (D2). stores 는 그룹 소속 Store 목록.
+        """
+        store_ids = [s.id for s in stores]
         failures: list[ConfirmGateFailure] = []
         names: dict[UUID, str] = {r.user_id: r.member_name for r in rows}
 
         # ① 미확인 자동퇴근 — anomaly + confirmed_at IS NULL (정밀 판정은 여기)
-        auto_map = await self._auto_clockout_dates(db, period)
+        auto_map = await self._auto_clockout_dates(db, period, store_ids)
         # ② 열린 근무
-        open_map = await self._open_shift_dates(db, period)
+        open_map = await self._open_shift_dates(db, period, store_ids)
         # ⑥ 미확인 조기 출근 강행
-        early_map = await self._early_clock_in_dates(db, period)
+        early_map = await self._early_clock_in_dates(db, period, store_ids)
         # ⑦ 겹친 근무 (D15) — 이중 지급의 최후 방어선
-        overlap_map = await self._overlapping_attendance_dates(db, period)
+        overlap_map = await self._overlapping_attendance_dates(
+            db, period, store_ids
+        )
         missing = (
             set(auto_map) | set(open_map) | set(early_map) | set(overlap_map)
         ) - set(names)
@@ -539,18 +600,32 @@ class PayrollConfirmService:
                 )
             )
 
-        # ④ tip period confirmed (계산 규칙 4)
-        tip_status = await payroll_period_service.tip_period_status_for(
-            db, store_id=period.store_id, period=period
+        # ④ tip period confirmed (계산 규칙 4) — 그룹 내 전 매장
+        tip_statuses = await payroll_period_service.tip_period_status_for(
+            db, store_ids=store_ids, period=period
         )
-        if tip_status != "confirmed":
-            state = tip_status if tip_status is not None else "not created yet"
+        store_names = {s.id: s.name for s in stores}
+        pending = {
+            sid: tp_status
+            for sid, tp_status in tip_statuses.items()
+            if tp_status != "confirmed"
+        }
+        if pending:
+            detail = ", ".join(
+                f"{store_names.get(sid, str(sid))} ("
+                + (tp_status if tp_status is not None else "not created yet")
+                + ")"
+                for sid, tp_status in sorted(
+                    pending.items(), key=lambda kv: store_names.get(kv[0], "")
+                )
+            )
             failures.append(
                 ConfirmGateFailure(
                     gate=VALIDATION_TIP_PERIOD_NOT_CONFIRMED,
                     message=(
                         f"The tip period for {period.start_date} – "
-                        f"{period.end_date} is {state}. Confirm the tip period "
+                        f"{period.end_date} is not confirmed at every store in "
+                        f"this group: {detail}. Confirm each store's tip period "
                         "in Tips first so card tips are final before they are "
                         "frozen into paychecks."
                     ),
@@ -558,8 +633,11 @@ class PayrollConfirmService:
                 )
             )
 
-        # ⑤ 멀티스토어 주간 정합 (계산 규칙 2)
-        multi_items = await self._multi_store_items(db, period, rows, names)
+        # ⑤ 멀티스토어 주간 정합 (계산 규칙 2) — 그룹 밖(cross-group) 겸업만.
+        # 그룹 안 겸업은 이제 계산 엔진이 법인 합산으로 직접 계산한다 (D2).
+        multi_items = await self._multi_store_items(
+            db, period, store_ids, rows, names
+        )
         if multi_items:
             failures.append(
                 ConfirmGateFailure(
@@ -577,13 +655,13 @@ class PayrollConfirmService:
         return failures
 
     async def _auto_clockout_dates(
-        self, db: AsyncSession, period: PayPeriod
+        self, db: AsyncSession, period: PayPeriod, store_ids: list[UUID]
     ) -> dict[UUID, list[date]]:
         """게이트 ① — 미확인 자동퇴근 (user → 날짜 목록, 정렬)."""
         result = await db.execute(
             select(Attendance.user_id, Attendance.work_date)
             .where(
-                Attendance.store_id == period.store_id,
+                Attendance.store_id.in_(store_ids),
                 Attendance.work_date >= period.start_date,
                 Attendance.work_date <= period.end_date,
                 Attendance.status != "cancelled",
@@ -596,7 +674,7 @@ class PayrollConfirmService:
         return self._group_dates(result.all())
 
     async def _early_clock_in_dates(
-        self, db: AsyncSession, period: PayPeriod
+        self, db: AsyncSession, period: PayPeriod, store_ids: list[UUID]
     ) -> dict[UUID, list[date]]:
         """게이트 ⑥ — 미확인 조기 출근 강행 (user → 날짜 목록, 정렬).
 
@@ -607,7 +685,7 @@ class PayrollConfirmService:
         result = await db.execute(
             select(Attendance.user_id, Attendance.work_date)
             .where(
-                Attendance.store_id == period.store_id,
+                Attendance.store_id.in_(store_ids),
                 Attendance.work_date >= period.start_date,
                 Attendance.work_date <= period.end_date,
                 Attendance.status != "cancelled",
@@ -620,7 +698,7 @@ class PayrollConfirmService:
         return self._group_dates(result.all())
 
     async def _overlapping_attendance_dates(
-        self, db: AsyncSession, period: PayPeriod
+        self, db: AsyncSession, period: PayPeriod, store_ids: list[UUID]
     ) -> dict[UUID, list[date]]:
         """게이트 ⑦ — 시간이 겹친 근무 (user → 날짜 목록, 정렬).
 
@@ -656,7 +734,7 @@ class PayrollConfirmService:
         store_user_ids = (
             select(Attendance.user_id)
             .where(
-                Attendance.store_id == period.store_id,
+                Attendance.store_id.in_(store_ids),
                 Attendance.work_date >= period.start_date,
                 Attendance.work_date <= period.end_date,
                 Attendance.status != "cancelled",
@@ -709,13 +787,13 @@ class PayrollConfirmService:
         return self._group_dates(sorted(set(pairs), key=lambda p: (str(p[0]), p[1])))
 
     async def _open_shift_dates(
-        self, db: AsyncSession, period: PayPeriod
+        self, db: AsyncSession, period: PayPeriod, store_ids: list[UUID]
     ) -> dict[UUID, list[date]]:
         """게이트 ② — clock_out 없는 열린 근무 (user → 날짜 목록, 정렬)."""
         result = await db.execute(
             select(Attendance.user_id, Attendance.work_date)
             .where(
-                Attendance.store_id == period.store_id,
+                Attendance.store_id.in_(store_ids),
                 Attendance.work_date >= period.start_date,
                 Attendance.work_date <= period.end_date,
                 Attendance.status != "cancelled",
@@ -752,10 +830,18 @@ class PayrollConfirmService:
         self,
         db: AsyncSession,
         period: PayPeriod,
+        store_ids: list[UUID],
         rows: list[PayrollPreviewRow],
         names: dict[UUID, str],
     ) -> list[ConfirmGateItem]:
-        """게이트 ⑤ — org 합산 주간 정합 체크 (모듈 docstring 의 한계 참조)."""
+        """게이트 ⑤ — org 합산 주간 정합 체크 (모듈 docstring 의 한계 참조).
+
+        group 스코프 전환 후: 그룹 **안** 겸업은 계산 엔진이 법인 합산으로 직접
+        계산하므로 여기서 걸지 않는다 — 그룹 매장들을 하나의 버킷으로 합쳐
+        평가해서, **그룹 밖(cross-group=다른 법인)** 매장과의 조합만 남긴다.
+        (다른 법인은 별개 고용주라 자동 합산 지급이 오히려 틀리다 — v1 은
+        기록 정리/수동 처리 유도라는 원래 의도 그대로.)
+        """
         from app.services.attendance_service import (
             attendance_service,
             compute_net_work_minutes,
@@ -784,21 +870,27 @@ class PayrollConfirmService:
             .scalars()
             .all()
         )
-        # 전부 이 매장 근무면 합산 체크 자체가 불필요 (v1 표준 케이스 fast path)
-        if all(att.store_id == period.store_id for att in attendances):
+        # 전부 그룹 안 근무면 합산 체크 자체가 불필요 — 엔진이 직접 계산한다.
+        group_store_ids = set(store_ids)
+        if all(att.store_id in group_store_ids for att in attendances):
             return []
 
         breaks_map = await attendance_service._load_breaks_map(
             db, [a.id for a in attendances]
         )
+        # 그룹 매장들은 하나의 버킷으로 합친다 — 그룹 안 조합은 위반이 아니다.
+        _GROUP_BUCKET = period.store_group_id
         per_user_week: dict[tuple[UUID, date], dict[UUID, dict[date, int]]] = {}
         for att in attendances:
             net = compute_net_work_minutes(att, breaks_map.get(att.id, []))
             if net is None:
                 continue  # 열린 근무 — 해당 매장 게이트 ② 몫 (한계 문서화)
             wk = week_start_for(att.work_date)
+            bucket = (
+                _GROUP_BUCKET if att.store_id in group_store_ids else att.store_id
+            )
             day_map = per_user_week.setdefault((att.user_id, wk), {}).setdefault(
-                att.store_id, {}
+                bucket, {}
             )
             day_map[att.work_date] = day_map.get(att.work_date, 0) + net
 
@@ -858,6 +950,7 @@ class PayrollConfirmService:
             entry = PayrollEntry(
                 pay_period_id=period.id,
                 organization_id=period.organization_id,
+                # group 스코프 entry 는 매장 귀속이 없다 (breakdown.days 가 원천)
                 store_id=period.store_id,
                 user_id=row.user_id,
                 org_member_id=member_ids.get(row.user_id),
@@ -872,6 +965,7 @@ class PayrollConfirmService:
                 ot_pay=row.ot_pay,
                 dt_pay=row.dt_pay,
                 penalty_pay=row.penalty_pay,
+                bonus_pay=row.bonus_pay,
                 card_tips=row.card_tips,
                 gross_pay=row.gross_pay,
                 calc_version=row.breakdown.calc_version,
@@ -882,7 +976,9 @@ class PayrollConfirmService:
         await db.flush()
         return entries
 
-    async def _stamp_events(self, db: AsyncSession, period: PayPeriod) -> int:
+    async def _stamp_events(
+        self, db: AsyncSession, period: PayPeriod, store_ids: list[UUID]
+    ) -> int:
         """범위 내 유효(non-voided)·미동결 이벤트에 pay_period_id 스탬프.
 
         voided 이벤트는 스탬프하지 않는다 — 조건 소멸 기록은 open 라이프사이클에
@@ -891,7 +987,7 @@ class PayrollConfirmService:
         result = await db.execute(
             update(PayrollEvent)
             .where(
-                PayrollEvent.store_id == period.store_id,
+                PayrollEvent.store_id.in_(store_ids),
                 PayrollEvent.work_date >= period.start_date,
                 PayrollEvent.work_date <= period.end_date,
                 PayrollEvent.voided_at.is_(None),

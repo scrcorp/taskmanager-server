@@ -11,6 +11,7 @@ Tables:
 
 import uuid
 from datetime import date, datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
@@ -193,6 +194,16 @@ class OrgMemberStore(Base):
         String(20), nullable=False,
         default=EMPID_KIND_SEQUENCE, server_default=EMPID_KIND_SEQUENCE,
     )
+    # 팁 수령 대상 여부 — 이 매장에서 팁 분배를 받는 사람인지 (급여 파일의 tip_apply 0/1).
+    # 매장이 팁을 운영하지 않으면(설정 payroll.tip_distribution_mode = "none")
+    # 이 값과 무관하게 분배 대상에서 빠진다 — 매장 설정이 상위 게이트다.
+    tip_eligible: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+    # 성과 보너스 시급 가산율 — Hourly add-on rate on top of the base rate (e.g. 1.60).
+    # 지급액 = bonus_rate × 총시간(regular+OT+DT). OT 할증(1.5배)은 붙지 않는다.
+    # NULL/0 = 보너스 없음. 변경 이력은 bonus_rate_history 가 원천.
+    bonus_rate: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

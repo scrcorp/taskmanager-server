@@ -21,7 +21,9 @@ from app.models.attendance_break import (
     AttendanceBreak,
     normalize_break_type,
 )
+from app.core.error_codes.attendance import BREAK_END_TOO_SHORT
 from app.services import attendance_timeline as tl
+from app.utils.break_end_policy import validate_break_end
 from app.utils.exceptions import BadRequestError
 from app.utils.timezone import minutes_between
 
@@ -441,6 +443,20 @@ class AttendanceActionService:
         at = interpret_clock_time(at, await get_store_timezone(db, attendance.store_id))
         if at < open_break.started_at:
             raise BadRequestError("Break end cannot be earlier than break start")
+
+        # 최소 시간 정책 — 키오스크(HTMA)와 **같은 판정 함수**를 쓴다.
+        # 이 게이트가 없던 동안 같은 행위가 채널에 따라 갈렸다: HTMA 는 29분에서
+        # 막히는데 콘솔은 5분짜리 unpaid_meal 도 그대로 닫혀 duration=5 가 저장됐다.
+        # 경과는 R2(분 절삭 후 차이) — 화면에 보이는 HH:MM 뺄셈과 일치한다.
+        # 정말 짧게 끝난 휴게를 기록해야 하면 이 액션이 아니라 휴게 세션 수정
+        # (PATCH .../breaks/{id}) 으로 시각을 고친다.
+        policy_error = validate_break_end(
+            open_break.break_type,
+            minutes_between(open_break.started_at, at),
+            reason,
+        )
+        if policy_error is not None:
+            raise BREAK_END_TOO_SHORT(message=policy_error)
 
         before_status = attendance.status
         open_break.ended_at = at

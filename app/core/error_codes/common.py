@@ -53,6 +53,12 @@ GROUP_NOT_FOUND = COMMON.code(
     "This store group no longer exists.",
 )
 
+MEMBER_STORE_NOT_FOUND = COMMON.code(
+    "MEMBER_STORE_NOT_FOUND",
+    404,
+    "This person is not assigned to this store.",
+)
+
 INVALID_DATE_RANGE = COMMON.code(
     "INVALID_DATE_RANGE",
     400,

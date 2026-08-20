@@ -1165,6 +1165,7 @@ async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
                 OrgMember.department,
                 User.full_name,
                 User.email,
+                User.is_active,
                 Role.name.label("role_name"),
                 Role.priority.label("role_priority"),
             )
@@ -1189,6 +1190,9 @@ async def roster(db: AsyncSession, organization_id: UUID) -> list[dict]:
             "empid_kind": r.empid_kind,
             "is_work_assignment": r.is_work_assignment,
             "is_manager": r.is_manager,
+            # 계정 활성 여부 — 비활성자도 번호는 점유하므로 로스터에는 남기고,
+            # export 후보에서 거를지는 콘솔 필터 몫.
+            "is_active": r.is_active,
             "crewid": r.crewid,
             "role_name": r.role_name,
             "role_priority": r.role_priority,

@@ -36,9 +36,9 @@ from uuid import UUID
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.org_member import OrgMember
+from app.models.org_member import OrgMember, OrgMemberStore
 from app.models.organization import Organization, Store
-from app.models.rate import HourlyRateHistory
+from app.models.rate import BonusRateHistory, HourlyRateHistory
 from app.models.schedule import Schedule
 from app.models.user import User
 from app.utils.exceptions import BadRequestError, NotFoundError
@@ -465,6 +465,121 @@ class RateService:
         applied = 0
         for member, new_rate, eff in rows.all():
             await self._apply_member_rate(db, member, Decimal(new_rate), eff)
+            applied += 1
+        if applied:
+            await db.commit()
+        return applied
+
+    # ── 성과 보너스 가산율 ────────────────────────────────────────────
+
+    async def bonus_rate_at(
+        self,
+        db: AsyncSession,
+        member_store_id: UUID,
+        on_date: date,
+    ) -> Decimal:
+        """보너스 가산율 2단 resolver — 급여 계산은 이 함수만 읽는다.
+
+        ① effective_date ≤ on_date 인 최신 bonus_rate_history
+        ② org_member_stores.bonus_rate
+
+        시급(rate_at)과 달리 store/org default 단계가 없다 — 보너스는 개인별로만
+        존재하는 값이라 폴백할 상위 기본값이라는 개념이 없기 때문이다.
+
+        Returns:
+            Decimal: 가산율. 이력도 컬럼도 없으면 Decimal("0") (보너스 없음).
+        """
+        history = await db.scalar(
+            select(BonusRateHistory.new_rate)
+            .where(
+                BonusRateHistory.org_member_store_id == member_store_id,
+                BonusRateHistory.effective_date <= on_date,
+            )
+            .order_by(
+                BonusRateHistory.effective_date.desc(),
+                BonusRateHistory.created_at.desc(),
+            )
+            .limit(1)
+        )
+        if history is not None:
+            return Decimal(history)
+        current = await db.scalar(
+            select(OrgMemberStore.bonus_rate).where(OrgMemberStore.id == member_store_id)
+        )
+        return Decimal(current) if current is not None else Decimal("0")
+
+    async def record_bonus_rate_change(
+        self,
+        db: AsyncSession,
+        member_store: OrgMemberStore,
+        new_rate: Decimal,
+        effective_date: date,
+        *,
+        organization_id: UUID,
+        reason: str | None = None,
+        changed_by: UUID | None = None,
+    ) -> BonusRateHistory:
+        """보너스율 변경의 단일 쓰기 경로 — 이력 + 현재값을 함께 갱신한다.
+
+        같은 (member_store, effective_date) 재등록은 insert 가 아니라 기존 행 update
+        (시급 이력과 동일 규칙). effective_date 가 급여기간 시작일인지의 검증은
+        호출측(API 계층)이 한다 — 시딩/백필처럼 우회가 필요한 경로가 있기 때문.
+        """
+        existing = await db.scalar(
+            select(BonusRateHistory).where(
+                BonusRateHistory.org_member_store_id == member_store.id,
+                BonusRateHistory.effective_date == effective_date,
+            )
+        )
+        old_rate = member_store.bonus_rate
+        if existing is not None:
+            existing.new_rate = new_rate
+            existing.reason = reason
+            existing.changed_by = changed_by
+            row = existing
+        else:
+            row = BonusRateHistory(
+                organization_id=organization_id,
+                org_member_store_id=member_store.id,
+                old_rate=old_rate,
+                new_rate=new_rate,
+                effective_date=effective_date,
+                reason=reason,
+                changed_by=changed_by,
+            )
+            db.add(row)
+
+        # 적용일이 이미 도래했으면 현재값도 즉시 반영. 미래 적용이면 이력만 남기고
+        # apply_due_bonus_changes() 가 그날 반영한다 (시급 변경과 같은 패턴).
+        if effective_date <= _utc_today():
+            member_store.bonus_rate = new_rate
+        return row
+
+    async def apply_due_bonus_changes(self, db: AsyncSession) -> int:
+        """적용일이 도래한 보너스율 변경을 현재값에 반영 (일일 잡)."""
+        today = _utc_today()
+        rows = await db.execute(
+            select(BonusRateHistory, OrgMemberStore)
+            .join(
+                OrgMemberStore,
+                OrgMemberStore.id == BonusRateHistory.org_member_store_id,
+            )
+            .where(
+                BonusRateHistory.effective_date <= today,
+                or_(
+                    OrgMemberStore.bonus_rate.is_(None),
+                    OrgMemberStore.bonus_rate != BonusRateHistory.new_rate,
+                ),
+            )
+            .order_by(BonusRateHistory.effective_date.desc())
+        )
+        seen: set[UUID] = set()
+        applied = 0
+        for history, member_store in rows.all():
+            if member_store.id in seen:
+                continue  # 같은 배정의 더 오래된 이력은 건너뛴다 (최신이 이긴다)
+            seen.add(member_store.id)
+            member_store.bonus_rate = history.new_rate
             applied += 1
         if applied:
             await db.commit()

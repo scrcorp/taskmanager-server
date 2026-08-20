@@ -118,6 +118,23 @@ INVALID_REASON_USER = ATTENDANCE.legacy(
 맞춘다. 한 흐름 안에서 코드 표기가 갈리면 앱 분기가 두 규칙을 들고 있어야 한다.
 """
 
+BREAK_END_TOO_SHORT = ATTENDANCE.code(
+    "BREAK_END_TOO_SHORT",
+    400,
+    "This break has not reached its minimum length yet.",
+    hint=(
+        "Wait until the minimum is met, or fix the break times on the record "
+        "instead of ending it now."
+    ),
+)
+"""params: 없음 (구체 문구는 break_end_policy 가 만든 문장을 그대로 싣는다).
+
+키오스크(HTMA)는 같은 판정을 `attendance_device_service` 에서 하고 평문 400 을 돌려준다 —
+그 경로는 구버전 APK 가 detail 문자열을 그대로 읽으므로 형태를 바꾸지 않는다.
+콘솔(web)은 배포 즉시 최신이라 코드 기반 400 을 쓴다. **판정 함수는 양쪽 공용**
+(`app/utils/break_end_policy.validate_break_end`) 이라 규칙이 갈리지 않는다.
+"""
+
 ACCESS_CODE_TAKEN = ATTENDANCE.legacy(
     "access_code_taken",
     409,

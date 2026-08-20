@@ -19,6 +19,7 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.models.attendance import Attendance
+from app.models.organization import Store
 from app.schemas.payroll import VALIDATION_UNCONFIRMED_EARLY_CLOCK_IN
 from app.services.attendance_service import ANOMALY_EARLY_CLOCK_IN_OVERRIDE
 
@@ -151,7 +152,10 @@ async def test_payroll_gate_blocks_until_confirmed(
             await db.refresh(period)
             period_id = period.id
 
-            failures = await payroll_confirm_service._evaluate_gates(db, period, [])
+            gate_store = await db.get(Store, test_store_id)
+            failures = await payroll_confirm_service._evaluate_gates(
+                db, period, [gate_store], []
+            )
             assert VALIDATION_UNCONFIRMED_EARLY_CLOCK_IN in {f.gate for f in failures}
 
         # 확인 후 재평가 — 이 게이트만 사라진다.
@@ -164,7 +168,10 @@ async def test_payroll_gate_blocks_until_confirmed(
             period = (
                 await db.execute(select(PayPeriod).where(PayPeriod.id == period_id))
             ).scalar_one()
-            failures = await payroll_confirm_service._evaluate_gates(db, period, [])
+            gate_store = await db.get(Store, test_store_id)
+            failures = await payroll_confirm_service._evaluate_gates(
+                db, period, [gate_store], []
+            )
             assert VALIDATION_UNCONFIRMED_EARLY_CLOCK_IN not in {
                 f.gate for f in failures
             }
