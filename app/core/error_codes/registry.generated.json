@@ -134,8 +134,10 @@
       "START_DATE_RECALCULATED",
       "STORE_CLOSED_DAY",
       "TIME_NOT_ON_GRID",
+      "USER_NOT_EMPLOYED",
       "USER_NOT_IN_STORE",
       "USER_NOT_MARKED_FOR_STORE",
+      "USER_TERMINATED_BEFORE_DATE",
       "WEEKLY_OVERTIME",
       "ZERO_DURATION"
     ],
@@ -1328,6 +1330,19 @@
       ]
     },
     {
+      "code": "USER_NOT_EMPLOYED",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "This employee is no longer active, so they can't be scheduled.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
       "code": "USER_NOT_IN_STORE",
       "domain": "schedule",
       "kind": "item",
@@ -1346,6 +1361,19 @@
       "kind": "item",
       "status": null,
       "message": "This employee is not marked for work at this store.",
+      "hint": null,
+      "frozen": true,
+      "clients": [
+        "console/src/lib/scheduleCodes.ts",
+        "app/apps/attendance/lib/utils/schedule_codes.dart"
+      ]
+    },
+    {
+      "code": "USER_TERMINATED_BEFORE_DATE",
+      "domain": "schedule",
+      "kind": "item",
+      "status": null,
+      "message": "This employee's last working day was {termination_date}, so they can't be scheduled on {operating_day}.",
       "hint": null,
       "frozen": true,
       "clients": [

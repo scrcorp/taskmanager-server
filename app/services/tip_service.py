@@ -1151,6 +1151,19 @@ class TipService:
             db, store_id=guard_store, date_in_cycle=guard_date,
         )
 
+        # 퇴사·비활성 직원에게 팁을 새로 기록하지 못하게 (2026-08-19).
+        # 화면에서 후보를 좁히는 것만으로는 API 직접 호출을 막지 못한다.
+        # 판정은 스케줄 배정과 **같은 서비스**를 쓴다 — 기준이 갈리면 한쪽만 막힌다.
+        # 날짜 기준이라 재직 중이던 과거 날짜의 팁 입력은 그대로 된다.
+        from app.services import staff_assignment_service
+
+        _assign = (await staff_assignment_service.get_assignability(
+            db, actor.organization_id, [employee_id]
+        ))[employee_id]
+        _blocked = staff_assignment_service.blocking_message(_assign, resolved_date)
+        if _blocked:
+            raise BadRequestError(_blocked)
+
         work_role_name = await self._resolve_work_role_snapshot(db, resolved_work_role_id)
         now = datetime.now(timezone.utc)
         entry = TipEntry(
