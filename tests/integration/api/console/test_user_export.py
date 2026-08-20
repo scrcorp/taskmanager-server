@@ -22,6 +22,7 @@ export 는 org_member_stores 를 읽기만 하므로 시딩 경로와 무관하�
 from __future__ import annotations
 
 import random
+import re
 import uuid
 from datetime import date
 from io import BytesIO
@@ -182,7 +183,7 @@ async def cleanup_created_users() -> AsyncIterator[list[str]]:
 async def test_export_headers_filename_and_no_cost_columns(
     async_client: AsyncClient, admin_headers: dict
 ) -> None:
-    """200 xlsx + 고정 헤더 + 파일명 staff_{today} + 시급/급여 컬럼 부재.
+    """200 xlsx + 고정 헤더 + 파일명 Staff_{스코프}_{생성시각} + 시급/급여 컬럼 부재.
 
     이 200 assert 자체가 라우트 순서 회귀 방어다 — /export 가 GET /{user_id}
     뒤로 밀리면 "export" 가 UUID 파싱에 걸려 422 가 난다.
@@ -193,7 +194,8 @@ async def test_export_headers_filename_and_no_cost_columns(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     dispo = resp.headers.get("content-disposition", "")
-    assert f"staff_{date.today().isoformat()}.xlsx" in dispo
+    # 매장 필터 없음 → AllStores + UTC 생성시각 스탬프 (같은 조건 재다운로드 구분용)
+    assert re.search(r"Staff_AllStores_\d{8}-\d{4}Z\.xlsx", dispo), dispo
 
     headers_row, _rows = _load_sheet(resp.content)
     assert headers_row == EXPECTED_HEADERS

@@ -18,7 +18,8 @@ from app.api.deps import check_store_access, get_accessible_store_ids, require_p
 from app.database import get_db
 from app.models.user import User
 from app.services.attendance_export_service import attendance_export_service
-from app.utils.download import content_disposition, safe_filename
+from app.services.export_naming_service import resolve_store_scope
+from app.utils.download import content_disposition, export_filename
 from app.utils.exceptions import BadRequestError
 from app.schemas.common import (
     AttendanceCorrectionRequest,
@@ -205,7 +206,14 @@ async def export_attendances(
         store_id=store_uuid,
         store_ids=accessible,
     )
-    filename: str = safe_filename(f"attendance_{date_from}_{date_to}.xlsx")
+    scope = await resolve_store_scope(
+        db,
+        current_user.organization_id,
+        [store_uuid] if store_uuid else None,
+    )
+    filename: str = export_filename(
+        "Attendance", scope=scope, start_date=date_from, end_date=date_to
+    )
     return StreamingResponse(
         BytesIO(excel_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -38,6 +38,7 @@ from app.services.warning_signature_service import (
     PARTY_EMPLOYEE,
     warning_signature_service,
 )
+from app.utils.download import content_disposition
 from app.utils.exceptions import NotFoundError
 
 router: APIRouter = APIRouter()
@@ -161,7 +162,7 @@ async def download_my_signed_pdf(
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition(filename)},
     )
 
 

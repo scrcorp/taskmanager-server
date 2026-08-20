@@ -59,6 +59,7 @@ from app.services.warning_signature_service import (
     PARTY_MANAGER,
     warning_signature_service,
 )
+from app.utils.download import content_disposition
 from app.utils.exceptions import BadRequestError, NotFoundError
 
 # wet 서명 PDF 업로드 상한 (hiring 첨부와 동일 20MB).
@@ -374,7 +375,7 @@ async def download_signed_pdf(
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition(filename)},
     )
 
 
@@ -428,7 +429,7 @@ async def download_warning_pdf(
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition(filename)},
     )
 
 
