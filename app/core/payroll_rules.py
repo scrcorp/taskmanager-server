@@ -6,7 +6,7 @@
 
 v1 정책:
     - 값은 전부 하드코딩 (CA 단일 매장 전제). 백오피스/설정화 이관은 v2 백로그.
-    - penalty 감지 임계값(meal 5h / rest 3.5h 단계)은 v1 presence 기반 규칙 —
+    - penalty 감지 임계값(meal 6h[blanket waiver] / rest 3.5h 단계)은 v1 presence 기반 규칙 —
       타이밍 기반 고도화("5th hour 종료 전 meal 시작" 등)는 v2 (payroll_event_service 참조).
 """
 
@@ -30,8 +30,11 @@ PENALTY_HOURS = 1
 DAY_PENALTY_MAX_HOURS = 2
 
 # ── meal penalty 감지 임계 (v1 presence 기반) ────────────────────────────
-# 일 C1 net > 5h 인데 30분 이상 무급 meal break 세션이 하루에 하나도 없으면 위반.
-MEAL_PENALTY_NET_MINUTES = 5 * 60  # 300
+# 법정 기준은 일 C1 net > 5h. 단, CA에서 6h 이하 근무는 상호 동의(meal waiver)로
+# meal break 면제 가능 — v1은 전 직원 waiver 서명 완료를 전제(blanket waiver)로
+# 실효 임계를 6h로 운용한다. 6h 초과는 waiver 자체가 무효라 그대로 위반.
+# 개인별 waiver 여부 저장·적용(waiver 없는 직원은 5h 임계 복원)은 다음 업데이트.
+MEAL_PENALTY_NET_MINUTES = 6 * 60  # 360 (blanket waiver 적용, 법정 원값은 5h)
 MEAL_BREAK_MIN_MINUTES = 30
 
 # ── rest penalty 감지 임계 (v1 presence 기반) ────────────────────────────

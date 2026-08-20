@@ -79,16 +79,22 @@ def test_required_rest_breaks_tiers() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_meal_no_penalty_at_exactly_five_hours() -> None:
-    """net == 5h (300분) 은 위반 아님 — 초과(>)만 위반."""
-    assert evaluate_meal_penalty(300, []) is None
+def test_meal_no_penalty_in_waiver_band() -> None:
+    """5h 초과~6h 이하는 blanket waiver 로 면제 — 위반 아님."""
+    assert evaluate_meal_penalty(301, []) is None
+    assert evaluate_meal_penalty(360, []) is None
 
 
-def test_meal_penalty_just_over_five_hours() -> None:
-    """net 301분 + meal break 없음 → 위반."""
-    reason = evaluate_meal_penalty(301, [])
+def test_meal_no_penalty_at_exactly_six_hours() -> None:
+    """net == 6h (360분) 은 위반 아님 — 초과(>)만 위반."""
+    assert evaluate_meal_penalty(360, []) is None
+
+
+def test_meal_penalty_just_over_six_hours() -> None:
+    """net 361분 + meal break 없음 → 위반 (waiver 는 6h 초과 시 무효)."""
+    reason = evaluate_meal_penalty(361, [])
     assert reason is not None
-    assert "5.0h" in reason
+    assert "6.0h" in reason
     assert "no 30-min meal break" in reason
 
 

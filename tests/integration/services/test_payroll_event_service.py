@@ -247,19 +247,19 @@ async def test_detect_legacy_break_types_recognized(event_ctx: dict) -> None:
 
 
 async def test_detect_split_shift_sums_to_one_penalty_per_kind(event_ctx: dict) -> None:
-    """같은 날 3h+3h split shift → 일 합산 6h, kind 당 1건. attendance_id 는 NULL."""
+    """같은 날 3h+3.5h split shift → 일 합산 6.5h, kind 당 1건. attendance_id 는 NULL."""
     sched1 = await _mk_schedule(event_ctx, work_date=_D1)
     sched2 = await _mk_schedule(event_ctx, work_date=_D1)
     await _mk_attendance(event_ctx, total_work_minutes=180, schedule_id=sched1)
-    await _mk_attendance(event_ctx, total_work_minutes=180, schedule_id=sched2)
+    await _mk_attendance(event_ctx, total_work_minutes=210, schedule_id=sched2)
 
     summary = await _detect(event_ctx)
-    assert summary.created == 2  # meal(360>300) + rest(360분 → 1개 필요, 0개)
+    assert summary.created == 2  # meal(390>360) + rest(390분 → 2개 필요, 0개)
 
     meal_events = await _events(event_ctx, EVENT_KIND_MEAL_PENALTY)
     assert len(meal_events) == 1  # split 이중부과 없음 (일 grain)
     assert meal_events[0].attendance_id is None  # 1:1 아님 → 참고 링크 없음
-    assert "6.0h" in meal_events[0].reason
+    assert "6.5h" in meal_events[0].reason
 
 
 async def test_detect_cancelled_attendance_excluded(event_ctx: dict) -> None:

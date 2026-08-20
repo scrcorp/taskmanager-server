@@ -9,7 +9,7 @@ payroll_events(스펙 §6, grain = 일 단위)의 유일한 쓰기 경로:
     - list_events() / tag_event(): 콘솔 조회 + 귀책 태그(E1)
 
 감지 규칙 (v1, 상수는 app/core/payroll_rules.py):
-    - meal_penalty: 일 C1 net > 5h 인데 그날 attendance 전체에 30분 이상
+    - meal_penalty: 일 C1 net > 6h(blanket waiver 적용 임계) 인데 그날 attendance 전체에 30분 이상
       완료된 무급 meal break 세션이 하나도 없으면 위반 (presence 기반).
       타이밍 기반 고도화 — "5th hour 종료 전에 meal 시작했는지" 판정 — 는 v2.
     - rest_penalty: 일 net ≥ 3.5h 부터 required_rest_breaks() 단계
@@ -92,7 +92,8 @@ def evaluate_meal_penalty(
 ) -> str | None:
     """meal penalty 판정 — 위반이면 reason(영어), 아니면 None.
 
-    조건: 일 net > 5h AND 그날 완료된(ended_at 有) 무급 meal 세션 중
+    조건: 일 net > 6h(blanket waiver 실효 임계, payroll_rules 참조) AND
+    그날 완료된(ended_at 有) 무급 meal 세션 중
     30분 이상이 하나도 없음. 진행 중 세션은 duration 미확정이라 불인정.
     레거시 break_type(unpaid_long)도 무급 meal 로 인식 (dual-read).
     """
