@@ -29,6 +29,8 @@ from app.schemas.schedule import (
     ScheduleAssignChecklist, ScheduleAssignChecklistResult,
     RosterResponse,
 )
+from app.services.fixed_schedule import patterns as pattern_service
+from app.services.fixed_schedule.read import merge_virtual, merge_virtual_roster
 from app.services.schedule_service import schedule_service
 
 
@@ -86,6 +88,13 @@ async def list_entries(
         status=status, page=page, per_page=per_page,
         accessible_store_ids=accessible,
     )
+    # 고정 근무 virtual 합성 — 창(date_from/date_to) 안 패턴 펼치기, 실 행(deleted 포함)이 점유한 슬롯은 억제
+    items = await merge_virtual(
+        db, organization_id=current_user.organization_id, entries=items,
+        store_ids=[parsed_store_id] if parsed_store_id else accessible,
+        date_from=date_from, date_to=date_to, hide_cost=hide_cost_for(current_user),
+        user_ids=parsed_user_ids or ([UUID(user_id)] if user_id else None),
+    )
     if hide_cost_for(current_user):
         for item in items:
             scrub_cost_fields(item)
@@ -118,7 +127,7 @@ async def get_roster(
         for sid in parsed_stores:
             await check_store_access(db, current_user, sid)
     accessible = await get_accessible_store_ids(db, current_user)
-    return await schedule_service.build_roster(
+    roster = await schedule_service.build_roster(
         db, current_user.organization_id,
         date_from=date_from, date_to=date_to, granularity=granularity,
         store_ids=parsed_stores,
@@ -130,6 +139,12 @@ async def get_roster(
         positions=_csv_strs(positions),
         shifts=_csv_strs(shifts),
         hide_cost=hide_cost_for(current_user),
+    )
+    # 고정 근무 virtual 분을 행/컬럼/합계에 가산 (그리드가 virtual 과 confirmed 를 동일하게 그린다)
+    return await merge_virtual_roster(
+        db, organization_id=current_user.organization_id, roster=roster,
+        store_ids=parsed_stores or accessible, date_from=date_from, date_to=date_to,
+        granularity=granularity, hide_cost=hide_cost_for(current_user),
     )
 
 
@@ -351,6 +366,20 @@ async def revert_schedule(
     """confirmed → requested (GM+ only)."""
     return _scrub(await schedule_service.revert_schedule(
         db, entry_id, current_user.organization_id, current_user,
+    ), current_user)
+
+
+@router.post("/{entry_id}/revert-to-pattern", response_model=ScheduleResponse)
+async def revert_to_pattern(
+    entry_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("schedules:update"))],
+) -> ScheduleResponse:
+    """사람이 고친(pattern_overridden) 고정 근무 행을 패턴 값으로 되돌린다. deleted 행은 거부(409)."""
+    entry = await schedule_service.get_entry(db, entry_id, current_user.organization_id)
+    await check_store_access(db, current_user, UUID(entry.store_id))
+    return _scrub(await pattern_service.revert_to_pattern(
+        db, organization_id=current_user.organization_id, entry_id=entry_id, actor=current_user,
     ), current_user)
 
 

@@ -170,6 +170,7 @@ async def start_scheduler() -> None:
     from app.services.rate_service import run_rate_change_daily_tick
     from app.services.push_digest_service import run_digest_tick
     from app.services.schedule_report_service import run_daily_report_tick
+    from app.services.fixed_schedule.materialize import run_daily_catchup_tick, run_weekly_window_tick
 
     logger = logging.getLogger("uvicorn.error")
     if not scheduler.running:
@@ -213,8 +214,26 @@ async def start_scheduler() -> None:
             max_instances=1,
             coalesce=True,
         )
+        # 고정 근무(fixed schedule) 창 실체화 — 매시 정각에 깨어나 org 로컬 요일·시각이 맞는 org 만.
+        #   weekly: 일요일 새벽 창(today..+N주) 밀기 / daily: 같은 범위 catch-up(멱등, 평소 0건).
+        scheduler.add_job(
+            run_weekly_window_tick,
+            trigger=CronTrigger(minute=0, timezone="UTC"),
+            id="fixed_schedule_weekly",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            run_daily_catchup_tick,
+            trigger=CronTrigger(minute=0, timezone="UTC"),
+            id="fixed_schedule_daily_catchup",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
         scheduler.start()
-        logger.info("[scheduler] APScheduler started (attendance_state_tick, schedule_daily_report hourly+org-local, rate_change_daily_tick, push_digest_tick hour=%s)", settings.PUSH_DIGEST_HOUR)
+        logger.info("[scheduler] APScheduler started (attendance_state_tick, schedule_daily_report hourly+org-local, rate_change_daily_tick, push_digest_tick hour=%s, fixed_schedule_weekly/daily_catchup hourly+org-local)", settings.PUSH_DIGEST_HOUR)
 
 
 @app.on_event("shutdown")

@@ -59,3 +59,4 @@ SCHEDULE_WARNINGS_UNCONFIRMED = SCHEDULE.legacy(
 for _code in sorted(_sc.ERROR_CODES | _sc.WARNING_CODES):
     SCHEDULE.item(_code, _template(_code), frozen=True, clients=_CLIENTS)
 del _code
+

@@ -2,7 +2,7 @@
 
 import math
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any
+from typing import Any, Sequence
 from uuid import UUID
 
 from sqlalchemy import select
@@ -31,6 +31,7 @@ from fastapi import HTTPException
 
 from app.core import schedule_codes as codes
 from app.services import staff_assignment_service
+from app.services.fixed_schedule.validation import pattern_overlap_warnings
 from app.utils.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.utils.settings_resolver import SettingNotRegisteredError, resolve_setting
 from app.utils.timezone import (
@@ -438,6 +439,10 @@ class ScheduleService:
             cancelled_by=str(entry.cancelled_by) if entry.cancelled_by else None,
             cancelled_at=entry.cancelled_at,
             cancellation_reason=entry.cancellation_reason,
+            # 고정 근무 도장 — 실 행의 FIXED/OVERRIDE 배지 근거
+            pattern_id=str(entry.pattern_id) if entry.pattern_id else None,
+            pattern_occurrence_date=entry.pattern_occurrence_date,
+            pattern_overridden=bool(entry.pattern_overridden),
             created_at=entry.created_at,
             updated_at=entry.updated_at,
         )
@@ -818,6 +823,9 @@ class ScheduleService:
                 if employment_issue is not None:
                     errors.append(employment_issue)
 
+        # 4. 고정 근무 패턴(virtual, 억제 적용 후)과의 겹침 — 경고, source:"pattern" (계약 §3-3 ③)
+        warnings.extend(await pattern_overlap_warnings(db, user_id, store_id, work_date, _cand_s, _cand_e, exclude_id=exclude_id))
+
         valid = len(errors) == 0
         return ScheduleValidation(valid=valid, warnings=warnings, errors=errors)
 
@@ -1148,13 +1156,17 @@ class ScheduleService:
         db: AsyncSession,
         organization_id: UUID,
         data: ScheduleCreate,
-        created_by: UUID,
+        created_by: UUID | None,
         warnings_sink: list[dict] | None = None,
+        pattern_stamp: tuple[UUID, date] | None = None,
     ) -> ScheduleResponse:
         """단건 생성.
 
         warnings_sink — 넘기면 "확인하고 넘어간 경고"를 여기에 담는다. 벌크 경로가
         항목별 경고를 결과에 실어 보내기 위해 쓴다(응답 스키마는 그대로 둔다).
+        pattern_stamp — 고정 근무 실체화 전용 `(pattern_id, occurrence_date)`. 주면 행 생성 시
+        두 도장 컬럼을 함께 채운다(DB CHECK 가 쌍을 강제). 그 외 경로는 항상 None (§3-6).
+        created_by 가 None 이면 시스템(cron) 생성 — audit actor 없음.
         """
         store_id = UUID(data.store_id)
         # 폐점(closed) 매장엔 새 스케줄 생성 차단 (조회/수정/삭제는 허용)
@@ -1261,6 +1273,9 @@ class ScheduleService:
                 # confirmed 상태로 직접 생성되면 confirmed_at 기록
                 "confirmed_at": now_utc if entry_status == "confirmed" else None,
                 "approved_by": created_by if entry_status == "confirmed" else None,
+                # 고정 근무 도장 — 둘 다 set 하거나 둘 다 None (ck_schedules_pattern_pair)
+                "pattern_id": pattern_stamp[0] if pattern_stamp else None,
+                "pattern_occurrence_date": pattern_stamp[1] if pattern_stamp else None,
             })
 
             # Audit log: 생성 이벤트
@@ -1301,7 +1316,8 @@ class ScheduleService:
 
             # 관리자가 직접 confirmed 로 만든 경우 배정된 직원에게 알림.
             # 본인이 자기 스케줄을 만든 경우(self-assign)는 알림 생략.
-            if entry_status == "confirmed" and entry.user_id != created_by:
+            # 고정 근무 실체화 행은 건별 알림을 내지 않는다 — 그룹 단위 알림 1건이 대신한다(D-e).
+            if entry_status == "confirmed" and entry.user_id != created_by and pattern_stamp is None:
                 from app.services.alert_service import alert_service
                 await alert_service.create_for_schedule_assigned(db, entry)
 
@@ -1822,6 +1838,52 @@ class ScheduleService:
         except Exception:
             await db.rollback()
             raise
+
+    # ── 고정 근무 도장 컬럼의 유일한 쓰기 통로 ──────────────────────────────
+    # fixed_schedule 패키지는 Schedule ORM 속성을 직접 set 하거나 update(Schedule) 를 쓰지 않고
+    # 아래 3개만 호출한다(원칙 P1 — 쓰기는 단일 도메인 서비스). A1 게이트웨이 도입 시 교체 지점.
+    async def set_pattern_stamp(
+        self, db: AsyncSession, entry_id: UUID, organization_id: UUID,
+        *, stamp: tuple[UUID, date] | None,
+    ) -> None:
+        """도장 이동(sweep) 또는 해제(None → 두 컬럼 NULL + overridden=False, ck_schedules_pattern_pair 준수)."""
+        from app.core.error_codes.fixed_schedule import PATTERN_TARGET_NOT_FOUND
+
+        entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
+        if entry is None:
+            raise PATTERN_TARGET_NOT_FOUND(schedule_id=str(entry_id))
+        entry.pattern_id = stamp[0] if stamp else None
+        entry.pattern_occurrence_date = stamp[1] if stamp else None
+        if stamp is None:
+            entry.pattern_overridden = False
+        await db.commit()
+
+    async def set_pattern_overridden(
+        self, db: AsyncSession, entry_id: UUID, organization_id: UUID, *, value: bool,
+    ) -> None:
+        """occurrence 실체화(True) / 패턴으로 되돌리기(False). 도장이 없는 행에는 켤 수 없다."""
+        from app.core.error_codes.fixed_schedule import PATTERN_NOT_STAMPED, PATTERN_TARGET_NOT_FOUND
+
+        entry = await schedule_repository.get_by_id(db, entry_id, organization_id)
+        if entry is None:
+            raise PATTERN_TARGET_NOT_FOUND(schedule_id=str(entry_id))
+        if value and entry.pattern_id is None:
+            raise PATTERN_NOT_STAMPED(schedule_id=str(entry_id))
+        if bool(entry.pattern_overridden) != value:
+            entry.pattern_overridden = value
+            await db.commit()
+
+    async def unstamp_pattern_rows(self, db: AsyncSession, pattern_ids: Sequence[UUID]) -> int:
+        """그룹 삭제 전 벌크 해제 → 실 행은 일회성으로 남는다(status 불변). 반환=영향 행수."""
+        from sqlalchemy import update as _update
+        if not pattern_ids:
+            return 0
+        res = await db.execute(
+            _update(Schedule)
+            .where(Schedule.pattern_id.in_(list(pattern_ids)))
+            .values(pattern_id=None, pattern_occurrence_date=None, pattern_overridden=False)
+        )
+        return int(res.rowcount or 0)
 
     async def get_entry(
         self, db: AsyncSession, entry_id: UUID, organization_id: UUID,
