@@ -56,6 +56,7 @@ from app.services.fixed_schedule.expand import expand
 from app.services.fixed_schedule.materialize import (
     _create_payload,
     materialize_window,
+    org_today,
     patch_from_occurrence,
     sweep_group,
     window_end,
@@ -123,7 +124,7 @@ async def _group_out(
     include_ended: bool = True,
     today: date | None = None,
 ) -> PatternGroupOut:
-    today = today or date.today()
+    today = today or await org_today(db, rows[0].organization_id)
     rows = sorted(rows, key=lambda r: (r.start_date, r.start_time))
     shown = rows if include_ended else [r for r in rows if not _is_ended(r, today)]
     if not shown:
@@ -171,7 +172,7 @@ async def list_for_user(
     include_ended: bool = False,
 ) -> list[PatternGroupOut]:
     """그룹 단위 목록 — 기본은 현재 유효 + 예정만(끝난 블록은 숨김, 전부 끝난 그룹은 제외)."""
-    today = date.today()
+    today = await org_today(db, organization_id)
     q = select(StaffWorkPattern).where(
         StaffWorkPattern.organization_id == organization_id,
         StaffWorkPattern.user_id == user_id,
@@ -286,7 +287,7 @@ async def _unstamp_rows(db: AsyncSession, pattern_ids: Sequence[UUID]) -> None:
 
 
 async def _materialize_for(db: AsyncSession, *, organization_id: UUID, user_id: UUID, actor: User | None) -> int:
-    today = date.today()
+    today = await org_today(db, organization_id)
     return await materialize_window(
         db, organization_id=organization_id, user_ids=[user_id],
         date_from=today, date_to=await window_end(db, organization_id, today),
@@ -319,7 +320,7 @@ async def create_group(
             overlaps = [(await _group_out(db, rows)).model_dump(mode="json") for rows in hits.values()]
             raise PATTERN_OVERLAP_EXISTING(overlaps=overlaps)
         if data.gate == "move":
-            today = date.today()
+            today = await org_today(db, organization_id)
             moved: list[StaffWorkPattern] = []
             for gid, rows in hits.items():
                 if _started(rows, today):
@@ -360,7 +361,7 @@ async def update_group(
 ) -> PatternGroupOut:
     """블록 전체 교체(group_id 유지). 시작 전 그룹 → 그대로 교체. 진행 중 → 옛 행 until=today-1,
     새 행 start=max(today, 입력) (§5.2). 이후 sweep_group(새 블록 기준) + materialize_window."""
-    today = date.today()
+    today = await org_today(db, organization_id)
     old = await _load_group(db, group_id, organization_id)
     if str(old[0].user_id) != data.user_id or str(old[0].store_id) != data.store_id:
         raise PATTERN_SUBJECT_IMMUTABLE(group_id=str(group_id))
@@ -411,7 +412,7 @@ async def move_group(
 ) -> PatternGroupOut:
     """묶음 델타 이동. 시작 전 그룹만(진행 중 → 409 PATTERN_GROUP_STARTED).
     결과 start_date < today → 409 PATTERN_MOVE_INTO_PAST."""
-    today = date.today()
+    today = await org_today(db, organization_id)
     rows = await _load_group(db, group_id, organization_id)
     if _started(rows, today):
         raise PATTERN_GROUP_STARTED(group_id=str(group_id), start_date=min(r.start_date for r in rows).isoformat())
@@ -440,7 +441,7 @@ async def delete_group(
     (`overridden=False ∧ operating_day ≥ today ∧ status != deleted`)은 먼저 `delete_entry` 로 정리."""
     from app.services.schedule_service import schedule_service
 
-    today = date.today()
+    today = await org_today(db, organization_id)
     rows = await _load_group(db, group_id, organization_id)
     pattern_ids = [r.id for r in rows]
     future_ids = list((await db.execute(
