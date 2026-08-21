@@ -15,6 +15,7 @@ Modules:
     communication: 공지사항, 추가 업무, 증빙, 읽음추적 (Notices, tasks, evidences, read tracking)
     alert: 알림 (User alerts)
     schedule: 스케줄 및 승인 (Schedules and approvals)
+    work_pattern: 고정 근무 반복 패턴 (Fixed schedule patterns — staff_work_patterns)
     attendance: 근태 관리 (Attendance: QR codes, records, corrections)
     evaluation: 평가 템플릿, 평가 (Evaluation templates, evaluations — JSONB config/snapshot)
     daily_report: 일일 보고서 템플릿, 보고서, 섹션, 코멘트 (Daily report templates, reports, sections, comments)
@@ -35,6 +36,7 @@ from app.models.checklist import ChecklistTemplate, ChecklistTemplateItem, Check
 from app.models.communication import Notice, NoticeRead, Voice
 from app.models.alert import Alert
 from app.models.schedule import Schedule, StoreWorkRole, StoreBreakRule, ScheduleAuditLog
+from app.models.work_pattern import StaffWorkPattern
 from app.models.attendance import QRCode, Attendance, AttendanceCorrection
 from app.models.attendance_break import AttendanceBreak
 from app.models.attendance_device import AttendanceDevice
@@ -90,6 +92,7 @@ __all__ = [
     "Notice", "NoticeRead", "Voice",
     "Alert",
     "Schedule", "StoreWorkRole", "StoreBreakRule", "ScheduleAuditLog",
+    "StaffWorkPattern",
     "QRCode", "Attendance", "AttendanceCorrection",
     "AttendanceBreak",
     "AttendanceDevice",

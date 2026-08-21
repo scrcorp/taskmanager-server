@@ -12,8 +12,10 @@ GET /api/v1/console/dashboard/export 의 Overtime 시트가:
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
+from urllib.parse import unquote
 from uuid import UUID
 
 import pytest
@@ -276,3 +278,41 @@ async def test_overtime_summary_uses_net_and_store_threshold(
     # gross 판정이었다면 2명(41h, 41h) — net 판정이라 gm 1명만
     assert body["overtime_users"] == 1
     assert body["total_overtime_hours"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# 파일명 — 무엇을/어디/언제 받은 파일인지 이름만으로 구분되어야 한다
+# ---------------------------------------------------------------------------
+
+
+async def test_export_filename_carries_store_and_range(
+    async_client: AsyncClient,
+    admin_headers: dict,
+    test_store_id: UUID,
+) -> None:
+    """매장+기간 필터 → 파일명에 매장명·기간·생성시각. (예전엔 항상 dashboard_export.xlsx)"""
+    resp = await async_client.get(
+        "/api/v1/console/dashboard/export",
+        headers=admin_headers,
+        params={
+            "date_from": str(WEEK1_START),
+            "date_to": str(WEEK1_END),
+            "store_id": str(test_store_id),
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    dispo = unquote(resp.headers["content-disposition"])
+    assert re.search(r"Dashboard_.+_\d{8}-\d{4}_\d{8}-\d{4}Z\.xlsx", dispo), dispo
+    assert "dashboard_export.xlsx" not in dispo
+
+
+async def test_export_filename_without_filters_says_all_stores(
+    async_client: AsyncClient, admin_headers: dict
+) -> None:
+    """필터 없이 받아도 생성시각은 붙는다 — 두 번 받은 파일이 구분된다."""
+    resp = await async_client.get(
+        "/api/v1/console/dashboard/export", headers=admin_headers
+    )
+    assert resp.status_code == 200, resp.text
+    dispo = resp.headers["content-disposition"]
+    assert re.search(r"Dashboard_AllStores_\d{8}-\d{4}Z\.xlsx", dispo), dispo

@@ -8,7 +8,15 @@
 
 from __future__ import annotations
 
-from app.utils.download import ascii_fallback, content_disposition, safe_filename
+from datetime import date, datetime, timezone
+
+from app.utils.download import (
+    ascii_fallback,
+    content_disposition,
+    date_range_tag,
+    export_filename,
+    safe_filename,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -82,3 +90,62 @@ def test_content_disposition_escapes_quotes() -> None:
     header = content_disposition('we"ird.pdf')
     assert 'filename="weird.pdf"' in header
     header.encode("latin-1")
+
+
+# ---------------------------------------------------------------------------
+# export_filename — 콘솔 export 공통 파일명 규칙
+# ---------------------------------------------------------------------------
+
+_AT = datetime(2026, 8, 20, 13, 52, tzinfo=timezone.utc)
+
+
+def test_export_filename_full_shape() -> None:
+    """{Kind}_{스코프}_{범위}_{extra}_{생성시각}.{ext} 순서 고정."""
+    assert export_filename(
+        "Attendance",
+        scope="Downtown",
+        start_date=date(2026, 8, 1),
+        end_date=date(2026, 8, 15),
+        extra=["numbered"],
+        generated_at=_AT,
+    ) == "Attendance_Downtown_20260801-0815_numbered_20260820-1352Z.xlsx"
+
+
+def test_export_filename_stamps_even_without_scope_or_range() -> None:
+    """조건이 하나도 없어도 생성시각은 붙는다 — 같은 파일명 두 개가 안 생긴다."""
+    assert export_filename("Dashboard", generated_at=_AT) == (
+        "Dashboard_20260820-1352Z.xlsx"
+    )
+
+
+def test_export_filename_keeps_unicode_scope() -> None:
+    """한글 매장명은 파일명에 그대로 (전송은 filename* 담당)."""
+    assert export_filename("Staff", scope="서울 2호점", generated_at=_AT) == (
+        "Staff_서울2호점_20260820-1352Z.xlsx"
+    )
+
+
+def test_export_filename_range_omitted_when_incomplete() -> None:
+    """한쪽 날짜만 있으면 범위를 적지 않는다 — 내용보다 좁아 보이면 안 된다."""
+    name = export_filename(
+        "Dashboard", start_date=date(2026, 8, 1), end_date=None, generated_at=_AT
+    )
+    assert name == "Dashboard_20260820-1352Z.xlsx"
+
+
+def test_export_filename_extra_is_sanitized_and_skips_blanks() -> None:
+    name = export_filename(
+        "EmpID_Export", extra=["by store", "", "12rows"], generated_at=_AT
+    )
+    assert name == "EmpID_Export_bystore_12rows_20260820-1352Z.xlsx"
+
+
+def test_export_filename_honours_ext() -> None:
+    assert export_filename("PayStub", ext="pdf", generated_at=_AT).endswith(".pdf")
+
+
+def test_date_range_tag_shortens_same_year() -> None:
+    assert date_range_tag(date(2026, 8, 1), date(2026, 8, 15)) == "20260801-0815"
+    assert date_range_tag(date(2025, 12, 30), date(2026, 1, 2)) == (
+        "20251230-20260102"
+    )

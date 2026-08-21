@@ -294,6 +294,33 @@ class AlertService:
             reference_id=schedule.id,
         )
 
+    async def create_for_fixed_schedule_changed(
+        self,
+        db: AsyncSession,
+        *,
+        organization_id: UUID,
+        user_id: UUID,
+        group_id: UUID,
+        message: str,
+    ) -> Alert | None:
+        """고정 근무(패턴 그룹) 생성/수정/이동/삭제 → 대상 직원에게 **작업 1회 = 알림 1건**(D-e).
+
+        건별(실체화된 날짜마다) 알림은 내지 않는다 — create_entry 가 pattern_stamp 있으면
+        schedule_assigned 를 건너뛰는 것과 짝. message 는 호출자가 그룹 요약(요일·시간·기간)으로 만든다.
+        reference = pattern_group(group_id). 선호 비활성 시 None. 커밋은 호출자가 한다.
+        """
+        if not await self._is_in_app_enabled_for_user(db, user_id, "fixed_schedule_changed"):
+            return None
+        return await self._create_alert(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            alert_type="fixed_schedule_changed",
+            message=message[:1000],
+            reference_type="pattern_group",
+            reference_id=group_id,
+        )
+
     async def create_for_reply(
         self,
         db: AsyncSession,

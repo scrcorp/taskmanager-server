@@ -13,8 +13,10 @@ GET /api/v1/console/attendances/export 검증:
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
+from urllib.parse import unquote
 from uuid import UUID
 
 import pytest
@@ -32,6 +34,7 @@ from app.models.attendance_break import (
 )
 from app.models.org_member import OrgMember, OrgMemberStore
 from app.services.attendance_export_service import EXPORT_HEADERS
+from app.utils.download import date_range_tag
 
 
 pytestmark = pytest.mark.asyncio
@@ -279,10 +282,14 @@ async def test_export_columns_and_values(
     assert resp.headers["content-type"].startswith(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    assert (
-        f"attendance_{RANGE_FROM}_{RANGE_TO}.xlsx"
-        in resp.headers["content-disposition"]
-    )
+    # 파일명 = Attendance_{매장}_{기간}_{생성시각} — 폴더에 쌓였을 때 구분되도록
+    dispo = resp.headers["content-disposition"]
+    tag = date_range_tag(RANGE_FROM, RANGE_TO)
+    assert re.search(
+        rf"Attendance_[^\";]*_{tag}_\d{{8}}-\d{{4}}Z\.xlsx", dispo
+    ), dispo
+    # filename* 에 매장명 (앞뒤 '_' 는 safe_filename 이 다듬는다)
+    assert "attendance_test_store" in unquote(dispo)
 
     headers, rows = _sheet_rows(resp.content)
     assert headers == EXPORT_HEADERS

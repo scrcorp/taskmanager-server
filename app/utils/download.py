@@ -89,3 +89,46 @@ def content_disposition(filename: str, *, disposition: str = "attachment") -> st
         f'{disposition}; filename="{ascii_fallback(filename)}"; '
         f"filename*=UTF-8''{encoded}"
     )
+
+
+def date_range_tag(start_date, end_date) -> str:
+    """날짜 범위 → `20260801-0815` (같은 해면 뒤는 월일만).
+
+    `payroll_range_tag` 의 일반 이름 — export 파일명은 급여든 근태든 같은 모양의
+    범위 토큰을 써야 폴더에 섞였을 때 눈으로 정렬된다.
+    """
+    return payroll_range_tag(start_date, end_date)
+
+
+def export_filename(
+    kind: str,
+    *,
+    scope: str | None = None,
+    start_date=None,
+    end_date=None,
+    extra: "list[str] | tuple[str, ...]" = (),
+    ext: str = "xlsx",
+    generated_at=None,
+) -> str:
+    """콘솔 export 파일명 공통 규칙.
+
+    `{Kind}[_{스코프}][_{날짜범위}][_{extra...}]_{생성시각}.{ext}`
+    예: `Attendance_Downtown_20260801-0815_20260820-1352Z.xlsx`
+
+    왜 이 모양인가 — 받는 사람은 파일명만 보고 **무엇을 / 어디 / 언제 것을 /
+    언제 받았는지** 구분해야 한다. 특히 생성시각은 필수다: 같은 조건으로 두 번
+    받으면 브라우저가 `(1)` 을 붙여줄 뿐 어느 쪽이 최신인지 알 수 없다.
+    급여(`payroll_export_service._payroll_filename`)와 같은 규칙 — 거기엔
+    기간ID/DRAFT 처럼 급여에만 있는 토큰이 더 붙는다.
+
+    스코프명은 유니코드 그대로 둔다 (한글 매장명이 남아야 구분된다). 전송은
+    Content-Disposition 의 filename*(UTF-8) 가 책임진다.
+    """
+    parts = [safe_filename(kind)]
+    if scope:
+        parts.append(safe_filename(scope))
+    if start_date is not None and end_date is not None:
+        parts.append(date_range_tag(start_date, end_date))
+    parts += [safe_filename(x) for x in extra if x]
+    parts.append(download_stamp(generated_at))
+    return "_".join(parts) + f".{ext}"

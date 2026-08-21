@@ -23,8 +23,12 @@ CATEGORIES: list[dict[str, Any]] = [
     {
         "code": "schedule",
         "label": "Schedule",
-        "description": "Schedule submission, approval, and substitution",
-        "types": ["schedule_pending", "schedule_approved", "schedule_assigned", "schedule_substitute"],
+        "description": "Schedule submission, approval, substitution, and fixed schedule changes",
+        # fixed_schedule_changed: 고정 근무(패턴 그룹) 생성/수정/이동/삭제 — 작업 1회 = 알림 1건(D-e)
+        "types": [
+            "schedule_pending", "schedule_approved", "schedule_assigned", "schedule_substitute",
+            "fixed_schedule_changed",
+        ],
         "email_available": False,
     },
     {

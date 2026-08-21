@@ -50,7 +50,8 @@ from app.services.records_retention_service import records_retention_service
 from app.services.offboarding_service import offboarding_service
 from app.services.user_export_service import user_export_service
 from app.services.user_service import user_service
-from app.utils.download import content_disposition
+from app.services.export_naming_service import resolve_store_scope
+from app.utils.download import content_disposition, export_filename
 from app.utils.exceptions import BadRequestError
 
 router: APIRouter = APIRouter()
@@ -153,7 +154,10 @@ async def export_users(
     excel_bytes: bytes = await user_export_service.export_staff_xlsx(
         db, current_user.organization_id, parsed_store_ids
     )
-    filename: str = f"staff_{date.today().isoformat()}.xlsx"
+    scope = await resolve_store_scope(
+        db, current_user.organization_id, parsed_store_ids
+    )
+    filename: str = export_filename("Staff", scope=scope)
     return StreamingResponse(
         BytesIO(excel_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
