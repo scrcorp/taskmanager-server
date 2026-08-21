@@ -52,6 +52,7 @@ class StoreGroupService:
             sort_order=group.sort_order,
             numbering_mode=group.numbering_mode,
             number_range_start=group.number_range_start,
+            payroll_corp_name=group.payroll_corp_name,
             store_count=store_count,
             duplicate_empids=duplicate_empids or [],
             created_at=group.created_at,
@@ -114,6 +115,7 @@ class StoreGroupService:
                     "code": (data.code.strip() or None) if data.code else None,
                     "numbering_mode": data.numbering_mode,
                     "number_range_start": data.number_range_start,
+                    "payroll_corp_name": data.payroll_corp_name,
                     "sort_order": next_sort,
                     # 채번 커서 초기화 — 신규 그룹도 NULL 로 두지 않는다(O1: NULL 폴백을
                     # 남기면 MAX 경로가 코드에 되살아난다).
@@ -143,10 +145,9 @@ class StoreGroupService:
         fields = data.model_dump(exclude_unset=True)
         # NOT NULL 컬럼(name/numbering_mode)에 명시적 null 이 오면 no-op 처리 (500 방지).
         # number_range_start 는 nullable — 명시적 null 로 번호대 해제 허용.
-        fields = {
-            k: v for k, v in fields.items()
-            if v is not None or k in ("number_range_start", "code")
-        }
+        # nullable 컬럼은 명시적 null 로 해제할 수 있어야 한다 (번호대 해제, 급여 표시명 제거).
+        nullable = {"number_range_start", "code", "payroll_corp_name"}
+        fields = {k: v for k, v in fields.items() if v is not None or k in nullable}
         if isinstance(fields.get("code"), str):
             fields["code"] = fields["code"].strip() or None
         if "name" in fields and fields["name"] is not None:

@@ -38,6 +38,8 @@ from app.models.attendance_break import (
     AttendanceBreak,
 )
 from app.models.organization import Store
+from app.models.settings import StoreSetting
+from app.seeds.settings_seed import REST_BREAK_TRACKING_KEY
 from app.models.payroll import PayPeriod, PayrollEvent
 from app.models.schedule import Schedule
 from app.models.user import User
@@ -83,6 +85,16 @@ async def event_ctx(
         await db.commit()
         await db.refresh(store)
         await db.refresh(user)
+        # rest penalty 는 "휴게를 기록하는 매장"에서만 판정한다(기본 off).
+        # 이 테스트들은 그 판정 자체를 검증하므로 켜 둔다.
+        db.add(
+            StoreSetting(
+                store_id=store.id,
+                key=REST_BREAK_TRACKING_KEY,
+                value=True,
+            )
+        )
+        await db.commit()
         ctx = {"org_id": org_id, "store_id": store.id, "user_id": user.id}
 
     yield ctx
@@ -179,7 +191,7 @@ async def _detect(ctx: dict, start: date = _D1, end: date = _D3):
     """서비스 호출 + commit (호출자 트랜잭션 소유 관례)."""
     async with async_session() as db:
         summary = await payroll_event_service.detect_and_upsert_events(
-            db, ctx["store_id"], start, end
+            db, [ctx["store_id"]], start, end
         )
         await db.commit()
         return summary
@@ -213,7 +225,7 @@ async def test_detect_creates_meal_and_rest_penalties(event_ctx: dict) -> None:
     assert set(by_kind) == {EVENT_KIND_MEAL_PENALTY, EVENT_KIND_REST_PENALTY}
 
     meal = by_kind[EVENT_KIND_MEAL_PENALTY]
-    assert meal.reason == "Worked 6.2h with no 30-min meal break"
+    assert meal.reason == "Worked 6.17h with 0 of 1 required 30-min meal break(s)"
     assert meal.work_date == _D1
     assert meal.user_id == event_ctx["user_id"]
     assert meal.attendance_id == att_id  # 그날 attendance 1건 → 1:1 링크
@@ -221,7 +233,7 @@ async def test_detect_creates_meal_and_rest_penalties(event_ctx: dict) -> None:
     assert meal.attribution is None  # 미태깅
 
     rest = by_kind[EVENT_KIND_REST_PENALTY]
-    assert rest.reason == "Worked 6.2h with 0 of 2 required 10-min rest break(s)"
+    assert rest.reason == "Worked 6.17h with 0 of 2 required 10-min rest break(s)"
 
 
 async def test_detect_no_penalty_when_breaks_satisfied(event_ctx: dict) -> None:
@@ -247,19 +259,24 @@ async def test_detect_legacy_break_types_recognized(event_ctx: dict) -> None:
 
 
 async def test_detect_split_shift_sums_to_one_penalty_per_kind(event_ctx: dict) -> None:
-    """같은 날 3h+3h split shift → 일 합산 6h, kind 당 1건. attendance_id 는 NULL."""
+    """같은 날 3h+3h split shift → 일 합산 6h.
+
+    6h 정확히는 meal 면제 구간(§512(a))이라 meal penalty 는 안 난다.
+    rest 만 1건 — split 이어도 일 grain 이라 이중부과되지 않는다.
+    """
     sched1 = await _mk_schedule(event_ctx, work_date=_D1)
     sched2 = await _mk_schedule(event_ctx, work_date=_D1)
     await _mk_attendance(event_ctx, total_work_minutes=180, schedule_id=sched1)
     await _mk_attendance(event_ctx, total_work_minutes=180, schedule_id=sched2)
 
     summary = await _detect(event_ctx)
-    assert summary.created == 2  # meal(360>300) + rest(360분 → 1개 필요, 0개)
+    assert summary.created == 1  # rest 만 (360분 → 1개 필요, 0개). meal 은 면제.
 
-    meal_events = await _events(event_ctx, EVENT_KIND_MEAL_PENALTY)
-    assert len(meal_events) == 1  # split 이중부과 없음 (일 grain)
-    assert meal_events[0].attendance_id is None  # 1:1 아님 → 참고 링크 없음
-    assert "6.0h" in meal_events[0].reason
+    assert await _events(event_ctx, EVENT_KIND_MEAL_PENALTY) == []
+    rest_events = await _events(event_ctx, EVENT_KIND_REST_PENALTY)
+    assert len(rest_events) == 1  # split 이중부과 없음 (일 grain)
+    assert rest_events[0].attendance_id is None  # 1:1 아님 → 참고 링크 없음
+    assert "6.00h" in rest_events[0].reason
 
 
 async def test_detect_cancelled_attendance_excluded(event_ctx: dict) -> None:
@@ -319,7 +336,9 @@ async def test_upsert_updates_reason_preserves_attribution(event_ctx: dict) -> N
     assert summary.created == 0
 
     meal = (await _events(event_ctx, EVENT_KIND_MEAL_PENALTY))[0]
-    assert meal.reason == "Worked 7.0h with no 30-min meal break"  # 갱신
+    assert (
+        meal.reason == "Worked 7.00h with 0 of 1 required 30-min meal break(s)"
+    )  # 갱신
     assert meal.attribution == "management"  # 보존
     assert meal.tagged_by == event_ctx["user_id"]
     assert meal.tagged_at == original_tagged_at
@@ -391,7 +410,7 @@ async def test_frozen_rows_untouched(event_ctx: dict) -> None:
     assert summary.skipped_frozen >= 1
     assert summary.updated == 0
     meal = (await _events(event_ctx, EVENT_KIND_MEAL_PENALTY))[0]
-    assert "6.2h" in meal.reason  # 갱신 안 됨
+    assert "6.17h" in meal.reason  # 갱신 안 됨
 
     # 조건 소멸시켜도 frozen 은 void 안 됨
     await _mk_break(att_id, BREAK_TYPE_UNPAID_MEAL, 30)
@@ -426,7 +445,7 @@ async def test_void_on_attendance_cancelled(event_ctx: dict) -> None:
 async def _classify(ctx: dict, days: list[ClassifiedDay], start: date = _D1, end: date = _D3):
     async with async_session() as db:
         summary = await payroll_event_service.upsert_classification_events(
-            db, ctx["store_id"], start, end, days
+            db, [ctx["store_id"]], start, end, days
         )
         await db.commit()
         return summary
@@ -529,17 +548,17 @@ async def test_list_events_filters_voided_and_range(event_ctx: dict) -> None:
 
     async with async_session() as db:
         active = await payroll_event_service.list_events(
-            db, event_ctx["store_id"], _D1, _D3
+            db, [event_ctx["store_id"]], _D1, _D3
         )
         assert [e.kind for e in active] == [EVENT_KIND_REST_PENALTY]
 
         everything = await payroll_event_service.list_events(
-            db, event_ctx["store_id"], _D1, _D3, include_voided=True
+            db, [event_ctx["store_id"]], _D1, _D3, include_voided=True
         )
         assert len(everything) == 2
 
         out_of_range = await payroll_event_service.list_events(
-            db, event_ctx["store_id"], _D1 + timedelta(days=90), _D1 + timedelta(days=99)
+            db, [event_ctx["store_id"]], _D1 + timedelta(days=90), _D1 + timedelta(days=99)
         )
         assert out_of_range == []
 

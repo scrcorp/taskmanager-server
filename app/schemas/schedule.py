@@ -252,6 +252,13 @@ class ScheduleResponse(BaseModel):
     cancelled_by: str | None = None
     cancelled_at: datetime | None = None
     cancellation_reason: str | None = None
+    # ── 고정 근무(Fixed Schedule) 도장 — 추가만(하위호환) ──────────────
+    # pattern_id 가 있으면 이 행은 패턴에서 나왔다(UI: FIXED 배지).
+    # status == "virtual" 이면 DB 행이 아닌 펼치기 결과이고 id 는 "virtual:<pattern_id>:<date>".
+    pattern_id: str | None = None
+    pattern_occurrence_date: date | None = None
+    # 사람이 손댄 실체화 행(UI: OVERRIDE 배지). virtual 은 항상 False.
+    pattern_overridden: bool = False
     created_at: datetime
     updated_at: datetime
 

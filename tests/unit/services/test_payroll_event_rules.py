@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
-from app.core.payroll_rules import required_rest_breaks
+from app.core.payroll_rules import required_meal_breaks, required_rest_breaks
 from app.models.attendance_break import (
     BREAK_TYPE_PAID_10MIN,
     BREAK_TYPE_PAID_SHORT,
@@ -79,23 +79,22 @@ def test_required_rest_breaks_tiers() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_meal_no_penalty_at_exactly_five_hours() -> None:
-    """net == 5h (300분) 은 위반 아님 — 초과(>)만 위반."""
-    assert evaluate_meal_penalty(300, []) is None
+def test_meal_no_penalty_in_waiver_band() -> None:
+    """5h 초과~6h 이하는 blanket waiver 로 면제 — 위반 아님."""
+    assert evaluate_meal_penalty(301, []) is None
+    assert evaluate_meal_penalty(360, []) is None
 
 
-def test_meal_penalty_just_over_five_hours() -> None:
-    """net 301분 + meal break 없음 → 위반."""
-    reason = evaluate_meal_penalty(301, [])
+def test_meal_penalty_just_over_six_hours() -> None:
+    """net 361분 + meal break 없음 → 위반 (waiver 는 6h 초과 시 무효)."""
+    reason = evaluate_meal_penalty(361, [])
     assert reason is not None
-    assert "5.0h" in reason
-    assert "no 30-min meal break" in reason
 
 
 def test_meal_reason_format() -> None:
-    """reason 은 영어 + 시간 표기 (372분 → 6.2h)."""
+    """reason 은 영어 + 시간 표기 + 몇 개 중 몇 개인지 (372분 → 6.20h)."""
     reason = evaluate_meal_penalty(372, [])
-    assert reason == "Worked 6.2h with no 30-min meal break"
+    assert reason == "Worked 6.20h with 0 of 1 required 30-min meal break(s)"
 
 
 def test_meal_satisfied_by_30min_unpaid_meal() -> None:
@@ -145,7 +144,7 @@ def test_rest_no_penalty_under_threshold() -> None:
 def test_rest_penalty_zero_of_one() -> None:
     """net 3.5h + 유급 세션 0개 → 위반, reason 에 0 of 1."""
     reason = evaluate_rest_penalty(210, [])
-    assert reason == "Worked 3.5h with 0 of 1 required 10-min rest break(s)"
+    assert reason == "Worked 3.50h with 0 of 1 required 10-min rest break(s)"
 
 
 def test_rest_satisfied_one_session() -> None:
@@ -227,3 +226,51 @@ def test_classification_reason_seventh_day() -> None:
     day = _day(seventh_day=True)
     reason = payroll_event_service._classification_reason(day, "seventh_day")
     assert reason == "7th consecutive day worked in Sun-Sat workweek"
+
+
+# ── §512(a) meal 면제 / 2회차 ────────────────────────────────────────
+
+
+def test_no_meal_required_up_to_six_hours() -> None:
+    """5h 초과라도 총 6h 이하면 상호 합의로 면제 가능 — 위반이 아니다.
+
+    이걸 빼먹으면 5~6h 근무가 전부 위반으로 잡힌다 (실측 833건).
+    """
+    for minutes in (301, 330, 359, 360):
+        assert required_meal_breaks(minutes) == 0
+        assert evaluate_meal_penalty(minutes, []) is None
+
+
+def test_meal_required_just_past_six_hours() -> None:
+    """6시간 1분부터는 면제가 안 된다."""
+    assert required_meal_breaks(361) == 1
+    assert evaluate_meal_penalty(361, []) is not None
+
+
+def test_second_meal_required_only_past_twelve_hours() -> None:
+    """10~12h 는 2회차를 면제 가능 — 1회면 충분. 12h 초과부터 2회."""
+    assert required_meal_breaks(11 * 60) == 1
+    assert required_meal_breaks(12 * 60) == 1
+    assert required_meal_breaks(12 * 60 + 1) == 2
+
+
+def test_one_meal_is_not_enough_past_twelve_hours() -> None:
+    breaks = [_br(BREAK_TYPE_UNPAID_MEAL, 30)]
+    assert evaluate_meal_penalty(13 * 60, breaks) is not None
+    assert evaluate_meal_penalty(12 * 60, breaks) is None
+
+
+def test_two_meals_satisfy_a_long_day() -> None:
+    breaks = [_br(BREAK_TYPE_UNPAID_MEAL, 30), _br(BREAK_TYPE_UNPAID_MEAL, 30)]
+    assert evaluate_meal_penalty(13 * 60, breaks) is None
+
+
+def test_short_meal_does_not_count() -> None:
+    """30분 미만은 인정하지 않는다."""
+    assert evaluate_meal_penalty(8 * 60, [_br(BREAK_TYPE_UNPAID_MEAL, 29)]) is not None
+    assert evaluate_meal_penalty(8 * 60, [_br(BREAK_TYPE_UNPAID_MEAL, 30)]) is None
+
+
+def test_rest_breaks_reach_four_past_fourteen_hours() -> None:
+    assert required_rest_breaks(14 * 60) == 3
+    assert required_rest_breaks(14 * 60 + 1) == 4

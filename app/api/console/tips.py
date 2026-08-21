@@ -18,7 +18,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import check_store_access, require_permission
+from app.core.error_codes.common import INVALID_DATE_RANGE
 from app.database import get_db
+from app.utils.exceptions import BadRequestError
 from app.models.organization import Store
 from app.models.user import User
 from app.schemas.tip import (
@@ -32,6 +34,7 @@ from app.schemas.tip import (
     StoreDistributionResponse,
     TipEntryResponse,
 )
+from app.services.tip_prorate_service import tip_prorate_service
 from app.services.tip_service import tip_service
 
 
@@ -94,6 +97,29 @@ async def manager_create_entry(
         entry, store_name=store_name,
         schedule=getattr(entry, "_schedule_loaded", None),
     )
+
+
+@router.post("/allocations/recalculate")
+async def recalculate_allocations(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("tips:add_for_others"))],
+    store_id: Annotated[UUID, Query()],
+    start: Annotated[DateType, Query()],
+    end: Annotated[DateType, Query()],
+) -> dict:
+    """근무시간 비례 분배를 기간 단위로 다시 계산합니다.
+
+    분배 방식이 hours_prorated 인 매장에서만 동작합니다. 근무시간이나 팁이
+    나중에 정정되면 그날 전원의 몫이 바뀌므로, 일 단위로 전부 다시 계산합니다.
+    """
+    await check_store_access(db, current_user, store_id)
+    if start > end:
+        raise INVALID_DATE_RANGE()
+    days = await tip_prorate_service.allocate_range(
+        db, store_id=store_id, start=start, end=end
+    )
+    await db.commit()
+    return {"days_recalculated": days}
 
 
 @router.patch("/entries/{entry_id}", response_model=TipEntryResponse)

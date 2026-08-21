@@ -35,8 +35,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import check_store_access, require_permission
+from app.core.error_codes.common import GROUP_NOT_FOUND
 from app.database import get_db
-from app.models.organization import Store
+from app.models.organization import Organization, Store, StoreGroup
 from app.models.payroll import PayPeriod, PayrollEntry, PayrollEvent
 from app.models.user import User
 from app.schemas.payroll import (
@@ -58,6 +59,11 @@ from app.services.payroll_calc_service import (
 )
 from app.services.payroll_confirm_service import payroll_confirm_service
 from app.services.payroll_event_service import payroll_event_service
+from app.services.payroll_cfs_export_service import (
+    export_filename as cfs_export_filename,
+    payroll_cfs_export_service,
+    workbook_bytes as cfs_workbook_bytes,
+)
 from app.services.payroll_export_service import (
     export_filename,
     payroll_export_service,
@@ -77,23 +83,59 @@ _MAX_RANGE_DAYS = 400  # 약 13개월
 _VALID_ATTRIBUTION_FILTERS = {"staff", "management", "untagged"}
 
 
-def _store_today(store: Store) -> DateType:
-    """store 타임존 기준 오늘 날짜 — '현재 기간' 판정용 (반월 경계는 날짜 기준)."""
+def _group_today(stores: list[Store]) -> DateType:
+    """그룹 타임존 기준 오늘 날짜 — '현재 기간' 판정용 (반월 경계는 날짜 기준).
+
+    그룹 매장들의 tz 는 단일이어야 한다 (D5 — 불일치는 period service 가 400).
+    """
     try:
-        tz = ZoneInfo(store.timezone or "UTC")
+        tz = ZoneInfo(payroll_period_service.group_timezone(stores))
     except Exception:
         tz = ZoneInfo("UTC")
     return datetime.now(tz).date()
 
 
+async def _check_group_access(
+    db: AsyncSession, user, group_id: UUID
+) -> StoreGroup:
+    """그룹 접근 검사 — 타 org 는 404 (존재 비노출).
+
+    payroll 은 그룹(법인) 전체를 다루므로, 비-Owner 는 그룹 내 **모든** 매장에
+    접근 가능해야 한다 (일부 매장만 배정된 매니저에게 법인 급여를 열지 않는다).
+    """
+    group = await db.get(StoreGroup, group_id)
+    if group is None or group.organization_id != user.organization_id:
+        raise GROUP_NOT_FOUND()
+    stores = (
+        (await db.execute(select(Store).where(Store.group_id == group_id)))
+        .scalars()
+        .all()
+    )
+    for store in stores:
+        await check_store_access(db, user, store.id)
+    return group
+
+
+async def _period_store_ids(db: AsyncSession, period: PayPeriod) -> list[UUID]:
+    """기간의 스코프 매장 id 목록 — group 기간은 그룹 전체, 레거시는 1곳."""
+    if period.store_group_id is not None:
+        rows = await db.scalars(
+            select(Store.id).where(Store.group_id == period.store_group_id)
+        )
+        return list(rows.all())
+    return [period.store_id] if period.store_id is not None else []
+
+
 async def _period_response(db: AsyncSession, period: PayPeriod) -> PayPeriodResponse:
     """PayPeriod → 응답 모델 (+대응 tip_period status — 게이트 ④ 사전 표시)."""
-    tip_status = await payroll_period_service.tip_period_status_for(
-        db, store_id=period.store_id, period=period
+    store_ids = await _period_store_ids(db, period)
+    statuses = await payroll_period_service.tip_period_status_for(
+        db, store_ids=store_ids, period=period
     )
     return PayPeriodResponse(
         id=period.id,
         organization_id=period.organization_id,
+        store_group_id=period.store_group_id,
         store_id=period.store_id,
         start_date=period.start_date,
         end_date=period.end_date,
@@ -101,7 +143,7 @@ async def _period_response(db: AsyncSession, period: PayPeriod) -> PayPeriodResp
         confirmed_at=period.confirmed_at,
         confirmed_by=period.confirmed_by,
         override_reason=period.override_reason,
-        tip_period_status=tip_status,
+        tip_period_status=payroll_period_service.aggregate_tip_status(statuses),
     )
 
 
@@ -169,11 +211,14 @@ async def _event_names(
 async def _get_period_checked(
     db: AsyncSession, current_user: User, period_id: UUID
 ) -> PayPeriod:
-    """period 로드 + store 접근 검사 (타 org 는 404 — 존재 비노출)."""
+    """period 로드 + 그룹(또는 레거시 매장) 접근 검사 (타 org 는 404)."""
     period = await db.get(PayPeriod, period_id)
-    if period is None:
+    if period is None or period.organization_id != current_user.organization_id:
         raise NotFoundError("Pay period not found")
-    await check_store_access(db, current_user, period.store_id)
+    if period.store_group_id is not None:
+        await _check_group_access(db, current_user, period.store_group_id)
+    elif period.store_id is not None:
+        await check_store_access(db, current_user, period.store_id)
     return period
 
 
@@ -186,19 +231,20 @@ async def _get_period_checked(
 async def list_periods(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("payroll:read"))],
-    store_id: Annotated[UUID, Query()],
+    group_id: Annotated[UUID, Query()],
     start: Annotated[Optional[DateType], Query()] = None,
     end: Annotated[Optional[DateType], Query()] = None,
 ) -> list[PayPeriodResponse]:
-    """매장의 pay period 목록 — 요청 범위와 겹치는 반월 기간을 자동 보장.
+    """법인(그룹)의 pay period 목록 — 요청 범위와 겹치는 반월 기간을 자동 보장.
 
-    범위 기본값: 오늘(store tz)까지 최근 75일. 오늘 이전(포함) 범위의 기간 행이
+    범위 기본값: 오늘(그룹 tz)까지 최근 75일. 오늘 이전(포함) 범위의 기간 행이
     없으면 ensure_period 로 만들어 준다 — 시스템 생성 전용 원칙(스펙 §4)의
     유일한 콘솔 진입점. 미래 기간은 만들지 않는다.
+    전환 전 확정된 레거시 store 스코프 기간(그룹 소속 매장분)도 목록에 나온다.
     """
-    await check_store_access(db, current_user, store_id)
-    store = await db.get(Store, store_id)
-    today = _store_today(store)
+    await _check_group_access(db, current_user, group_id)
+    stores = await payroll_period_service.group_stores(db, group_id)
+    today = _group_today(stores)
     if end is None:
         end = today
     if start is None:
@@ -217,13 +263,13 @@ async def list_periods(
     ensure_until = min(end, today)
     while cursor <= ensure_until:
         period = await payroll_period_service.ensure_period(
-            db, store_id=store_id, date_in_period=cursor
+            db, store_group_id=group_id, date_in_period=cursor
         )
         cursor = period.end_date + timedelta(days=1)
     await db.commit()
 
     periods = await payroll_period_service.list_periods(
-        db, store_id=store_id, range_start=start, range_end=end
+        db, store_group_id=group_id, range_start=start, range_end=end
     )
     return [await _period_response(db, p) for p in periods]
 
@@ -245,7 +291,7 @@ async def preview_period(
             "This pay period is already confirmed — use its frozen entries "
             "instead of the live preview"
         )
-    rows = await payroll_calc_service.preview_period(db, period.store_id, period)
+    rows = await payroll_calc_service.preview_period(db, period)
     await db.commit()  # 이벤트 upsert 영속화 (계산 자체는 저장 안 됨)
 
     counter = Counter(v.code for row in rows for v in row.validations)
@@ -272,9 +318,9 @@ async def confirm_period(
         - detail.code == "payroll_close_gates_failed": detail.gates[] 에
           게이트별 {gate, message, items[{user_id, member_name, dates, message}]}
     """
-    period = await _get_period_checked(db, current_user, period_id)
+    await _get_period_checked(db, current_user, period_id)
     result = await payroll_confirm_service.confirm_period(
-        db, store_id=period.store_id, period_id=period_id, actor=current_user
+        db, period_id=period_id, actor=current_user
     )
     return PeriodConfirmResponse(
         period=await _period_response(db, result.period),
@@ -308,13 +354,50 @@ async def list_period_entries(
     )
 
 
+@router.get("/cfs-export")
+async def export_cfs(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("payroll:export"))],
+    start: Annotated[DateType, Query()],
+    end: Annotated[DateType, Query()],
+) -> StreamingResponse:
+    """회계사(CFS) 급여 입력 파일 — 조직 전체를 그룹별 시트로 내보냅니다.
+
+    시트 1장 = store group. 확정 전 기간이 섞이면 해당 시트에 DRAFT 배너가 붙고
+    파일명에도 _DRAFT 가 붙습니다.
+    """
+    workbook, is_draft = await payroll_cfs_export_service.build_org_export(
+        db,
+        organization_id=current_user.organization_id,
+        start_date=start,
+        end_date=end,
+    )
+    await db.commit()  # 미확정 기간 preview 경로의 이벤트 upsert 영속화
+    # 파일명에 조직명을 담는다 — 회계사는 여러 고객사 파일을 한 폴더에서 받는다.
+    org = await db.get(Organization, current_user.organization_id)
+    filename = cfs_export_filename(
+        org.name if org else "ALL", start, end, draft=is_draft
+    )
+    return StreamingResponse(
+        BytesIO(cfs_workbook_bytes(workbook)),
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={"Content-Disposition": content_disposition(filename)},
+    )
+
+
 @router.get("/periods/{period_id}/export")
 async def export_period(
     period_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission("payroll:export"))],
+    include_idle_members: Annotated[bool, Query()] = False,
 ) -> StreamingResponse:
     """기간 xlsx 다운로드 (DUMMY 포맷 v1, E3).
+
+    include_idle_members=true 면 기간에 급여 활동이 없는 재직 직원도 0 행으로
+    덧붙인다 (파일 전용 — 화면 로스터는 바뀌지 않는다).
 
     회계사 양식 확정 전 선개발 — 실제 양식 스왑은 payroll_export_service 의
     EXPORT_COLUMNS / export_row 만 교체 (스펙 참조).
@@ -327,12 +410,19 @@ async def export_period(
     404: 없는 기간 / 타 org 기간 (존재 비노출)
     """
     period = await _get_period_checked(db, current_user, period_id)
-    result = await payroll_export_service.build_period_export(db, period)
+    result = await payroll_export_service.build_period_export(
+        db, period, include_idle_members=include_idle_members
+    )
     if result.is_draft:
         await db.commit()  # preview 경로의 이벤트 upsert 영속화 (계산은 저장 안 됨)
-    store = await db.get(Store, period.store_id)
+    if period.store_group_id is not None:
+        group = await db.get(StoreGroup, period.store_group_id)
+        scope_name = (group.code or group.name) if group else "group"
+    else:
+        store = await db.get(Store, period.store_id)
+        scope_name = store.name if store else "store"
     filename = export_filename(
-        store.name if store else "store",
+        scope_name,
         period.start_date,
         period.end_date,
         draft=result.is_draft,
@@ -354,11 +444,14 @@ async def export_period(
 async def _get_entry_checked(
     db: AsyncSession, current_user: User, entry_id: UUID
 ) -> PayrollEntry:
-    """entry 로드 + store 접근 검사 (타 org 는 404 — 존재 비노출)."""
+    """entry 로드 + 소속 기간 스코프 접근 검사 (타 org 는 404 — 존재 비노출).
+
+    group 스코프 entry 는 store_id 가 없다 — 접근 판정은 소속 기간이 원천.
+    """
     entry = await db.get(PayrollEntry, entry_id)
-    if entry is None:
+    if entry is None or entry.organization_id != current_user.organization_id:
         raise NotFoundError("Payroll entry not found")
-    await check_store_access(db, current_user, entry.store_id)
+    await _get_period_checked(db, current_user, entry.pay_period_id)
     return entry
 
 
@@ -494,7 +587,7 @@ async def list_events(
             "Start date must be on or before end date — check the requested range"
         )
     events = await payroll_event_service.list_events(
-        db, store_id, start, end, include_voided=include_voided
+        db, [store_id], start, end, include_voided=include_voided
     )
     if attribution == "untagged":
         events = [e for e in events if e.attribution is None]

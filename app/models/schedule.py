@@ -9,7 +9,7 @@ Tables:
 import uuid
 from datetime import date, datetime, time, timezone
 from typing import Optional
-from sqlalchemy import String, DateTime, Date, Time, Text, Boolean, Integer, Numeric, ForeignKey, UniqueConstraint, Index, Uuid
+from sqlalchemy import String, DateTime, Date, Time, Text, Boolean, Integer, Numeric, ForeignKey, UniqueConstraint, CheckConstraint, Index, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -71,12 +71,21 @@ class StoreBreakRule(Base):
 class Schedule(Base):
     """통합 스케줄 — 신청/확정/거절 모든 상태를 포함.
 
-    Status: draft / requested / confirmed / rejected / cancelled
+    Status (DB 에 저장되는 6종 + 응답 전용 1종):
     - draft: admin이 임시 저장한 스케줄 (제출 전)
     - requested: staff가 앱에서 신청하거나 admin이 pending으로 생성
     - confirmed: 확정된 근무 스케줄
     - rejected: 거절된 스케줄 (final, read-only)
     - cancelled: 취소된 스케줄 (confirmed 이후 취소, GM+ 만, final)
+    - deleted: soft delete (종착 상태). 행은 남는다 — 고정 근무 슬롯
+      `(pattern_id, pattern_occurrence_date)` 를 계속 점유해서 sweep/실체화가
+      같은 날을 다시 만들지 않게 한다 ("Delete this day" 의 근거).
+    - virtual: **응답 전용** — 고정 근무 패턴을 펼친 미리보기 항목
+      (`id = "virtual:<pattern_id>:<date>"`). DB 행이 아니며 저장은
+      CHECK `ck_schedules_no_virtual` 이 막는다.
+
+    고정 근무(Fixed Schedule) 도장 3컬럼 — `pattern_id` / `pattern_occurrence_date` /
+    `pattern_overridden`. 자세한 의미는 각 컬럼 주석 참조.
     """
 
     __tablename__ = "schedules"
@@ -131,7 +140,7 @@ class Schedule(Base):
     def break_end_time(self) -> Optional[time]:
         return self.break_end_at.time() if self.break_end_at is not None else None
     net_work_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    # Status: draft / requested / confirmed / rejected / cancelled
+    # Status: draft / requested / confirmed / rejected / cancelled / deleted (virtual 은 응답 전용, 저장 금지)
     status: Mapped[str] = mapped_column(String(20), default="confirmed")
     # Origin: 'manual' (사람이 등록한 스케줄) | 'walk_in' (출근 시 자동 생성된 워크인 스케줄)
     origin: Mapped[str] = mapped_column(String(20), nullable=False, server_default="manual", default="manual")
@@ -154,6 +163,18 @@ class Schedule(Base):
     cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Legacy modification history — 새 변경은 schedule_audit_logs를 사용. 데이터는 마이그레이션됨.
     modifications: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # ── 고정 근무(Fixed Schedule) 도장 ───────────────────────────────
+    # pattern_id: "이 자리 주인이 누구냐". 패턴이 삭제되면 SET NULL 로 풀려 일회성 행이 된다.
+    pattern_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("staff_work_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # 패턴상 원래 날짜. operating_day 와 다를 수 있다(날짜 이동 override).
+    # pattern_id 와 항상 쌍으로 NULL/NOT NULL (ck_schedules_pattern_pair).
+    pattern_occurrence_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # "사람이 손댔으니 sweep 건드리지 마라". occurrence edit/delete 경로만 켠다 — sweep 은 절대 켜지 않는다.
+    pattern_overridden: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -161,6 +182,21 @@ class Schedule(Base):
         Index("ix_schedules_org_store_opday", "organization_id", "store_id", "operating_day"),
         Index("ix_schedules_user_opday", "user_id", "operating_day"),
         Index("ix_schedules_status", "status"),
+        # 패턴 슬롯 1개 = 실 행 1개. status 조건 없음 — deleted 행도 슬롯을 점유해야
+        # sweep/실체화가 같은 날을 다시 만들지 않는다.
+        Index(
+            "uq_schedules_pattern_occurrence",
+            "pattern_id",
+            "pattern_occurrence_date",
+            unique=True,
+            postgresql_where=text("pattern_id IS NOT NULL"),
+        ),
+        # virtual 은 응답 전용 — DB 에 들어오면 안 된다.
+        CheckConstraint("status <> 'virtual'", name="ck_schedules_no_virtual"),
+        CheckConstraint(
+            "(pattern_id IS NULL) = (pattern_occurrence_date IS NULL)",
+            name="ck_schedules_pattern_pair",
+        ),
     )
 
 

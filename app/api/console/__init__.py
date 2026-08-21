@@ -86,6 +86,7 @@ from app.api.console.voices import router as voices_router
 # Schedule System — Work Roles + Break Rules + Schedules 라우터 임포트
 from app.api.console.work_roles import router as work_roles_router
 from app.api.console.break_rules import router as break_rules_router
+from app.api.console.schedule_patterns import router as schedule_patterns_router
 from app.api.console.schedules import router as schedule_entries_router
 
 # Daily Reports 라우터 임포트 (legacy)
@@ -228,6 +229,8 @@ console_router.include_router(tasks_router, prefix="/tasks", tags=["Tasks"])
 # ---------------------------------------------------------------------------
 console_router.include_router(work_roles_router, tags=["Work Roles"])
 console_router.include_router(break_rules_router, tags=["Break Rules"])
+# 고정 근무 패턴 — schedules 보다 **먼저** (아니면 /schedules/{entry_id} 가 "patterns" 를 삼킨다)
+console_router.include_router(schedule_patterns_router, prefix="/schedules/patterns", tags=["Schedule Patterns"])
 console_router.include_router(schedule_entries_router, prefix="/schedules", tags=["Schedules"])
 console_router.include_router(availability_router, prefix="/availability", tags=["Availability"])
 

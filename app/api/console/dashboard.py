@@ -20,6 +20,8 @@ from app.api.deps import require_permission
 from app.database import get_db
 from app.models.user import User
 from app.services.dashboard_service import dashboard_service
+from app.services.export_naming_service import resolve_store_scope
+from app.utils.download import content_disposition, export_filename
 
 router: APIRouter = APIRouter()
 
@@ -85,17 +87,29 @@ async def export_dashboard(
     store_id: Annotated[str | None, Query()] = None,
 ) -> StreamingResponse:
     """대시보드 데이터를 Excel 파일로 내보냅니다. Owner + GM."""
+    store_uuid: UUID | None = UUID(store_id) if store_id else None
     excel_bytes: bytes = await dashboard_service.export_excel(
         db,
         organization_id=current_user.organization_id,
         date_from=date_from,
         date_to=date_to,
-        store_id=UUID(store_id) if store_id else None,
+        store_id=store_uuid,
+    )
+    scope = await resolve_store_scope(
+        db, current_user.organization_id, [store_uuid] if store_uuid else None
+    )
+    # 기간은 둘 다 있을 때만 파일명에 넣는다 — 한쪽만 있는 파일에 범위를 적으면
+    # 실제로 담긴 것보다 좁아 보인다 (파일명이 내용을 속이면 안 된다).
+    filename: str = export_filename(
+        "Dashboard",
+        scope=scope,
+        start_date=date_from if date_to else None,
+        end_date=date_to if date_from else None,
     )
     return StreamingResponse(
         BytesIO(excel_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=dashboard_export.xlsx"},
+        headers={"Content-Disposition": content_disposition(filename)},
     )
 
 

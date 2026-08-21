@@ -39,11 +39,20 @@ from app.database import Base
 
 
 class PayPeriod(Base):
-    """매장별 반월 정산 기간 — 시스템 생성 전용, 'open' → 'confirmed'.
+    """법인(store group)별 반월 정산 기간 — 시스템 생성 전용, 'open' → 'confirmed'.
+
+    2026-08-19 스코프 전환 (D1, 2026-08-19-payroll-group-scope-전환-스펙.md):
+    급여의 법적 주체는 Group(법인=EIN)이다. store 스코프에서는 같은 법인 두 매장
+    겸업자의 주 40h 가 합산되지 않아 확정 임금 미지급이 발생했다(P0).
+    신규 기간은 전부 group 스코프. 전환 전에 확정된 기간만 store 스코프로 남는다
+    (동결 원장 — 재계산하지 않는다).
 
     Attributes:
         organization_id: 소속 조직 FK (CASCADE)
-        store_id: 매장 FK — RESTRICT (확정 급여 기록 보존, 매장 삭제로 소멸 금지)
+        store_group_id: 법인 FK — RESTRICT (확정 급여 기록 보존).
+            레거시(전환 전 확정) 행만 NULL.
+        store_id: 레거시 매장 스코프 — 전환 전 확정 행만 값이 있다.
+            신규 행은 NULL. RESTRICT (확정 급여 기록 보존, 매장 삭제로 소멸 금지)
         start_date / end_date: 반월 구간. 시스템 생성 전용 — 수동 생성 불가라
             겹침이 원천 차단됨 (겹침 CHECK 없음)
         status: 'open' → 'confirmed'
@@ -51,8 +60,8 @@ class PayPeriod(Base):
         override_reason: force-confirm 사유 (TipPeriod 선례). 일반 confirm 은 NULL.
 
     Constraints:
-        uq_pay_period_store_start: (store_id, start_date) UNIQUE
-            — 같은 매장의 같은 시작일 기간은 한 행만.
+        uq_pay_period_group_start: (store_group_id, start_date) UNIQUE — 신규 행.
+        uq_pay_period_store_start: (store_id, start_date) UNIQUE — 레거시 행 보존용.
     """
 
     __tablename__ = "pay_periods"
@@ -61,9 +70,13 @@ class PayPeriod(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    # 확정 급여 기록 보존 — 매장 삭제로 소멸 금지 (RESTRICT)
-    store_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("stores.id", ondelete="RESTRICT"), nullable=False
+    # 급여 스코프 = 법인. 확정 급여 기록 보존 — 그룹 삭제로 소멸 금지 (RESTRICT)
+    store_group_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, ForeignKey("store_groups.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    # 레거시(2026-08 스코프 전환 전 확정) 행 전용 — 신규 행은 NULL
+    store_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, ForeignKey("stores.id", ondelete="RESTRICT"), nullable=True
     )
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -89,6 +102,10 @@ class PayPeriod(Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "store_group_id", "start_date", name="uq_pay_period_group_start"
+        ),
+        # 레거시 store 스코프 행 보존용 — 신규 행은 store_id NULL 이라 걸리지 않는다
         UniqueConstraint("store_id", "start_date", name="uq_pay_period_store_start"),
     )
 
@@ -125,8 +142,11 @@ class PayrollEntry(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    store_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False
+    # 레거시(store 스코프 기간) 행 전용 — group 스코프 entry 는 NULL
+    # (한 사람이 그룹 내 여러 매장에서 일하면 entry 를 한 매장에 귀속시킬 수 없다.
+    #  매장별 상세는 breakdown.days 가 원천)
+    store_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=True
     )
     # attendance/schedules 관례 일치 — 유저 삭제돼도 entry(스냅샷) 보존
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
@@ -162,6 +182,11 @@ class PayrollEntry(Base):
         Numeric(10, 2), nullable=False, default=Decimal("0"), server_default=text("0")
     )
     penalty_pay: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=Decimal("0"), server_default=text("0")
+    )
+    # 성과 보너스 지급액 — bonus_rate × 총시간(regular+OT+DT). OT 할증 없음.
+    # 보너스율 자체는 breakdown.bonus_rate 에 남는다 (export 의 performance_bonus 칸).
+    bonus_pay: Mapped[Decimal] = mapped_column(
         Numeric(10, 2), nullable=False, default=Decimal("0"), server_default=text("0")
     )
     card_tips: Mapped[Decimal] = mapped_column(

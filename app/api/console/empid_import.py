@@ -28,6 +28,8 @@ from app.schemas.empid_import import (
     EmpidRosterStore,
 )
 from app.services import empid_import_service as svc
+from app.services.export_naming_service import resolve_store_scope
+from app.utils.download import content_disposition, export_filename
 from app.core.error_codes.common import INVALID_STORE_OVERRIDES
 from app.utils.exceptions import BadRequestError
 
@@ -146,11 +148,28 @@ async def download_empid_template(
         include_dormant=include_dormant, include_email=include_email,
         include_numbers=include_numbers,
     )
-    filename = "empid_export.xlsx" if prefill else "empid_import_template.xlsx"
+    # blank 는 내용이 항상 같은 빈 양식이라 고정 이름이 맞다. current 는 필터에
+    # 따라 내용이 달라지므로 매장/사람 필터·옵션을 파일명에 남긴다.
+    if prefill:
+        scope = await resolve_store_scope(
+            db, current_user.organization_id, store_ids
+        )
+        extra = []
+        if people != "all":
+            extra.append(people)  # numbered / unnumbered
+        if not include_dormant:
+            extra.append("ActiveOnly")
+        if not include_numbers:
+            extra.append("BlankIDs")  # 작성용 양식 — 번호 칸이 비어 있다
+        if not include_email:
+            extra.append("NoEmail")  # 재업로드 매칭 불가
+        filename = export_filename("EmpID_Export", scope=scope, extra=extra)
+    else:
+        filename = "EmpID_ImportTemplate.xlsx"
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition(filename)},
     )
 
 
@@ -179,10 +198,22 @@ async def export_selected_empids(
         include_email=data.include_email, include_numbers=data.include_numbers,
         split_by=data.split_by,
     )
+    # 선택 export 는 "누구를 골랐는지" 가 내용이다 — 인원수와 시트 분할 축을
+    # 파일명에 남겨야 두 번 받은 파일이 구분된다.
+    store_ids = {sid for _, sid in selected}
+    scope = await resolve_store_scope(db, current_user.organization_id, store_ids)
+    extra = [f"{len(selected)}rows"]
+    if data.split_by != "none":
+        extra.append(f"by{data.split_by}")
+    if not data.include_numbers:
+        extra.append("BlankIDs")
+    if not data.include_email:
+        extra.append("NoEmail")
+    filename = export_filename("EmpID_Export", scope=scope, extra=extra)
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="empid_export.xlsx"'},
+        headers={"Content-Disposition": content_disposition(filename)},
     )
 
 

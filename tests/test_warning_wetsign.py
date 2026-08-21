@@ -321,7 +321,9 @@ async def test_download_signed_pdf(
     assert r.status_code == 200, r.text
     assert r.headers["content-type"] == "application/pdf"
     cd = r.headers["content-disposition"]
-    assert "attachment" in cd and cd.endswith('.pdf"')
+    # filename*(UTF-8) 가 뒤에 붙는다 — 한글 이름 매장/직원도 헤더가 안 깨지도록
+    assert "attachment" in cd and cd.endswith(".pdf")
+    assert "filename*=UTF-8''" in cd
     assert "2026-06-12" in cd  # 서명일 기반 파일명 (YYYY-MM-DD)
     assert r.content.startswith(b"%PDF-")
 

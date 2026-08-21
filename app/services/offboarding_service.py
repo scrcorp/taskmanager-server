@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.org_member import OrgMember
 from app.models.schedule import Schedule
 from app.models.user import Role, User
+from app.services.fixed_schedule.materialize import cleanup_future
 from app.core.error_codes.employment import (
     EMPLOYEE_NOT_FOUND,
     LAST_ADMIN,
@@ -77,6 +78,15 @@ class OffboardingService:
         # lockout 방지 — 이 사람을 내보내면 조직을 관리할 사람이 아무도 남지 않는 경우 차단.
         # 이 상태가 되면 아무도 되돌릴 수 없어 DB 를 직접 만져야 복구된다 (§23.2).
         await self._guard_last_admin(db, user, organization_id)
+
+        # 0) 고정 근무 자동생성분 정리 — 퇴사일 이후의 미손댐 패턴 행(overridden=False)은 사람이
+        #    결정한 스케줄이 아니라 패턴이 찍어낸 것이다. unassign 으로 빈 칸을 남기지 않고
+        #    delete_entry(감사 기록 포함)로 지운다. 사람이 손댄 행(overridden)은 아래 3) 의 선택을 따른다.
+        #    건별 commit 을 하는 경로라 트랜잭션 밖(앞)에서 부른다 — 이후 실패해도 패턴은 살아 있어
+        #    daily catch-up 이 멱등으로 다시 채운다.
+        await cleanup_future(
+            db, organization_id=organization_id, user_id=user_id, after=termination_date,
+        )
 
         try:
             # 1) 재직 상태 — org 소속(OrgMember)이 진실의 원천

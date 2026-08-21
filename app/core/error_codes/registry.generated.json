@@ -8,6 +8,7 @@
       "ORG_LICENSE_INACTIVE"
     ],
     "attendance": [
+      "BREAK_END_TOO_SHORT",
       "DEVICE_NO_STORE",
       "access_code_taken",
       "early_clock_in_reason_required",
@@ -21,6 +22,7 @@
       "INVALID_DATE_RANGE",
       "INVALID_STORE_IDS",
       "INVALID_STORE_OVERRIDES",
+      "MEMBER_STORE_NOT_FOUND",
       "file_not_found",
       "file_too_large",
       "forbidden",
@@ -56,6 +58,23 @@
       "NOT_ON_LEAVE",
       "OFFBOARD_PROVISIONAL",
       "RETENTION_NOT_ELAPSED"
+    ],
+    "fixed_schedule": [
+      "PATTERN_BLOCK_OVERLAP",
+      "PATTERN_BLOCK_PERIOD_INVALID",
+      "PATTERN_DAY_REMOVED",
+      "PATTERN_GROUP_STARTED",
+      "PATTERN_MOVE_INTO_PAST",
+      "PATTERN_MOVE_PAST_END",
+      "PATTERN_NOT_FOUND",
+      "PATTERN_NOT_STAMPED",
+      "PATTERN_NO_OCCURRENCE",
+      "PATTERN_OUTSIDE_AVAILABILITY",
+      "PATTERN_OVERLAP_EXISTING",
+      "PATTERN_PATCH_REQUIRED",
+      "PATTERN_REVERT_NOT_OVERRIDDEN",
+      "PATTERN_SUBJECT_IMMUTABLE",
+      "PATTERN_TARGET_NOT_FOUND"
     ],
     "hiring": [
       "already_hired",
@@ -97,6 +116,10 @@
       "too_many"
     ],
     "payroll": [
+      "BONUS_EFFECTIVE_DATE_INVALID",
+      "PAYROLL_GROUP_HAS_NO_STORES",
+      "PAYROLL_GROUP_TIMEZONE_MISMATCH",
+      "PAYROLL_SCOPE_MISSING",
       "pay_period_already_confirmed",
       "payroll_close_gates_failed"
     ],
@@ -202,6 +225,16 @@
         "console/src/types/index.ts",
         "console/src/app/license-inactive/page.tsx"
       ]
+    },
+    {
+      "code": "BREAK_END_TOO_SHORT",
+      "domain": "attendance",
+      "kind": "http",
+      "status": 400,
+      "message": "This break has not reached its minimum length yet.",
+      "hint": "Wait until the minimum is met, or fix the break times on the record instead of ending it now.",
+      "frozen": false,
+      "clients": []
     },
     {
       "code": "DEVICE_NO_STORE",
@@ -324,6 +357,16 @@
       "kind": "http",
       "status": 400,
       "message": "store_overrides must be a JSON object of {label: store id}.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "MEMBER_STORE_NOT_FOUND",
+      "domain": "common",
+      "kind": "http",
+      "status": 404,
+      "message": "This person is not assigned to this store.",
       "hint": null,
       "frozen": false,
       "clients": []
@@ -618,6 +661,156 @@
       "status": 400,
       "message": "This record is still within the retention period.",
       "hint": "Only offboarded employees past the retention window can be anonymized.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_BLOCK_OVERLAP",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 400,
+      "message": "Two blocks in this fixed schedule overlap on the same day of the week.",
+      "hint": "Change the times or uncheck the day on one of the highlighted blocks, then save again.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_BLOCK_PERIOD_INVALID",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 400,
+      "message": "A block ends before it starts.",
+      "hint": "Move the block's end date later, or remove the block.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_DAY_REMOVED",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 400,
+      "message": "This day was removed from the fixed schedule and cannot be edited.",
+      "hint": "Create a one-time schedule for that day instead.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_GROUP_STARTED",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 409,
+      "message": "This fixed schedule has already started, so its dates cannot be moved.",
+      "hint": "Edit the schedule instead — the change will apply from today onward.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_MOVE_INTO_PAST",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 409,
+      "message": "A fixed schedule cannot be moved to start in the past.",
+      "hint": "Use a smaller shift so the start date is today or later.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_MOVE_PAST_END",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 400,
+      "message": "The existing fixed schedule ends before the new start date, so it cannot be moved there.",
+      "hint": "Choose Replace instead, or pick an earlier start date.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_NOT_FOUND",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 404,
+      "message": "This fixed schedule no longer exists.",
+      "hint": "Refresh the page — it may have been deleted by someone else.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_NOT_STAMPED",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 400,
+      "message": "This is a one-time schedule, not part of a fixed schedule.",
+      "hint": "Only schedules created from a fixed schedule can be marked as overridden.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_NO_OCCURRENCE",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 400,
+      "message": "This fixed schedule has no shift on that day.",
+      "hint": "It is not one of its days, it is outside its period, or the employee is not assignable that day.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_OUTSIDE_AVAILABILITY",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 400,
+      "message": "This fixed schedule falls outside the employee's work availability.",
+      "hint": "Pick a time inside their availability, or update their availability first.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_OVERLAP_EXISTING",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 409,
+      "message": "This fixed schedule overlaps an existing fixed schedule for the same person and store.",
+      "hint": "Choose how to resolve it: move the existing schedule earlier, replace it, or change the days.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_PATCH_REQUIRED",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 400,
+      "message": "Provide the changes to apply to this day.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_REVERT_NOT_OVERRIDDEN",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 409,
+      "message": "This day has not been changed from its fixed schedule, so there is nothing to revert.",
+      "hint": "Only edited days can be reverted. Deleted days cannot be restored.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_SUBJECT_IMMUTABLE",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 400,
+      "message": "A fixed schedule cannot be moved to another person or store.",
+      "hint": "Create a new fixed schedule for them instead.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PATTERN_TARGET_NOT_FOUND",
+      "domain": "fixed_schedule",
+      "kind": "http",
+      "status": 404,
+      "message": "The schedule for this fixed-schedule day no longer exists.",
+      "hint": "Refresh the page — it may have been deleted or moved.",
       "frozen": false,
       "clients": []
     },
@@ -967,6 +1160,46 @@
       "kind": "http",
       "status": 400,
       "message": "You picked more times than allowed.",
+      "hint": null,
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "BONUS_EFFECTIVE_DATE_INVALID",
+      "domain": "payroll",
+      "kind": "http",
+      "status": 400,
+      "message": "Bonus rate changes must take effect on the 1st or 16th.",
+      "hint": "Pick a pay-period start date (1st or 16th) as the effective date.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PAYROLL_GROUP_HAS_NO_STORES",
+      "domain": "payroll",
+      "kind": "http",
+      "status": 400,
+      "message": "This group has no stores.",
+      "hint": "Assign at least one store to the group before running payroll.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PAYROLL_GROUP_TIMEZONE_MISMATCH",
+      "domain": "payroll",
+      "kind": "http",
+      "status": 400,
+      "message": "Stores in this group use different timezones: {zones}.",
+      "hint": "Payroll needs a single business-day boundary per group — align the store timezones, then retry.",
+      "frozen": false,
+      "clients": []
+    },
+    {
+      "code": "PAYROLL_SCOPE_MISSING",
+      "domain": "payroll",
+      "kind": "http",
+      "status": 400,
+      "message": "This pay period's store or group no longer exists.",
       "hint": null,
       "frozen": false,
       "clients": []

@@ -5,7 +5,8 @@ Handles user management including creation, update, activation toggle,
 and user-store association management.
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -22,6 +23,7 @@ from app.repositories.employee_no_history_repository import (
     employee_no_history_repository,
 )
 from app.schemas.organization import StoreResponse
+from app.core.error_codes.common import MEMBER_STORE_NOT_FOUND
 from app.core.permissions import (
     OWNER_PRIORITY,
     STAFF_PRIORITY,
@@ -1573,6 +1575,58 @@ class UserService:
         except Exception:
             await db.rollback()
             raise
+
+    async def set_store_payroll_attrs(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: UUID,
+        store_id: UUID,
+        organization_id: UUID,
+        empid: int | None = None,
+        tip_eligible: bool | None = None,
+        bonus_rate: Decimal | None = None,
+        bonus_effective_date: date | None = None,
+        changed_by: UUID | None = None,
+    ):
+        """직원 x 매장의 급여 속성(empid / 팁 대상 / 보너스 가산율)을 설정한다.
+
+        보너스율은 rate_service 를 통해서만 쓴다 — 이력이 급여 분쟁의 근거라
+        컬럼만 갈아끼우는 경로를 만들지 않는다. effective_date 를 안 주면
+        "지금부터"로 보고 오늘 날짜로 이력을 남긴다.
+        """
+        from app.models.org_member import OrgMember, OrgMemberStore
+        from app.services.rate_service import rate_service
+
+        member_store = await db.scalar(
+            select(OrgMemberStore)
+            .join(OrgMember, OrgMember.id == OrgMemberStore.org_member_id)
+            .where(
+                OrgMember.user_id == user_id,
+                OrgMember.organization_id == organization_id,
+                OrgMemberStore.store_id == store_id,
+            )
+        )
+        if member_store is None:
+            raise MEMBER_STORE_NOT_FOUND()
+
+        if empid is not None:
+            member_store.empid = empid
+        if tip_eligible is not None:
+            member_store.tip_eligible = tip_eligible
+        if bonus_rate is not None:
+            await rate_service.record_bonus_rate_change(
+                db,
+                member_store,
+                bonus_rate,
+                bonus_effective_date or datetime.now(timezone.utc).date(),
+                organization_id=organization_id,
+                reason="console update",
+                changed_by=changed_by,
+            )
+        await db.commit()
+        await db.refresh(member_store)
+        return member_store
 
     async def add_user_store(
         self,

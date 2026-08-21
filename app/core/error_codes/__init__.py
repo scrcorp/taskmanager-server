@@ -56,6 +56,7 @@ from app.core.error_codes import attendance as _attendance  # noqa: F401,E402
 from app.core.error_codes import common as _common  # noqa: F401,E402
 from app.core.error_codes import contacts as _contacts  # noqa: F401,E402
 from app.core.error_codes import empid as _empid  # noqa: F401,E402
+from app.core.error_codes import fixed_schedule as _fixed_schedule  # noqa: F401,E402
 from app.core.error_codes import employment as _employment  # noqa: F401,E402
 from app.core.error_codes import hiring as _hiring  # noqa: F401,E402
 from app.core.error_codes import interviews as _interviews  # noqa: F401,E402
@@ -72,6 +73,7 @@ _DOMAIN_MODULES = (
     _common,
     _contacts,
     _empid,
+    _fixed_schedule,
     _employment,
     _hiring,
     _interviews,
