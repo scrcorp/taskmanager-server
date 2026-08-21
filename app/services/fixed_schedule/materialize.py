@@ -54,7 +54,7 @@ async def window_weeks(db: AsyncSession, organization_id: UUID) -> int:
 
 
 async def window_end(db: AsyncSession, organization_id: UUID, today: date | None = None) -> date:
-    today = today or date.today()
+    today = today or await org_today(db, organization_id)
     return today + timedelta(weeks=await window_weeks(db, organization_id))
 
 
@@ -185,13 +185,13 @@ async def sweep_group(
     """
     from app.services.schedule_service import schedule_service
 
-    today = date_from or date.today()
     patterns = list((await db.execute(
         select(StaffWorkPattern).where(StaffWorkPattern.group_id == group_id)
     )).scalars())
     if not patterns:
         return (0, 0)
     org_id = patterns[0].organization_id
+    today = date_from or await org_today(db, org_id)
     user_id = patterns[0].user_id
 
     rows = list((await db.execute(
@@ -301,6 +301,21 @@ FIXED_TICK_HOUR = 3
 FIXED_WEEKLY_DOW = 0  # 0=Sun .. 6=Sat (일요일 시작)
 
 
+async def org_today(db: AsyncSession, organization_id: UUID) -> date:
+    """org 로컬 '오늘'.
+
+    창(window)·"진행 중" 판정의 기준일은 **서버 프로세스 tz 가 아니라 org 로컬**이어야 한다.
+    운영 컨테이너는 TZ 설정이 없어 UTC 로 돈다 — `date.today()` 를 쓰면 org(예: LA) 로컬
+    17:00~24:00 사이에 저장한 그날 저녁 근무가 창 밖(=다음 날부터)으로 밀려 실체화되지
+    않고, 일 1회 catch-up 은 그날 기준으로 다시 돌기 때문에 그 occurrence 가 영구 누락된다.
+    """
+    from app.models.organization import Organization
+
+    org = await db.get(Organization, organization_id)
+    tz_name = org.timezone if org and org.timezone else "UTC"
+    return _org_local_now(tz_name).date()
+
+
 def _org_local_now(tz_name: str):
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -343,11 +358,11 @@ async def _run_window_tick(
                     dow = now_dow if now_dow is not None else dow_sun0(local.date())
                     if dow != require_dow:
                         continue
-                org_today = today or local.date()
+                tick_today = today or local.date()  # 함수 org_today() 와 이름 충돌 방지
                 try:
                     created = await materialize_window(
                         db, organization_id=org.id,
-                        date_from=org_today, date_to=await window_end(db, org.id, org_today),
+                        date_from=tick_today, date_to=await window_end(db, org.id, tick_today),
                     )
                 except Exception as exc:  # noqa: BLE001 — 한 org 실패가 다른 org 를 막으면 안 된다
                     logger.exception("[fixed_schedule:%s] org=%s failed: %s", label, org.id, exc)
